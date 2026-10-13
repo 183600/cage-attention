@@ -111,7 +111,15 @@ _causal_mask_order = []
 
 
 def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    """Additive causal mask (0 on/below the diagonal, -inf above)."""
+    """Additive causal mask (0 on/below the diagonal, -inf above).
+
+    The shared tensor is allocated with inference mode *off*.  Both caches
+    here are module-global and outlive the call that filled them, while
+    ``collect_stats`` / ``eval_accuracy`` run under ``torch.inference_mode()``:
+    an inference tensor stays an inference tensor for the rest of the process,
+    so a cached entry built inside that mode cannot be reused by an
+    autograd-tracked call.  See ``_arange`` for where that actually bites.
+    """
     key = (T, device, dtype)
     m = _causal_mask_cache.get(key)
     if m is not None:
@@ -121,8 +129,9 @@ def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tens
     if len(_causal_mask_cache) >= _MAX_MASK_CACHE:
         evict_key = _causal_mask_order.pop(0)
         _causal_mask_cache.pop(evict_key)
-    m = torch.full((T, T), float("-inf"), device=device, dtype=dtype)
-    m.triu_(1)
+    with torch.inference_mode(False):
+        m = torch.full((T, T), float("-inf"), device=device, dtype=dtype)
+        m.triu_(1)
     _causal_mask_cache[key] = m
     _causal_mask_order.append(key)
     return m
@@ -133,13 +142,23 @@ _arange_cache: dict = {}
 
 
 def _arange(n: int, device: torch.device) -> torch.Tensor:
-    """Read-only ``arange(n)`` shared across calls (index tensors only)."""
+    """Read-only ``arange(n)`` shared across calls (index tensors only).
+
+    This cache is process-global while ``collect_stats`` / ``eval_accuracy``
+    fill it under ``torch.inference_mode()``, and ``_pick_rows`` hands the
+    tensor to advanced indexing - which saves the index for backward.  A
+    cached inference tensor therefore aborts the next *training*-mode forward
+    that collects per-layer stats with "Inference tensors cannot be saved for
+    backward", long after the eval call that created it.  Allocate with
+    inference mode off so one cached entry serves every context.
+    """
     key = (n, device)
     a = _arange_cache.get(key)
     if a is None:
         if len(_arange_cache) >= _ARANGE_CACHE_MAX:
             _arange_cache.clear()
-        a = torch.arange(n, device=device)
+        with torch.inference_mode(False):
+            a = torch.arange(n, device=device)
         _arange_cache[key] = a
     return a
 

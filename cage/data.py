@@ -12,6 +12,15 @@ Tasks
 Format (vocab 0..V-1):
     [k1 v1 k2 v2 ... kn vn, SEP, qi, <predict vi>]
 The label for the position right after qi is vi.
+
+``dense_lm`` additionally scores every next-token position of the pair
+section.  Note that in this causal layout those targets are *irreducible*:
+at position ``2i`` the model sees ``k_i`` but its target ``v_i`` sits at
+``2i+1``, i.e. in the future, so the pair section can only teach the marginal
+token frequency.  It therefore dilutes the recall gradient ~15:1 at
+``n_pairs=8`` and the recall accuracy that E1/E2 measure collapses to chance
+-- supervision should stay on the query position unless the marginal prior
+is explicitly wanted.
 """
 
 from __future__ import annotations
@@ -26,11 +35,23 @@ def _sample_keys(batch: int, n_pairs: int, vocab: int, gen, device) -> torch.Ten
     """Distinct keys per sequence (sampling without replacement).
 
     Values may still repeat freely (a shared value never makes the target
-    ambiguous, only a shared key does).
+    ambiguous, only a shared key does).  That makes ``n_pairs`` distinct keys a
+    hard requirement of the task, not a nicety: a key that occurs twice gives
+    the query two different values to choose from, so the "correct answer" is
+    no longer well defined and the accuracy ceiling drops for reasons that have
+    nothing to do with the variant under test.  ``vocab - 2`` keys are
+    available (0/1 are reserved), so a request beyond that is rejected rather
+    than silently downgraded to sampling with replacement.
     """
     n_avail = vocab - 2                      # 0/1 are reserved (PAD / SEP)
     if n_pairs > n_avail:                    # cannot sample without replacement
-        return torch.randint(2, vocab, (batch, n_pairs), generator=gen, device=device)
+        raise ValueError(
+            f"n_pairs={n_pairs} needs {n_pairs} distinct keys per sequence but "
+            f"vocab={vocab} only offers {n_avail} (ids 0=PAD and 1=SEP are "
+            f"reserved); use vocab >= {n_pairs + 2} or n_pairs <= {n_avail}. "
+            f"Sampling keys with replacement instead would make the recall "
+            f"target ambiguous and cap the measured accuracy."
+        )
     noise = torch.rand(batch, n_avail, generator=gen, device=device)
     return noise.topk(n_pairs, dim=1).indices.add_(2)
 
