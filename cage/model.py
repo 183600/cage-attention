@@ -320,17 +320,23 @@ class _CalibAttn(torch.autograd.Function):
         d_k = torch.zeros_like(k)
         d_v = torch.zeros_like(v)
         s = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
+        # the selector is reused across blocks: it is a bool plane a quarter of
+        # the size of the score scratch, so holding it costs less than letting
+        # every block allocate (and first-touch) its own
         gbuf = q.new_empty(s.numel()) if grad_ent is not None else None
+        mbuf = torch.empty(s.numel(), dtype=torch.bool) if grad_ent is not None else None
         for i0, i1 in blocks:
+            n = bh * (i1 - i0) * i1
             p = _softmax_inplace(torch.baddbmm(
                 mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
                 beta=1.0, alpha=scale,
-                out=s[:bh * (i1 - i0) * i1].view(bh, i1 - i0, i1)))
+                out=s[:n].view(bh, i1 - i0, i1)))
             g = grad_y[:, i0:i1]
             # the entropy output is absent when it was never requested
             ge = None if grad_ent is None else grad_ent[:, i0:i1]
             d_s = _softmax_grad_from_p(torch.bmm(g, vt[:, :, :i1]), p, ge,
-                                       buf=gbuf)
+                                       buf=None if gbuf is None else gbuf[:n],
+                                       mbuf=None if mbuf is None else mbuf[:n])
             d_v[:, :i1].add_(torch.bmm(p.transpose(1, 2), g))
             d_q[:, i0:i1] = torch.bmm(d_s, k[:, :i1]).mul_(scale)
             d_k[:, :i1].add_(torch.bmm(d_s.transpose(1, 2), q[:, i0:i1]).mul_(scale))
@@ -338,23 +344,34 @@ class _CalibAttn(torch.autograd.Function):
 
 
 def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
-                         grad_ent: torch.Tensor,
-                         buf: torch.Tensor | None = None) -> torch.Tensor:
+                         grad_ent: torch.Tensor | None,
+                         buf: torch.Tensor | None = None,
+                         mbuf: torch.Tensor | None = None) -> torch.Tensor:
     """Score gradient for ``p = softmax(s)`` plus the calibrated-entropy term,
     both read off the recomputed probabilities.  Consumes ``d_p``.
 
-    ``buf`` optionally reuses a flat scratch for the ``log(clamp(p))`` term so
-    the blocked backward path allocates it once instead of per block.
+    ``buf`` optionally reuses a flat scratch for the ``log(clamp(p))`` term and
+    ``mbuf`` one for the ``p > _EPS`` selector, so the blocked backward path
+    allocates neither per block.
     """
     if grad_ent is not None:
         if buf is None:
             logterm = p.clamp_min(_EPS).log_()
+            mask = p > _EPS
         else:
             logterm = buf[:p.numel()].view_as(p)
             torch.clamp_min(p, _EPS, out=logterm)
             logterm.log_()
-        mask = p > _EPS
-        logterm.add_(mask).mul_(mask)
+            if mbuf is None:
+                mask = p > _EPS
+            else:
+                mask = mbuf[:p.numel()].view_as(p)
+                torch.gt(p, _EPS, out=mask)
+        # ``(p > _EPS) * (log(clamp_min(p, _EPS)) + 1)``: the selector zeroes
+        # the sub-eps rows exactly as multiplying by the 0/1 promotion did,
+        # but as one fused select instead of a bool add plus a bool multiply
+        logterm.add_(1.0)
+        torch.where(mask, logterm, logterm.new_zeros(()), out=logterm)
         d_p.addcmul_(logterm, grad_ent.unsqueeze(-1), value=-1.0)
     d_p.mul_(p)
     return d_p.addcmul_(p, d_p.sum(dim=-1, keepdim=True), value=-1.0)
