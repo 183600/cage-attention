@@ -104,17 +104,27 @@ def make_norm(kind: str, dim: int) -> nn.Module:
     return SeeDNorm(dim) if kind == "seednorm" else Norm(dim)
 
 
+_MAX_MASK_CACHE = 64
+
 _causal_mask_cache = {}
+_causal_mask_order = []
 
 
 def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """Additive causal mask (0 on/below the diagonal, -inf above)."""
     key = (T, device, dtype)
     m = _causal_mask_cache.get(key)
-    if m is None:
-        m = torch.full((T, T), float("-inf"), device=device, dtype=dtype)
-        m.triu_(1)
-        _causal_mask_cache[key] = m
+    if m is not None:
+        _causal_mask_order.remove(key)
+        _causal_mask_order.append(key)
+        return m
+    if len(_causal_mask_cache) >= _MAX_MASK_CACHE:
+        evict_key = _causal_mask_order.pop(0)
+        _causal_mask_cache.pop(evict_key)
+    m = torch.full((T, T), float("-inf"), device=device, dtype=dtype)
+    m.triu_(1)
+    _causal_mask_cache[key] = m
+    _causal_mask_order.append(key)
     return m
 
 
@@ -522,11 +532,11 @@ class Attention(nn.Module):
         ent = None
         y_owned = False
         if not explicit:
-            q = q.view(B, T, h, dk).transpose(1, 2)
-            k = k.view(B, T, h, dk).transpose(1, 2)
-            v = v.view(B, T, h, dk).transpose(1, 2)
+            q_ = q.view(B, T, h, dk).transpose(1, 2)
+            k_ = k.view(B, T, h, dk).transpose(1, 2)
+            v_ = v.view(B, T, h, dk).transpose(1, 2)
             y = F.scaled_dot_product_attention(
-                q, k, v,
+                q_, k_, v_,
                 is_causal=True,
                 dropout_p=drop_p if self.training else 0.0,
             )
@@ -535,7 +545,7 @@ class Attention(nn.Module):
             stats = None
             if need_stats:
                 stats = self._row_stats_at(
-                    q, k.reshape(bh, T, dk), B, h, T, stat_pos, False)
+                    q_, k_.reshape(bh, T, dk), B, h, T, stat_pos, False)
             del qkv, q, k, v
         elif use_fused:
             qb = q.view(B, T, h, dk).moveaxis(1, 2).reshape(bh, T, dk)
@@ -556,16 +566,16 @@ class Attention(nn.Module):
                     qb.view(B, h, T, dk), kb, B, h, T, stat_pos, is_null,
                     ent_full=ent if is_calib else None)
         else:
-            q = q.view(B, T, h, dk).transpose(1, 2)
-            k = k.view(B, T, h, dk).transpose(1, 2)
-            v = v.view(B, T, h, dk).transpose(1, 2)
+            q_ = q.view(B, T, h, dk).transpose(1, 2)
+            k_ = k.view(B, T, h, dk).transpose(1, 2)
+            v_ = v.view(B, T, h, dk).transpose(1, 2)
             mask = _causal_mask(T, x.device, x.dtype)
             if is_null:
                 nk = self.null_k.view(1, h, 1, dk).expand(B, h, 1, dk)
-                kv_k = torch.cat([nk, k], dim=2)
-                att = torch.matmul(q, kv_k.transpose(-2, -1)).mul_(self.inv_scale)
+                kv_k = torch.cat([nk, k_], dim=2)
+                att = torch.matmul(q_, kv_k.transpose(-2, -1)).mul_(self.inv_scale)
                 att[..., 1:].add_(mask)
-                vb = v.reshape(bh, T, dk)
+                vb = v_.reshape(bh, T, dk)
                 del qkv, q, k, v, nk, kv_k
                 p = _SoftmaxInPlace.apply(att)
                 if not need_stats:
@@ -581,9 +591,9 @@ class Attention(nn.Module):
                 y = y.view(B, h, T, dk).transpose(1, 2).reshape(B, T, C)
                 y_owned = True
             else:
-                qb = q.reshape(bh, T, dk)
-                kb = k.reshape(bh, T, dk)
-                vb = v.reshape(bh, T, dk)
+                qb = q_.transpose(1, 2).reshape(bh, T, dk)
+                kb = k_.transpose(1, 2).reshape(bh, T, dk)
+                vb = v_.transpose(1, 2).reshape(bh, T, dk)
                 del qkv, q, k, v
                 att = torch.baddbmm(mask, qb, kb.transpose(1, 2),
                                     beta=1.0, alpha=self.inv_scale)
@@ -634,32 +644,13 @@ class Attention(nn.Module):
         }
 
 
-class _GeluAffine(torch.autograd.Function):
-    """``gelu(h) @ w.T + b`` with a hand-written backward."""
-
-    @staticmethod
-    def forward(ctx, h, w, b):
-        ctx.save_for_backward(h, w, b)
-        return F.linear(F.gelu(h), w, b)
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        h, w, b = ctx.saved_tensors
-        go = grad_out.reshape(-1, grad_out.size(-1))
-        gw = go.t().mm(F.gelu(h).view(-1, h.size(-1))) if ctx.needs_input_grad[1] else None
-        gb = go.sum(0) if b is not None and ctx.needs_input_grad[2] else None
-        gh = torch.ops.aten.gelu_backward(go.mm(w).view_as(h), h, approximate="none") \
-            if ctx.needs_input_grad[0] else None
-        return gh, gw, gb
-
-
 class _GeluLinear(nn.Linear):
     """``nn.Linear`` fed the *pre-activation*: applies GELU before the
     projection.
     """
 
     def forward(self, h):
-        return _GeluAffine.apply(h, self.weight, self.bias)
+        return F.linear(F.gelu(h), self.weight, self.bias)
 
 
 class Block(nn.Module):
