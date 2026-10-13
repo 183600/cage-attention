@@ -349,18 +349,23 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     """Score gradient for ``p = softmax(s)`` plus the calibrated-entropy term,
     both read off the recomputed probabilities.  Consumes ``d_p``.
 
-    ``buf`` optionally reuses a flat scratch for the ``log(clamp(p))`` term and
+    ``buf`` optionally reuses a flat scratch for the ``log(p)`` term and
     ``mbuf`` one for the ``p > _EPS`` selector, so the blocked backward path
     allocates neither per block.
+
+    The surviving term is ``log(p) + 1`` on ``p > _EPS`` and ``0`` elsewhere;
+    the sub-eps entries are dropped by the trailing select, so the ``clamp_min``
+    that the forward entropy needs is unnecessary here (``log`` of a genuine
+    zero is ``-inf`` and is masked out) and one full pass over the matrix is
+    saved.
     """
     if grad_ent is not None:
         if buf is None:
-            logterm = p.clamp_min(_EPS).log_()
+            logterm = torch.log(p)
             mask = p > _EPS
         else:
             logterm = buf[:p.numel()].view_as(p)
-            torch.clamp_min(p, _EPS, out=logterm)
-            logterm.log_()
+            torch.log(p, out=logterm)
             if mbuf is None:
                 mask = p > _EPS
             else:
@@ -625,7 +630,16 @@ class Attention(nn.Module):
         dropping = self.training and drop_p > 0.0
 
         qkv = self.qkv(x)
-        q, k, v = qkv.chunk(3, dim=-1)
+        # One fused gather of all three projections into the head-major
+        # (B*h, T, dk) layout: a single walk over qkv instead of separate
+        # strided copies, and the same layout feeds both the hand-written
+        # kernel path and the explicit dropout path.
+        qb, kb, vb = qkv.view(B, T, 3, h, dk).permute(
+            2, 0, 3, 1, 4).contiguous().unbind(0)
+        qb = qb.reshape(bh, T, dk)
+        kb = kb.reshape(bh, T, dk)
+        vb = vb.reshape(bh, T, dk)
+        del qkv
 
         ent = None
         if not dropping:
@@ -634,15 +648,6 @@ class Attention(nn.Module):
             # comparison, so the numerics must not depend on the gate variant.
             # The calibrated kernel emits the row entropy as a by-product.
             # Do NOT switch any variant to a fused/flash attention call.
-            # one fused gather of all three projections into the head-major
-            # (B*h, T, dk) layout, instead of three strided copies of the same
-            # source (same bytes, one walk over qkv)
-            qb, kb, vb = qkv.view(B, T, 3, h, dk).permute(
-                2, 0, 3, 1, 4).contiguous().unbind(0)
-            qb = qb.reshape(bh, T, dk)
-            kb = kb.reshape(bh, T, dk)
-            vb = vb.reshape(bh, T, dk)
-            del qkv, q, k, v
             if is_null:
                 y = _NullAttn.apply(qb, kb, vb, self.null_k, self.null_v,
                                     self.inv_scale, B)
@@ -662,18 +667,17 @@ class Attention(nn.Module):
                     ent_full=None if ent is None else ent)
         else:
             # attention dropout acts on the probabilities; the statistics are
-            # read from the clean softmax rows before the dropout.
-            q_ = q.view(B, T, h, dk).transpose(1, 2)
-            k_ = k.view(B, T, h, dk).transpose(1, 2)
-            v_ = v.view(B, T, h, dk).transpose(1, 2)
+            # read from the clean softmax rows before the dropout.  The
+            # head-major q/k/v views are the ones the gather above produced.
+            q_ = qb.view(B, h, T, dk)
+            k_ = kb.view(B, h, T, dk)
             mask = _causal_mask(T, x.device, x.dtype)
             if is_null:
                 nk = self.null_k.view(1, h, 1, dk).expand(B, h, 1, dk)
                 kv_k = torch.cat([nk, k_], dim=2)
                 att = torch.matmul(q_, kv_k.transpose(-2, -1)).mul_(self.inv_scale)
                 att[..., 1:].add_(mask)
-                vb = v_.reshape(bh, T, dk)
-                del qkv, q, k, v, q_, k_, v_, nk, kv_k
+                del q_, k_, nk, kv_k
                 p = _SoftmaxInPlace.apply(att)
                 if not need_stats:
                     stats = None
@@ -687,13 +691,9 @@ class Attention(nn.Module):
                 y = torch.bmm(pb[..., 1:], vb).addcmul_(pb[..., :1], nv)
                 y = y.view(B, h, T, dk).transpose(1, 2).reshape(B, T, C)
             else:
-                qb = q_.reshape(bh, T, dk)
-                kb = k_.reshape(bh, T, dk)
-                vb = v_.reshape(bh, T, dk)
-                del qkv, q, k, v, q_, k_, v_
+                del q_, k_
                 att = torch.baddbmm(mask, qb, kb.transpose(1, 2),
                                     beta=1.0, alpha=self.inv_scale)
-                del qb, kb
                 p = _SoftmaxInPlace.apply(att)
                 if is_calib:
                     ent = _RowEntropy.apply(p, _EPS).view(B, h, T)
