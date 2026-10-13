@@ -108,12 +108,7 @@ _causal_mask_cache = {}
 
 
 def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    """Additive causal mask (0 on/below the diagonal, -inf above).
-
-    Cached per ``(T, device, dtype)``: the mask is read-only (every consumer
-    passes it to ``baddbmm`` as the addend operand), so layers can share a
-    single allocation instead of rebuilding it on every forward/backward.
-    """
+    """Additive causal mask (0 on/below the diagonal, -inf above)."""
     key = (T, device, dtype)
     m = _causal_mask_cache.get(key)
     if m is None:
@@ -290,7 +285,6 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     both read off the recomputed probabilities.  Consumes ``d_p``.
     """
     if grad_ent is not None:
-        # bool mask is consumed in place, avoiding a full score-sized copy
         mask = p > _EPS
         logterm = p.clamp_min(_EPS).log_()
         logterm.add_(mask)
@@ -641,11 +635,7 @@ class Attention(nn.Module):
 
 
 class _GeluAffine(torch.autograd.Function):
-    """``gelu(h) @ w.T + b`` with a hand-written backward.
-
-    Only the pre-activation ``h`` is saved; the post-GELU activations are
-    rebuilt inside the backward pass.
-    """
+    """``gelu(h) @ w.T + b`` with a hand-written backward."""
 
     @staticmethod
     def forward(ctx, h, w, b):

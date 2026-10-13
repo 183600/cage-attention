@@ -10,11 +10,7 @@ from .data import make_batch
 
 
 def _make_adamw(params, lr):
-    """AdamW with the fastest backend the current device supports.
-
-    ``fused`` is CUDA-only and removes most per-parameter overhead; ``foreach``
-    batches the update kernels.  Both are optional, so degrade gracefully.
-    """
+    """AdamW on the current device, preferring the backends it supports."""
     kw = dict(lr=lr, weight_decay=0.01, betas=(0.9, 0.95))
     if any(p.is_cuda for p in params):
         try:
@@ -31,13 +27,6 @@ def _make_adamw(params, lr):
 def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                 device="cpu", log_every=250, seed=0, dense_lm=False):
     """Train on the recall task.
-
-    ``dense_lm`` supervises every next-token position of the pair section as
-    well.  Those targets are unpredictable in the causal layout (each value
-    only ever appears after its own key), so the extra loss buys the marginal
-    token frequency and, at ~15:1, drowns the gradient that actually teaches
-    the recall operation the accuracy metric measures.  Keep it off unless a
-    marginal prior is explicitly part of the study.
 
     ``seed`` governs *all* run-to-run randomness: the data generator and the
     global RNG that draws the attention/MLP dropout masks.  Without the
