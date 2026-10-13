@@ -440,10 +440,20 @@ class Attention(nn.Module):
         self.max_len = cfg.max_len
 
         if cfg.gate in ("query", "calib"):
-            self.gate = nn.Linear(cfg.d_model, cfg.d_model, bias=True)
+            # The gate is the only gate-variant-specific module in the model.
+            # Drawing it from the global RNG advances the stream that
+            # ``CAGE.apply(_init)`` consumes afterwards, so ``query``/``calib``
+            # would start from different token embeddings, attention and MLP
+            # weights than ``none``/``null`` - E1 is a *controlled* comparison,
+            # so that confound would be indistinguishable from the effect of
+            # the gate.  Draw it from a forked copy of the CPU generator: same
+            # initialisation, shared stream left where it was.
+            with torch.random.fork_rng(devices=[]):
+                self.gate = nn.Linear(cfg.d_model, cfg.d_model, bias=True)
+                nn.init.normal_(self.gate.weight, std=0.02)
+                nn.init.constant_(self.gate.bias,
+                                  2.0 if cfg.gate == "query" else 6.0)
             self.gate._is_gate = True
-            nn.init.normal_(self.gate.weight, std=0.02)
-            nn.init.constant_(self.gate.bias, 2.0 if cfg.gate == "query" else 6.0)
         else:
             self.gate = None
         if cfg.gate == "calib":
@@ -705,11 +715,16 @@ class CAGE(nn.Module):
     @staticmethod
     def _init(m):
         if isinstance(m, nn.Linear):
+            # The gate was already given its weight and its "start open" bias
+            # in Attention.__init__ under a forked RNG.  Re-drawing it here
+            # would move the shared stream that this walk consumes, so the
+            # four gate variants would stop being init-matched; see
+            # Attention.__init__.
+            if hasattr(m, "_is_gate") and m._is_gate:
+                return
             nn.init.normal_(m.weight, std=0.02)
             if m.bias is not None:
-                # Skip gate bias (initialized in Attention.__init__ with "open" bias)
-                if not (hasattr(m, '_is_gate') and m._is_gate):
-                    nn.init.zeros_(m.bias)
+                nn.init.zeros_(m.bias)
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, std=0.02)
 
