@@ -324,7 +324,8 @@ class _CalibAttn(torch.autograd.Function):
         # the size of the score scratch, so holding it costs less than letting
         # every block allocate (and first-touch) its own
         gbuf = q.new_empty(s.numel()) if grad_ent is not None else None
-        mbuf = torch.empty(s.numel(), dtype=torch.bool) if grad_ent is not None else None
+        mbuf = (torch.empty(s.numel(), dtype=torch.bool, device=q.device)
+                if grad_ent is not None else None)
         for i0, i1 in blocks:
             n = bh * (i1 - i0) * i1
             p = _softmax_inplace(torch.baddbmm(
