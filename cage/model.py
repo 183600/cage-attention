@@ -137,9 +137,9 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
     """
     B = pos.size(0)
     cols = torch.arange(T, device=pos.device)
-    m = torch.zeros(B, T, dtype=dtype, device=pos.device)
-    m.masked_fill_(cols.view(1, T) > pos.view(B, 1), float("-inf"))
-    return m.view(B, 1, T).expand(B, h, T).reshape(B * h, 1, T)
+    m = torch.zeros(B * h, 1, T, dtype=dtype, device=pos.device)
+    m.view(B, h, T)[:, 0].masked_fill_(cols.view(1, T) > pos.view(B, 1), float("-inf"))
+    return m
 
 
 def _softmax_inplace(s: torch.Tensor) -> torch.Tensor:
@@ -193,20 +193,36 @@ def _pick_tokens(x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
     return x[torch.arange(x.size(0), device=x.device), pos]
 
 
+_query_blocks_cache: dict = {}
+
+
 def _query_blocks(bh: int, T: int):
     """``[(start, stop), ...]`` query blocks for a ``bh``-fold batch of ``T``."""
+    key = (bh, T)
+    blocks = _query_blocks_cache.get(key)
+    if blocks is not None:
+        return blocks
     if T <= 32:
-        return ((0, T),)
-    max_rows = (1 << 20) // (bh * T)
-    if max_rows < 32:
-        max_rows = 32
-    rows = min(T, max_rows)
-    return tuple((i, min(i + rows, T)) for i in range(0, T, rows))
+        blocks = ((0, T),)
+    else:
+        max_rows = (1 << 20) // (bh * T)
+        if max_rows < 32:
+            max_rows = 32
+        rows = min(T, max_rows)
+        blocks = tuple((i, min(i + rows, T)) for i in range(0, T, rows))
+    _query_blocks_cache[key] = blocks
+    return blocks
 
 
-def _row_entropy(p: torch.Tensor, eps: float) -> torch.Tensor:
+def _row_entropy(p: torch.Tensor, eps: float,
+                 out: torch.Tensor | None = None) -> torch.Tensor:
     """``-(p * log p).sum(-1)`` computed row-wise."""
-    return p.clamp_min(eps).log_().mul_(p).sum(dim=-1).neg_()
+    t = p.clamp_min(eps)
+    t.log_().mul_(p)
+    if out is None:
+        return t.sum(dim=-1).neg_()
+    torch.sum(t, dim=-1, out=out)
+    return out.neg_()
 
 
 class _CalibAttn(torch.autograd.Function):
@@ -238,12 +254,15 @@ class _CalibAttn(torch.autograd.Function):
         else:
             y = q.new_empty(bh, T, v.size(-1))
             ent = q.new_empty(bh, T) if need_ent else None
+            s = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
             for i0, i1 in blocks:
-                p = _softmax_inplace(torch.baddbmm(mask[i0:i1, :i1], q[:, i0:i1],
-                                                   kt[:, :, :i1], beta=1.0, alpha=scale))
+                p = _softmax_inplace(torch.baddbmm(
+                    mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
+                    beta=1.0, alpha=scale,
+                    out=s[:bh * (i1 - i0) * i1].view(bh, i1 - i0, i1)))
                 y[:, i0:i1] = torch.bmm(p, v[:, :i1])
                 if need_ent:
-                    ent[:, i0:i1] = _row_entropy(p, eps)
+                    _row_entropy(p, eps, out=ent[:, i0:i1])
         ctx.save_for_backward(q, k, v)
         ctx.scale = scale
         ctx.eps = eps
@@ -270,9 +289,12 @@ class _CalibAttn(torch.autograd.Function):
         d_q = torch.empty_like(q)
         d_k = torch.zeros_like(k)
         d_v = torch.zeros_like(v)
+        s = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
         for i0, i1 in blocks:
-            p = _softmax_inplace(torch.baddbmm(mask[i0:i1, :i1], q[:, i0:i1],
-                                               kt[:, :, :i1], beta=1.0, alpha=scale))
+            p = _softmax_inplace(torch.baddbmm(
+                mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
+                beta=1.0, alpha=scale,
+                out=s[:bh * (i1 - i0) * i1].view(bh, i1 - i0, i1)))
             g = grad_y[:, i0:i1]
             # the entropy output is absent when it was never requested
             ge = None if grad_ent is None else grad_ent[:, i0:i1]
@@ -322,10 +344,11 @@ def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
     """
     s = torch.baddbmm(mask[i0:i1, :i1], q_blk, kt[:, :, :i1], beta=1.0, alpha=scale)
     s0 = torch.bmm(q_blk, nkt).mul_(scale)
-    m = torch.maximum(s.amax(dim=-1, keepdim=True), s0)
+    m = s.amax(dim=-1, keepdim=True)
+    torch.maximum(m, s0, out=m)
     s.sub_(m).exp_()
     e0 = s0.sub_(m).exp_()
-    d = e0.add(s.sum(dim=-1, keepdim=True))
+    d = s.sum(dim=-1, keepdim=True).add_(e0)
     return s.div_(d), e0.div_(d)
 
 
