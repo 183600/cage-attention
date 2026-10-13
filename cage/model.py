@@ -138,7 +138,10 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
     B = pos.size(0)
     cols = torch.arange(T, device=pos.device)
     m = torch.zeros(B * h, 1, T, dtype=dtype, device=pos.device)
-    m.view(B, h, T)[:, 0].masked_fill_(cols.view(1, T) > pos.view(B, 1), float("-inf"))
+    # (B, 1, T) broadcasts over the head axis of the (B, h, T) view, so every
+    # head of every batch row gets the same causal row mask.
+    m.view(B, h, T).masked_fill_(
+        (cols.view(1, T) > pos.view(B, 1)).unsqueeze(1), float("-inf"))
     return m
 
 
