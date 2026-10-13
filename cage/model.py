@@ -591,9 +591,9 @@ class Attention(nn.Module):
                 y = y.view(B, h, T, dk).transpose(1, 2).reshape(B, T, C)
                 y_owned = True
             else:
-                qb = q_.transpose(1, 2).reshape(bh, T, dk)
-                kb = k_.transpose(1, 2).reshape(bh, T, dk)
-                vb = v_.transpose(1, 2).reshape(bh, T, dk)
+                qb = q_.reshape(bh, T, dk)
+                kb = k_.reshape(bh, T, dk)
+                vb = v_.reshape(bh, T, dk)
                 del qkv, q, k, v
                 att = torch.baddbmm(mask, qb, kb.transpose(1, 2),
                                     beta=1.0, alpha=self.inv_scale)
