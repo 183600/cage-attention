@@ -1,5 +1,8 @@
 # CAGE-Attention: 校准门控注意力 × 归一化/激活协同
 
+**中文** | [English](README_en.md)
+
+
 针对"稀疏/门控注意力是不是已有门控的小变体"以及"深层贡献不足"两个 reviewer
 关切的实验代码库。核心思想：**门控不应只依赖 query（Gated Attention 风格），
 还要按注意力分布的集中度（熵）与序列长度做校准**；并与 Pre/Post/Mix-LN、
