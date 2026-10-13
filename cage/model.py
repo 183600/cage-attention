@@ -651,15 +651,15 @@ class Attention(nn.Module):
         drop_p = self.cfg.dropout
         dropping = self.training and drop_p > 0.0
 
-        qkv = self.qkv(x)
+        qkv = self.qkv(x).view(B, T, 3, h, dk)
         # Gather all three projections into the head-major (B*h, T, dk)
         # layout; the same views feed the hand-written kernel path and the
-        # explicit dropout path.
-        qb, kb, vb = qkv.view(B, T, 3, h, dk).permute(
-            2, 0, 3, 1, 4).contiguous().unbind(0)
-        qb = qb.reshape(bh, T, dk)
-        kb = kb.reshape(bh, T, dk)
-        vb = vb.reshape(bh, T, dk)
+        # explicit dropout path.  Transposing each projection on its own is
+        # the same permutation as a single 5-D permute but touches one
+        # C-wide block at a time, which the copy kernel walks more cheaply.
+        qb = qkv[:, :, 0].transpose(1, 2).reshape(bh, T, dk)
+        kb = qkv[:, :, 1].transpose(1, 2).reshape(bh, T, dk)
+        vb = qkv[:, :, 2].transpose(1, 2).reshape(bh, T, dk)
         del qkv
 
         ent = None
