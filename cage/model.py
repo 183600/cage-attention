@@ -128,6 +128,22 @@ def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tens
     return m
 
 
+_ARANGE_CACHE_MAX = 128
+_arange_cache: dict = {}
+
+
+def _arange(n: int, device: torch.device) -> torch.Tensor:
+    """Read-only ``arange(n)`` shared across calls (index tensors only)."""
+    key = (n, device)
+    a = _arange_cache.get(key)
+    if a is None:
+        if len(_arange_cache) >= _ARANGE_CACHE_MAX:
+            _arange_cache.clear()
+        a = torch.arange(n, device=device)
+        _arange_cache[key] = a
+    return a
+
+
 def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.Tensor:
     """``(B*h, 1, T)`` additive mask rows for the query positions ``pos``.
 
@@ -136,7 +152,7 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
     shared per-length causal mask is cached.
     """
     B = pos.size(0)
-    cols = torch.arange(T, device=pos.device)
+    cols = _arange(T, pos.device)
     m = torch.zeros(B * h, 1, T, dtype=dtype, device=pos.device)
     # (B, 1, T) broadcasts over the head axis of the (B, h, T) view, so every
     # head of every batch row gets the same causal row mask.
@@ -188,12 +204,12 @@ class _RowEntropy(torch.autograd.Function):
 
 def _pick_rows(x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
     """``x[b, :, pos[b], ...]`` for every ``b``: ``(B, H, T, S) -> (B, H, S)``."""
-    return x[torch.arange(x.size(0), device=x.device), :, pos]
+    return x[_arange(x.size(0), x.device), :, pos]
 
 
 def _pick_tokens(x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
     """``x[b, pos[b], ...]`` for every ``b``: ``(B, T, C) -> (B, C)``."""
-    return x[torch.arange(x.size(0), device=x.device), pos]
+    return x[_arange(x.size(0), x.device), pos]
 
 
 _query_blocks_cache: dict = {}
@@ -218,9 +234,19 @@ def _query_blocks(bh: int, T: int):
 
 
 def _row_entropy(p: torch.Tensor, eps: float,
-                 out: torch.Tensor | None = None) -> torch.Tensor:
-    """``-(p * log p).sum(-1)`` computed row-wise."""
-    t = p.clamp_min(eps)
+                 out: torch.Tensor | None = None,
+                 buf: torch.Tensor | None = None) -> torch.Tensor:
+    """``-(p * log p).sum(-1)`` computed row-wise.
+
+    ``buf`` is an optional flat scratch of at least ``p.numel()`` elements
+    reused across blocked iterations so the ``clamp_min`` workspace is
+    allocated once per kernel call instead of once per query block.
+    """
+    if buf is None:
+        t = p.clamp_min(eps)
+    else:
+        t = buf[:p.numel()].view_as(p)
+        torch.clamp_min(p, eps, out=t)
     t.log_().mul_(p)
     if out is None:
         return t.sum(dim=-1).neg_()
@@ -258,6 +284,7 @@ class _CalibAttn(torch.autograd.Function):
             y = q.new_empty(bh, T, v.size(-1))
             ent = q.new_empty(bh, T) if need_ent else None
             s = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
+            ebuf = q.new_empty(s.numel()) if need_ent else None
             for i0, i1 in blocks:
                 p = _softmax_inplace(torch.baddbmm(
                     mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
@@ -265,7 +292,7 @@ class _CalibAttn(torch.autograd.Function):
                     out=s[:bh * (i1 - i0) * i1].view(bh, i1 - i0, i1)))
                 y[:, i0:i1] = torch.bmm(p, v[:, :i1])
                 if need_ent:
-                    _row_entropy(p, eps, out=ent[:, i0:i1])
+                    _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
         ctx.save_for_backward(q, k, v)
         ctx.scale = scale
         ctx.eps = eps
@@ -293,6 +320,7 @@ class _CalibAttn(torch.autograd.Function):
         d_k = torch.zeros_like(k)
         d_v = torch.zeros_like(v)
         s = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
+        gbuf = q.new_empty(s.numel()) if grad_ent is not None else None
         for i0, i1 in blocks:
             p = _softmax_inplace(torch.baddbmm(
                 mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
@@ -301,7 +329,8 @@ class _CalibAttn(torch.autograd.Function):
             g = grad_y[:, i0:i1]
             # the entropy output is absent when it was never requested
             ge = None if grad_ent is None else grad_ent[:, i0:i1]
-            d_s = _softmax_grad_from_p(torch.bmm(g, vt[:, :, :i1]), p, ge)
+            d_s = _softmax_grad_from_p(torch.bmm(g, vt[:, :, :i1]), p, ge,
+                                       buf=gbuf)
             d_v[:, :i1].add_(torch.bmm(p.transpose(1, 2), g))
             d_q[:, i0:i1] = torch.bmm(d_s, k[:, :i1]).mul_(scale)
             d_k[:, :i1].add_(torch.bmm(d_s.transpose(1, 2), q[:, i0:i1]).mul_(scale))
@@ -309,13 +338,22 @@ class _CalibAttn(torch.autograd.Function):
 
 
 def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
-                         grad_ent: torch.Tensor) -> torch.Tensor:
+                         grad_ent: torch.Tensor,
+                         buf: torch.Tensor | None = None) -> torch.Tensor:
     """Score gradient for ``p = softmax(s)`` plus the calibrated-entropy term,
     both read off the recomputed probabilities.  Consumes ``d_p``.
+
+    ``buf`` optionally reuses a flat scratch for the ``log(clamp(p))`` term so
+    the blocked backward path allocates it once instead of per block.
     """
     if grad_ent is not None:
+        if buf is None:
+            logterm = p.clamp_min(_EPS).log_()
+        else:
+            logterm = buf[:p.numel()].view_as(p)
+            torch.clamp_min(p, _EPS, out=logterm)
+            logterm.log_()
         mask = p > _EPS
-        logterm = p.clamp_min(_EPS).log_()
         logterm.add_(mask).mul_(mask)
         d_p.addcmul_(logterm, grad_ent.unsqueeze(-1), value=-1.0)
     d_p.mul_(p)
@@ -335,7 +373,8 @@ def _null_row(x: torch.Tensor, B: int) -> torch.Tensor:
 
 
 def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
-                mask: torch.Tensor, nkt: torch.Tensor, scale: float):
+                mask: torch.Tensor, nkt: torch.Tensor, scale: float,
+                sbuf: torch.Tensor | None = None):
     """Joint weights of the causally visible tokens and of the null slot for
     the query block ``[i0, i1)``.
 
@@ -343,9 +382,17 @@ def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
     keeps the width of the real (causally masked) part.  Both are shifted by
     the joint row maximum before the exp, which makes the pair ``(p, p0)`` an
     ordinary softmax over the ``i1 + 1`` columns the null slot adds to the
-    block.
+    block.  ``sbuf`` optionally supplies a reusable flat score workspace so
+    the blocked loops allocate it once per kernel call.
     """
-    s = torch.baddbmm(mask[i0:i1, :i1], q_blk, kt[:, :, :i1], beta=1.0, alpha=scale)
+    if sbuf is None:
+        s = torch.baddbmm(mask[i0:i1, :i1], q_blk, kt[:, :, :i1],
+                          beta=1.0, alpha=scale)
+    else:
+        n, r = q_blk.size(0), q_blk.size(1)
+        s = sbuf[:n * r * i1].view(n, r, i1)
+        torch.baddbmm(mask[i0:i1, :i1], q_blk, kt[:, :, :i1],
+                      beta=1.0, alpha=scale, out=s)
     s0 = torch.bmm(q_blk, nkt).mul_(scale)
     m = s.amax(dim=-1, keepdim=True)
     torch.maximum(m, s0, out=m)
@@ -377,8 +424,10 @@ class _NullAttn(torch.autograd.Function):
         nvw = _null_row(null_v, B)
         multi = len(blocks) > 1
         y = q.new_empty(bh, T, v.size(-1)) if multi else None
+        sbuf = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
         for i0, i1 in blocks:
-            p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, nkt, scale)
+            p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, nkt, scale,
+                                sbuf)
             out = torch.bmm(p, v[:, :i1]).addcmul_(p0, nvw)
             if multi:
                 y[:, i0:i1] = out
@@ -409,11 +458,12 @@ class _NullAttn(torch.autograd.Function):
         d_v = torch.zeros_like(v) if multi else None
         d_null_k = torch.zeros_like(null_k)
         d_null_v = torch.zeros_like(null_v)
+        sbuf = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
         for i0, i1 in blocks:
             # rebuild the joint weights of this block only
             q_blk = q[:, i0:i1]
             g = grad_y[:, i0:i1]
-            p, p0 = _null_probs(q_blk, kt, i0, i1, mask, nkt, scale)
+            p, p0 = _null_probs(q_blk, kt, i0, i1, mask, nkt, scale, sbuf)
             # sum_joint p * d_p = <grad_out, p @ v> = <grad_out, y>: the
             # denominator term follows from the rebuilt weights alone
             e = torch.bmm(g, vt[:, :, :i1])
@@ -440,8 +490,10 @@ class _NullAttn(torch.autograd.Function):
                 d_k = dkb
             # the null slot is a per-head parameter replicated across the batch
             q4 = q_blk.view(B, h, i1 - i0, dk)
-            d_null_k.add_((d_s0.view(B, h, -1, 1) * q4).sum((0, 2)))
-            d_null_v.add_((g.view(B, h, -1, dk) * p0.view(B, h, -1, 1)).sum((0, 2)))
+            d_null_k.add_(torch.matmul(d_s0.view(B, h, -1, 1).transpose(-2, -1),
+                                       q4).squeeze(-2).sum(0))
+            d_null_v.add_(torch.matmul(p0.view(B, h, -1, 1).transpose(-2, -1),
+                                       g.view(B, h, -1, dk)).squeeze(-2).sum(0))
         return d_q, d_k, d_v, d_null_k, d_null_v, None, None
 
 
@@ -596,7 +648,7 @@ class Attention(nn.Module):
                 att = torch.matmul(q_, kv_k.transpose(-2, -1)).mul_(self.inv_scale)
                 att[..., 1:].add_(mask)
                 vb = v_.reshape(bh, T, dk)
-                del qkv, q, k, v, nk, kv_k
+                del qkv, q, k, v, q_, k_, v_, nk, kv_k
                 p = _SoftmaxInPlace.apply(att)
                 if not need_stats:
                     stats = None
@@ -613,9 +665,10 @@ class Attention(nn.Module):
                 qb = q_.reshape(bh, T, dk)
                 kb = k_.reshape(bh, T, dk)
                 vb = v_.reshape(bh, T, dk)
-                del qkv, q, k, v
+                del qkv, q, k, v, q_, k_, v_
                 att = torch.baddbmm(mask, qb, kb.transpose(1, 2),
                                     beta=1.0, alpha=self.inv_scale)
+                del qb, kb
                 p = _SoftmaxInPlace.apply(att)
                 if is_calib:
                     ent = _RowEntropy.apply(p, _EPS).view(B, h, T)
