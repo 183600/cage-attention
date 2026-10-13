@@ -317,17 +317,10 @@ class _CalibAttn(torch.autograd.Function):
             d_q = torch.bmm(d_s, k).mul_(scale)
             d_k = torch.bmm(d_s.transpose(1, 2), q).mul_(scale)
             return d_q, d_k, d_v, None, None, None
-        # the first query block is written instead of accumulated on top of a
-        # zeroed buffer: 0 + x == x, so the summation order (and the rounding)
-        # is identical to the zeros_like + add_ version while the memset and
-        # one add pass over d_k / d_v disappear
         d_q = torch.empty_like(q)
-        d_k = torch.empty_like(k)
-        d_v = torch.empty_like(v)
+        d_k = torch.zeros_like(k)
+        d_v = torch.zeros_like(v)
         s = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
-        # the selector is reused across blocks: it is a bool plane a quarter of
-        # the size of the score scratch, so holding it costs less than letting
-        # every block allocate (and first-touch) its own
         gbuf = q.new_empty(s.numel()) if grad_ent is not None else None
         mbuf = (torch.empty(s.numel(), dtype=torch.bool, device=q.device)
                 if grad_ent is not None else None)
@@ -338,23 +331,14 @@ class _CalibAttn(torch.autograd.Function):
                 beta=1.0, alpha=scale,
                 out=s[:n].view(bh, i1 - i0, i1)))
             g = grad_y[:, i0:i1]
-            # the entropy output is absent when it was never requested
             ge = None if grad_ent is None else grad_ent[:, i0:i1]
             d_s = _softmax_grad_from_p(torch.bmm(g, vt[:, :, :i1]), p, ge,
                                        buf=None if gbuf is None else gbuf[:n],
                                        mbuf=None if mbuf is None else mbuf[:n])
-            if i0:
-                d_v[:, :i1].add_(torch.bmm(p.transpose(1, 2), g))
-                d_q[:, i0:i1] = torch.bmm(d_s, k[:, :i1]).mul_(scale)
-                d_k[:, :i1].add_(torch.bmm(d_s.transpose(1, 2),
-                                           q[:, i0:i1]).mul_(scale))
-            else:
-                # first block: the gradient is the whole contribution so far
-                torch.bmm(p.transpose(1, 2), g, out=d_v[:, :i1])
-                torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1])
-                d_q[:, i0:i1].mul_(scale)
-                torch.bmm(d_s.transpose(1, 2), q[:, i0:i1], out=d_k[:, :i1])
-                d_k[:, :i1].mul_(scale)
+            d_v[:, :i1].add_(torch.bmm(p.transpose(1, 2), g))
+            d_q[:, i0:i1] = torch.bmm(d_s, k[:, :i1]).mul_(scale)
+            d_k[:, :i1].add_(torch.bmm(d_s.transpose(1, 2),
+                                       q[:, i0:i1]).mul_(scale))
         return d_q, d_k, d_v, None, None, None
 
 
