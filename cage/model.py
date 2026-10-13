@@ -138,7 +138,7 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
     B = pos.size(0)
     cols = torch.arange(T, device=pos.device)
     m = torch.zeros(B, T, dtype=dtype, device=pos.device)
-    m.masked_fill_(cols.view(1, T) > pos.reshape(B, 1), float("-inf"))
+    m.masked_fill_(cols.view(1, T) > pos.view(B, 1), float("-inf"))
     return m.view(B, 1, T).expand(B, h, T).reshape(B * h, 1, T)
 
 
@@ -181,11 +181,8 @@ class _RowEntropy(torch.autograd.Function):
         (p,) = ctx.saved_tensors
         g = grad_out.unsqueeze(-1).neg()
         mask = p > ctx.eps
-        d = p.clamp_min(ctx.eps)
-        d.log_()
-        d.add_(mask)
-        d.mul_(g)
-        d.mul_(mask)
+        d = p.clamp_min(ctx.eps).log_()
+        d.add_(mask).mul_(mask).mul_(g)
         return d, None
 
 
@@ -264,16 +261,16 @@ class _CalibAttn(torch.autograd.Function):
         blocks = _query_blocks(bh, T)
         mask = _causal_mask(T, q.device, q.dtype)
         kt = k.transpose(1, 2)
+        vt = v.transpose(1, 2)
         # recompute probabilities (identical op sequence to forward)
         if len(blocks) == 1:
             p = _softmax_inplace(torch.baddbmm(mask, q, kt, beta=1.0, alpha=scale))
             d_s = _softmax_grad_from_p(
-                torch.bmm(grad_y, v.transpose(1, 2)), p, grad_ent)
+                torch.bmm(grad_y, vt), p, grad_ent)
             d_v = torch.bmm(p.transpose(1, 2), grad_y)
             d_q = torch.bmm(d_s, k).mul_(scale)
             d_k = torch.bmm(d_s.transpose(1, 2), q).mul_(scale)
             return d_q, d_k, d_v, None, None
-        vt = v.transpose(1, 2)
         d_q = torch.empty_like(q)
         d_k = torch.zeros_like(k)
         d_v = torch.zeros_like(v)
@@ -297,8 +294,7 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     if grad_ent is not None:
         mask = p > _EPS
         logterm = p.clamp_min(_EPS).log_()
-        logterm.add_(mask)
-        logterm.mul_(mask)
+        logterm.add_(mask).mul_(mask)
         d_p.addcmul_(logterm, grad_ent.unsqueeze(-1), value=-1.0)
     d_p.mul_(p)
     return d_p.addcmul_(p, d_p.sum(dim=-1, keepdim=True), value=-1.0)
@@ -307,13 +303,13 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
 def _null_col(x: torch.Tensor, B: int) -> torch.Tensor:
     """``(h, d)`` -> ``(B*h, d, 1)``: batch-replicated key column."""
     h, d = x.shape
-    return x.unsqueeze(0).expand(B, h, d).reshape(B * h, d, 1)
+    return x.view(1, h, d).expand(B, h, d).reshape(B * h, d, 1)
 
 
 def _null_row(x: torch.Tensor, B: int) -> torch.Tensor:
     """``(h, d)`` -> ``(B*h, 1, d)``: batch-replicated value row."""
     h, d = x.shape
-    return x.unsqueeze(0).expand(B, h, d).reshape(B * h, 1, d)
+    return x.view(1, h, d).expand(B, h, d).reshape(B * h, 1, d)
 
 
 def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
@@ -533,9 +529,9 @@ class Attention(nn.Module):
             # comparison, so the numerics must not depend on the gate variant.
             # The calibrated kernel emits the row entropy as a by-product.
             # Do NOT switch any variant to a fused/flash attention call.
-            qb = q.view(B, T, h, dk).moveaxis(1, 2).reshape(bh, T, dk)
-            kb = k.view(B, T, h, dk).moveaxis(1, 2).reshape(bh, T, dk)
-            vb = v.view(B, T, h, dk).moveaxis(1, 2).reshape(bh, T, dk)
+            qb = q.view(B, T, h, dk).transpose(1, 2).reshape(bh, T, dk)
+            kb = k.view(B, T, h, dk).transpose(1, 2).reshape(bh, T, dk)
+            vb = v.view(B, T, h, dk).transpose(1, 2).reshape(bh, T, dk)
             del qkv, q, k, v
             if is_null:
                 y = _NullAttn.apply(qb, kb, vb, self.null_k, self.null_v,
@@ -603,7 +599,7 @@ class Attention(nn.Module):
         gate_val = None
         if kind == "query":
             gate_val = self.gate(x).sigmoid_()
-            y = y.mul_(gate_val)
+            y.mul_(gate_val)
         elif is_calib:
             log_len = math.log(max(T, 2))
             conc = ent.mean(dim=1).unsqueeze(-1).div_(log_len)
@@ -612,7 +608,7 @@ class Attention(nn.Module):
             gate_val.addcmul_(conc, self.calib_c * self.calib_scale, value=-1.0)
             tau = F.softplus(self.calib_tau).add_(0.1)
             gate_val.div_(tau).sigmoid_()
-            y = y.mul_(gate_val)
+            y.mul_(gate_val)
 
         out = self.proj(y)
         if not need_stats:
