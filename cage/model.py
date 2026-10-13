@@ -284,14 +284,24 @@ class _CalibAttn(torch.autograd.Function):
         else:
             y = q.new_empty(bh, T, v.size(-1))
             ent = q.new_empty(bh, T) if need_ent else None
-            s = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
+            dv = v.size(-1)
+            rows0 = blocks[0][1] - blocks[0][0]
+            s = q.new_empty(bh * rows0 * T)
             ebuf = q.new_empty(s.numel()) if need_ent else None
+            # bmm only takes a contiguous out, so a block's output is staged
+            # through a block-shaped scratch and copied into place; writing
+            # straight into ``y[:, i0:i1]`` selects its way through the batch
+            # one item at a time instead of using the batched gemm.
+            yb = q.new_empty(bh * rows0 * dv)
             for i0, i1 in blocks:
+                r = i1 - i0
                 p = _softmax_inplace(torch.baddbmm(
                     mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
                     beta=1.0, alpha=scale,
-                    out=s[:bh * (i1 - i0) * i1].view(bh, i1 - i0, i1)))
-                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
+                    out=s[:bh * r * i1].view(bh, r, i1)))
+                o = yb[:bh * r * dv].view(bh, r, dv)
+                torch.bmm(p, v[:, :i1], out=o)
+                y[:, i0:i1].copy_(o)
                 if need_ent:
                     _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
         ctx.save_for_backward(q, k, v)
@@ -354,18 +364,18 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     allocates neither per block.
 
     The surviving term is ``log(p) + 1`` on ``p > _EPS`` and ``0`` elsewhere;
-    the sub-eps entries are dropped by the trailing select, so the ``clamp_min``
-    that the forward entropy needs is unnecessary here (``log`` of a genuine
-    zero is ``-inf`` and is masked out) and one full pass over the matrix is
-    saved.
+    the sub-eps entries are dropped by the trailing select, so clamping ``p``
+    to ``_EPS`` in front of the ``log`` cannot change the result - it only
+    keeps the sub-normal probabilities of a long causal row out of the log.
     """
     if grad_ent is not None:
         if buf is None:
-            logterm = torch.log(p)
+            logterm = p.clamp_min(_EPS).log_()
             mask = p > _EPS
         else:
             logterm = buf[:p.numel()].view_as(p)
-            torch.log(p, out=logterm)
+            torch.clamp_min(p, _EPS, out=logterm)
+            logterm.log_()
             if mbuf is None:
                 mask = p > _EPS
             else:
@@ -444,17 +454,26 @@ class _NullAttn(torch.autograd.Function):
         nkt = _null_col(null_k, B)
         nvw = _null_row(null_v, B)
         multi = len(blocks) > 1
-        y = q.new_empty(bh, T, v.size(-1)) if multi else None
-        sbuf = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
+        dv = v.size(-1)
+        rows0 = blocks[0][1] - blocks[0][0]
+        y = q.new_empty(bh, T, dv) if multi else None
+        sbuf = q.new_empty(bh * rows0 * T)
+        # bmm only takes a contiguous out, so a block's output is staged
+        # through a block-shaped scratch and copied into place; writing
+        # straight into ``y[:, i0:i1]`` selects its way through the batch
+        # one item at a time instead of using the batched gemm.
+        yb = q.new_empty(bh * rows0 * dv) if multi else None
         for i0, i1 in blocks:
             p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, nkt, scale,
                                 sbuf)
             if multi:
-                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
+                o = yb[:bh * (i1 - i0) * dv].view(bh, i1 - i0, dv)
+                torch.bmm(p, v[:, :i1], out=o)
+                y[:, i0:i1].copy_(o)
                 y[:, i0:i1].addcmul_(p0, nvw)
             else:
                 if y is None:
-                    y = q.new_empty(bh, T, v.size(-1))
+                    y = q.new_empty(bh, T, dv)
                 torch.bmm(p, v[:, :i1], out=y)
                 y.addcmul_(p0, nvw)
         ctx.save_for_backward(q, k, v, null_k, null_v)
