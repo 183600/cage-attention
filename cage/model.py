@@ -317,9 +317,13 @@ class _CalibAttn(torch.autograd.Function):
             d_q = torch.bmm(d_s, k).mul_(scale)
             d_k = torch.bmm(d_s.transpose(1, 2), q).mul_(scale)
             return d_q, d_k, d_v, None, None, None
+        # the first query block is written instead of accumulated on top of a
+        # zeroed buffer: 0 + x == x, so the summation order (and the rounding)
+        # is identical to the zeros_like + add_ version while the memset and
+        # one add pass over d_k / d_v disappear
         d_q = torch.empty_like(q)
-        d_k = torch.zeros_like(k)
-        d_v = torch.zeros_like(v)
+        d_k = torch.empty_like(k)
+        d_v = torch.empty_like(v)
         s = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
         # the selector is reused across blocks: it is a bool plane a quarter of
         # the size of the score scratch, so holding it costs less than letting
@@ -339,9 +343,18 @@ class _CalibAttn(torch.autograd.Function):
             d_s = _softmax_grad_from_p(torch.bmm(g, vt[:, :, :i1]), p, ge,
                                        buf=None if gbuf is None else gbuf[:n],
                                        mbuf=None if mbuf is None else mbuf[:n])
-            d_v[:, :i1].add_(torch.bmm(p.transpose(1, 2), g))
-            d_q[:, i0:i1] = torch.bmm(d_s, k[:, :i1]).mul_(scale)
-            d_k[:, :i1].add_(torch.bmm(d_s.transpose(1, 2), q[:, i0:i1]).mul_(scale))
+            if i0:
+                d_v[:, :i1].add_(torch.bmm(p.transpose(1, 2), g))
+                d_q[:, i0:i1] = torch.bmm(d_s, k[:, :i1]).mul_(scale)
+                d_k[:, :i1].add_(torch.bmm(d_s.transpose(1, 2),
+                                           q[:, i0:i1]).mul_(scale))
+            else:
+                # first block: the gradient is the whole contribution so far
+                torch.bmm(p.transpose(1, 2), g, out=d_v[:, :i1])
+                torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1])
+                d_q[:, i0:i1].mul_(scale)
+                torch.bmm(d_s.transpose(1, 2), q[:, i0:i1], out=d_k[:, :i1])
+                d_k[:, :i1].mul_(scale)
         return d_q, d_k, d_v, None, None, None
 
 
@@ -637,9 +650,14 @@ class Attention(nn.Module):
             # comparison, so the numerics must not depend on the gate variant.
             # The calibrated kernel emits the row entropy as a by-product.
             # Do NOT switch any variant to a fused/flash attention call.
-            qb = q.view(B, T, h, dk).transpose(1, 2).reshape(bh, T, dk)
-            kb = k.view(B, T, h, dk).transpose(1, 2).reshape(bh, T, dk)
-            vb = v.view(B, T, h, dk).transpose(1, 2).reshape(bh, T, dk)
+            # one fused gather of all three projections into the head-major
+            # (B*h, T, dk) layout, instead of three strided copies of the same
+            # source (same bytes, one walk over qkv)
+            qb, kb, vb = qkv.view(B, T, 3, h, dk).permute(
+                2, 0, 3, 1, 4).contiguous().unbind(0)
+            qb = qb.reshape(bh, T, dk)
+            kb = kb.reshape(bh, T, dk)
+            vb = vb.reshape(bh, T, dk)
             del qkv, q, k, v
             if is_null:
                 y = _NullAttn.apply(qb, kb, vb, self.null_k, self.null_v,
