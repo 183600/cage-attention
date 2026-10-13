@@ -97,7 +97,7 @@ class SeeDNorm(nn.Module):
 
     def forward(self, x):
         s = self.scale(x).sigmoid_()
-        return self.ln(x) * s.mul(2.0)
+        return self.ln(x).mul_(s).mul_(2.0)
 
 
 def make_norm(kind: str, dim: int) -> nn.Module:
@@ -144,9 +144,7 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
 
 def _softmax_inplace(s: torch.Tensor) -> torch.Tensor:
     """Row softmax written back into ``s`` (no autograd node)."""
-    s.sub_(s.amax(dim=-1, keepdim=True)).exp_()
-    s.div_(s.sum(dim=-1, keepdim=True))
-    return s
+    return torch.softmax(s, dim=-1, out=s)
 
 
 class _SoftmaxInPlace(torch.autograd.Function):
@@ -155,8 +153,7 @@ class _SoftmaxInPlace(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
         ctx.mark_dirty(x)
-        x.sub_(x.amax(dim=-1, keepdim=True)).exp_()
-        x.div_(x.sum(dim=-1, keepdim=True))
+        torch.softmax(x, dim=-1, out=x)
         ctx.save_for_backward(x)
         return x
 
@@ -184,11 +181,6 @@ class _RowEntropy(torch.autograd.Function):
         d = p.clamp_min(ctx.eps).log_()
         d.add_(mask).mul_(mask).mul_(g)
         return d, None
-
-
-def _batch_index(B: int, device: torch.device) -> torch.Tensor:
-    """``arange(B)`` on ``device``: one row is picked per sequence."""
-    return torch.arange(B, device=device)
 
 
 def _pick_rows(x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
@@ -227,11 +219,14 @@ class _CalibAttn(torch.autograd.Function):
         ent = -(p * log p).rowsum
 
     The probabilities are rebuilt block by block: forward scores them one
-    block at a time and backward recomputes them from ``q, k, v``.
+    block at a time and backward recomputes them from ``q, k, v``.  The
+    entropy output is only produced when ``need_ent`` is set (calibrated
+    gate or diagnostics); the attention output itself is identical either
+    way, so the kernel stays shared by all gate variants.
     """
 
     @staticmethod
-    def forward(ctx, q, k, v, scale: float, eps: float):
+    def forward(ctx, q, k, v, scale: float, eps: float, need_ent: bool = True):
         bh, T = q.size(0), q.size(1)
         blocks = _query_blocks(bh, T)
         mask = _causal_mask(T, q.device, q.dtype)
@@ -239,15 +234,16 @@ class _CalibAttn(torch.autograd.Function):
         if len(blocks) == 1:
             p = _softmax_inplace(torch.baddbmm(mask, q, kt, beta=1.0, alpha=scale))
             y = torch.bmm(p, v)
-            ent = _row_entropy(p, eps)
+            ent = _row_entropy(p, eps) if need_ent else None
         else:
             y = q.new_empty(bh, T, v.size(-1))
-            ent = q.new_empty(bh, T)
+            ent = q.new_empty(bh, T) if need_ent else None
             for i0, i1 in blocks:
                 p = _softmax_inplace(torch.baddbmm(mask[i0:i1, :i1], q[:, i0:i1],
                                                    kt[:, :, :i1], beta=1.0, alpha=scale))
                 y[:, i0:i1] = torch.bmm(p, v[:, :i1])
-                ent[:, i0:i1] = _row_entropy(p, eps)
+                if need_ent:
+                    ent[:, i0:i1] = _row_entropy(p, eps)
         ctx.save_for_backward(q, k, v)
         ctx.scale = scale
         ctx.eps = eps
@@ -270,7 +266,7 @@ class _CalibAttn(torch.autograd.Function):
             d_v = torch.bmm(p.transpose(1, 2), grad_y)
             d_q = torch.bmm(d_s, k).mul_(scale)
             d_k = torch.bmm(d_s.transpose(1, 2), q).mul_(scale)
-            return d_q, d_k, d_v, None, None
+            return d_q, d_k, d_v, None, None, None
         d_q = torch.empty_like(q)
         d_k = torch.zeros_like(k)
         d_v = torch.zeros_like(v)
@@ -278,12 +274,13 @@ class _CalibAttn(torch.autograd.Function):
             p = _softmax_inplace(torch.baddbmm(mask[i0:i1, :i1], q[:, i0:i1],
                                                kt[:, :, :i1], beta=1.0, alpha=scale))
             g = grad_y[:, i0:i1]
-            d_s = _softmax_grad_from_p(torch.bmm(g, vt[:, :, :i1]), p,
-                                       grad_ent[:, i0:i1])
+            # the entropy output is absent when it was never requested
+            ge = None if grad_ent is None else grad_ent[:, i0:i1]
+            d_s = _softmax_grad_from_p(torch.bmm(g, vt[:, :, :i1]), p, ge)
             d_v[:, :i1].add_(torch.bmm(p.transpose(1, 2), g))
             d_q[:, i0:i1] = torch.bmm(d_s, k[:, :i1]).mul_(scale)
             d_k[:, :i1].add_(torch.bmm(d_s.transpose(1, 2), q[:, i0:i1]).mul_(scale))
-        return d_q, d_k, d_v, None, None
+        return d_q, d_k, d_v, None, None, None
 
 
 def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
@@ -547,15 +544,19 @@ class Attention(nn.Module):
                 y = _NullAttn.apply(qb, kb, vb, self.null_k, self.null_v,
                                     self.inv_scale, B)
             else:
-                # none / query / calib run through the same kernel.
-                y, ent = _CalibAttn.apply(qb, kb, vb, self.inv_scale, _EPS)
-                ent = ent.view(B, h, T)
+                # none / query / calib run through the same kernel; the row
+                # entropy by-product is only materialised when something
+                # consumes it (calibrated gate or diagnostics).
+                y, ent = _CalibAttn.apply(qb, kb, vb, self.inv_scale, _EPS,
+                                          is_calib or need_stats)
+                if ent is not None:
+                    ent = ent.view(B, h, T)
             y = y.view(B, h, T, dk).transpose(1, 2).reshape(B, T, C)
             stats = None
             if need_stats:
                 stats = self._row_stats_at(
                     qb.view(B, h, T, dk), kb, B, h, T, stat_pos, is_null,
-                    ent_full=None if is_null else ent)
+                    ent_full=None if ent is None else ent)
         else:
             # attention dropout acts on the probabilities; the statistics are
             # read from the clean softmax rows before the dropout.
