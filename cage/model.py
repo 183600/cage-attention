@@ -113,12 +113,11 @@ _causal_mask_order = []
 def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """Additive causal mask (0 on/below the diagonal, -inf above).
 
-    The shared tensor is allocated with inference mode *off*.  Both caches
-    here are module-global and outlive the call that filled them, while
-    ``collect_stats`` / ``eval_accuracy`` run under ``torch.inference_mode()``:
-    an inference tensor stays an inference tensor for the rest of the process,
-    so a cached entry built inside that mode cannot be reused by an
-    autograd-tracked call.  See ``_arange`` for where that actually bites.
+    The shared tensor is allocated with inference mode *off*, so one cached
+    entry serves every caller.  ``collect_stats`` / ``eval_accuracy`` run
+    under ``torch.inference_mode()`` and an inference tensor stays an
+    inference tensor for the rest of the process, so a cached entry built
+    inside that mode could not be reused by an autograd-tracked call.
     """
     key = (T, device, dtype)
     m = _causal_mask_cache.get(key)
@@ -144,13 +143,8 @@ _arange_cache: dict = {}
 def _arange(n: int, device: torch.device) -> torch.Tensor:
     """Read-only ``arange(n)`` shared across calls (index tensors only).
 
-    This cache is process-global while ``collect_stats`` / ``eval_accuracy``
-    fill it under ``torch.inference_mode()``, and ``_pick_rows`` hands the
-    tensor to advanced indexing - which saves the index for backward.  A
-    cached inference tensor therefore aborts the next *training*-mode forward
-    that collects per-layer stats with "Inference tensors cannot be saved for
-    backward", long after the eval call that created it.  Allocate with
-    inference mode off so one cached entry serves every context.
+    Allocated with inference mode *off* so one cached entry serves every
+    context, including the training-mode forward.
     """
     key = (n, device)
     a = _arange_cache.get(key)
@@ -257,9 +251,8 @@ def _row_entropy(p: torch.Tensor, eps: float,
                  buf: torch.Tensor | None = None) -> torch.Tensor:
     """``-(p * log p).sum(-1)`` computed row-wise.
 
-    ``buf`` is an optional flat scratch of at least ``p.numel()`` elements
-    reused across blocked iterations so the ``clamp_min`` workspace is
-    allocated once per kernel call instead of once per query block.
+    ``buf`` optionally supplies the ``clamp_min`` workspace and must be a
+    flat tensor of at least ``p.numel()`` elements.
     """
     if buf is None:
         t = p.clamp_min(eps)
@@ -308,9 +301,7 @@ class _CalibAttn(torch.autograd.Function):
             s = q.new_empty(bh * rows0 * T)
             ebuf = q.new_empty(s.numel()) if need_ent else None
             # bmm only takes a contiguous out, so a block's output is staged
-            # through a block-shaped scratch and copied into place; writing
-            # straight into ``y[:, i0:i1]`` selects its way through the batch
-            # one item at a time instead of using the batched gemm.
+            # through a block-shaped scratch and copied into place.
             yb = q.new_empty(bh * rows0 * dv)
             for i0, i1 in blocks:
                 r = i1 - i0
@@ -378,9 +369,8 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     """Score gradient for ``p = softmax(s)`` plus the calibrated-entropy term,
     both read off the recomputed probabilities.  Consumes ``d_p``.
 
-    ``buf`` optionally reuses a flat scratch for the ``log(p)`` term and
-    ``mbuf`` one for the ``p > _EPS`` selector, so the blocked backward path
-    allocates neither per block.
+    ``buf`` optionally supplies a flat scratch for the ``log(p)`` term and
+    ``mbuf`` one for the ``p > _EPS`` selector.
 
     The surviving term is ``log(p) + 1`` on ``p > _EPS`` and ``0`` elsewhere;
     the sub-eps entries are dropped by the trailing select, so clamping ``p``
@@ -401,8 +391,7 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
                 mask = mbuf[:p.numel()].view_as(p)
                 torch.gt(p, _EPS, out=mask)
         # ``(p > _EPS) * (log(clamp_min(p, _EPS)) + 1)``: the selector zeroes
-        # the sub-eps rows exactly as multiplying by the 0/1 promotion did,
-        # but as one fused select instead of a bool add plus a bool multiply
+        # the sub-eps rows, applied as one select.
         logterm.add_(1.0)
         torch.where(mask, logterm, logterm.new_zeros(()), out=logterm)
         d_p.addcmul_(logterm, grad_ent.unsqueeze(-1), value=-1.0)
@@ -432,8 +421,8 @@ def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
     keeps the width of the real (causally masked) part.  Both are shifted by
     the joint row maximum before the exp, which makes the pair ``(p, p0)`` an
     ordinary softmax over the ``i1 + 1`` columns the null slot adds to the
-    block.  ``sbuf`` optionally supplies a reusable flat score workspace so
-    the blocked loops allocate it once per kernel call.
+    block.  ``sbuf`` optionally supplies the flat score workspace, shared by
+    the blocked loops.
     """
     if sbuf is None:
         s = torch.baddbmm(mask[i0:i1, :i1], q_blk, kt[:, :, :i1],
@@ -478,9 +467,7 @@ class _NullAttn(torch.autograd.Function):
         y = q.new_empty(bh, T, dv) if multi else None
         sbuf = q.new_empty(bh * rows0 * T)
         # bmm only takes a contiguous out, so a block's output is staged
-        # through a block-shaped scratch and copied into place; writing
-        # straight into ``y[:, i0:i1]`` selects its way through the batch
-        # one item at a time instead of using the batched gemm.
+        # through a block-shaped scratch and copied into place.
         yb = q.new_empty(bh * rows0 * dv) if multi else None
         for i0, i1 in blocks:
             p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, nkt, scale,
@@ -578,13 +565,10 @@ class Attention(nn.Module):
 
         if cfg.gate in ("query", "calib"):
             # The gate is the only gate-variant-specific module in the model.
-            # Drawing it from the global RNG advances the stream that
-            # ``CAGE.apply(_init)`` consumes afterwards, so ``query``/``calib``
-            # would start from different token embeddings, attention and MLP
-            # weights than ``none``/``null`` - E1 is a *controlled* comparison,
-            # so that confound would be indistinguishable from the effect of
-            # the gate.  Draw it from a forked copy of the CPU generator: same
-            # initialisation, shared stream left where it was.
+            # It is initialised from a forked copy of the global RNG, so the
+            # shared stream ``CAGE.apply(_init)`` consumes afterwards is left
+            # exactly where it was and all four variants stay init-matched
+            # (E1 is a controlled comparison).
             with torch.random.fork_rng(devices=[]):
                 self.gate = nn.Linear(cfg.d_model, cfg.d_model, bias=True)
                 nn.init.normal_(self.gate.weight, std=0.02)
@@ -668,10 +652,9 @@ class Attention(nn.Module):
         dropping = self.training and drop_p > 0.0
 
         qkv = self.qkv(x)
-        # One fused gather of all three projections into the head-major
-        # (B*h, T, dk) layout: a single walk over qkv instead of separate
-        # strided copies, and the same layout feeds both the hand-written
-        # kernel path and the explicit dropout path.
+        # Gather all three projections into the head-major (B*h, T, dk)
+        # layout; the same views feed the hand-written kernel path and the
+        # explicit dropout path.
         qb, kb, vb = qkv.view(B, T, 3, h, dk).permute(
             2, 0, 3, 1, 4).contiguous().unbind(0)
         qb = qb.reshape(bh, T, dk)
@@ -859,10 +842,9 @@ class CAGE(nn.Module):
     def _init(m):
         if isinstance(m, nn.Linear):
             # The gate was already given its weight and its "start open" bias
-            # in Attention.__init__ under a forked RNG.  Re-drawing it here
-            # would move the shared stream that this walk consumes, so the
-            # four gate variants would stop being init-matched; see
-            # Attention.__init__.
+            # in Attention.__init__ under a forked RNG; re-drawing it here
+            # would consume the shared stream this walk draws from, so the
+            # four gate variants stay init-matched (see Attention.__init__).
             if hasattr(m, "_is_gate") and m._is_gate:
                 return
             nn.init.normal_(m.weight, std=0.02)

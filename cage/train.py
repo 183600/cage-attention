@@ -10,7 +10,7 @@ from .data import make_batch
 
 
 def _make_adamw(params, lr):
-    """AdamW on the current device, preferring the backends it supports."""
+    """AdamW on the current device."""
     kw = dict(lr=lr, weight_decay=0.01, betas=(0.9, 0.95))
     if any(p.is_cuda for p in params):
         try:
