@@ -278,7 +278,8 @@ class _CalibAttn(torch.autograd.Function):
         kt = k.transpose(1, 2)
         if len(blocks) == 1:
             p = _softmax_inplace(torch.baddbmm(mask, q, kt, beta=1.0, alpha=scale))
-            y = torch.bmm(p, v)
+            y = q.new_empty(bh, T, v.size(-1))
+            torch.bmm(p, v, out=y)
             ent = _row_entropy(p, eps) if need_ent else None
         else:
             y = q.new_empty(bh, T, v.size(-1))
@@ -290,7 +291,7 @@ class _CalibAttn(torch.autograd.Function):
                     mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
                     beta=1.0, alpha=scale,
                     out=s[:bh * (i1 - i0) * i1].view(bh, i1 - i0, i1)))
-                y[:, i0:i1] = torch.bmm(p, v[:, :i1])
+                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
                 if need_ent:
                     _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
         ctx.save_for_backward(q, k, v)
@@ -446,11 +447,14 @@ class _NullAttn(torch.autograd.Function):
         for i0, i1 in blocks:
             p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, nkt, scale,
                                 sbuf)
-            out = torch.bmm(p, v[:, :i1]).addcmul_(p0, nvw)
             if multi:
-                y[:, i0:i1] = out
+                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
+                y[:, i0:i1].addcmul_(p0, nvw)
             else:
-                y = out
+                if y is None:
+                    y = q.new_empty(bh, T, v.size(-1))
+                torch.bmm(p, v[:, :i1], out=y)
+                y.addcmul_(p0, nvw)
         ctx.save_for_backward(q, k, v, null_k, null_v)
         ctx.scale = scale
         ctx.shape = (B, h)
