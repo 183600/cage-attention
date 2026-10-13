@@ -559,9 +559,10 @@ class Attention(nn.Module):
             tau_init = math.log(math.expm1(cfg.calib_tau_init))
             self.calib_tau = nn.Parameter(torch.tensor(tau_init))
             self.calib_scale = nn.Parameter(torch.tensor(float(cfg.calib_scale)))
-            # calib_tau initialized so softplus(tau) + 0.1 = calib_tau_init initially:
+            # calib_tau initialized so softplus(tau) = calib_tau_init initially
+            # (tau_init = log(expm1(calib_tau_init))):
             # softplus(log(expm1(calib_tau_init))) = log(1 + exp(log(expm1(calib_tau_init)))) = log(1 + expm1(calib_tau_init)) = log(exp(calib_tau_init)) = calib_tau_init
-            # calib_tau_init + 0.1 = target initial temperature
+            # gate temperature = softplus(tau) + 0.1 = calib_tau_init + 0.1 (default 0.9 + 0.1 = 1.0)
         else:
             self.calib_a = self.calib_c = self.calib_tau = self.calib_scale = None
         if cfg.gate == "null":

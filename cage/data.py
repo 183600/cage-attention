@@ -29,7 +29,7 @@ def _sample_keys(batch: int, n_pairs: int, vocab: int, gen, device) -> torch.Ten
     ambiguous, only a shared key does).
     """
     n_avail = vocab - 2                      # 0/1 are reserved (PAD / SEP)
-    if n_pairs >= n_avail:                   # cannot sample without replacement
+    if n_pairs > n_avail:                    # cannot sample without replacement
         return torch.randint(2, vocab, (batch, n_pairs), generator=gen, device=device)
     noise = torch.rand(batch, n_avail, generator=gen, device=device)
     return noise.topk(n_pairs, dim=1).indices.add_(2)
