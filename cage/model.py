@@ -427,14 +427,13 @@ class _NullAttn(torch.autograd.Function):
 
 
 class Attention(nn.Module):
-    __slots__ = ("cfg", "gate_kind", "use_sdpa", "h", "dk", "scale", "inv_scale",
+    __slots__ = ("cfg", "gate_kind", "h", "dk", "scale", "inv_scale",
                  "qkv", "proj", "attn_dropout", "gate", "calib_a", "calib_c",
                  "calib_tau", "calib_scale", "null_k", "null_v", "max_len")
     def __init__(self, cfg: Cfg):
         super().__init__()
         self.cfg = cfg
         self.gate_kind = cfg.gate
-        self.use_sdpa = cfg.gate in ("none", "query")
         self.h = cfg.n_heads
         self.dk = cfg.d_model // cfg.n_heads
         self.scale = math.sqrt(self.dk)
@@ -523,49 +522,37 @@ class Attention(nn.Module):
         is_calib = kind == "calib"
         drop_p = self.cfg.dropout
         dropping = self.training and drop_p > 0.0
-        explicit = is_calib or is_null
-        use_fused = explicit and not dropping
 
         qkv = self.qkv(x)
         q, k, v = qkv.chunk(3, dim=-1)
 
         ent = None
-        y_owned = False
-        if not explicit:
-            q_ = q.view(B, T, h, dk).transpose(1, 2)
-            k_ = k.view(B, T, h, dk).transpose(1, 2)
-            v_ = v.view(B, T, h, dk).transpose(1, 2)
-            y = F.scaled_dot_product_attention(
-                q_, k_, v_,
-                is_causal=True,
-                dropout_p=drop_p if self.training else 0.0,
-            )
-            y = y.transpose(1, 2).reshape(B, T, C)
-            y_owned = False
-            stats = None
-            if need_stats:
-                stats = self._row_stats_at(
-                    q_, k_.reshape(bh, T, dk), B, h, T, stat_pos, False)
-            del qkv, q, k, v
-        elif use_fused:
+        if not dropping:
+            # [fixed design, docs/design_notes.md D1] All four gate variants
+            # share ONE hand-written kernel family: E1 is a controlled
+            # comparison, so the numerics must not depend on the gate variant.
+            # The calibrated kernel emits the row entropy as a by-product.
+            # Do NOT switch any variant to a fused/flash attention call.
             qb = q.view(B, T, h, dk).moveaxis(1, 2).reshape(bh, T, dk)
             kb = k.view(B, T, h, dk).moveaxis(1, 2).reshape(bh, T, dk)
             vb = v.view(B, T, h, dk).moveaxis(1, 2).reshape(bh, T, dk)
             del qkv, q, k, v
-            if is_calib:
-                y, ent = _CalibAttn.apply(qb, kb, vb, self.inv_scale, _EPS)
-                ent = ent.view(B, h, T)
-            else:
+            if is_null:
                 y = _NullAttn.apply(qb, kb, vb, self.null_k, self.null_v,
                                     self.inv_scale, B)
+            else:
+                # none / query / calib run through the same kernel.
+                y, ent = _CalibAttn.apply(qb, kb, vb, self.inv_scale, _EPS)
+                ent = ent.view(B, h, T)
             y = y.view(B, h, T, dk).transpose(1, 2).reshape(B, T, C)
-            y_owned = True
             stats = None
             if need_stats:
                 stats = self._row_stats_at(
                     qb.view(B, h, T, dk), kb, B, h, T, stat_pos, is_null,
-                    ent_full=ent if is_calib else None)
+                    ent_full=None if is_null else ent)
         else:
+            # attention dropout acts on the probabilities; the statistics are
+            # read from the clean softmax rows before the dropout.
             q_ = q.view(B, T, h, dk).transpose(1, 2)
             k_ = k.view(B, T, h, dk).transpose(1, 2)
             v_ = v.view(B, T, h, dk).transpose(1, 2)
@@ -589,7 +576,6 @@ class Attention(nn.Module):
                 pb = p.view(bh, T, T + 1)
                 y = torch.bmm(pb[..., 1:], vb).addcmul_(pb[..., :1], nv)
                 y = y.view(B, h, T, dk).transpose(1, 2).reshape(B, T, C)
-                y_owned = True
             else:
                 qb = q_.reshape(bh, T, dk)
                 kb = k_.reshape(bh, T, dk)
@@ -612,13 +598,12 @@ class Attention(nn.Module):
                     p = self.attn_dropout(p)
                 y = torch.bmm(p, vb).view(B, h, T, dk)
                 y = y.transpose(1, 2).reshape(B, T, C)
-                y_owned = True
 
         # ---- gating ----
         gate_val = None
         if kind == "query":
             gate_val = self.gate(x).sigmoid_()
-            y = y.mul_(gate_val) if y_owned else y * gate_val
+            y = y.mul_(gate_val)
         elif is_calib:
             log_len = math.log(max(T, 2))
             conc = ent.mean(dim=1).unsqueeze(-1).div_(log_len)
@@ -627,7 +612,7 @@ class Attention(nn.Module):
             gate_val.addcmul_(conc, self.calib_c * self.calib_scale, value=-1.0)
             tau = F.softplus(self.calib_tau).add_(0.1)
             gate_val.div_(tau).sigmoid_()
-            y = y.mul_(gate_val) if y_owned else y * gate_val
+            y = y.mul_(gate_val)
 
         out = self.proj(y)
         if not need_stats:
@@ -664,7 +649,7 @@ class Block(nn.Module):
         self.ln1 = make_norm(cfg.norm, cfg.d_model)
         self.ln2 = make_norm(cfg.norm, cfg.d_model)
         self.attn = Attention(cfg)
-        # the GELU is folded into the second projection (see _GeluAffine)
+        # the GELU is folded into the second projection (see _GeluLinear)
         self.mlp = nn.Sequential(
             nn.Linear(cfg.d_model, 4 * cfg.d_model),
             _GeluLinear(4 * cfg.d_model, cfg.d_model),
