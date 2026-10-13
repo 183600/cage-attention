@@ -82,8 +82,8 @@ def length_sweep_lengths(base: int = 16, factor: int = 2, n: int = 4,
                          max_len: int = 256):
     """``n`` geometrically spaced ``n_pairs`` values for the length sweep.
 
-    A length ``L`` occupies ``2*L + 2`` positions (pairs + SEP + query +
-    answer), so anything that does not fit into ``max_len`` positions cannot
+    A length ``L`` occupies ``2*L + 2`` positions (pairs + SEP + query),
+    so anything that does not fit into ``max_len`` positions cannot
     be run at all and is dropped instead of producing an out-of-range
     position embedding at evaluation time.
     """

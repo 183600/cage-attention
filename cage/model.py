@@ -59,6 +59,8 @@ class Cfg:
     layer_scale: float | None = None  # initial LayerScale value or None
     calib_a: float = 1.0        # length-correction strength (learnable scale)
     calib_c: float = 1.0        # concentration-correction strength
+    calib_scale: float = 1.0    # additional concentration scaling
+    calib_tau_init: float = 0.9  # initial gate temperature (softplus(tau)+0.1 = this)
     use_gradient_checkpointing: bool = False
 
     def __post_init__(self):
@@ -440,6 +442,7 @@ class Attention(nn.Module):
 
         if cfg.gate in ("query", "calib"):
             self.gate = nn.Linear(cfg.d_model, cfg.d_model, bias=True)
+            self.gate._is_gate = True
             nn.init.normal_(self.gate.weight, std=0.02)
             nn.init.constant_(self.gate.bias, 2.0 if cfg.gate == "query" else 6.0)
         else:
@@ -447,11 +450,12 @@ class Attention(nn.Module):
         if cfg.gate == "calib":
             self.calib_a = nn.Parameter(torch.tensor(float(cfg.calib_a)))
             self.calib_c = nn.Parameter(torch.tensor(float(cfg.calib_c)))
-            self.calib_tau = nn.Parameter(torch.tensor(math.log(math.expm1(0.9))))
-            self.calib_scale = nn.Parameter(torch.tensor(1.0))
-            # calib_tau initialized so softplus(tau) + 0.1 = 1.0 initially:
-            # softplus(log(expm1(0.9))) = log(1 + exp(log(expm1(0.9)))) = log(1 + expm1(0.9)) = log(exp(0.9)) = 0.9
-            # 0.9 + 0.1 = 1.0
+            tau_init = math.log(math.expm1(cfg.calib_tau_init))
+            self.calib_tau = nn.Parameter(torch.tensor(tau_init))
+            self.calib_scale = nn.Parameter(torch.tensor(float(cfg.calib_scale)))
+            # calib_tau initialized so softplus(tau) + 0.1 = calib_tau_init initially:
+            # softplus(log(expm1(calib_tau_init))) = log(1 + exp(log(expm1(calib_tau_init)))) = log(1 + expm1(calib_tau_init)) = log(exp(calib_tau_init)) = calib_tau_init
+            # calib_tau_init + 0.1 = target initial temperature
         else:
             self.calib_a = self.calib_c = self.calib_tau = self.calib_scale = None
         if cfg.gate == "null":
@@ -735,17 +739,15 @@ class CAGE(nn.Module):
         self.head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.head.weight = self.tok.weight
         self.apply(self._init)
-        # _init zeroes all linear biases; restore the "gates start open" bias
-        for m in self.modules():
-            if isinstance(m, Attention) and m.gate is not None:
-                nn.init.constant_(m.gate.bias, 2.0 if cfg.gate == "query" else 6.0)
 
     @staticmethod
     def _init(m):
         if isinstance(m, nn.Linear):
             nn.init.normal_(m.weight, std=0.02)
             if m.bias is not None:
-                nn.init.zeros_(m.bias)
+                # Skip gate bias (initialized in Attention.__init__ with "open" bias)
+                if not (hasattr(m, '_is_gate') and m._is_gate):
+                    nn.init.zeros_(m.bias)
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, std=0.02)
 
