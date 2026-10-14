@@ -208,10 +208,9 @@ class _RowEntropy(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out):
         (p,) = ctx.saved_tensors
-        g = grad_out.unsqueeze(-1).neg()
         mask = p > ctx.eps
         d = p.clamp_min(ctx.eps).log_()
-        d.add_(mask).mul_(mask).mul_(g)
+        d.add_(mask).mul_(mask).mul_(grad_out.unsqueeze(-1)).neg_()
         return d, None
 
 
@@ -338,13 +337,21 @@ class _CalibAttn(torch.autograd.Function):
             d_k = torch.bmm(d_s.transpose(1, 2), q).mul_(scale)
             return d_q, d_k, d_v, None, None, None
         d_q = torch.empty_like(q)
-        d_k = torch.zeros_like(k)
-        d_v = torch.zeros_like(v)
-        s = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
+        # every block writes a *prefix* of d_k / d_v, so the first block
+        # overwrites and no zeros fill is needed
+        d_k = torch.empty_like(k)
+        d_v = torch.empty_like(v)
+        rows0 = blocks[0][1] - blocks[0][0]
+        dk = q.size(-1)
+        dv = v.size(-1)
+        s = q.new_empty(bh * rows0 * T)
         gbuf = q.new_empty(s.numel()) if grad_ent is not None else None
         mbuf = (torch.empty(s.numel(), dtype=torch.bool, device=q.device)
                 if grad_ent is not None else None)
-        for i0, i1 in blocks:
+        dvb = q.new_empty(bh * T * dv)
+        dkb = q.new_empty(bh * T * dk)
+        dqb = q.new_empty(bh * rows0 * dk)
+        for bi, (i0, i1) in enumerate(blocks):
             n = bh * (i1 - i0) * i1
             p = _softmax_inplace(torch.baddbmm(
                 mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
@@ -355,10 +362,20 @@ class _CalibAttn(torch.autograd.Function):
             d_s = _softmax_grad_from_p(torch.bmm(g, vt[:, :, :i1]), p, ge,
                                        buf=None if gbuf is None else gbuf[:n],
                                        mbuf=None if mbuf is None else mbuf[:n])
-            d_v[:, :i1].add_(torch.bmm(p.transpose(1, 2), g))
-            d_q[:, i0:i1] = torch.bmm(d_s, k[:, :i1]).mul_(scale)
-            d_k[:, :i1].add_(torch.bmm(d_s.transpose(1, 2),
-                                       q[:, i0:i1]).mul_(scale))
+            r = i1 - i0
+            ov = dvb[:bh * i1 * dv].view(bh, i1, dv)
+            torch.bmm(p.transpose(1, 2), g, out=ov)
+            ok = dkb[:bh * i1 * dk].view(bh, i1, dk)
+            torch.bmm(d_s.transpose(1, 2), q[:, i0:i1], out=ok).mul_(scale)
+            oq = dqb[:bh * r * dk].view(bh, r, dk)
+            torch.bmm(d_s, k[:, :i1], out=oq).mul_(scale)
+            if bi:
+                d_v[:, :i1].add_(ov)
+                d_k[:, :i1].add_(ok)
+            else:
+                d_v[:, :i1] = ov
+                d_k[:, :i1] = ok
+            d_q[:, i0:i1] = oq
         return d_q, d_k, d_v, None, None, None
 
 
@@ -503,12 +520,19 @@ class _NullAttn(torch.autograd.Function):
         nkw = nkt.transpose(1, 2)
         multi = len(blocks) > 1
         d_q = torch.empty_like(q) if multi else None
-        d_k = torch.zeros_like(k) if multi else None
-        d_v = torch.zeros_like(v) if multi else None
+        d_k = torch.empty_like(k) if multi else None
+        d_v = torch.empty_like(v) if multi else None
         d_null_k = torch.zeros_like(null_k)
         d_null_v = torch.zeros_like(null_v)
         sbuf = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
-        for i0, i1 in blocks:
+        # per-block result scratch, shared by the loop; never escapes, so the
+        # accumulated grads above can be plain empty tensors whose first
+        # block overwrites instead of accumulating onto a zeros fill
+        peb = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
+        dvb = q.new_empty(bh * T * dk)
+        dkb = q.new_empty(bh * T * dk)
+        dqb = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * dk)
+        for bi, (i0, i1) in enumerate(blocks):
             # rebuild the joint weights of this block only
             q_blk = q[:, i0:i1]
             g = grad_y[:, i0:i1]
@@ -517,26 +541,35 @@ class _NullAttn(torch.autograd.Function):
             # denominator term follows from the rebuilt weights alone
             e = torch.bmm(g, vt[:, :, :i1])
             gu0 = torch.bmm(g, nvw.mT)
-            dot = (p * e).sum(-1, keepdim=True).add_(p0 * gu0)
+            n = bh * (i1 - i0) * i1
+            pe = peb[:n].view(bh, i1 - i0, i1)
+            torch.mul(p, e, out=pe)
+            dot = pe.sum(-1, keepdim=True).add_(p0 * gu0)
             d_u = e.sub_(dot)
             gu0.sub_(dot)
-            dv = torch.bmm(p.transpose(1, 2), g)
-            if multi:
-                d_v[:, :i1].add_(dv)
-            else:
-                d_v = dv
+            r = i1 - i0
+            ov = dvb[:bh * i1 * dk].view(bh, i1, dk)
+            torch.bmm(p.transpose(1, 2), g, out=ov)
             d_s = d_u.mul_(p).mul_(scale)
             d_s0 = gu0.mul_(p0).mul_(scale)
-            dq = torch.bmm(d_s, k[:, :i1]).addcmul_(d_s0, nkw)
+            oq = dqb[:bh * r * dk].view(bh, r, dk)
+            torch.bmm(d_s, k[:, :i1], out=oq).addcmul_(d_s0, nkw)
+            ok = dkb[:bh * i1 * dk].view(bh, i1, dk)
+            torch.bmm(d_s.transpose(1, 2), q_blk, out=ok)
             if multi:
-                d_q[:, i0:i1] = dq
+                if bi:
+                    d_v[:, :i1].add_(ov)
+                    d_k[:, :i1].add_(ok)
+                else:
+                    d_v[:, :i1] = ov
+                    d_k[:, :i1] = ok
+                d_q[:, i0:i1] = oq
             else:
-                d_q = dq
-            dkb = torch.bmm(d_s.transpose(1, 2), q_blk)
-            if multi:
-                d_k[:, :i1].add_(dkb)
-            else:
-                d_k = dkb
+                # single-block: the results must be fresh tensors, not views
+                # of the shared scratch
+                d_v = torch.bmm(p.transpose(1, 2), g)
+                d_q = torch.bmm(d_s, k[:, :i1]).addcmul_(d_s0, nkw)
+                d_k = torch.bmm(d_s.transpose(1, 2), q_blk)
             # the null slot is a per-head parameter replicated across the batch
             q4 = q_blk.view(B, h, i1 - i0, dk)
             d_null_k.add_(torch.matmul(d_s0.view(B, h, -1, 1).transpose(-2, -1),
