@@ -309,7 +309,7 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
     nbytes = numel * dtype.itemsize
     # Replacing the entry for ``key`` (too small or wrong device/dtype) must
     # drop its bytes first, otherwise _scratch_bytes double-counts the old
-    # buffer and the budget evicts too aggressively.  Do this before the
+    # buffer and the byte cap evicts too aggressively.  Do this before the
     # max-entries eviction so a stale ``key`` is never left counted while its
     # replacement is added.
     old_entry = _scratch_cache.pop(key, None)
