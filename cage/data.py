@@ -12,15 +12,6 @@ Tasks
 Format (vocab 0..V-1):
     [k1 v1 k2 v2 ... kn vn, SEP, qi, <predict vi>]
 The label for the position right after qi is vi.
-
-``dense_lm`` additionally scores every next-token position of the pair
-section.  Note that in this causal layout those targets are *irreducible*:
-at position ``2i`` the model sees ``k_i`` but its target ``v_i`` sits at
-``2i+1``, i.e. in the future, so the pair section can only teach the marginal
-token frequency.  It therefore dilutes the recall gradient ~15:1 at
-``n_pairs=8`` and the recall accuracy that E1/E2 measure collapses to chance
--- supervision should stay on the query position unless the marginal prior
-is explicitly wanted.
 """
 
 from __future__ import annotations

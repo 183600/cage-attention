@@ -131,9 +131,6 @@ def make_norm(kind: str, dim: int) -> nn.Module:
 
 _MAX_MASK_CACHE = 64
 
-# OrderedDict: the recency order lives in the container itself, so a hit is an
-# O(1) move_to_end instead of a linear scan over a parallel list.  The mask is
-# fetched once per layer per call, i.e. tens of thousands of times per run.
 _causal_mask_cache: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
 
 
@@ -260,12 +257,8 @@ class _RowEntropy(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out):
         (p,) = ctx.saved_tensors
-        # NOTE: the gradient must be a fresh tensor. An earlier revision
-        # returned a shared scratch slice here, so two _RowEntropy nodes with
-        # the same shape (e.g. two layers of the dropout path) aliased the
-        # same buffer and the second backward overwrote the first layer's
-        # grad (identical data_ptr, wrong values). Fresh temporaries keep the
-        # exact D7 formula (log(p)+1 on p > _EPS, else 0, times -grad_out).
+        # the gradient must be a fresh tensor, per the exact D7 formula
+        # (log(p)+1 on p > _EPS, else 0, times -grad_out)
         mask = p > ctx.eps
         d = p.clamp_min(ctx.eps).log()
         d.add_(mask).mul_(mask).mul_(grad_out.unsqueeze(-1)).neg_()
@@ -301,9 +294,6 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
     stays an inference tensor for the rest of the process - a later
     autograd-tracked training step could then no longer write into it
     ("Inplace update to inference tensor outside InferenceMode").
-
-    Hits skip the eviction-order bookkeeping (dict insertion order gives
-    FIFO, which is enough for the near-static shape set of a run).
     """
     global _scratch_bytes
     entry = _scratch_cache.get(key)
@@ -446,9 +436,6 @@ class _CalibAttn(torch.autograd.Function):
             n = p.numel()
             gbuf = mbuf = None
             if grad_ent is not None:
-                # same buffer the forward used for the entropy clamp: that one
-                # is dead by now, and the backward needs exactly the same
-                # (bh, rows, T) float workspace for the log term
                 gbuf = _get_scratch(("calib_f", bh, T, rows0), q.device, q.dtype, n)
                 mbuf = _get_scratch(("calib_bwd_mbuf", bh, T, rows0), q.device, torch.bool, n)
             d_p = _get_scratch(("calib_dp", bh, T, rows0), q.device, q.dtype, n).view(bh, T, T)
@@ -798,11 +785,6 @@ class Attention(nn.Module):
         drop_p = self.cfg.dropout
         dropping = self.training and drop_p > 0.0
 
-        # One permute+copy for the whole (3, B, H, T, dk) block: the three
-        # per-tensor reshapes it replaces each cloned a permuted view, so the
-        # head-major q/k/v the kernel needs cost one copy plus three free views
-        # here, and the un-permuted qkv buffer is released right away instead of
-        # staying alive behind the view for the rest of the layer.
         qkv = self.qkv(x).view(B, T, 3, h, dk).permute(2, 0, 3, 1, 4).contiguous()
         qb = qkv[0].view(bh, T, dk)
         kb = qkv[1].view(bh, T, dk)
@@ -833,8 +815,7 @@ class Attention(nn.Module):
                     ent_full=None if ent is None else ent)
         else:
             # attention dropout acts on the probabilities; the statistics are
-            # read from the clean softmax rows before the dropout.  The
-            # head-major q/k/v views are the ones the gather above produced.
+            # read from the clean softmax rows before the dropout.
             q_ = qb.view(B, h, T, dk)
             k_ = kb.view(B, h, T, dk)
             if is_null:
