@@ -172,8 +172,7 @@ def _causal_bool_mask(T: int, device: torch.device) -> torch.Tensor:
     key = (T, device)
     m = _causal_bool_cache.get(key)
     if m is not None:
-        del _causal_bool_cache[key]
-        _causal_bool_cache[key] = m
+        _causal_bool_cache.move_to_end(key)
         return m
     with torch.inference_mode(False):
         m = torch.ones(T, T + 1, dtype=torch.bool, device=device)
@@ -197,8 +196,7 @@ def _arange(n: int, device: torch.device) -> torch.Tensor:
     key = (n, device)
     a = _arange_cache.get(key)
     if a is not None:
-        del _arange_cache[key]
-        _arange_cache[key] = a
+        _arange_cache.move_to_end(key)
         return a
     with torch.inference_mode(False):
         a = torch.arange(n, device=device)
@@ -784,7 +782,9 @@ class Attention(nn.Module):
         att_sel = torch.baddbmm(mask_sel, q_sel, k.transpose(1, 2),
                                 beta=1.0, alpha=self.inv_scale)
         if is_null:
-            s0 = torch.bmm(q_sel, _null_col(self.null_k, B)).mul_(self.inv_scale)
+            s0 = torch.matmul(q_sel.reshape(B, h, 1, dk),
+                              self.null_k.view(1, h, dk, 1)).reshape(
+                                  q_sel.size(0), 1, 1).mul_(self.inv_scale)
             att_sel = torch.cat([s0, att_sel], dim=-1)
         probs = _softmax_inplace(att_sel).view(B, h, cols)
         if ent_full is not None and not is_null:
@@ -854,9 +854,10 @@ class Attention(nn.Module):
                         _pick_rows(p.view(B, h, T, -1), stat_pos), T, True)
                 if dropping:
                     p = self.attn_dropout(p)
-                nv = _null_row(self.null_v, B)
                 pb = p.view(bh, T, T + 1)
-                y = torch.bmm(pb[..., 1:], vb).addcmul_(pb[..., :1], nv)
+                y = torch.bmm(pb[..., 1:], vb)
+                y.view(B, h, T, dk).addcmul_(p.view(B, h, T, T + 1)[..., :1],
+                                             self.null_v.view(1, h, 1, dk))
                 y = y.view(B, h, T, dk).transpose(1, 2).reshape(B, T, C)
             else:
                 del q_, k_
@@ -933,7 +934,7 @@ class Block(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(cfg.d_model, 4 * cfg.d_model),
             _GeluLinear(4 * cfg.d_model, cfg.d_model),
-            nn.Dropout(cfg.dropout),
+            nn.Dropout(cfg.dropout, inplace=True),
         )
         if cfg.layer_scale is not None:
             ls_val = float(cfg.layer_scale)
@@ -979,7 +980,7 @@ class CAGE(nn.Module):
         self.cfg = cfg
         self.tok = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.pos = nn.Embedding(cfg.max_len, cfg.d_model)
-        self.drop = nn.Dropout(cfg.dropout)
+        self.drop = nn.Dropout(cfg.dropout, inplace=True)
         self.blocks = nn.ModuleList([Block(cfg, i) for i in range(cfg.n_layers)])
         self.ln_f = make_norm(cfg.norm, cfg.d_model)
         self.head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
