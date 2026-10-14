@@ -289,7 +289,7 @@ _QUERY_BLOCKS_CACHE_MAX = 512
 
 _scratch_cache: dict = {}
 _SCRATCH_CACHE_MAX = 128
-_SCRATCH_CACHE_BYTES = 128 << 20
+_SCRATCH_CACHE_BYTES = 64 << 20
 _scratch_bytes = 0
 
 
@@ -701,7 +701,7 @@ class _NullAttn(torch.autograd.Function):
 
 
 class Attention(nn.Module):
-    __slots__ = ("cfg", "gate_kind", "h", "dk", "scale", "inv_scale",
+    __slots__ = ("cfg", "gate_kind", "h", "dk", "inv_scale",
                  "qkv", "proj", "attn_dropout", "gate", "calib_a", "calib_c",
                  "calib_tau", "calib_scale", "null_k", "null_v", "max_len")
     def __init__(self, cfg: Cfg):
@@ -710,8 +710,7 @@ class Attention(nn.Module):
         self.gate_kind = cfg.gate
         self.h = cfg.n_heads
         self.dk = cfg.d_model // cfg.n_heads
-        self.scale = math.sqrt(self.dk)
-        self.inv_scale = 1.0 / self.scale
+        self.inv_scale = 1.0 / math.sqrt(self.dk)
         self.qkv = nn.Linear(cfg.d_model, 3 * cfg.d_model, bias=False)
         self.proj = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
         self.attn_dropout = nn.Dropout(cfg.dropout)
