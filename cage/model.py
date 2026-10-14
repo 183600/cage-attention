@@ -123,7 +123,7 @@ class SeeDNorm(nn.Module):
         nn.init.normal_(self.scale.weight, std=0.02)
 
     def forward(self, x):
-        s = torch.sigmoid(self.scale(x))
+        s = self.scale(x).sigmoid_()
         return self.ln(x).mul_(s).mul_(2.0)
 
 
@@ -222,7 +222,10 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
     m = _get_scratch(("mask_rows", B, h, T), pos.device, dtype, B * h * T)
     m = m[:B * h * T].view(B, h, T)
     m.zero_()
-    m.masked_fill_(cols.view(1, 1, T) > pos.view(B, 1, 1), float("-inf"))
+    cmp = _get_scratch(("mask_rows_b", B, T), pos.device, torch.bool, B * T)
+    cmp = cmp[:B * T].view(B, 1, T)
+    torch.greater(cols.view(1, 1, T), pos.view(B, 1, 1), out=cmp)
+    m.masked_fill_(cmp, float("-inf"))
     return m.view(B * h, 1, T)
 
 
@@ -781,7 +784,7 @@ class Attention(nn.Module):
         if is_null:
             s0 = torch.bmm(q_sel, _null_col(self.null_k, B)).mul_(self.inv_scale)
             att_sel = torch.cat([s0, att_sel], dim=-1)
-        probs = torch.softmax(att_sel, -1).view(B, h, cols)
+        probs = _softmax_inplace(att_sel).view(B, h, cols)
         if ent_full is not None and not is_null:
             return _pick_rows(ent_full, stat_pos), probs.max(-1).values, None
         return self._row_stats(probs, T, is_null)
