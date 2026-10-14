@@ -165,28 +165,25 @@ def _causal_bool_mask(T: int, device: torch.device) -> torch.Tensor:
 
 
 _ARANGE_CACHE_MAX = 128
-_arange_cache: dict[tuple, torch.Tensor] = {}
-_arange_order: list[tuple] = []
+_arange_cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
+
 
 def _arange(n: int, device: torch.device) -> torch.Tensor:
     """Read-only ``arange(n)`` shared across calls (index tensors only).
 
     Allocated with inference mode *off* so one cached entry serves every
-    context, including the training-mode forward.  FIFO eviction.
+    context, including the training-mode forward.  LRU eviction.
     """
     key = (n, device)
     a = _arange_cache.get(key)
     if a is not None:
-        _arange_order.remove(key)
-        _arange_order.append(key)
+        _arange_cache.move_to_end(key)
         return a
     with torch.inference_mode(False):
         a = torch.arange(n, device=device)
     _arange_cache[key] = a
-    _arange_order.append(key)
     if len(_arange_cache) > _ARANGE_CACHE_MAX:
-        old_key = _arange_order.pop(0)
-        _arange_cache.pop(old_key, None)
+        _arange_cache.popitem(last=False)
     return a
 
 
@@ -204,10 +201,11 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
     m = _get_scratch(("mask_rows", B, h, T), pos.device, dtype, B * h * T)
     m = m[:B * h * T].view(B, h, T)
     m.zero_()
-    cmp = _get_scratch(("mask_rows_b", B, T), pos.device, torch.bool, B * T)
-    cmp = cmp[:B * T].view(B, 1, T)
-    torch.greater(cols.view(1, 1, T), pos.view(B, 1, 1), out=cmp)
-    m.masked_fill_(cmp, float("-inf"))
+    # Inline comparison to avoid scratch allocation for the boolean mask
+    # cols: (T,) -> (1, 1, T), pos: (B,) -> (B, 1, 1)
+    # Result: (B, 1, T) boolean mask where True means mask with -inf
+    mask_bool = cols.view(1, 1, T) > pos.view(B, 1, 1)
+    m.masked_fill_(mask_bool, float("-inf"))
     return m.view(B * h, 1, T)
 
 
@@ -290,7 +288,7 @@ class _ScratchCache:
         # and every scratch use stays outside autograd tracking (custom
         # Function forward/backward interiors), so sharing is aliasing-safe.
         name = key[0] if isinstance(key, tuple) else key
-        ckey = (name, str(device), str(dtype))
+        ckey = (name, device, dtype)
         entry = self.cache.get(ckey)
         if entry is not None and entry.numel() >= numel:
             # Move to end (MRU)
@@ -396,13 +394,15 @@ class _CalibAttn(torch.autograd.Function):
         y = q.new_empty(bh, T, dv)
         rows0 = blocks[0][1] - blocks[0][0]
         max_rows = rows0
+        max_i1 = rows0
         for i0, i1 in blocks:
             r = i1 - i0
             if r > max_rows:
                 max_rows = r
-        max_i1 = max(i1 for i0, i1 in blocks)
-        s = _get_scratch(("calib_s", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1)
-        yb = _get_scratch(("calib_y", bh, T, max_rows), q.device, q.dtype, bh * max_rows * dv)
+            if i1 > max_i1:
+                max_i1 = i1
+        s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
+        yb = _get_scratch(("calib_y",), q.device, q.dtype, bh * max_rows * dv)
         if len(blocks) == 1:
             p = _softmax_inplace(torch.baddbmm(
                 mask, q, kt, beta=1.0, alpha=scale,
@@ -411,13 +411,12 @@ class _CalibAttn(torch.autograd.Function):
             if need_ent:
                 ent = q.new_empty(bh, T)
                 _row_entropy(p, eps, out=ent,
-                             buf=_get_scratch(("calib_f", bh, T, max_rows),
-                                               q.device, q.dtype, bh * T * T))
+                             buf=_get_scratch(("calib_f",), q.device, q.dtype, bh * T * T))
             else:
                 ent = None
         else:
             ent = q.new_empty(bh, T) if need_ent else None
-            ebuf = _get_scratch(("calib_f", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
+            ebuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
             for i0, i1 in blocks:
                 r = i1 - i0
                 p = _softmax_inplace(torch.baddbmm(
@@ -445,16 +444,16 @@ class _CalibAttn(torch.autograd.Function):
         rows0 = blocks[0][1] - blocks[0][0]
         # recompute probabilities (identical op sequence to forward)
         if len(blocks) == 1:
-            s = _get_scratch(("calib_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
+            s = _get_scratch(("calib_s",), q.device, q.dtype, bh * rows0 * T)
             p = _softmax_inplace(torch.baddbmm(
                 mask, q, kt, beta=1.0, alpha=scale,
                 out=s[:bh * T * T].view(bh, T, T)))
             n = p.numel()
             gbuf = mbuf = None
             if grad_ent is not None:
-                gbuf = _get_scratch(("calib_f", bh, T, rows0), q.device, q.dtype, n)
-                mbuf = _get_scratch(("calib_bwd_mbuf", bh, T, rows0), q.device, torch.bool, n)
-            d_p = _get_scratch(("calib_dp", bh, T, rows0), q.device, q.dtype, n).view(bh, T, T)
+                gbuf = _get_scratch(("calib_f",), q.device, q.dtype, n)
+                mbuf = _get_scratch(("calib_bwd_mbuf",), q.device, torch.bool, n)
+            d_p = _get_scratch(("calib_dp",), q.device, q.dtype, n).view(bh, T, T)
             torch.bmm(grad_y, vt, out=d_p)
             d_s = _softmax_grad_from_p(d_p, p, grad_ent, buf=gbuf, mbuf=mbuf)
             d_v = q.new_empty(bh, T, v.size(-1))
@@ -478,11 +477,11 @@ class _CalibAttn(torch.autograd.Function):
             if i1 > max_i1:
                 max_i1 = i1
         dk = q.size(-1)
-        s = _get_scratch(("calib_s", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1)
-        gbuf = _get_scratch(("calib_f", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1) if grad_ent is not None else None
-        mbuf = _get_scratch(("calib_bwd_mbuf", bh, T, max_rows), q.device, torch.bool, bh * max_rows * max_i1) if grad_ent is not None else None
-        dpb = _get_scratch(("calib_dp", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1)
-        tmpb = _get_scratch(("calib_bwd_tmp", bh, T), q.device, q.dtype, bh * T * dk)
+        s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
+        gbuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if grad_ent is not None else None
+        mbuf = _get_scratch(("calib_bwd_mbuf",), q.device, torch.bool, bh * max_rows * max_i1) if grad_ent is not None else None
+        dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
+        tmpb = _get_scratch(("calib_bwd_tmp",), q.device, q.dtype, bh * T * dk)
         zero = _zero_scalar(q.device, q.dtype)
         for i0, i1 in blocks:
             n = bh * (i1 - i0) * i1
@@ -557,13 +556,13 @@ def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
         s = sbuf[:n * r * i1].view(n, r, i1)
         torch.baddbmm(mask[i0:i1, :i1], q_blk, kt[:, :, :i1],
                       beta=1.0, alpha=scale, out=s)
-    s0 = _get_scratch(("null_s0", n, r), q_blk.device, q_blk.dtype, n * r)
+    s0 = _get_scratch(("null_s0",), q_blk.device, q_blk.dtype, n * r)
     s0 = s0[:n * r]
     torch.matmul(q_blk.view(B, h, r, -1), null_k.view(h, -1, 1),
                  out=s0.view(B, h, r, 1))
     s0mul = s0.view(n, r, 1)
     s0mul.mul_(scale)
-    m = _get_scratch(("null_m", n, r), q_blk.device, q_blk.dtype, n * r)
+    m = _get_scratch(("null_m",), q_blk.device, q_blk.dtype, n * r)
     m = m[:n * r].view(n, r, 1)
     torch.amax(s, dim=-1, keepdim=True, out=m)
     torch.maximum(m, s0mul, out=m)
@@ -606,8 +605,8 @@ class _NullAttn(torch.autograd.Function):
         y = q.new_empty(bh, T, dv)
         y4 = y.view(B, h, T, dv)
         nv4 = null_v.view(1, h, 1, dv)
-        sbuf = _get_scratch(("null_s", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1)
-        yb = _get_scratch(("null_y", bh, T, max_rows), q.device, q.dtype, bh * max_rows * dv)
+        sbuf = _get_scratch(("null_s",), q.device, q.dtype, bh * max_rows * max_i1)
+        yb = _get_scratch(("null_y",), q.device, q.dtype, bh * max_rows * dv)
         for i0, i1 in blocks:
             r = i1 - i0
             p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, null_k, B, h,
@@ -648,14 +647,14 @@ class _NullAttn(torch.autograd.Function):
                 max_rows = r
             if i1 > max_i1:
                 max_i1 = i1
-        sbuf = _get_scratch(("null_s", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1)
-        peb = _get_scratch(("null_bwd_peb", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1)
-        eb = _get_scratch(("null_bwd_e", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1)
-        gub = _get_scratch(("null_bwd_gu", bh, T, max_rows), q.device, q.dtype, bh * max_rows)
-        dotb = _get_scratch(("null_bwd_dot", bh, T, max_rows), q.device, q.dtype, bh * max_rows)
-        tmpb = _get_scratch(("null_bwd_tmp", bh, T), q.device, q.dtype, bh * T * dk)
-        acc_k = _get_scratch(("null_bwd_ak", bh, dk), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
-        acc_v = _get_scratch(("null_bwd_av", bh, dk), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
+        sbuf = _get_scratch(("null_s",), q.device, q.dtype, bh * max_rows * max_i1)
+        peb = _get_scratch(("null_bwd_peb",), q.device, q.dtype, bh * max_rows * max_i1)
+        eb = _get_scratch(("null_bwd_e",), q.device, q.dtype, bh * max_rows * max_i1)
+        gub = _get_scratch(("null_bwd_gu",), q.device, q.dtype, bh * max_rows)
+        dotb = _get_scratch(("null_bwd_dot",), q.device, q.dtype, bh * max_rows)
+        tmpb = _get_scratch(("null_bwd_tmp",), q.device, q.dtype, bh * T * dk)
+        acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
+        acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         for i0, i1 in blocks:
             q_blk = q[:, i0:i1]
             g = grad_y[:, i0:i1]
@@ -883,10 +882,12 @@ class Attention(nn.Module):
             gate_val.sigmoid_()
         elif is_calib:
             log_len = math.log(max(T, 2))
-            # Fused: ent.mean(1) / log_len * (-calib_c * calib_scale) + gate(x) - calib_a * log_len
-            conc = ent.mean(dim=1).div_(log_len).unsqueeze(-1)
+            # Fused: gate(x) - calib_a*log_len - (calib_c*calib_scale/log_len) * ent.mean(1, keepdim=True)
             gate_val = self.gate(x)
             gate_val.sub_(self.calib_a * log_len)
+            # Subtract (calib_c*calib_scale/log_len) * ent.mean(1, keepdim=True)
+            # mean(dim=1) -> (B, T), unsqueeze(-1) -> (B, T, 1) for broadcasting
+            conc = ent.mean(dim=1).div_(log_len).unsqueeze(-1)
             gate_val.addcmul_(conc, self.calib_c * self.calib_scale, value=-1.0)
             tau = F.softplus(self.calib_tau).add_(0.1)
             gate_val.div_(tau).sigmoid_()
