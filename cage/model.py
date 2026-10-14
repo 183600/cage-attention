@@ -272,13 +272,22 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
     if len(_scratch_cache) >= _SCRATCH_CACHE_MAX:
         _scratch_cache.clear()
         _scratch_bytes = 0
-    elif nbytes <= _SCRATCH_CACHE_BYTES:
-        # evict oldest entries one by one; clearing everything would drop the
-        # buffers the enclosing kernel is still iterating over, forcing a
-        # realloc of each on the next call.
-        while _scratch_bytes + nbytes > _SCRATCH_CACHE_BYTES and _scratch_cache:
-            old = _scratch_cache.pop(next(iter(_scratch_cache)))
-            _scratch_bytes -= old.numel() * old.element_size()
+    else:
+        # Replacing the entry for ``key`` (too small or wrong device/dtype)
+        # must drop its bytes first, otherwise _scratch_bytes double-counts
+        # the old buffer and the budget evicts too aggressively.
+        old_entry = _scratch_cache.pop(key, None)
+        if old_entry is not None:
+            _scratch_bytes -= old_entry.numel() * old_entry.element_size()
+            if _scratch_bytes < 0:
+                _scratch_bytes = 0
+        if nbytes <= _SCRATCH_CACHE_BYTES:
+            # evict oldest entries one by one; clearing everything would drop the
+            # buffers the enclosing kernel is still iterating over, forcing a
+            # realloc of each on the next call.
+            while _scratch_bytes + nbytes > _SCRATCH_CACHE_BYTES and _scratch_cache:
+                old = _scratch_cache.pop(next(iter(_scratch_cache)))
+                _scratch_bytes -= old.numel() * old.element_size()
     with torch.inference_mode(False):
         buf = torch.empty(numel, device=device, dtype=dtype)
     _scratch_cache[key] = buf
