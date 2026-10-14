@@ -228,6 +228,25 @@ _query_blocks_cache: dict = {}
 _QUERY_BLOCKS_CACHE_MAX = 512
 
 
+_scratch_cache: dict = {}
+_SCRATCH_CACHE_MAX = 128
+
+
+def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: int) -> torch.Tensor:
+    """Get or allocate a scratch buffer from the cache."""
+    entry = _scratch_cache.get(key)
+    if entry is not None:
+        buf = entry
+        if buf.numel() >= numel:
+            _scratch_cache[key] = buf  # keep LRU order by re-inserting
+            return buf[:numel]
+    if len(_scratch_cache) >= _SCRATCH_CACHE_MAX:
+        _scratch_cache.clear()
+    buf = torch.empty(numel, device=device, dtype=dtype)
+    _scratch_cache[key] = buf
+    return buf[:numel]
+
+
 def _query_blocks(bh: int, T: int):
     """``[(start, stop), ...]`` query blocks for a ``bh``-fold batch of ``T``."""
     key = (bh, T)
@@ -297,9 +316,8 @@ class _CalibAttn(torch.autograd.Function):
             y = q.new_empty(bh, T, v.size(-1))
             torch.bmm(p, v, out=y)
             if need_ent:
-                # same one-buffer scheme the blocked path uses: no temporaries
                 ent = q.new_empty(bh, T)
-                _row_entropy(p, eps, out=ent, buf=q.new_empty(p.numel()))
+                _row_entropy(p, eps, out=ent, buf=_get_scratch(("calib_fwd_ent", bh, T), q.device, q.dtype, bh * T * T))
             else:
                 ent = None
         else:
@@ -307,20 +325,15 @@ class _CalibAttn(torch.autograd.Function):
             ent = q.new_empty(bh, T) if need_ent else None
             dv = v.size(-1)
             rows0 = blocks[0][1] - blocks[0][0]
-            s = q.new_empty(bh * rows0 * T)
-            ebuf = q.new_empty(s.numel()) if need_ent else None
-            # bmm only takes a contiguous out, so a block's output is staged
-            # through a block-shaped scratch and copied into place.
-            yb = q.new_empty(bh * rows0 * dv)
+            s = _get_scratch(("calib_fwd_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
+            ebuf = _get_scratch(("calib_fwd_ebuf", bh, T, rows0), q.device, q.dtype, bh * rows0 * T) if need_ent else None
             for i0, i1 in blocks:
                 r = i1 - i0
                 p = _softmax_inplace(torch.baddbmm(
                     mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
                     beta=1.0, alpha=scale,
                     out=s[:bh * r * i1].view(bh, r, i1)))
-                o = yb[:bh * r * dv].view(bh, r, dv)
-                torch.bmm(p, v[:, :i1], out=o)
-                y[:, i0:i1].copy_(o)
+                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
                 if need_ent:
                     _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
         ctx.save_for_backward(q, k, v)
@@ -345,8 +358,8 @@ class _CalibAttn(torch.autograd.Function):
             n = p.numel()
             gbuf = mbuf = None
             if grad_ent is not None:
-                gbuf = q.new_empty(n)
-                mbuf = torch.empty(n, dtype=torch.bool, device=q.device)
+                gbuf = _get_scratch(("calib_bwd_gbuf", bh, T), q.device, q.dtype, n)
+                mbuf = _get_scratch(("calib_bwd_mbuf", bh, T), q.device, torch.bool, n)
             d_s = _softmax_grad_from_p(
                 torch.bmm(grad_y, vt), p, grad_ent, buf=gbuf, mbuf=mbuf)
             d_v = torch.bmm(p.transpose(1, 2), grad_y)
@@ -366,13 +379,11 @@ class _CalibAttn(torch.autograd.Function):
         rows0 = blocks[0][1] - blocks[0][0]
         dk = q.size(-1)
         dv = v.size(-1)
-        s = q.new_empty(bh * rows0 * T)
-        gbuf = q.new_empty(s.numel()) if grad_ent is not None else None
-        mbuf = (torch.empty(s.numel(), dtype=torch.bool, device=q.device)
-                if grad_ent is not None else None)
-        dvb = q.new_empty(bh * T * dv)
-        dkb = q.new_empty(bh * T * dk)
-        dqb = q.new_empty(bh * rows0 * dk)
+        s = _get_scratch(("calib_bwd_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
+        gbuf = _get_scratch(("calib_bwd_gbuf", bh, T, rows0), q.device, q.dtype, bh * rows0 * T) if grad_ent is not None else None
+        mbuf = _get_scratch(("calib_bwd_mbuf", bh, T, rows0), q.device, torch.bool, bh * rows0 * T) if grad_ent is not None else None
+        dvb = _get_scratch(("calib_bwd_dvb", bh, T, dv), q.device, q.dtype, bh * T * dv)
+        dkb = _get_scratch(("calib_bwd_dkb", bh, T, dk), q.device, q.dtype, bh * T * dk)
         for i0, i1 in blocks:
             n = bh * (i1 - i0) * i1
             p = _softmax_inplace(torch.baddbmm(
@@ -389,11 +400,9 @@ class _CalibAttn(torch.autograd.Function):
             torch.bmm(p.transpose(1, 2), g, out=ov)
             ok = dkb[:bh * i1 * dk].view(bh, i1, dk)
             torch.bmm(d_s.transpose(1, 2), q[:, i0:i1], out=ok).mul_(scale)
-            oq = dqb[:bh * r * dk].view(bh, r, dk)
-            torch.bmm(d_s, k[:, :i1], out=oq).mul_(scale)
+            torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1]).mul_(scale)
             d_v[:, :i1].add_(ov)
             d_k[:, :i1].add_(ok)
-            d_q[:, i0:i1] = oq
         return d_q, d_k, d_v, None, None, None
 
 
@@ -500,17 +509,12 @@ class _NullAttn(torch.autograd.Function):
         dv = v.size(-1)
         rows0 = blocks[0][1] - blocks[0][0]
         y = q.new_empty(bh, T, dv) if multi else None
-        sbuf = q.new_empty(bh * rows0 * T)
-        # bmm only takes a contiguous out, so a block's output is staged
-        # through a block-shaped scratch and copied into place.
-        yb = q.new_empty(bh * rows0 * dv) if multi else None
+        sbuf = _get_scratch(("null_fwd_sbuf", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
         for i0, i1 in blocks:
             p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, nkt, scale,
                                 sbuf)
             if multi:
-                o = yb[:bh * (i1 - i0) * dv].view(bh, i1 - i0, dv)
-                torch.bmm(p, v[:, :i1], out=o)
-                y[:, i0:i1].copy_(o)
+                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
                 y[:, i0:i1].addcmul_(p0, nvw)
             else:
                 if y is None:
@@ -544,15 +548,15 @@ class _NullAttn(torch.autograd.Function):
         # start from zeros and let each block add its own prefix
         d_k = torch.zeros_like(k) if multi else None
         d_v = torch.zeros_like(v) if multi else None
+        d_q = torch.empty_like(q) if multi else None
         d_null_k = torch.zeros_like(null_k)
         d_null_v = torch.zeros_like(null_v)
-        sbuf = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
-        # per-block result scratch, shared by the loop
-        peb = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
+        rows0 = blocks[0][1] - blocks[0][0]
+        sbuf = _get_scratch(("null_bwd_sbuf", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
+        peb = _get_scratch(("null_bwd_peb", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
         if multi:
-            dvb = q.new_empty(bh * T * dk)
-            dkb = q.new_empty(bh * T * dk)
-            dqb = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * dk)
+            dvb = _get_scratch(("null_bwd_dvb", bh, T, dk), q.device, q.dtype, bh * T * dk)
+            dkb = _get_scratch(("null_bwd_dkb", bh, T, dk), q.device, q.dtype, bh * T * dk)
         for i0, i1 in blocks:
             # rebuild the joint weights of this block only
             q_blk = q[:, i0:i1]
@@ -571,28 +575,27 @@ class _NullAttn(torch.autograd.Function):
             r = i1 - i0
             if multi:
                 ov = dvb[:bh * i1 * dk].view(bh, i1, dk)
-                oq = dqb[:bh * r * dk].view(bh, r, dk)
                 ok = dkb[:bh * i1 * dk].view(bh, i1, dk)
             else:
                 # single block: the results escape the loop, so make them
                 # the bmm destinations directly instead of staging into
                 # scratch and doing a second, identical bmm per key/value
                 ov = q.new_empty(bh, i1, dk)
-                oq = q.new_empty(bh, r, dk)
                 ok = q.new_empty(bh, i1, dk)
+                if d_q is None:
+                    d_q = torch.empty_like(q)
             torch.bmm(p.transpose(1, 2), g, out=ov)
             d_s = d_u.mul_(p).mul_(scale)
             d_s0 = gu0.mul_(p0).mul_(scale)
-            torch.bmm(d_s, k[:, :i1], out=oq).addcmul_(d_s0, nkw)
+            torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1]).addcmul_(d_s0, nkw)
             torch.bmm(d_s.transpose(1, 2), q_blk, out=ok)
             if multi:
                 d_v[:, :i1].add_(ov)
                 d_k[:, :i1].add_(ok)
-                d_q[:, i0:i1] = oq
             else:
                 # single-block: the three results *are* the outputs, so
                 # return them straight (the buffers above never escape)
-                d_v, d_k, d_q = ov, ok, oq
+                d_v, d_k = ov, ok
             # the null slot is a per-head parameter replicated across the batch
             q4 = q_blk.view(B, h, i1 - i0, dk)
             d_null_k.add_(torch.matmul(d_s0.view(B, h, -1, 1).transpose(-2, -1),
