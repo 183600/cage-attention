@@ -233,16 +233,23 @@ _SCRATCH_CACHE_MAX = 128
 
 
 def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: int) -> torch.Tensor:
-    """Get or allocate a scratch buffer from the cache."""
+    """Get or allocate a scratch buffer from the cache.
+
+    Allocation happens with inference mode *off* (same convention as
+    ``_causal_mask`` / ``_arange``): ``collect_stats`` / ``eval_accuracy``
+    run under ``torch.inference_mode()``, and a buffer allocated there
+    stays an inference tensor for the rest of the process - a later
+    autograd-tracked training step could then no longer write into it
+    ("Inplace update to inference tensor outside InferenceMode").
+    """
     entry = _scratch_cache.get(key)
-    if entry is not None:
-        buf = entry
-        if buf.numel() >= numel:
-            _scratch_cache[key] = buf  # keep LRU order by re-inserting
-            return buf[:numel]
+    if (entry is not None and entry.numel() >= numel
+            and entry.device == device and entry.dtype == dtype):
+        return entry[:numel]
     if len(_scratch_cache) >= _SCRATCH_CACHE_MAX:
         _scratch_cache.clear()
-    buf = torch.empty(numel, device=device, dtype=dtype)
+    with torch.inference_mode(False):
+        buf = torch.empty(numel, device=device, dtype=dtype)
     _scratch_cache[key] = buf
     return buf[:numel]
 
