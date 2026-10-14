@@ -1041,7 +1041,7 @@ class CAGE(nn.Module):
         if targets is not None:
             flat_t = targets.reshape(-1)
             if sup_pos is not None:
-                rows = _arange(targets.size(0), targets.device)
+                rows = _arange(targets.size(0), targets.device).clone()
                 sup = rows.mul(targets.size(1)).add_(sup_pos)
             else:
                 sup = (flat_t != -1).nonzero(as_tuple=True)[0]
