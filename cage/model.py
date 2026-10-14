@@ -274,48 +274,50 @@ _QUERY_BLOCKS_CACHE_MAX = 512
 
 
 class _ScratchCache:
-    __slots__ = ("cache", "order", "bytes", "max_entries", "max_bytes")
+    __slots__ = ("cache", "bytes", "max_entries", "max_bytes")
 
     def __init__(self, max_entries: int = 128, max_bytes: int = 64 << 20):
-        self.cache: dict[tuple, torch.Tensor] = {}
-        self.order: list[tuple] = []
+        self.cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
         self.bytes = 0
         self.max_entries = max_entries
         self.max_bytes = max_bytes
 
     def get(self, key: tuple, device: torch.device, dtype: torch.dtype, numel: int) -> torch.Tensor:
-        entry = self.cache.get(key)
-        if entry is not None and entry.numel() >= numel and entry.device == device and entry.dtype == dtype:
+        # The shape dims carried in ``key`` are informational only: buffers are
+        # shared by purpose (``key[0]``), device and dtype, so one entry serves
+        # every (B, T) shape instead of pinning one buffer per shape.  All call
+        # sites use distinct purpose names for concurrently-live temporaries,
+        # and every scratch use stays outside autograd tracking (custom
+        # Function forward/backward interiors), so sharing is aliasing-safe.
+        name = key[0] if isinstance(key, tuple) else key
+        ckey = (name, str(device), str(dtype))
+        entry = self.cache.get(ckey)
+        if entry is not None and entry.numel() >= numel:
             # Move to end (MRU)
-            self.order.remove(key)
-            self.order.append(key)
+            self.cache.move_to_end(ckey)
             return entry[:numel]
 
         nbytes = numel * dtype.itemsize
         # Remove old entry if exists
-        if key in self.cache:
-            old = self.cache.pop(key)
-            self.order.remove(key)
+        if ckey in self.cache:
+            old = self.cache.pop(ckey)
             self.bytes -= old.numel() * old.element_size()
 
         # Evict by count
         while len(self.cache) >= self.max_entries:
-            old_key = self.order.pop(0)
-            old = self.cache.pop(old_key)
+            _, old = self.cache.popitem(last=False)
             self.bytes -= old.numel() * old.element_size()
 
         # Evict by bytes
         if nbytes <= self.max_bytes:
-            while self.bytes + nbytes > self.max_bytes and self.order:
-                old_key = self.order.pop(0)
-                old = self.cache.pop(old_key)
+            while self.bytes + nbytes > self.max_bytes and self.cache:
+                _, old = self.cache.popitem(last=False)
                 self.bytes -= old.numel() * old.element_size()
 
         with torch.inference_mode(False):
             buf = torch.empty(numel, device=device, dtype=dtype)
 
-        self.cache[key] = buf
-        self.order.append(key)
+        self.cache[ckey] = buf
         self.bytes += buf.numel() * buf.element_size()
         return buf[:numel]
 
