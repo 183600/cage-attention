@@ -393,9 +393,15 @@ class _CalibAttn(torch.autograd.Function):
         blocks = _query_blocks(bh, T)
         mask = _causal_mask(T, q.device, q.dtype)
         kt = k.transpose(1, 2)
-        y = q.new_empty(bh, T, v.size(-1))
+        dv = v.size(-1)
+        y = q.new_empty(bh, T, dv)
         rows0 = blocks[0][1] - blocks[0][0]
         s = _get_scratch(("calib_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
+        # bmm with a strided out= view (a y / d_v slice) falls back to a
+        # per-slice select/copy loop, so products land in a contiguous
+        # workspace first and are copied into the slice once
+        yb = _get_scratch(("calib_y", bh, T, rows0), q.device, q.dtype,
+                           bh * rows0 * dv)
         if len(blocks) == 1:
             p = _softmax_inplace(torch.baddbmm(
                 mask, q, kt, beta=1.0, alpha=scale,
@@ -417,7 +423,8 @@ class _CalibAttn(torch.autograd.Function):
                     mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
                     beta=1.0, alpha=scale,
                     out=s[:bh * r * i1].view(bh, r, i1)))
-                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
+                torch.bmm(p, v[:, :i1], out=yb[:bh * r * dv].view(bh, r, dv))
+                y[:, i0:i1].copy_(yb[:bh * r * dv].view(bh, r, dv))
                 if need_ent:
                     _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
         ctx.save_for_backward(q, k, v)
@@ -467,6 +474,15 @@ class _CalibAttn(torch.autograd.Function):
         gbuf = _get_scratch(("calib_f", bh, T, rows0), q.device, q.dtype, bh * rows0 * T) if grad_ent is not None else None
         mbuf = _get_scratch(("calib_bwd_mbuf", bh, T, rows0), q.device, torch.bool, bh * rows0 * T) if grad_ent is not None else None
         dpb = _get_scratch(("calib_dp", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
+        dk = q.size(-1)
+        # products land in a contiguous workspace first: baddbmm with a
+        # strided out= view (a d_v / d_k / d_q slice) falls back to a
+        # per-slice addmm_ loop that is far slower than one GEMM.  Each
+        # product is a *fresh* gemm (beta=0), then added to the block prefix
+        # exactly once - a beta=1 accumulate would fold the destination's
+        # earlier contents into the workspace and count them twice.
+        tmpb = _get_scratch(("calib_bwd_tmp", bh, T), q.device, q.dtype,
+                             bh * T * dk)
         zero = _zero_scalar(q.device, q.dtype)
         for i0, i1 in blocks:
             n = bh * (i1 - i0) * i1
@@ -481,13 +497,16 @@ class _CalibAttn(torch.autograd.Function):
             d_s = _softmax_grad_from_p(d_p, p, ge,
                                        buf=None if gbuf is None else gbuf[:n],
                                        mbuf=None if mbuf is None else mbuf[:n])
-            dv_blk = d_v[:, :i1]
-            torch.baddbmm(dv_blk, p.transpose(1, 2), g, beta=1.0, out=dv_blk)
-            dk_blk = d_k[:, :i1]
-            torch.baddbmm(dk_blk, d_s.transpose(1, 2), q[:, i0:i1], beta=1.0,
-                          alpha=scale, out=dk_blk)
+            tmp = tmpb[:bh * i1 * dk].view(bh, i1, dk)
+            torch.bmm(p.transpose(1, 2), g, out=tmp)
+            d_v[:, :i1].add_(tmp)
+            torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1], beta=0.0,
+                          alpha=scale, out=tmp)
+            d_k[:, :i1].add_(tmp)
+            tmp = tmpb[:bh * (i1 - i0) * dk].view(bh, i1 - i0, dk)
             torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
-                          out=d_q[:, i0:i1])
+                          out=tmp)
+            d_q[:, i0:i1].copy_(tmp)
         return d_q, d_k, d_v, None, None, None
 
 
@@ -592,11 +611,17 @@ class _NullAttn(torch.autograd.Function):
         y4 = y.view(B, h, T, dv)
         nv4 = null_v.view(1, h, 1, dv)
         sbuf = _get_scratch(("null_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
+        yb = _get_scratch(("null_y", bh, T, rows0), q.device, q.dtype,
+                           bh * rows0 * dv)
         for i0, i1 in blocks:
             r = i1 - i0
             p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, null_k, B, h,
                                 scale, sbuf)
-            torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
+            # contiguous product workspace: bmm with a strided out= view
+            # falls back to a per-slice select/copy loop (see _CalibAttn)
+            yblk = yb[:bh * r * dv].view(bh, r, dv)
+            torch.bmm(p, v[:, :i1], out=yblk)
+            y[:, i0:i1].copy_(yblk)
             y4[:, :, i0:i1].addcmul_(p0.view(B, h, r, 1), nv4)
         ctx.save_for_backward(q, k, v, null_k, null_v)
         ctx.scale = scale
@@ -631,6 +656,7 @@ class _NullAttn(torch.autograd.Function):
         eb = _get_scratch(("null_bwd_e", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
         gub = _get_scratch(("null_bwd_gu", bh, T, rows0), q.device, q.dtype, bh * rows0)
         dotb = _get_scratch(("null_bwd_dot", bh, T, rows0), q.device, q.dtype, bh * rows0)
+        tmpb = _get_scratch(("null_bwd_tmp", bh, T), q.device, q.dtype, bh * T * dk)
         # null-slot grads are per-head parameters replicated over the batch;
         # accumulate each block's products and reduce over the batch after
         acc_k = _get_scratch(("null_bwd_ak", bh, dk), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
@@ -657,11 +683,17 @@ class _NullAttn(torch.autograd.Function):
             d_s = d_u.mul_(p).mul_(scale)
             d_s0 = gu0.mul_(p0).mul_(scale)
             if multi:
-                dv_blk = d_v[:, :i1]
-                torch.baddbmm(dv_blk, p.transpose(1, 2), g, beta=1.0, out=dv_blk)
-                dk_blk = d_k[:, :i1]
-                torch.baddbmm(dk_blk, d_s.transpose(1, 2), q_blk, beta=1.0,
-                              out=dk_blk)
+                # products land in a contiguous workspace first: bmm with a
+                # strided out= view falls back to a per-slice select/copy
+                # loop that is far slower than one GEMM.  A fresh bmm (not a
+                # beta=1 accumulate into the workspace) keeps the
+                # destination's earlier contents out of the product, which
+                # is then added to the block prefix exactly once.
+                tmp = tmpb[:bh * i1 * dk].view(bh, i1, dk)
+                torch.bmm(p.transpose(1, 2), g, out=tmp)
+                d_v[:, :i1].add_(tmp)
+                torch.bmm(d_s.transpose(1, 2), q_blk, out=tmp)
+                d_k[:, :i1].add_(tmp)
             else:
                 d_v = q.new_empty(bh, i1, dk)
                 d_k = q.new_empty(bh, i1, dk)
@@ -669,9 +701,11 @@ class _NullAttn(torch.autograd.Function):
                 torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
             torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1])
             d_q4[:, :, i0:i1].addcmul_(d_s0.view(B, h, r, 1), nk4)
-            torch.baddbmm(acc_k, d_s0.transpose(-2, -1), q_blk, beta=1.0,
-                          out=acc_k)
-            torch.baddbmm(acc_v, p0.transpose(-2, -1), g, beta=1.0, out=acc_v)
+            acc_blk = tmpb[:bh * dk].view(bh, 1, dk)
+            torch.bmm(d_s0.transpose(-2, -1), q_blk, out=acc_blk)
+            acc_k.add_(acc_blk)
+            torch.bmm(p0.transpose(-2, -1), g, out=acc_blk)
+            acc_v.add_(acc_blk)
         d_null_k = acc_k.view(B, h, dk).sum(0)
         d_null_v = acc_v.view(B, h, dk).sum(0)
         return d_q, d_k, d_v, d_null_k, d_null_v, None, None
