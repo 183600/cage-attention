@@ -56,19 +56,6 @@ def _zero_scalar(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     return z
 
 
-_neg_inf_scalar_cache: dict = {}
-
-def _neg_inf_scalar(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    """Cached ``-inf`` scalar for the given device and dtype."""
-    key = (device, dtype)
-    z = _neg_inf_scalar_cache.get(key)
-    if z is None:
-        with torch.inference_mode(False):
-            z = torch.full((), float("-inf"), device=device, dtype=dtype)
-        _neg_inf_scalar_cache[key] = z
-    return z
-
-
 GATES = ("none", "query", "calib", "null")
 NORMS = ("pre", "post", "mix", "seednorm")
 
@@ -261,8 +248,12 @@ class _RowEntropy(torch.autograd.Function):
     def backward(ctx, grad_out):
         (p,) = ctx.saved_tensors
         # the gradient must be a fresh tensor, per the exact D7 formula
-        # (log(p)+1 on p > _EPS, else 0, times -grad_out)
-        mask = p > ctx.eps
+        # (log(p)+1 on p > _EPS, else 0, times -grad_out); only the selector is
+        # scratch (it is consumed inside this call and never returned)
+        mask = _get_scratch(("rowent_bwd_m", *p.shape), p.device, torch.bool,
+                            p.numel())
+        mask = mask[:p.numel()].view_as(p)
+        torch.gt(p, ctx.eps, out=mask)
         d = p.clamp_min(ctx.eps)
         d.log_()
         d.add_(mask).mul_(mask).mul_(grad_out.unsqueeze(-1)).neg_()
@@ -536,18 +527,6 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     return d_p.addcmul_(p, d_p.sum(dim=-1, keepdim=True), value=-1.0)
 
 
-def _null_col(x: torch.Tensor, B: int) -> torch.Tensor:
-    """``(h, d)`` -> ``(B*h, d, 1)``: batch-replicated key column."""
-    h, d = x.shape
-    return x.view(1, h, d).expand(B, h, d).reshape(B * h, d, 1)
-
-
-def _null_row(x: torch.Tensor, B: int) -> torch.Tensor:
-    """``(h, d)`` -> ``(B*h, 1, d)``: batch-replicated value row."""
-    h, d = x.shape
-    return x.view(1, h, d).expand(B, h, d).reshape(B * h, 1, d)
-
-
 def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
                 mask: torch.Tensor, null_k: torch.Tensor, B: int, h: int,
                 scale: float, sbuf: torch.Tensor | None = None):
@@ -709,7 +688,6 @@ class Attention(nn.Module):
         self.qkv = nn.Linear(cfg.d_model, 3 * cfg.d_model, bias=False)
         self.proj = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
         self.attn_dropout = nn.Dropout(cfg.dropout)
-        self.max_len = cfg.max_len
 
         if cfg.gate in ("query", "calib"):
             # The gate is the only gate-variant-specific module in the model.
@@ -808,6 +786,11 @@ class Attention(nn.Module):
         del qkv
 
         ent = None
+        # head-major attention output (B, h, T, dk): the transpose into the
+        # model layout happens once, after the gate, and is fused into the
+        # per-channel gate multiply below.
+        y4 = None
+        stats = None
         if not dropping:
             # [fixed design, docs/design_notes.md D1] All four gate variants
             # share ONE hand-written kernel family: E1 is a controlled
@@ -815,21 +798,19 @@ class Attention(nn.Module):
             # The calibrated kernel emits the row entropy as a by-product.
             # Do NOT switch any variant to a fused/flash attention call.
             if is_null:
-                y = _NullAttn.apply(qb, kb, vb, self.null_k, self.null_v,
-                                    self.inv_scale, B)
+                y4 = _NullAttn.apply(qb, kb, vb, self.null_k, self.null_v,
+                                     self.inv_scale, B).view(B, h, T, dk)
             else:
                 # none / query / calib share the same kernel; the row entropy
                 # by-product is materialised only for the calibrated gate
                 y, ent = _CalibAttn.apply(qb, kb, vb, self.inv_scale, _EPS,
                                           is_calib)
-                if ent is not None:
-                    ent = ent.view(B, h, T)
-            y = y.view(B, h, T, dk).transpose(1, 2).reshape(B, T, C)
-            stats = None
+                y4 = y.view(B, h, T, dk)
+                ent = None if ent is None else ent.view(B, h, T)
             if need_stats:
                 stats = self._row_stats_at(
                     qb.view(B, h, T, dk), kb, B, h, T, stat_pos, is_null,
-                    ent_full=None if ent is None else ent)
+                    ent_full=ent)
         else:
             # attention dropout acts on the probabilities; the statistics are
             # read from the clean softmax rows before the dropout.
@@ -854,10 +835,9 @@ class Attention(nn.Module):
                 if dropping:
                     p = self.attn_dropout(p)
                 pb = p.view(bh, T, T + 1)
-                y = torch.bmm(pb[..., 1:], vb)
-                y.view(B, h, T, dk).addcmul_(p.view(B, h, T, T + 1)[..., :1],
-                                             self.null_v.view(1, h, 1, dk))
-                y = y.view(B, h, T, dk).transpose(1, 2).reshape(B, T, C)
+                y4 = torch.bmm(pb[..., 1:], vb).view(B, h, T, dk)
+                y4.addcmul_(p.view(B, h, T, T + 1)[..., :1],
+                            self.null_v.view(1, h, 1, dk))
             else:
                 del q_, k_
                 mask = _causal_mask(T, x.device, x.dtype)
@@ -876,15 +856,13 @@ class Attention(nn.Module):
                         _pick_rows(p.view(B, h, T, -1), stat_pos), T, False)
                 if dropping:
                     p = self.attn_dropout(p)
-                y = torch.bmm(p, vb).view(B, h, T, dk)
-                y = y.transpose(1, 2).reshape(B, T, C)
+                y4 = torch.bmm(p, vb).view(B, h, T, dk)
 
         # ---- gating ----
         gate_val = None
         if kind == "query":
             gate_val = self.gate(x)
             gate_val.sigmoid_()
-            y.mul_(gate_val)
         elif is_calib:
             log_len = math.log(max(T, 2))
             conc = ent.mean(dim=1).div_(log_len).unsqueeze(-1)
@@ -892,7 +870,21 @@ class Attention(nn.Module):
             gate_val.addcmul_(conc, self.calib_c * self.calib_scale, value=-1.0)
             tau = F.softplus(self.calib_tau).add_(0.1)
             gate_val.div_(tau).sigmoid_()
-            y.mul_(gate_val)
+
+        # The head-major output is transposed into the model layout once.  For
+        # the gated variants the transpose and the per-channel gate multiply
+        # share a single pass: ``out[b, t, h, dk] = y[b, h, t, dk] * g[b, t, ...]``
+        # is the same elementwise product as transposing first and multiplying.
+        if gate_val is None:
+            y = y4.transpose(1, 2).reshape(B, T, C)
+        else:
+            # one pass: the per-channel gate multiply doubles as the
+            # head-major -> token-major transpose.  The gate is the leading
+            # operand so the product keeps the token-major contiguous
+            # layout; the elementwise product is commutative, so this is the
+            # same value as transposing first and multiplying afterwards.
+            y = torch.mul(gate_val.view(B, T, h, dk), y4.transpose(1, 2))
+            y = y.reshape(B, T, C)
 
         out = self.proj(y)
         if not need_stats:
