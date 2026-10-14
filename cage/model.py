@@ -394,13 +394,7 @@ class _CalibAttn(torch.autograd.Function):
         y = q.new_empty(bh, T, dv)
         rows0 = blocks[0][1] - blocks[0][0]
         max_rows = rows0
-        max_i1 = rows0
-        for i0, i1 in blocks:
-            r = i1 - i0
-            if r > max_rows:
-                max_rows = r
-            if i1 > max_i1:
-                max_i1 = i1
+        max_i1 = T
         s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
         yb = _get_scratch(("calib_y",), q.device, q.dtype, bh * max_rows * dv)
         if len(blocks) == 1:
@@ -469,13 +463,7 @@ class _CalibAttn(torch.autograd.Function):
         d_k = torch.zeros_like(k)
         d_v = torch.zeros_like(v)
         max_rows = rows0
-        max_i1 = rows0
-        for i0, i1 in blocks:
-            r = i1 - i0
-            if r > max_rows:
-                max_rows = r
-            if i1 > max_i1:
-                max_i1 = i1
+        max_i1 = T
         dk = q.size(-1)
         s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
         gbuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if grad_ent is not None else None
@@ -595,13 +583,7 @@ class _NullAttn(torch.autograd.Function):
         dv = v.size(-1)
         rows0 = blocks[0][1] - blocks[0][0]
         max_rows = rows0
-        max_i1 = rows0
-        for i0, i1 in blocks:
-            r = i1 - i0
-            if r > max_rows:
-                max_rows = r
-            if i1 > max_i1:
-                max_i1 = i1
+        max_i1 = T
         y = q.new_empty(bh, T, dv)
         y4 = y.view(B, h, T, dv)
         nv4 = null_v.view(1, h, 1, dv)
@@ -640,13 +622,7 @@ class _NullAttn(torch.autograd.Function):
         nv4t = null_v.view(1, h, dk, 1)
         rows0 = blocks[0][1] - blocks[0][0]
         max_rows = rows0
-        max_i1 = rows0
-        for i0, i1 in blocks:
-            r = i1 - i0
-            if r > max_rows:
-                max_rows = r
-            if i1 > max_i1:
-                max_i1 = i1
+        max_i1 = T
         sbuf = _get_scratch(("null_s",), q.device, q.dtype, bh * max_rows * max_i1)
         peb = _get_scratch(("null_bwd_peb",), q.device, q.dtype, bh * max_rows * max_i1)
         eb = _get_scratch(("null_bwd_e",), q.device, q.dtype, bh * max_rows * max_i1)
@@ -679,12 +655,15 @@ class _NullAttn(torch.autograd.Function):
                 d_v[:, :i1].add_(tmp)
                 torch.bmm(d_s.transpose(1, 2), q_blk, out=tmp)
                 d_k[:, :i1].add_(tmp)
+                tmp = tmpb[:bh * (i1 - i0) * dk].view(bh, i1 - i0, dk)
+                torch.bmm(d_s, k[:, :i1], out=tmp)
+                d_q[:, i0:i1].copy_(tmp)
             else:
                 d_v = q.new_empty(bh, i1, dk)
                 d_k = q.new_empty(bh, i1, dk)
                 torch.bmm(p.transpose(1, 2), g, out=d_v)
                 torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
-            torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1])
+                torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1])
             d_q4[:, :, i0:i1].addcmul_(d_s0.view(B, h, r, 1), nk4)
             acc_blk = tmpb[:bh * dk].view(bh, 1, dk)
             torch.bmm(d_s0.transpose(-2, -1), q_blk, out=acc_blk)
