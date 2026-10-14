@@ -118,59 +118,55 @@ def make_norm(kind: str, dim: int) -> nn.Module:
 
 _MAX_MASK_CACHE = 64
 
-_causal_mask_cache: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
+_causal_mask_cache: dict[tuple, torch.Tensor] = {}
+_causal_mask_order: list[tuple] = []
 
 
 def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    """Additive causal mask (0 on/below the diagonal, -inf above).
-
-    The shared tensor is allocated with inference mode *off*, so one cached
-    entry serves every caller.  ``collect_stats`` / ``eval_accuracy`` run
-    under ``torch.inference_mode()`` and an inference tensor stays an
-    inference tensor for the rest of the process, so a cached entry built
-    inside that mode could not be reused by an autograd-tracked call.
-    """
     key = (T, device, dtype)
     m = _causal_mask_cache.get(key)
     if m is not None:
-        _causal_mask_cache.move_to_end(key)
+        _causal_mask_order.remove(key)
+        _causal_mask_order.append(key)
         return m
     with torch.inference_mode(False):
         m = torch.full((T, T), float("-inf"), device=device, dtype=dtype)
         m.triu_(1)
     _causal_mask_cache[key] = m
+    _causal_mask_order.append(key)
     if len(_causal_mask_cache) > _MAX_MASK_CACHE:
-        _causal_mask_cache.popitem(last=False)
+        old_key = _causal_mask_order.pop(0)
+        _causal_mask_cache.pop(old_key, None)
     return m
 
 
-_causal_bool_cache: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
+_causal_bool_cache: dict[tuple, torch.Tensor] = {}
+_causal_bool_order: list[tuple] = []
 _MAX_BOOL_CACHE = 64
 
 
 def _causal_bool_mask(T: int, device: torch.device) -> torch.Tensor:
-    """Cached ``(T, T + 1)`` bool mask for the null-slot dropout path.
-
-    Column 0 (the null slot) is never masked; the remaining ``T`` columns are
-    ``True`` strictly above the diagonal.  FIFO eviction.
-    """
     key = (T, device)
     m = _causal_bool_cache.get(key)
     if m is not None:
-        _causal_bool_cache.move_to_end(key)
+        _causal_bool_order.remove(key)
+        _causal_bool_order.append(key)
         return m
     with torch.inference_mode(False):
         m = torch.ones(T, T + 1, dtype=torch.bool, device=device)
         m[:, 0] = False
         m[:, 1:].triu_(1)
     _causal_bool_cache[key] = m
+    _causal_bool_order.append(key)
     if len(_causal_bool_cache) > _MAX_BOOL_CACHE:
-        _causal_bool_cache.popitem(last=False)
+        old_key = _causal_bool_order.pop(0)
+        _causal_bool_cache.pop(old_key, None)
     return m
 
 
 _ARANGE_CACHE_MAX = 128
-_arange_cache: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
+_arange_cache: dict[tuple, torch.Tensor] = {}
+_arange_order: list[tuple] = []
 
 def _arange(n: int, device: torch.device) -> torch.Tensor:
     """Read-only ``arange(n)`` shared across calls (index tensors only).
@@ -181,13 +177,16 @@ def _arange(n: int, device: torch.device) -> torch.Tensor:
     key = (n, device)
     a = _arange_cache.get(key)
     if a is not None:
-        _arange_cache.move_to_end(key)
+        _arange_order.remove(key)
+        _arange_order.append(key)
         return a
     with torch.inference_mode(False):
         a = torch.arange(n, device=device)
     _arange_cache[key] = a
+    _arange_order.append(key)
     if len(_arange_cache) > _ARANGE_CACHE_MAX:
-        _arange_cache.popitem(last=False)
+        old_key = _arange_order.pop(0)
+        _arange_cache.pop(old_key, None)
     return a
 
 
@@ -274,57 +273,58 @@ _query_blocks_cache: dict = {}
 _QUERY_BLOCKS_CACHE_MAX = 512
 
 
-_scratch_cache: dict = {}
-_SCRATCH_CACHE_MAX = 128
-_SCRATCH_CACHE_BYTES = 64 << 20
-_scratch_bytes = 0
+class _ScratchCache:
+    __slots__ = ("cache", "order", "bytes", "max_entries", "max_bytes")
+
+    def __init__(self, max_entries: int = 128, max_bytes: int = 64 << 20):
+        self.cache: dict[tuple, torch.Tensor] = {}
+        self.order: list[tuple] = []
+        self.bytes = 0
+        self.max_entries = max_entries
+        self.max_bytes = max_bytes
+
+    def get(self, key: tuple, device: torch.device, dtype: torch.dtype, numel: int) -> torch.Tensor:
+        entry = self.cache.get(key)
+        if entry is not None and entry.numel() >= numel and entry.device == device and entry.dtype == dtype:
+            # Move to end (MRU)
+            self.order.remove(key)
+            self.order.append(key)
+            return entry[:numel]
+
+        nbytes = numel * dtype.itemsize
+        # Remove old entry if exists
+        if key in self.cache:
+            old = self.cache.pop(key)
+            self.order.remove(key)
+            self.bytes -= old.numel() * old.element_size()
+
+        # Evict by count
+        while len(self.cache) >= self.max_entries:
+            old_key = self.order.pop(0)
+            old = self.cache.pop(old_key)
+            self.bytes -= old.numel() * old.element_size()
+
+        # Evict by bytes
+        if nbytes <= self.max_bytes:
+            while self.bytes + nbytes > self.max_bytes and self.order:
+                old_key = self.order.pop(0)
+                old = self.cache.pop(old_key)
+                self.bytes -= old.numel() * old.element_size()
+
+        with torch.inference_mode(False):
+            buf = torch.empty(numel, device=device, dtype=dtype)
+
+        self.cache[key] = buf
+        self.order.append(key)
+        self.bytes += buf.numel() * buf.element_size()
+        return buf[:numel]
+
+
+_scratch_cache = _ScratchCache()
 
 
 def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: int) -> torch.Tensor:
-    """Get or allocate a scratch buffer from the cache.
-
-    Allocation happens with inference mode *off* (same convention as
-    ``_causal_mask`` / ``_arange``): ``collect_stats`` / ``eval_accuracy``
-    run under ``torch.inference_mode()``, and a buffer allocated there
-    stays an inference tensor for the rest of the process - a later
-    autograd-tracked training step could then no longer write into it
-    ("Inplace update to inference tensor outside InferenceMode").
-    """
-    global _scratch_bytes
-    entry = _scratch_cache.get(key)
-    if (entry is not None and entry.numel() >= numel
-            and entry.device == device and entry.dtype == dtype):
-        del _scratch_cache[key]
-        _scratch_cache[key] = entry
-        return entry[:numel]
-    nbytes = numel * dtype.itemsize
-    # Replacing the entry for ``key`` (too small or wrong device/dtype) must
-    # drop its bytes first, otherwise _scratch_bytes double-counts the old
-    # buffer and the byte cap evicts too aggressively.  Do this before the
-    # max-entries eviction so a stale ``key`` is never left counted while its
-    # replacement is added.
-    old_entry = _scratch_cache.pop(key, None)
-    if old_entry is not None:
-        _scratch_bytes -= old_entry.numel() * old_entry.element_size()
-        if _scratch_bytes < 0:
-            _scratch_bytes = 0
-    if len(_scratch_cache) >= _SCRATCH_CACHE_MAX:
-        old_key = next(iter(_scratch_cache))
-        old_entry = _scratch_cache.pop(old_key)
-        _scratch_bytes -= old_entry.numel() * old_entry.element_size()
-        if _scratch_bytes < 0:
-            _scratch_bytes = 0
-    if nbytes <= _SCRATCH_CACHE_BYTES:
-        while _scratch_bytes + nbytes > _SCRATCH_CACHE_BYTES and _scratch_cache:
-            old = _scratch_cache.pop(next(iter(_scratch_cache)))
-            _scratch_bytes -= old.numel() * old.element_size()
-            if _scratch_bytes < 0:
-                _scratch_bytes = 0
-    with torch.inference_mode(False):
-        buf = torch.empty(numel, device=device, dtype=dtype)
-    _scratch_cache[key] = buf
-    _scratch_bytes += buf.numel() * buf.element_size()
-    return buf[:numel]
+    return _scratch_cache.get(key, device, dtype, numel)
 
 
 def _query_blocks(bh: int, T: int):
@@ -332,8 +332,6 @@ def _query_blocks(bh: int, T: int):
     key = (bh, T)
     blocks = _query_blocks_cache.get(key)
     if blocks is not None:
-        del _query_blocks_cache[key]
-        _query_blocks_cache[key] = blocks
         return blocks
     if T <= 32:
         blocks = ((0, T),)
@@ -387,7 +385,6 @@ class _CalibAttn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, scale: float, eps: float, need_ent: bool = True):
-        # unused outputs arrive as an undefined grad instead of zeros
         ctx.set_materialize_grads(False)
         bh, T = q.size(0), q.size(1)
         blocks = _query_blocks(bh, T)
@@ -396,12 +393,14 @@ class _CalibAttn(torch.autograd.Function):
         dv = v.size(-1)
         y = q.new_empty(bh, T, dv)
         rows0 = blocks[0][1] - blocks[0][0]
-        s = _get_scratch(("calib_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
-        # bmm with a strided out= view (a y / d_v slice) falls back to a
-        # per-slice select/copy loop, so products land in a contiguous
-        # workspace first and are copied into the slice once
-        yb = _get_scratch(("calib_y", bh, T, rows0), q.device, q.dtype,
-                           bh * rows0 * dv)
+        max_rows = rows0
+        for i0, i1 in blocks:
+            r = i1 - i0
+            if r > max_rows:
+                max_rows = r
+        max_i1 = max(i1 for i0, i1 in blocks)
+        s = _get_scratch(("calib_s", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1)
+        yb = _get_scratch(("calib_y", bh, T, max_rows), q.device, q.dtype, bh * max_rows * dv)
         if len(blocks) == 1:
             p = _softmax_inplace(torch.baddbmm(
                 mask, q, kt, beta=1.0, alpha=scale,
@@ -410,13 +409,13 @@ class _CalibAttn(torch.autograd.Function):
             if need_ent:
                 ent = q.new_empty(bh, T)
                 _row_entropy(p, eps, out=ent,
-                             buf=_get_scratch(("calib_f", bh, T, rows0),
-                                              q.device, q.dtype, bh * T * T))
+                             buf=_get_scratch(("calib_f", bh, T, max_rows),
+                                               q.device, q.dtype, bh * T * T))
             else:
                 ent = None
         else:
             ent = q.new_empty(bh, T) if need_ent else None
-            ebuf = _get_scratch(("calib_f", bh, T, rows0), q.device, q.dtype, bh * rows0 * T) if need_ent else None
+            ebuf = _get_scratch(("calib_f", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
             for i0, i1 in blocks:
                 r = i1 - i0
                 p = _softmax_inplace(torch.baddbmm(
@@ -466,23 +465,22 @@ class _CalibAttn(torch.autograd.Function):
                           out=d_k)
             return d_q, d_k, d_v, None, None, None
         d_q = torch.empty_like(q)
-        # each block writes a longer d_k / d_v prefix, so the buffers start
-        # at zero and every block adds its own prefix
         d_k = torch.zeros_like(k)
         d_v = torch.zeros_like(v)
-        s = _get_scratch(("calib_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
-        gbuf = _get_scratch(("calib_f", bh, T, rows0), q.device, q.dtype, bh * rows0 * T) if grad_ent is not None else None
-        mbuf = _get_scratch(("calib_bwd_mbuf", bh, T, rows0), q.device, torch.bool, bh * rows0 * T) if grad_ent is not None else None
-        dpb = _get_scratch(("calib_dp", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
+        max_rows = rows0
+        max_i1 = rows0
+        for i0, i1 in blocks:
+            r = i1 - i0
+            if r > max_rows:
+                max_rows = r
+            if i1 > max_i1:
+                max_i1 = i1
         dk = q.size(-1)
-        # products land in a contiguous workspace first: baddbmm with a
-        # strided out= view (a d_v / d_k / d_q slice) falls back to a
-        # per-slice addmm_ loop that is far slower than one GEMM.  Each
-        # product is a *fresh* gemm (beta=0), then added to the block prefix
-        # exactly once - a beta=1 accumulate would fold the destination's
-        # earlier contents into the workspace and count them twice.
-        tmpb = _get_scratch(("calib_bwd_tmp", bh, T), q.device, q.dtype,
-                             bh * T * dk)
+        s = _get_scratch(("calib_s", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1)
+        gbuf = _get_scratch(("calib_f", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1) if grad_ent is not None else None
+        mbuf = _get_scratch(("calib_bwd_mbuf", bh, T, max_rows), q.device, torch.bool, bh * max_rows * max_i1) if grad_ent is not None else None
+        dpb = _get_scratch(("calib_dp", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1)
+        tmpb = _get_scratch(("calib_bwd_tmp", bh, T), q.device, q.dtype, bh * T * dk)
         zero = _zero_scalar(q.device, q.dtype)
         for i0, i1 in blocks:
             n = bh * (i1 - i0) * i1
@@ -549,18 +547,6 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
 def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
                 mask: torch.Tensor, null_k: torch.Tensor, B: int, h: int,
                 scale: float, sbuf: torch.Tensor | None = None):
-    """Joint weights of the causally visible tokens and of the null slot for
-    the query block ``[i0, i1)``.
-
-    The null score is the rank-1 term ``q . null_k`` (batched via 4-D
-    broadcast against the ``(h, d)`` parameter, so the ``(B*h, d, 1)``
-    replica is never materialised), so the score matrix keeps the width of
-    the real (causally masked) part.  Both are shifted by the joint row
-    maximum before the exp, which makes the pair ``(p, p0)`` an ordinary
-    softmax over the ``i1 + 1`` columns the null slot adds to the block.
-    ``sbuf`` optionally supplies the flat score workspace, shared by the
-    blocked loops; the shift/normaliser scalars come from scratch too.
-    """
     n, r = q_blk.size(0), q_blk.size(1)
     if sbuf is None:
         s = torch.baddbmm(mask[i0:i1, :i1], q_blk, kt[:, :, :i1],
@@ -607,18 +593,23 @@ class _NullAttn(torch.autograd.Function):
         kt = k.transpose(1, 2)
         dv = v.size(-1)
         rows0 = blocks[0][1] - blocks[0][0]
+        max_rows = rows0
+        max_i1 = rows0
+        for i0, i1 in blocks:
+            r = i1 - i0
+            if r > max_rows:
+                max_rows = r
+            if i1 > max_i1:
+                max_i1 = i1
         y = q.new_empty(bh, T, dv)
         y4 = y.view(B, h, T, dv)
         nv4 = null_v.view(1, h, 1, dv)
-        sbuf = _get_scratch(("null_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
-        yb = _get_scratch(("null_y", bh, T, rows0), q.device, q.dtype,
-                           bh * rows0 * dv)
+        sbuf = _get_scratch(("null_s", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1)
+        yb = _get_scratch(("null_y", bh, T, max_rows), q.device, q.dtype, bh * max_rows * dv)
         for i0, i1 in blocks:
             r = i1 - i0
             p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, null_k, B, h,
                                 scale, sbuf)
-            # contiguous product workspace: bmm with a strided out= view
-            # falls back to a per-slice select/copy loop (see _CalibAttn)
             yblk = yb[:bh * r * dv].view(bh, r, dv)
             torch.bmm(p, v[:, :i1], out=yblk)
             y[:, i0:i1].copy_(yblk)
@@ -640,10 +631,6 @@ class _NullAttn(torch.autograd.Function):
         kt = k.transpose(1, 2)
         vt = v.transpose(1, 2)
         multi = len(blocks) > 1
-        # like _CalibAttn, every block contributes to all key columns < i1 of
-        # its own query rows, so the d_k / d_v prefixes grow with the block
-        # index and their tails have never been written by earlier blocks:
-        # start from zeros and let each block add its own prefix
         d_k = torch.zeros_like(k) if multi else None
         d_v = torch.zeros_like(v) if multi else None
         d_q = torch.empty_like(q)
@@ -651,24 +638,27 @@ class _NullAttn(torch.autograd.Function):
         nk4 = null_k.view(1, h, 1, dk)
         nv4t = null_v.view(1, h, dk, 1)
         rows0 = blocks[0][1] - blocks[0][0]
-        sbuf = _get_scratch(("null_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
-        peb = _get_scratch(("null_bwd_peb", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
-        eb = _get_scratch(("null_bwd_e", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
-        gub = _get_scratch(("null_bwd_gu", bh, T, rows0), q.device, q.dtype, bh * rows0)
-        dotb = _get_scratch(("null_bwd_dot", bh, T, rows0), q.device, q.dtype, bh * rows0)
+        max_rows = rows0
+        max_i1 = rows0
+        for i0, i1 in blocks:
+            r = i1 - i0
+            if r > max_rows:
+                max_rows = r
+            if i1 > max_i1:
+                max_i1 = i1
+        sbuf = _get_scratch(("null_s", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1)
+        peb = _get_scratch(("null_bwd_peb", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1)
+        eb = _get_scratch(("null_bwd_e", bh, T, max_rows), q.device, q.dtype, bh * max_rows * max_i1)
+        gub = _get_scratch(("null_bwd_gu", bh, T, max_rows), q.device, q.dtype, bh * max_rows)
+        dotb = _get_scratch(("null_bwd_dot", bh, T, max_rows), q.device, q.dtype, bh * max_rows)
         tmpb = _get_scratch(("null_bwd_tmp", bh, T), q.device, q.dtype, bh * T * dk)
-        # null-slot grads are per-head parameters replicated over the batch;
-        # accumulate each block's products and reduce over the batch after
         acc_k = _get_scratch(("null_bwd_ak", bh, dk), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         acc_v = _get_scratch(("null_bwd_av", bh, dk), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         for i0, i1 in blocks:
-            # rebuild the joint weights of this block only
             q_blk = q[:, i0:i1]
             g = grad_y[:, i0:i1]
             r = i1 - i0
             p, p0 = _null_probs(q_blk, kt, i0, i1, mask, null_k, B, h, scale, sbuf)
-            # sum_joint p * d_p = <grad_out, p @ v> = <grad_out, y>: the
-            # denominator term follows from the rebuilt weights alone
             n = bh * r * i1
             e = torch.bmm(g, vt[:, :, :i1], out=eb[:n].view(bh, r, i1))
             gu0 = gub[:bh * r].view(bh, r, 1)
@@ -683,12 +673,6 @@ class _NullAttn(torch.autograd.Function):
             d_s = d_u.mul_(p).mul_(scale)
             d_s0 = gu0.mul_(p0).mul_(scale)
             if multi:
-                # products land in a contiguous workspace first: bmm with a
-                # strided out= view falls back to a per-slice select/copy
-                # loop that is far slower than one GEMM.  A fresh bmm (not a
-                # beta=1 accumulate into the workspace) keeps the
-                # destination's earlier contents out of the product, which
-                # is then added to the block prefix exactly once.
                 tmp = tmpb[:bh * i1 * dk].view(bh, i1, dk)
                 torch.bmm(p.transpose(1, 2), g, out=tmp)
                 d_v[:, :i1].add_(tmp)
@@ -859,7 +843,6 @@ class Attention(nn.Module):
                 # mask (the (T+1)-wide bool form comes from the module cache).
                 att.masked_fill_(_causal_bool_mask(T, x.device),
                                  float("-inf"))
-                del q_, k_, nk, kv_k
                 p = _SoftmaxInPlace.apply(att)
                 if not need_stats:
                     stats = None
@@ -873,7 +856,6 @@ class Attention(nn.Module):
                 y4.addcmul_(p.view(B, h, T, T + 1)[..., :1],
                             self.null_v.view(1, h, 1, dk))
             else:
-                del q_, k_
                 mask = _causal_mask(T, x.device, x.dtype)
                 att = torch.baddbmm(mask, qb, kb.transpose(1, 2),
                                     beta=1.0, alpha=self.inv_scale)
@@ -899,8 +881,10 @@ class Attention(nn.Module):
             gate_val.sigmoid_()
         elif is_calib:
             log_len = math.log(max(T, 2))
+            # Fused: ent.mean(1) / log_len * (-calib_c * calib_scale) + gate(x) - calib_a * log_len
             conc = ent.mean(dim=1).div_(log_len).unsqueeze(-1)
-            gate_val = self.gate(x).sub_(self.calib_a * log_len)
+            gate_val = self.gate(x)
+            gate_val.sub_(self.calib_a * log_len)
             gate_val.addcmul_(conc, self.calib_c * self.calib_scale, value=-1.0)
             tau = F.softplus(self.calib_tau).add_(0.1)
             gate_val.div_(tau).sigmoid_()
