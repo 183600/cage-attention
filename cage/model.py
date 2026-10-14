@@ -103,6 +103,7 @@ class Cfg:
 
 
 class Norm(nn.Module):
+    __slots__ = ("ln",)
     def __init__(self, dim: int):
         super().__init__()
         self.ln = nn.LayerNorm(dim, elementwise_affine=True)
@@ -113,6 +114,7 @@ class Norm(nn.Module):
 
 class SeeDNorm(nn.Module):
     """Dynamic normalization: per-token scale predicted from hidden state."""
+    __slots__ = ("ln", "scale")
     def __init__(self, dim: int):
         super().__init__()
         self.ln = nn.LayerNorm(dim, elementwise_affine=False)
@@ -170,6 +172,8 @@ def _causal_bool_mask(T: int, device: torch.device) -> torch.Tensor:
     key = (T, device)
     m = _causal_bool_cache.get(key)
     if m is not None:
+        del _causal_bool_cache[key]
+        _causal_bool_cache[key] = m
         return m
     with torch.inference_mode(False):
         m = torch.ones(T, T + 1, dtype=torch.bool, device=device)
@@ -193,6 +197,8 @@ def _arange(n: int, device: torch.device) -> torch.Tensor:
     key = (n, device)
     a = _arange_cache.get(key)
     if a is not None:
+        del _arange_cache[key]
+        _arange_cache[key] = a
         return a
     with torch.inference_mode(False):
         a = torch.arange(n, device=device)
@@ -215,10 +221,8 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
     cols = _arange(T, pos.device)
     m = _get_scratch(("mask_rows", B, h, T), pos.device, dtype, B * h * T)
     m = m[:B * h * T].view(B, h, T)
-    cond = (cols.view(1, T) > pos.view(B, 1)).unsqueeze(1)
-    torch.where(cond.expand(B, h, T),
-                _neg_inf_scalar(pos.device, dtype),
-                _zero_scalar(pos.device, dtype), out=m)
+    m.zero_()
+    m.masked_fill_(cols.view(1, 1, T) > pos.view(B, 1, 1), float("-inf"))
     return m.view(B * h, 1, T)
 
 
@@ -260,7 +264,8 @@ class _RowEntropy(torch.autograd.Function):
         # the gradient must be a fresh tensor, per the exact D7 formula
         # (log(p)+1 on p > _EPS, else 0, times -grad_out)
         mask = p > ctx.eps
-        d = p.clamp_min(ctx.eps).log()
+        d = p.clamp_min(ctx.eps)
+        d.log_()
         d.add_(mask).mul_(mask).mul_(grad_out.unsqueeze(-1)).neg_()
         return d, None
 
@@ -299,6 +304,8 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
     entry = _scratch_cache.get(key)
     if (entry is not None and entry.numel() >= numel
             and entry.device == device and entry.dtype == dtype):
+        del _scratch_cache[key]
+        _scratch_cache[key] = entry
         return entry[:numel]
     nbytes = numel * dtype.itemsize
     if len(_scratch_cache) >= _SCRATCH_CACHE_MAX:
@@ -326,6 +333,8 @@ def _query_blocks(bh: int, T: int):
     key = (bh, T)
     blocks = _query_blocks_cache.get(key)
     if blocks is not None:
+        del _query_blocks_cache[key]
+        _query_blocks_cache[key] = blocks
         return blocks
     if T <= 32:
         blocks = ((0, T),)
@@ -513,7 +522,7 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
         # ``(p > _EPS) * (log(clamp_min(p, _EPS)) + 1)``: the selector zeroes
         # the sub-eps rows, applied as one select.
         logterm.add_(1.0)
-        torch.where(mask, logterm, _zero_scalar(logterm.device, logterm.dtype), out=logterm)
+        logterm.mul_(mask)
         d_p.addcmul_(logterm, grad_ent.unsqueeze(-1), value=-1.0)
     d_p.mul_(p)
     return d_p.addcmul_(p, d_p.sum(dim=-1, keepdim=True), value=-1.0)
@@ -684,6 +693,9 @@ class _NullAttn(torch.autograd.Function):
 
 
 class Attention(nn.Module):
+    __slots__ = ("cfg", "gate_kind", "h", "dk", "scale", "inv_scale",
+                 "qkv", "proj", "attn_dropout", "gate", "calib_a", "calib_c",
+                 "calib_tau", "calib_scale", "null_k", "null_v", "max_len")
     def __init__(self, cfg: Cfg):
         super().__init__()
         self.cfg = cfg
@@ -789,6 +801,7 @@ class Attention(nn.Module):
         qb = qkv[0].view(bh, T, dk)
         kb = qkv[1].view(bh, T, dk)
         vb = qkv[2].view(bh, T, dk)
+        del qkv
 
         ent = None
         if not dropping:
@@ -901,6 +914,7 @@ class _GeluLinear(nn.Linear):
 
 
 class Block(nn.Module):
+    __slots__ = ("cfg", "layer_idx", "post", "ln1", "ln2", "attn", "mlp", "ls1", "ls2")
     def __init__(self, cfg: Cfg, layer_idx: int):
         super().__init__()
         self.cfg = cfg
@@ -954,6 +968,7 @@ class Block(nn.Module):
 
 
 class CAGE(nn.Module):
+    __slots__ = ("cfg", "tok", "pos", "drop", "blocks", "ln_f", "head")
     def __init__(self, cfg: Cfg):
         super().__init__()
         self.cfg = cfg
