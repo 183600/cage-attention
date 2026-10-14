@@ -238,14 +238,10 @@ _QUERY_BLOCKS_CACHE_MAX = 512
 
 _scratch_cache: dict = {}
 _SCRATCH_CACHE_MAX = 128
-# The workspaces are sized by ``(batch, sequence)``, so a length sweep keeps
-# asking for new ones; the entry cap alone would let the retained bytes grow
-# with the number of shapes, which is what actually costs memory.  A byte
-# budget bounds the whole pool instead (a single workspace larger than the
-# budget is still served - the cap must never break a call).  The per-step
-# working set of one attention block (scores, entropy buffer, boolean mask,
-# score gradient) has to fit together, so the budget keeps all of them
-# resident instead of cycling them through the allocator.
+# Byte ceiling for the shared scratch pool: workspaces are keyed by
+# ``(batch, sequence)``, so a length sweep keeps producing new shapes.
+# A single workspace larger than the ceiling is still served - the ceiling
+# must never break a call.
 _SCRATCH_CACHE_BYTES = 128 << 20
 _scratch_bytes = 0
 
@@ -273,9 +269,6 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
         _scratch_cache.clear()
         _scratch_bytes = 0
     else:
-        # Replacing the entry for ``key`` (too small or wrong device/dtype)
-        # must drop its bytes first, otherwise _scratch_bytes double-counts
-        # the old buffer and the budget evicts too aggressively.
         old_entry = _scratch_cache.pop(key, None)
         if old_entry is not None:
             _scratch_bytes -= old_entry.numel() * old_entry.element_size()
@@ -492,7 +485,7 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     is what makes that ``log`` affordable, though: it hands the kernel only
     strictly positive inputs, and a vectorised ``log`` falls off its fast
     path element by element as soon as a lane holds a zero (masked causal
-    rows are ~half the block) - measured 3-20x slower without the clamp.
+    rows are ~half the block).
     """
     if grad_ent is not None:
         if buf is None:
