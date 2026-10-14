@@ -222,9 +222,6 @@ class _RowEntropy(torch.autograd.Function):
     def forward(ctx, p, eps: float):
         ctx.save_for_backward(p)
         ctx.eps = eps
-        # the clamp workspace is transient (the row sums escape, the buffer
-        # itself does not), so it comes from the shared scratch pool instead
-        # of being a fresh full-size allocation per call
         buf = _get_scratch(("rowent", *p.shape), p.device, p.dtype, p.numel())
         return _row_entropy(p, eps, buf=buf)
 
@@ -259,10 +256,6 @@ _QUERY_BLOCKS_CACHE_MAX = 512
 
 _scratch_cache: dict = {}
 _SCRATCH_CACHE_MAX = 128
-# Byte ceiling for the shared scratch pool: workspaces are keyed by
-# ``(batch, sequence)``, so a length sweep keeps producing new shapes.
-# A single workspace larger than the ceiling is still served - the ceiling
-# must never break a call.
 _SCRATCH_CACHE_BYTES = 128 << 20
 _scratch_bytes = 0
 
@@ -296,9 +289,6 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
             if _scratch_bytes < 0:
                 _scratch_bytes = 0
         if nbytes <= _SCRATCH_CACHE_BYTES:
-            # evict oldest entries one by one; clearing everything would drop the
-            # buffers the enclosing kernel is still iterating over, forcing a
-            # realloc of each on the next call.
             while _scratch_bytes + nbytes > _SCRATCH_CACHE_BYTES and _scratch_cache:
                 old = _scratch_cache.pop(next(iter(_scratch_cache)))
                 _scratch_bytes -= old.numel() * old.element_size()
@@ -371,9 +361,7 @@ class _CalibAttn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, scale: float, eps: float, need_ent: bool = True):
-        # an unused entropy output arrives as an undefined grad instead of a
-        # materialised zeros tensor, so the no-entropy consumers never pay
-        # for the calibrated backward branch
+        # unused outputs arrive as an undefined grad instead of zeros
         ctx.set_materialize_grads(False)
         bh, T = q.size(0), q.size(1)
         blocks = _query_blocks(bh, T)
@@ -425,25 +413,16 @@ class _CalibAttn(torch.autograd.Function):
             p = _softmax_inplace(torch.baddbmm(
                 mask, q, kt, beta=1.0, alpha=scale,
                 out=s[:bh * T * T].view(bh, T, T)))
-            # one scratch each for the log(p) term and the p > _EPS selector,
-            # exactly like the blocked path below - no per-call temporaries
             n = p.numel()
             gbuf = mbuf = None
             if grad_ent is not None:
                 gbuf = _get_scratch(("calib_f", bh, T), q.device, q.dtype, n)
                 mbuf = _get_scratch(("calib_bwd_mbuf", bh, T), q.device, torch.bool, n)
-            # the score gradient is consumed in place, so it lives in scratch
-            # instead of being allocated per call
             d_p = _get_scratch(("calib_dp", bh, T, rows0), q.device, q.dtype, n).view(bh, T, T)
             torch.bmm(grad_y, vt, out=d_p)
             d_s = _softmax_grad_from_p(d_p, p, grad_ent, buf=gbuf, mbuf=mbuf)
             d_v = q.new_empty(bh, T, v.size(-1))
             torch.bmm(p.transpose(1, 2), grad_y, out=d_v)
-            # ``baddbmm(..., beta=0, alpha=scale)`` is the same gemm as
-            # ``bmm(...).mul_(scale)`` with the scale folded into the epilogue
-            # (both round the accumulator once and then scale it), so the
-            # gradient stays bit-identical while the separate full-size
-            # multiply over the score gradient disappears.
             zero = _zero_scalar(d_s.device, d_s.dtype)
             d_q = q.new_empty(bh, T, q.size(-1))
             torch.baddbmm(zero, d_s, k, beta=0.0, alpha=scale, out=d_q)
@@ -452,13 +431,8 @@ class _CalibAttn(torch.autograd.Function):
                           out=d_k)
             return d_q, d_k, d_v, None, None, None
         d_q = torch.empty_like(q)
-        # block bi contributes to *every* key column < i1 of its own query
-        # rows, so each block writes a prefix of d_k / d_v whose length i1
-        # grows with the block index.  The tail of that prefix (columns
-        # i1_prev .. i1) has not been touched by any earlier block, so the
-        # buffers must start at zero and every block *adds* its own prefix;
-        # overwriting from the first block alone would leave the tails of
-        # the later (longer) prefixes holding undefined memory.
+        # each block writes a longer d_k / d_v prefix, so the buffers start
+        # at zero and every block adds its own prefix
         d_k = torch.zeros_like(k)
         d_v = torch.zeros_like(v)
         s = _get_scratch(("calib_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
@@ -479,13 +453,6 @@ class _CalibAttn(torch.autograd.Function):
             d_s = _softmax_grad_from_p(d_p, p, ge,
                                        buf=None if gbuf is None else gbuf[:n],
                                        mbuf=None if mbuf is None else mbuf[:n])
-            # The d_k / d_v prefixes start at zero, so each block's gemm can
-            # accumulate into them directly (``beta=1`` with ``self`` being the
-            # destination skips the copy and *is* the "+="), which retires the
-            # per-block staging buffer and the full-size add that followed it.
-            # The slice is bound once: ``baddbmm`` only skips the broadcast of
-            # ``self`` when it is handed the very same tensor object, so
-            # slicing twice would make it copy the block onto itself first.
             dv_blk = d_v[:, :i1]
             torch.baddbmm(dv_blk, p.transpose(1, 2), g, beta=1.0, out=dv_blk)
             dk_blk = d_k[:, :i1]
@@ -508,11 +475,7 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
 
     The surviving term is ``log(p) + 1`` on ``p > _EPS`` and ``0`` elsewhere;
     the sub-eps entries are dropped by the trailing select, so clamping ``p``
-    to ``_EPS`` in front of the ``log`` cannot change the result.  The clamp
-    is what makes that ``log`` affordable, though: it hands the kernel only
-    strictly positive inputs, and a vectorised ``log`` falls off its fast
-    path element by element as soon as a lane holds a zero (masked causal
-    rows are ~half the block).
+    to ``_EPS`` in front of the ``log`` cannot change the result.
     """
     if grad_ent is not None:
         if buf is None:
@@ -645,11 +608,8 @@ class _NullAttn(torch.autograd.Function):
         sbuf = _get_scratch(("null_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
         peb = _get_scratch(("null_bwd_peb", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
         eb = _get_scratch(("null_bwd_e", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
-        # The null-slot grads are per-head parameters replicated across the
-        # batch: every block contributes one (1 x r) @ (r x dk) product per
-        # (batch, head), whose batch sum is the gradient.  Accumulating the
-        # unsummed products into a (B*h, 1, dk) scratch (beta=1 gemm) retires
-        # the per-block (B, h, dk) temporary, squeeze and batch reduction.
+        # null-slot grads are per-head parameters replicated over the batch;
+        # accumulate each block's products and reduce over the batch after
         acc_k = _get_scratch(("null_bwd_ak", bh, dk), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         acc_v = _get_scratch(("null_bwd_av", bh, dk), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         for i0, i1 in blocks:
@@ -670,28 +630,17 @@ class _NullAttn(torch.autograd.Function):
             d_s = d_u.mul_(p).mul_(scale)
             d_s0 = gu0.mul_(p0).mul_(scale)
             if multi:
-                # beta=1 with ``self`` being the destination makes the gemm
-                # epilogue do the "+=" itself, so no staging buffer and no
-                # separate add over the prefix is needed; the slice is bound
-                # once because ``baddbmm`` only skips the broadcast of
-                # ``self`` when it is handed the very same tensor object
                 dv_blk = d_v[:, :i1]
                 torch.baddbmm(dv_blk, p.transpose(1, 2), g, beta=1.0, out=dv_blk)
                 dk_blk = d_k[:, :i1]
                 torch.baddbmm(dk_blk, d_s.transpose(1, 2), q_blk, beta=1.0,
                               out=dk_blk)
             else:
-                # single block: the results escape the loop, so make them
-                # the bmm destinations directly instead of staging into
-                # scratch and doing a second, identical bmm per key/value
                 d_v = q.new_empty(bh, i1, dk)
                 d_k = q.new_empty(bh, i1, dk)
                 torch.bmm(p.transpose(1, 2), g, out=d_v)
                 torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
             torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1]).addcmul_(d_s0, nkw)
-            # the null slot is a per-head parameter replicated across the
-            # batch: accumulate this block's unsummed (1 x r) @ (r x dk)
-            # products into the shared scratch, reduced once after the loop
             torch.baddbmm(acc_k, d_s0.transpose(-2, -1), q_blk, beta=1.0,
                           out=acc_k)
             torch.baddbmm(acc_v, p0.transpose(-2, -1), g, beta=1.0, out=acc_v)
@@ -806,8 +755,6 @@ class Attention(nn.Module):
         dropping = self.training and drop_p > 0.0
 
         qkv = self.qkv(x).view(B, T, 3, h, dk)
-        # Single permute+reshape replaces split/squeeze/transpose/reshape
-        # (B, T, 3, h, dk) -> (3, B, h, T, dk) -> split into 3 of (B, h, T, dk)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         qb = qkv[0].reshape(bh, T, dk)
         kb = qkv[1].reshape(bh, T, dk)
@@ -824,13 +771,8 @@ class Attention(nn.Module):
                 y = _NullAttn.apply(qb, kb, vb, self.null_k, self.null_v,
                                     self.inv_scale, B)
             else:
-                # none / query / calib run through the same kernel; the row
-                # entropy by-product is only materialised when the *calibrated
-                # gate* consumes it.  The diagnostics do not: they read the
-                # entropy of the queried rows, which ``_row_stats_at`` already
-                # re-scores, so asking the kernel for a full-sequence entropy
-                # there would run four extra passes over the whole
-                # probability matrix to produce rows nobody reads.
+                # none / query / calib share the same kernel; the row entropy
+                # by-product is materialised only for the calibrated gate
                 y, ent = _CalibAttn.apply(qb, kb, vb, self.inv_scale, _EPS,
                                           is_calib)
                 if ent is not None:
@@ -852,12 +794,8 @@ class Attention(nn.Module):
                 nk = self.null_k.view(1, h, 1, dk).expand(B, h, 1, dk)
                 kv_k = torch.cat([nk, k_], dim=2)
                 att = torch.matmul(q_, kv_k.transpose(-2, -1)).mul_(self.inv_scale)
-                # mask the real-key columns in place; an in-place add on the
-                # ``att[..., 1:]`` *view* would send autograd into its
-                # CopySlices fallback and clone the whole (B, h, T, T+1)
-                # score tensor.  Filling with -inf on the same cells and
-                # leaving the rest untouched is bit-identical to adding the
-                # additive 0/-inf mask.
+                # fill the real-key columns with -inf and leave the null
+                # column untouched; identical to adding the additive 0/-inf mask
                 att.masked_fill_(
                     torch.cat([att.new_zeros((T, 1), dtype=torch.bool),
                                mask.eq(float("-inf"))], dim=1),
@@ -896,24 +834,12 @@ class Attention(nn.Module):
                 y = y.transpose(1, 2).reshape(B, T, C)
 
         # ---- gating ----
-        # The first write to the gate's ``addmm`` output (the Linear carries a
-        # bias) must be out-of-place: an in-place op there makes autograd fall
-        # back to CopySlices, which clones the whole (B, T, C) gate tensor
-        # before the kernel runs - one extra read/write pass over the largest
-        # tensor in the block, per write.  Once the chain has left the addmm
-        # output, in-place ops whose gradient formulas never read the
-        # pre-write value (``addcmul_``, ``sigmoid_``) are safe again; ``div``
-        # and ``mul`` stay out-of-place because their derivatives need the
-        # operand (an in-place ``div_``/``mul_`` there has the same CopySlices
-        # fallback).
         gate_val = None
         if kind == "query":
             gate_val = torch.sigmoid(self.gate(x))
             y = y * gate_val
         elif is_calib:
             log_len = math.log(max(T, 2))
-            # div before unsqueeze: the unsqueeze result is a view, and an
-            # in-place ``div_`` on that view has the CopySlices fallback.
             conc = ent.mean(dim=1).div(log_len).unsqueeze(-1)
             gate_val = self.gate(x).sub(self.calib_a * log_len)
             gate_val.addcmul_(conc, self.calib_c * self.calib_scale, value=-1.0)
