@@ -139,7 +139,6 @@ def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tens
 _ARANGE_CACHE_MAX = 128
 _arange_cache: dict = {}
 
-
 def _arange(n: int, device: torch.device) -> torch.Tensor:
     """Read-only ``arange(n)`` shared across calls (index tensors only).
 
@@ -230,6 +229,13 @@ _QUERY_BLOCKS_CACHE_MAX = 512
 
 _scratch_cache: dict = {}
 _SCRATCH_CACHE_MAX = 128
+# The workspaces are sized by ``(batch, sequence)``, so a length sweep keeps
+# asking for new ones; the entry cap alone would let the retained bytes grow
+# with the number of shapes, which is what actually costs memory.  A byte
+# budget bounds the whole pool instead (a single workspace larger than the
+# budget is still served - the cap must never break a call).
+_SCRATCH_CACHE_BYTES = 64 << 20
+_scratch_bytes = 0
 
 
 def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: int) -> torch.Tensor:
@@ -242,15 +248,20 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
     autograd-tracked training step could then no longer write into it
     ("Inplace update to inference tensor outside InferenceMode").
     """
+    global _scratch_bytes
     entry = _scratch_cache.get(key)
     if (entry is not None and entry.numel() >= numel
             and entry.device == device and entry.dtype == dtype):
         return entry[:numel]
-    if len(_scratch_cache) >= _SCRATCH_CACHE_MAX:
+    nbytes = numel * dtype.itemsize
+    if len(_scratch_cache) >= _SCRATCH_CACHE_MAX or (
+            _scratch_bytes + nbytes > _SCRATCH_CACHE_BYTES and nbytes <= _SCRATCH_CACHE_BYTES):
         _scratch_cache.clear()
+        _scratch_bytes = 0
     with torch.inference_mode(False):
         buf = torch.empty(numel, device=device, dtype=dtype)
     _scratch_cache[key] = buf
+    _scratch_bytes += buf.numel() * buf.element_size()
     return buf[:numel]
 
 
@@ -324,7 +335,7 @@ class _CalibAttn(torch.autograd.Function):
             torch.bmm(p, v, out=y)
             if need_ent:
                 ent = q.new_empty(bh, T)
-                _row_entropy(p, eps, out=ent, buf=_get_scratch(("calib_fwd_ent", bh, T), q.device, q.dtype, bh * T * T))
+                _row_entropy(p, eps, out=ent, buf=_get_scratch(("calib_f", bh, T), q.device, q.dtype, bh * T * T))
             else:
                 ent = None
         else:
@@ -332,8 +343,8 @@ class _CalibAttn(torch.autograd.Function):
             ent = q.new_empty(bh, T) if need_ent else None
             dv = v.size(-1)
             rows0 = blocks[0][1] - blocks[0][0]
-            s = _get_scratch(("calib_fwd_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
-            ebuf = _get_scratch(("calib_fwd_ebuf", bh, T, rows0), q.device, q.dtype, bh * rows0 * T) if need_ent else None
+            s = _get_scratch(("calib_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
+            ebuf = _get_scratch(("calib_f", bh, T, rows0), q.device, q.dtype, bh * rows0 * T) if need_ent else None
             for i0, i1 in blocks:
                 r = i1 - i0
                 p = _softmax_inplace(torch.baddbmm(
@@ -365,13 +376,23 @@ class _CalibAttn(torch.autograd.Function):
             n = p.numel()
             gbuf = mbuf = None
             if grad_ent is not None:
-                gbuf = _get_scratch(("calib_bwd_gbuf", bh, T), q.device, q.dtype, n)
+                gbuf = _get_scratch(("calib_f", bh, T), q.device, q.dtype, n)
                 mbuf = _get_scratch(("calib_bwd_mbuf", bh, T), q.device, torch.bool, n)
             d_s = _softmax_grad_from_p(
                 torch.bmm(grad_y, vt), p, grad_ent, buf=gbuf, mbuf=mbuf)
-            d_v = torch.bmm(p.transpose(1, 2), grad_y)
-            d_q = torch.bmm(d_s, k).mul_(scale)
-            d_k = torch.bmm(d_s.transpose(1, 2), q).mul_(scale)
+            d_v = q.new_empty(bh, T, v.size(-1))
+            torch.bmm(p.transpose(1, 2), grad_y, out=d_v)
+            # ``baddbmm(..., beta=0, alpha=scale)`` is the same gemm as
+            # ``bmm(...).mul_(scale)`` with the scale folded into the epilogue
+            # (both round the accumulator once and then scale it), so the
+            # gradient stays bit-identical while the separate full-size
+            # multiply over the score gradient disappears.
+            zero = d_s.new_zeros(())
+            d_q = q.new_empty(bh, T, q.size(-1))
+            torch.baddbmm(zero, d_s, k, beta=0.0, alpha=scale, out=d_q)
+            d_k = k.new_empty(bh, T, k.size(-1))
+            torch.baddbmm(zero, d_s.transpose(1, 2), q, beta=0.0, alpha=scale,
+                          out=d_k)
             return d_q, d_k, d_v, None, None, None
         d_q = torch.empty_like(q)
         # block bi contributes to *every* key column < i1 of its own query
@@ -384,13 +405,10 @@ class _CalibAttn(torch.autograd.Function):
         d_k = torch.zeros_like(k)
         d_v = torch.zeros_like(v)
         rows0 = blocks[0][1] - blocks[0][0]
-        dk = q.size(-1)
-        dv = v.size(-1)
-        s = _get_scratch(("calib_bwd_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
-        gbuf = _get_scratch(("calib_bwd_gbuf", bh, T, rows0), q.device, q.dtype, bh * rows0 * T) if grad_ent is not None else None
+        s = _get_scratch(("calib_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
+        gbuf = _get_scratch(("calib_f", bh, T, rows0), q.device, q.dtype, bh * rows0 * T) if grad_ent is not None else None
         mbuf = _get_scratch(("calib_bwd_mbuf", bh, T, rows0), q.device, torch.bool, bh * rows0 * T) if grad_ent is not None else None
-        dvb = _get_scratch(("calib_bwd_dvb", bh, T, dv), q.device, q.dtype, bh * T * dv)
-        dkb = _get_scratch(("calib_bwd_dkb", bh, T, dk), q.device, q.dtype, bh * T * dk)
+        zero = q.new_zeros(())
         for i0, i1 in blocks:
             n = bh * (i1 - i0) * i1
             p = _softmax_inplace(torch.baddbmm(
@@ -402,14 +420,20 @@ class _CalibAttn(torch.autograd.Function):
             d_s = _softmax_grad_from_p(torch.bmm(g, vt[:, :, :i1]), p, ge,
                                        buf=None if gbuf is None else gbuf[:n],
                                        mbuf=None if mbuf is None else mbuf[:n])
-            r = i1 - i0
-            ov = dvb[:bh * i1 * dv].view(bh, i1, dv)
-            torch.bmm(p.transpose(1, 2), g, out=ov)
-            ok = dkb[:bh * i1 * dk].view(bh, i1, dk)
-            torch.bmm(d_s.transpose(1, 2), q[:, i0:i1], out=ok).mul_(scale)
-            torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1]).mul_(scale)
-            d_v[:, :i1].add_(ov)
-            d_k[:, :i1].add_(ok)
+            # The d_k / d_v prefixes start at zero, so each block's gemm can
+            # accumulate into them directly (``beta=1`` with ``self`` being the
+            # destination skips the copy and *is* the "+="), which retires the
+            # per-block staging buffer and the full-size add that followed it.
+            # The slice is bound once: ``baddbmm`` only skips the broadcast of
+            # ``self`` when it is handed the very same tensor object, so
+            # slicing twice would make it copy the block onto itself first.
+            dv_blk = d_v[:, :i1]
+            torch.baddbmm(dv_blk, p.transpose(1, 2), g, beta=1.0, out=dv_blk)
+            dk_blk = d_k[:, :i1]
+            torch.baddbmm(dk_blk, d_s.transpose(1, 2), q[:, i0:i1], beta=1.0,
+                          alpha=scale, out=dk_blk)
+            torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
+                          out=d_q[:, i0:i1])
         return d_q, d_k, d_v, None, None, None
 
 
@@ -425,8 +449,11 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
 
     The surviving term is ``log(p) + 1`` on ``p > _EPS`` and ``0`` elsewhere;
     the sub-eps entries are dropped by the trailing select, so clamping ``p``
-    to ``_EPS`` in front of the ``log`` cannot change the result - it only
-    keeps the sub-normal probabilities of a long causal row out of the log.
+    to ``_EPS`` in front of the ``log`` cannot change the result.  The clamp
+    is what makes that ``log`` affordable, though: it hands the kernel only
+    strictly positive inputs, and a vectorised ``log`` falls off its fast
+    path element by element as soon as a lane holds a zero (masked causal
+    rows are ~half the block) - measured 3-20x slower without the clamp.
     """
     if grad_ent is not None:
         if buf is None:
@@ -516,7 +543,7 @@ class _NullAttn(torch.autograd.Function):
         dv = v.size(-1)
         rows0 = blocks[0][1] - blocks[0][0]
         y = q.new_empty(bh, T, dv) if multi else None
-        sbuf = _get_scratch(("null_fwd_sbuf", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
+        sbuf = _get_scratch(("null_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
         for i0, i1 in blocks:
             p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, nkt, scale,
                                 sbuf)
@@ -548,22 +575,18 @@ class _NullAttn(torch.autograd.Function):
         nvw = _null_row(null_v, B)
         nkw = nkt.transpose(1, 2)
         multi = len(blocks) > 1
-        d_q = torch.empty_like(q) if multi else None
         # like _CalibAttn, every block contributes to all key columns < i1 of
         # its own query rows, so the d_k / d_v prefixes grow with the block
         # index and their tails have never been written by earlier blocks:
         # start from zeros and let each block add its own prefix
         d_k = torch.zeros_like(k) if multi else None
         d_v = torch.zeros_like(v) if multi else None
-        d_q = torch.empty_like(q) if multi else None
+        d_q = torch.empty_like(q)
         d_null_k = torch.zeros_like(null_k)
         d_null_v = torch.zeros_like(null_v)
         rows0 = blocks[0][1] - blocks[0][0]
-        sbuf = _get_scratch(("null_bwd_sbuf", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
+        sbuf = _get_scratch(("null_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
         peb = _get_scratch(("null_bwd_peb", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
-        if multi:
-            dvb = _get_scratch(("null_bwd_dvb", bh, T, dk), q.device, q.dtype, bh * T * dk)
-            dkb = _get_scratch(("null_bwd_dkb", bh, T, dk), q.device, q.dtype, bh * T * dk)
         for i0, i1 in blocks:
             # rebuild the joint weights of this block only
             q_blk = q[:, i0:i1]
@@ -579,30 +602,28 @@ class _NullAttn(torch.autograd.Function):
             dot = pe.sum(-1, keepdim=True).add_(p0 * gu0)
             d_u = e.sub_(dot)
             gu0.sub_(dot)
-            r = i1 - i0
+            d_s = d_u.mul_(p).mul_(scale)
+            d_s0 = gu0.mul_(p0).mul_(scale)
             if multi:
-                ov = dvb[:bh * i1 * dk].view(bh, i1, dk)
-                ok = dkb[:bh * i1 * dk].view(bh, i1, dk)
+                # beta=1 with ``self`` being the destination makes the gemm
+                # epilogue do the "+=" itself, so no staging buffer and no
+                # separate add over the prefix is needed; the slice is bound
+                # once because ``baddbmm`` only skips the broadcast of
+                # ``self`` when it is handed the very same tensor object
+                dv_blk = d_v[:, :i1]
+                torch.baddbmm(dv_blk, p.transpose(1, 2), g, beta=1.0, out=dv_blk)
+                dk_blk = d_k[:, :i1]
+                torch.baddbmm(dk_blk, d_s.transpose(1, 2), q_blk, beta=1.0,
+                              out=dk_blk)
             else:
                 # single block: the results escape the loop, so make them
                 # the bmm destinations directly instead of staging into
                 # scratch and doing a second, identical bmm per key/value
-                ov = q.new_empty(bh, i1, dk)
-                ok = q.new_empty(bh, i1, dk)
-                if d_q is None:
-                    d_q = torch.empty_like(q)
-            torch.bmm(p.transpose(1, 2), g, out=ov)
-            d_s = d_u.mul_(p).mul_(scale)
-            d_s0 = gu0.mul_(p0).mul_(scale)
+                d_v = q.new_empty(bh, i1, dk)
+                d_k = q.new_empty(bh, i1, dk)
+                torch.bmm(p.transpose(1, 2), g, out=d_v)
+                torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
             torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1]).addcmul_(d_s0, nkw)
-            torch.bmm(d_s.transpose(1, 2), q_blk, out=ok)
-            if multi:
-                d_v[:, :i1].add_(ov)
-                d_k[:, :i1].add_(ok)
-            else:
-                # single-block: the three results *are* the outputs, so
-                # return them straight (the buffers above never escape)
-                d_v, d_k = ov, ok
             # the null slot is a per-head parameter replicated across the batch
             q4 = q_blk.view(B, h, i1 - i0, dk)
             d_null_k.add_(torch.matmul(d_s0.view(B, h, -1, 1).transpose(-2, -1),
@@ -747,10 +768,14 @@ class Attention(nn.Module):
                                     self.inv_scale, B)
             else:
                 # none / query / calib run through the same kernel; the row
-                # entropy by-product is only materialised when something
-                # consumes it (calibrated gate or diagnostics).
+                # entropy by-product is only materialised when the *calibrated
+                # gate* consumes it.  The diagnostics do not: they read the
+                # entropy of the queried rows, which ``_row_stats_at`` already
+                # re-scores, so asking the kernel for a full-sequence entropy
+                # there would run four extra passes over the whole
+                # probability matrix to produce rows nobody reads.
                 y, ent = _CalibAttn.apply(qb, kb, vb, self.inv_scale, _EPS,
-                                          is_calib or need_stats)
+                                          is_calib)
                 if ent is not None:
                     ent = ent.view(B, h, T)
             y = y.view(B, h, T, dk).transpose(1, 2).reshape(B, T, C)
@@ -805,10 +830,17 @@ class Attention(nn.Module):
                 y = y.transpose(1, 2).reshape(B, T, C)
 
         # ---- gating ----
+        # Every write below is either in-place on a freshly allocated buffer
+        # whose gradient formulas never read the pre-write value (``sub_``,
+        # ``addcmul_``, ``sigmoid_``), or out-of-place where the derivative
+        # *does* need the operand (``div`` and ``mul``): an in-place ``div_``/
+        # ``mul_`` there makes autograd fall back to CopySlices, which clones
+        # the whole (B, T, C) tensor before the kernel runs - one extra
+        # read/write pass over the largest tensor in the block, per write.
         gate_val = None
         if kind == "query":
             gate_val = self.gate(x).sigmoid_()
-            y.mul_(gate_val)
+            y = y * gate_val
         elif is_calib:
             log_len = math.log(max(T, 2))
             conc = ent.mean(dim=1).unsqueeze(-1).div_(log_len)
@@ -816,8 +848,8 @@ class Attention(nn.Module):
             gate_val.sub_(self.calib_a * log_len)
             gate_val.addcmul_(conc, self.calib_c * self.calib_scale, value=-1.0)
             tau = F.softplus(self.calib_tau).add_(0.1)
-            gate_val.div_(tau).sigmoid_()
-            y.mul_(gate_val)
+            gate_val = gate_val.div(tau).sigmoid_()
+            y = y * gate_val
 
         out = self.proj(y)
         if not need_stats:
