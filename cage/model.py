@@ -206,7 +206,11 @@ class _RowEntropy(torch.autograd.Function):
     def forward(ctx, p, eps: float):
         ctx.save_for_backward(p)
         ctx.eps = eps
-        return _row_entropy(p, eps)
+        # the clamp workspace is transient (the row sums escape, the buffer
+        # itself does not), so it comes from the shared scratch pool instead
+        # of being a fresh full-size allocation per call
+        buf = _get_scratch(("rowent", *p.shape), p.device, p.dtype, p.numel())
+        return _row_entropy(p, eps, buf=buf)
 
     @staticmethod
     def backward(ctx, grad_out):
@@ -348,6 +352,10 @@ class _CalibAttn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, scale: float, eps: float, need_ent: bool = True):
+        # an unused entropy output arrives as an undefined grad instead of a
+        # materialised zeros tensor, so the no-entropy consumers never pay
+        # for the calibrated backward branch
+        ctx.set_materialize_grads(False)
         bh, T = q.size(0), q.size(1)
         blocks = _query_blocks(bh, T)
         mask = _causal_mask(T, q.device, q.dtype)
@@ -614,12 +622,17 @@ class _NullAttn(torch.autograd.Function):
         d_k = torch.zeros_like(k) if multi else None
         d_v = torch.zeros_like(v) if multi else None
         d_q = torch.empty_like(q)
-        d_null_k = torch.zeros_like(null_k)
-        d_null_v = torch.zeros_like(null_v)
         rows0 = blocks[0][1] - blocks[0][0]
         sbuf = _get_scratch(("null_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
         peb = _get_scratch(("null_bwd_peb", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
         eb = _get_scratch(("null_bwd_e", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
+        # The null-slot grads are per-head parameters replicated across the
+        # batch: every block contributes one (1 x r) @ (r x dk) product per
+        # (batch, head), whose batch sum is the gradient.  Accumulating the
+        # unsummed products into a (B*h, 1, dk) scratch (beta=1 gemm) retires
+        # the per-block (B, h, dk) temporary, squeeze and batch reduction.
+        acc_k = _get_scratch(("null_bwd_ak", bh, dk), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
+        acc_v = _get_scratch(("null_bwd_av", bh, dk), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         for i0, i1 in blocks:
             # rebuild the joint weights of this block only
             q_blk = q[:, i0:i1]
@@ -632,7 +645,7 @@ class _NullAttn(torch.autograd.Function):
             gu0 = torch.bmm(g, nvw.mT)
             pe = peb[:n].view(bh, i1 - i0, i1)
             torch.mul(p, e, out=pe)
-            dot = pe.sum(-1, keepdim=True).add_(p0 * gu0)
+            dot = pe.sum(-1, keepdim=True).addcmul_(p0, gu0)
             d_u = e.sub_(dot)
             gu0.sub_(dot)
             d_s = d_u.mul_(p).mul_(scale)
@@ -657,12 +670,14 @@ class _NullAttn(torch.autograd.Function):
                 torch.bmm(p.transpose(1, 2), g, out=d_v)
                 torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
             torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1]).addcmul_(d_s0, nkw)
-            # the null slot is a per-head parameter replicated across the batch
-            q4 = q_blk.view(B, h, i1 - i0, dk)
-            d_null_k.add_(torch.matmul(d_s0.view(B, h, -1, 1).transpose(-2, -1),
-                                       q4).squeeze(-2).sum(0))
-            d_null_v.add_(torch.matmul(p0.view(B, h, -1, 1).transpose(-2, -1),
-                                       g.view(B, h, -1, dk)).squeeze(-2).sum(0))
+            # the null slot is a per-head parameter replicated across the
+            # batch: accumulate this block's unsummed (1 x r) @ (r x dk)
+            # products into the shared scratch, reduced once after the loop
+            torch.baddbmm(acc_k, d_s0.transpose(-2, -1), q_blk, beta=1.0,
+                          out=acc_k)
+            torch.baddbmm(acc_v, p0.transpose(-2, -1), g, beta=1.0, out=acc_v)
+        d_null_k = acc_k.view(B, h, dk).sum(0)
+        d_null_v = acc_v.view(B, h, dk).sum(0)
         return d_q, d_k, d_v, d_null_k, d_null_v, None, None
 
 
@@ -1026,8 +1041,7 @@ class CAGE(nn.Module):
         if targets is not None:
             flat_t = targets.reshape(-1)
             if sup_pos is not None:
-                rows = torch.arange(targets.size(0), device=targets.device,
-                                    dtype=torch.long)
+                rows = _arange(targets.size(0), targets.device)
                 sup = rows.mul(targets.size(1)).add_(sup_pos)
             else:
                 sup = (flat_t != -1).nonzero(as_tuple=True)[0]
