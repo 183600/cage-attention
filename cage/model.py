@@ -32,6 +32,7 @@ Normalization schemes
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
 
 import torch
@@ -130,8 +131,10 @@ def make_norm(kind: str, dim: int) -> nn.Module:
 
 _MAX_MASK_CACHE = 64
 
-_causal_mask_cache = {}
-_causal_mask_order = []
+# OrderedDict: the recency order lives in the container itself, so a hit is an
+# O(1) move_to_end instead of a linear scan over a parallel list.  The mask is
+# fetched once per layer per call, i.e. tens of thousands of times per run.
+_causal_mask_cache: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
 
 
 def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -146,21 +149,18 @@ def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tens
     key = (T, device, dtype)
     m = _causal_mask_cache.get(key)
     if m is not None:
-        _causal_mask_order.remove(key)
-        _causal_mask_order.append(key)
+        _causal_mask_cache.move_to_end(key)
         return m
-    if len(_causal_mask_cache) >= _MAX_MASK_CACHE:
-        evict_key = _causal_mask_order.pop(0)
-        _causal_mask_cache.pop(evict_key)
     with torch.inference_mode(False):
         m = torch.full((T, T), float("-inf"), device=device, dtype=dtype)
         m.triu_(1)
     _causal_mask_cache[key] = m
-    _causal_mask_order.append(key)
+    if len(_causal_mask_cache) > _MAX_MASK_CACHE:
+        _causal_mask_cache.popitem(last=False)
     return m
 
 
-_causal_bool_cache = {}
+_causal_bool_cache: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
 _MAX_BOOL_CACHE = 64
 
 
@@ -168,42 +168,40 @@ def _causal_bool_mask(T: int, device: torch.device) -> torch.Tensor:
     """Cached ``(T, T + 1)`` bool mask for the null-slot dropout path.
 
     Column 0 (the null slot) is never masked; the remaining ``T`` columns are
-    ``True`` strictly above the diagonal.  FIFO eviction (dict insertion
-    order).
+    ``True`` strictly above the diagonal.  FIFO eviction.
     """
     key = (T, device)
     m = _causal_bool_cache.get(key)
     if m is not None:
         return m
-    if len(_causal_bool_cache) >= _MAX_BOOL_CACHE:
-        _causal_bool_cache.pop(next(iter(_causal_bool_cache)))
     with torch.inference_mode(False):
         m = torch.ones(T, T + 1, dtype=torch.bool, device=device)
         m[:, 0] = False
         m[:, 1:].triu_(1)
     _causal_bool_cache[key] = m
+    if len(_causal_bool_cache) > _MAX_BOOL_CACHE:
+        _causal_bool_cache.popitem(last=False)
     return m
 
 
 _ARANGE_CACHE_MAX = 128
-_arange_cache: dict = {}
+_arange_cache: "OrderedDict[tuple, torch.Tensor]" = OrderedDict()
 
 def _arange(n: int, device: torch.device) -> torch.Tensor:
     """Read-only ``arange(n)`` shared across calls (index tensors only).
 
     Allocated with inference mode *off* so one cached entry serves every
-    context, including the training-mode forward.  Dict insertion order
-    gives FIFO eviction.
+    context, including the training-mode forward.  FIFO eviction.
     """
     key = (n, device)
     a = _arange_cache.get(key)
     if a is not None:
         return a
-    if len(_arange_cache) >= _ARANGE_CACHE_MAX:
-        _arange_cache.pop(next(iter(_arange_cache)))
     with torch.inference_mode(False):
         a = torch.arange(n, device=device)
     _arange_cache[key] = a
+    if len(_arange_cache) > _ARANGE_CACHE_MAX:
+        _arange_cache.popitem(last=False)
     return a
 
 
@@ -406,7 +404,9 @@ class _CalibAttn(torch.autograd.Function):
             torch.bmm(p, v, out=y)
             if need_ent:
                 ent = q.new_empty(bh, T)
-                _row_entropy(p, eps, out=ent, buf=_get_scratch(("calib_f", bh, T), q.device, q.dtype, bh * T * T))
+                _row_entropy(p, eps, out=ent,
+                             buf=_get_scratch(("calib_f", bh, T, rows0),
+                                              q.device, q.dtype, bh * T * T))
             else:
                 ent = None
         else:
@@ -445,8 +445,11 @@ class _CalibAttn(torch.autograd.Function):
             n = p.numel()
             gbuf = mbuf = None
             if grad_ent is not None:
-                gbuf = _get_scratch(("calib_f", bh, T), q.device, q.dtype, n)
-                mbuf = _get_scratch(("calib_bwd_mbuf", bh, T), q.device, torch.bool, n)
+                # same buffer the forward used for the entropy clamp: that one
+                # is dead by now, and the backward needs exactly the same
+                # (bh, rows, T) float workspace for the log term
+                gbuf = _get_scratch(("calib_f", bh, T, rows0), q.device, q.dtype, n)
+                mbuf = _get_scratch(("calib_bwd_mbuf", bh, T, rows0), q.device, torch.bool, n)
             d_p = _get_scratch(("calib_dp", bh, T, rows0), q.device, q.dtype, n).view(bh, T, T)
             torch.bmm(grad_y, vt, out=d_p)
             d_s = _softmax_grad_from_p(d_p, p, grad_ent, buf=gbuf, mbuf=mbuf)
@@ -575,11 +578,11 @@ def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
     torch.maximum(m, s0mul, out=m)
     s.sub_(m).exp_()
     s0mul.sub_(m).exp_()
-    d = _get_scratch(("null_d", n, r), q_blk.device, q_blk.dtype, n * r)
-    d = d[:n * r].view(n, r, 1)
-    torch.sum(s, dim=-1, keepdim=True, out=d).add_(s0mul)
-    s.div_(d)
-    s0mul.div_(d)
+    # the row maximum is dead once both exponentiations have consumed it, so
+    # the denominator is reduced into the same buffer instead of a third one
+    torch.sum(s, dim=-1, keepdim=True, out=m).add_(s0mul)
+    s.div_(m)
+    s0mul.div_(m)
     return s, s0mul
 
 
@@ -797,11 +800,15 @@ class Attention(nn.Module):
         drop_p = self.cfg.dropout
         dropping = self.training and drop_p > 0.0
 
-        qkv = self.qkv(x).view(B, T, 3, h, dk)
-        qkv = qkv.permute(2, 0, 3, 1, 4)
-        qb = qkv[0].reshape(bh, T, dk)
-        kb = qkv[1].reshape(bh, T, dk)
-        vb = qkv[2].reshape(bh, T, dk)
+        # One permute+copy for the whole (3, B, H, T, dk) block: the three
+        # per-tensor reshapes it replaces each cloned a permuted view, so the
+        # head-major q/k/v the kernel needs cost one copy plus three free views
+        # here, and the un-permuted qkv buffer is released right away instead of
+        # staying alive behind the view for the rest of the layer.
+        qkv = self.qkv(x).view(B, T, 3, h, dk).permute(2, 0, 3, 1, 4).contiguous()
+        qb = qkv[0].view(bh, T, dk)
+        kb = qkv[1].view(bh, T, dk)
+        vb = qkv[2].view(bh, T, dk)
 
         ent = None
         if not dropping:
@@ -1019,8 +1026,10 @@ class CAGE(nn.Module):
         if targets is not None:
             flat_t = targets.reshape(-1)
             if sup_pos is not None:
-                rows = _arange(targets.size(0), targets.device).clone()
-                sup = rows.mul(targets.size(1)).add_(sup_pos)
+                # `mul` already yields a private tensor, so the shared arange
+                # does not have to be cloned before it is scaled in place
+                sup = _arange(targets.size(0), targets.device).mul(
+                    targets.size(1)).add_(sup_pos)
             else:
                 sup = (flat_t != -1).nonzero(as_tuple=True)[0]
                 if sup.numel() == flat_t.numel():
