@@ -54,6 +54,18 @@ def _zero_scalar(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     return z
 
 
+_neg_inf_scalar_cache: dict = {}
+
+def _neg_inf_scalar(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Cached ``-inf`` scalar for the given device and dtype."""
+    key = (device, dtype)
+    z = _neg_inf_scalar_cache.get(key)
+    if z is None:
+        z = torch.full((), float("-inf"), device=device, dtype=dtype)
+        _neg_inf_scalar_cache[key] = z
+    return z
+
+
 GATES = ("none", "query", "calib", "null")
 NORMS = ("pre", "post", "mix", "seednorm")
 
@@ -148,29 +160,50 @@ def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tens
     return m
 
 
+_causal_bool_cache = {}
+_MAX_BOOL_CACHE = 64
+
+
+def _causal_bool_mask(T: int, device: torch.device) -> torch.Tensor:
+    """Cached ``(T, T + 1)`` bool mask for the null-slot dropout path.
+
+    Column 0 (the null slot) is never masked; the remaining ``T`` columns are
+    ``True`` strictly above the diagonal.  FIFO eviction (dict insertion
+    order).
+    """
+    key = (T, device)
+    m = _causal_bool_cache.get(key)
+    if m is not None:
+        return m
+    if len(_causal_bool_cache) >= _MAX_BOOL_CACHE:
+        _causal_bool_cache.pop(next(iter(_causal_bool_cache)))
+    with torch.inference_mode(False):
+        m = torch.ones(T, T + 1, dtype=torch.bool, device=device)
+        m[:, 0] = False
+        m[:, 1:].triu_(1)
+    _causal_bool_cache[key] = m
+    return m
+
+
 _ARANGE_CACHE_MAX = 128
 _arange_cache: dict = {}
-_arange_order: list = []
 
 def _arange(n: int, device: torch.device) -> torch.Tensor:
     """Read-only ``arange(n)`` shared across calls (index tensors only).
 
     Allocated with inference mode *off* so one cached entry serves every
-    context, including the training-mode forward. Uses LRU eviction.
+    context, including the training-mode forward.  Dict insertion order
+    gives FIFO eviction.
     """
     key = (n, device)
     a = _arange_cache.get(key)
     if a is not None:
-        _arange_order.remove(key)
-        _arange_order.append(key)
         return a
     if len(_arange_cache) >= _ARANGE_CACHE_MAX:
-        evict_key = _arange_order.pop(0)
-        _arange_cache.pop(evict_key)
+        _arange_cache.pop(next(iter(_arange_cache)))
     with torch.inference_mode(False):
         a = torch.arange(n, device=device)
     _arange_cache[key] = a
-    _arange_order.append(key)
     return a
 
 
@@ -187,9 +220,10 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
     cols = _arange(T, pos.device)
     m = _get_scratch(("mask_rows", B, h, T), pos.device, dtype, B * h * T)
     m = m[:B * h * T].view(B, h, T)
-    m.zero_()
-    m.masked_fill_(
-        (cols.view(1, T) > pos.view(B, 1)).unsqueeze(1), float("-inf"))
+    cond = (cols.view(1, T) > pos.view(B, 1)).unsqueeze(1)
+    torch.where(cond.expand(B, h, T),
+                _neg_inf_scalar(pos.device, dtype),
+                _zero_scalar(pos.device, dtype), out=m)
     return m.view(B * h, 1, T)
 
 
@@ -250,7 +284,6 @@ def _pick_tokens(x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
 
 
 _query_blocks_cache: dict = {}
-_query_blocks_order: list = []
 _QUERY_BLOCKS_CACHE_MAX = 512
 
 
@@ -269,14 +302,14 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
     stays an inference tensor for the rest of the process - a later
     autograd-tracked training step could then no longer write into it
     ("Inplace update to inference tensor outside InferenceMode").
+
+    Hits skip the eviction-order bookkeeping (dict insertion order gives
+    FIFO, which is enough for the near-static shape set of a run).
     """
     global _scratch_bytes
     entry = _scratch_cache.get(key)
     if (entry is not None and entry.numel() >= numel
             and entry.device == device and entry.dtype == dtype):
-        # move to the back of the eviction order (dicts keep insertion order)
-        del _scratch_cache[key]
-        _scratch_cache[key] = entry
         return entry[:numel]
     nbytes = numel * dtype.itemsize
     if len(_scratch_cache) >= _SCRATCH_CACHE_MAX:
@@ -301,11 +334,9 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
 
 def _query_blocks(bh: int, T: int):
     """``[(start, stop), ...]`` query blocks for a ``bh``-fold batch of ``T``."""
-    key = bh * T
+    key = (bh, T)
     blocks = _query_blocks_cache.get(key)
     if blocks is not None:
-        _query_blocks_order.remove(key)
-        _query_blocks_order.append(key)
         return blocks
     if T <= 32:
         blocks = ((0, T),)
@@ -316,10 +347,8 @@ def _query_blocks(bh: int, T: int):
         rows = min(T, max_rows)
         blocks = tuple((i, min(i + rows, T)) for i in range(0, T, rows))
     if len(_query_blocks_cache) >= _QUERY_BLOCKS_CACHE_MAX:
-        evict_key = _query_blocks_order.pop(0)
-        _query_blocks_cache.pop(evict_key)
+        _query_blocks_cache.pop(next(iter(_query_blocks_cache)))
     _query_blocks_cache[key] = blocks
-    _query_blocks_order.append(key)
     return blocks
 
 
@@ -512,33 +541,46 @@ def _null_row(x: torch.Tensor, B: int) -> torch.Tensor:
 
 
 def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
-                mask: torch.Tensor, nkt: torch.Tensor, scale: float,
-                sbuf: torch.Tensor | None = None):
+                mask: torch.Tensor, null_k: torch.Tensor, B: int, h: int,
+                scale: float, sbuf: torch.Tensor | None = None):
     """Joint weights of the causally visible tokens and of the null slot for
     the query block ``[i0, i1)``.
 
-    The null score is the rank-1 term ``q . null_k``, so the score matrix
-    keeps the width of the real (causally masked) part.  Both are shifted by
-    the joint row maximum before the exp, which makes the pair ``(p, p0)`` an
-    ordinary softmax over the ``i1 + 1`` columns the null slot adds to the
-    block.  ``sbuf`` optionally supplies the flat score workspace, shared by
-    the blocked loops.
+    The null score is the rank-1 term ``q . null_k`` (batched via 4-D
+    broadcast against the ``(h, d)`` parameter, so the ``(B*h, d, 1)``
+    replica is never materialised), so the score matrix keeps the width of
+    the real (causally masked) part.  Both are shifted by the joint row
+    maximum before the exp, which makes the pair ``(p, p0)`` an ordinary
+    softmax over the ``i1 + 1`` columns the null slot adds to the block.
+    ``sbuf`` optionally supplies the flat score workspace, shared by the
+    blocked loops; the shift/normaliser scalars come from scratch too.
     """
+    n, r = q_blk.size(0), q_blk.size(1)
     if sbuf is None:
         s = torch.baddbmm(mask[i0:i1, :i1], q_blk, kt[:, :, :i1],
                           beta=1.0, alpha=scale)
     else:
-        n, r = q_blk.size(0), q_blk.size(1)
         s = sbuf[:n * r * i1].view(n, r, i1)
         torch.baddbmm(mask[i0:i1, :i1], q_blk, kt[:, :, :i1],
                       beta=1.0, alpha=scale, out=s)
-    s0 = torch.bmm(q_blk, nkt).mul_(scale)
-    m = s.amax(dim=-1, keepdim=True)
-    torch.maximum(m, s0, out=m)
+    s0 = _get_scratch(("null_s0", n, r), q_blk.device, q_blk.dtype, n * r)
+    s0 = s0[:n * r]
+    torch.matmul(q_blk.view(B, h, r, -1), null_k.view(h, -1, 1),
+                 out=s0.view(B, h, r, 1))
+    s0mul = s0.view(n, r, 1)
+    s0mul.mul_(scale)
+    m = _get_scratch(("null_m", n, r), q_blk.device, q_blk.dtype, n * r)
+    m = m[:n * r].view(n, r, 1)
+    torch.amax(s, dim=-1, keepdim=True, out=m)
+    torch.maximum(m, s0mul, out=m)
     s.sub_(m).exp_()
-    e0 = s0.sub_(m).exp_()
-    d = s.sum(dim=-1, keepdim=True).add_(e0)
-    return s.div_(d), e0.div_(d)
+    s0mul.sub_(m).exp_()
+    d = _get_scratch(("null_d", n, r), q_blk.device, q_blk.dtype, n * r)
+    d = d[:n * r].view(n, r, 1)
+    torch.sum(s, dim=-1, keepdim=True, out=d).add_(s0mul)
+    s.div_(d)
+    s0mul.div_(d)
+    return s, s0mul
 
 
 class _NullAttn(torch.autograd.Function):
@@ -559,24 +601,18 @@ class _NullAttn(torch.autograd.Function):
         blocks = _query_blocks(bh, T)
         mask = _causal_mask(T, q.device, q.dtype)
         kt = k.transpose(1, 2)
-        nkt = _null_col(null_k, B)
-        nvw = _null_row(null_v, B)
-        multi = len(blocks) > 1
         dv = v.size(-1)
         rows0 = blocks[0][1] - blocks[0][0]
-        y = q.new_empty(bh, T, dv) if multi else None
+        y = q.new_empty(bh, T, dv)
+        y4 = y.view(B, h, T, dv)
+        nv4 = null_v.view(1, h, 1, dv)
         sbuf = _get_scratch(("null_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
         for i0, i1 in blocks:
-            p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, nkt, scale,
-                                sbuf)
-            if multi:
-                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
-                y[:, i0:i1].addcmul_(p0, nvw)
-            else:
-                if y is None:
-                    y = q.new_empty(bh, T, dv)
-                torch.bmm(p, v[:, :i1], out=y)
-                y.addcmul_(p0, nvw)
+            r = i1 - i0
+            p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, null_k, B, h,
+                                scale, sbuf)
+            torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
+            y4[:, :, i0:i1].addcmul_(p0.view(B, h, r, 1), nv4)
         ctx.save_for_backward(q, k, v, null_k, null_v)
         ctx.scale = scale
         ctx.shape = (B, h)
@@ -593,9 +629,6 @@ class _NullAttn(torch.autograd.Function):
         mask = _causal_mask(T, q.device, q.dtype)
         kt = k.transpose(1, 2)
         vt = v.transpose(1, 2)
-        nkt = _null_col(null_k, B)
-        nvw = _null_row(null_v, B)
-        nkw = nkt.transpose(1, 2)
         multi = len(blocks) > 1
         # like _CalibAttn, every block contributes to all key columns < i1 of
         # its own query rows, so the d_k / d_v prefixes grow with the block
@@ -604,10 +637,15 @@ class _NullAttn(torch.autograd.Function):
         d_k = torch.zeros_like(k) if multi else None
         d_v = torch.zeros_like(v) if multi else None
         d_q = torch.empty_like(q)
+        d_q4 = d_q.view(B, h, T, dk)
+        nk4 = null_k.view(1, h, 1, dk)
+        nv4t = null_v.view(1, h, dk, 1)
         rows0 = blocks[0][1] - blocks[0][0]
         sbuf = _get_scratch(("null_s", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
         peb = _get_scratch(("null_bwd_peb", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
         eb = _get_scratch(("null_bwd_e", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
+        gub = _get_scratch(("null_bwd_gu", bh, T, rows0), q.device, q.dtype, bh * rows0)
+        dotb = _get_scratch(("null_bwd_dot", bh, T, rows0), q.device, q.dtype, bh * rows0)
         # null-slot grads are per-head parameters replicated over the batch;
         # accumulate each block's products and reduce over the batch after
         acc_k = _get_scratch(("null_bwd_ak", bh, dk), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
@@ -616,15 +654,19 @@ class _NullAttn(torch.autograd.Function):
             # rebuild the joint weights of this block only
             q_blk = q[:, i0:i1]
             g = grad_y[:, i0:i1]
-            p, p0 = _null_probs(q_blk, kt, i0, i1, mask, nkt, scale, sbuf)
+            r = i1 - i0
+            p, p0 = _null_probs(q_blk, kt, i0, i1, mask, null_k, B, h, scale, sbuf)
             # sum_joint p * d_p = <grad_out, p @ v> = <grad_out, y>: the
             # denominator term follows from the rebuilt weights alone
-            n = bh * (i1 - i0) * i1
-            e = torch.bmm(g, vt[:, :, :i1], out=eb[:n].view(bh, i1 - i0, i1))
-            gu0 = torch.bmm(g, nvw.mT)
-            pe = peb[:n].view(bh, i1 - i0, i1)
+            n = bh * r * i1
+            e = torch.bmm(g, vt[:, :, :i1], out=eb[:n].view(bh, r, i1))
+            gu0 = gub[:bh * r].view(bh, r, 1)
+            torch.matmul(g.view(B, h, r, -1), nv4t, out=gu0.view(B, h, r, 1))
+            pe = peb[:n].view(bh, r, i1)
             torch.mul(p, e, out=pe)
-            dot = pe.sum(-1, keepdim=True).addcmul_(p0, gu0)
+            dot = dotb[:bh * r].view(bh, r, 1)
+            torch.sum(pe, dim=-1, keepdim=True, out=dot)
+            dot.addcmul_(p0, gu0)
             d_u = e.sub_(dot)
             gu0.sub_(dot)
             d_s = d_u.mul_(p).mul_(scale)
@@ -640,7 +682,8 @@ class _NullAttn(torch.autograd.Function):
                 d_k = q.new_empty(bh, i1, dk)
                 torch.bmm(p.transpose(1, 2), g, out=d_v)
                 torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
-            torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1]).addcmul_(d_s0, nkw)
+            torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1])
+            d_q4[:, :, i0:i1].addcmul_(d_s0.view(B, h, r, 1), nk4)
             torch.baddbmm(acc_k, d_s0.transpose(-2, -1), q_blk, beta=1.0,
                           out=acc_k)
             torch.baddbmm(acc_v, p0.transpose(-2, -1), g, beta=1.0, out=acc_v)
@@ -789,17 +832,15 @@ class Attention(nn.Module):
             # head-major q/k/v views are the ones the gather above produced.
             q_ = qb.view(B, h, T, dk)
             k_ = kb.view(B, h, T, dk)
-            mask = _causal_mask(T, x.device, x.dtype)
             if is_null:
                 nk = self.null_k.view(1, h, 1, dk).expand(B, h, 1, dk)
                 kv_k = torch.cat([nk, k_], dim=2)
                 att = torch.matmul(q_, kv_k.transpose(-2, -1)).mul_(self.inv_scale)
                 # fill the real-key columns with -inf and leave the null
-                # column untouched; identical to adding the additive 0/-inf mask
-                att.masked_fill_(
-                    torch.cat([att.new_zeros((T, 1), dtype=torch.bool),
-                               mask.eq(float("-inf"))], dim=1),
-                    float("-inf"))
+                # column untouched; identical to adding the additive 0/-inf
+                # mask (the (T+1)-wide bool form comes from the module cache).
+                att.masked_fill_(_causal_bool_mask(T, x.device),
+                                 float("-inf"))
                 del q_, k_, nk, kv_k
                 p = _SoftmaxInPlace.apply(att)
                 if not need_stats:
@@ -815,6 +856,7 @@ class Attention(nn.Module):
                 y = y.view(B, h, T, dk).transpose(1, 2).reshape(B, T, C)
             else:
                 del q_, k_
+                mask = _causal_mask(T, x.device, x.dtype)
                 att = torch.baddbmm(mask, qb, kb.transpose(1, 2),
                                     beta=1.0, alpha=self.inv_scale)
                 p = _SoftmaxInPlace.apply(att)
@@ -836,16 +878,17 @@ class Attention(nn.Module):
         # ---- gating ----
         gate_val = None
         if kind == "query":
-            gate_val = torch.sigmoid(self.gate(x))
-            y = y * gate_val
+            gate_val = self.gate(x)
+            gate_val.sigmoid_()
+            y.mul_(gate_val)
         elif is_calib:
             log_len = math.log(max(T, 2))
-            conc = ent.mean(dim=1).div(log_len).unsqueeze(-1)
-            gate_val = self.gate(x).sub(self.calib_a * log_len)
+            conc = ent.mean(dim=1).div_(log_len).unsqueeze(-1)
+            gate_val = self.gate(x).sub_(self.calib_a * log_len)
             gate_val.addcmul_(conc, self.calib_c * self.calib_scale, value=-1.0)
             tau = F.softplus(self.calib_tau).add_(0.1)
-            gate_val = gate_val.div(tau).sigmoid_()
-            y = y * gate_val
+            gate_val.div_(tau).sigmoid_()
+            y.mul_(gate_val)
 
         out = self.proj(y)
         if not need_stats:
