@@ -42,6 +42,18 @@ import torch.utils.checkpoint
 
 _EPS = 1e-9
 
+_zero_scalar_cache: dict = {}
+
+def _zero_scalar(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """Cached zero scalar for the given device and dtype."""
+    key = (device, dtype)
+    z = _zero_scalar_cache.get(key)
+    if z is None:
+        z = torch.zeros((), device=device, dtype=dtype)
+        _zero_scalar_cache[key] = z
+    return z
+
+
 GATES = ("none", "query", "calib", "null")
 NORMS = ("pre", "post", "mix", "seednorm")
 
@@ -138,21 +150,27 @@ def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tens
 
 _ARANGE_CACHE_MAX = 128
 _arange_cache: dict = {}
+_arange_order: list = []
 
 def _arange(n: int, device: torch.device) -> torch.Tensor:
     """Read-only ``arange(n)`` shared across calls (index tensors only).
 
     Allocated with inference mode *off* so one cached entry serves every
-    context, including the training-mode forward.
+    context, including the training-mode forward. Uses LRU eviction.
     """
     key = (n, device)
     a = _arange_cache.get(key)
-    if a is None:
-        if len(_arange_cache) >= _ARANGE_CACHE_MAX:
-            _arange_cache.clear()
-        with torch.inference_mode(False):
-            a = torch.arange(n, device=device)
-        _arange_cache[key] = a
+    if a is not None:
+        _arange_order.remove(key)
+        _arange_order.append(key)
+        return a
+    if len(_arange_cache) >= _ARANGE_CACHE_MAX:
+        evict_key = _arange_order.pop(0)
+        _arange_cache.pop(evict_key)
+    with torch.inference_mode(False):
+        a = torch.arange(n, device=device)
+    _arange_cache[key] = a
+    _arange_order.append(key)
     return a
 
 
@@ -168,13 +186,11 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
     B = pos.size(0)
     cols = _arange(T, pos.device)
     m = _get_scratch(("mask_rows", B, h, T), pos.device, dtype, B * h * T)
-    m = m[:B * h * T].view(B * h, 1, T)
+    m = m[:B * h * T].view(B, h, T)
     m.zero_()
-    # (B, 1, T) broadcasts over the head axis of the (B, h, T) view, so every
-    # head of every batch row gets the same causal row mask.
-    m.view(B, h, T).masked_fill_(
+    m.masked_fill_(
         (cols.view(1, T) > pos.view(B, 1)).unsqueeze(1), float("-inf"))
-    return m
+    return m.view(B * h, 1, T)
 
 
 def _softmax_inplace(s: torch.Tensor) -> torch.Tensor:
@@ -237,6 +253,7 @@ def _pick_tokens(x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
 
 
 _query_blocks_cache: dict = {}
+_query_blocks_order: list = []
 _QUERY_BLOCKS_CACHE_MAX = 512
 
 
@@ -294,9 +311,11 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
 
 def _query_blocks(bh: int, T: int):
     """``[(start, stop), ...]`` query blocks for a ``bh``-fold batch of ``T``."""
-    key = (bh, T)
+    key = bh * T
     blocks = _query_blocks_cache.get(key)
     if blocks is not None:
+        _query_blocks_order.remove(key)
+        _query_blocks_order.append(key)
         return blocks
     if T <= 32:
         blocks = ((0, T),)
@@ -307,10 +326,10 @@ def _query_blocks(bh: int, T: int):
         rows = min(T, max_rows)
         blocks = tuple((i, min(i + rows, T)) for i in range(0, T, rows))
     if len(_query_blocks_cache) >= _QUERY_BLOCKS_CACHE_MAX:
-        # shapes come from (batch, seq) in practice, so the key space is
-        # bounded; the cap keeps an unbounded sweep from growing it forever
-        _query_blocks_cache.clear()
+        evict_key = _query_blocks_order.pop(0)
+        _query_blocks_cache.pop(evict_key)
     _query_blocks_cache[key] = blocks
+    _query_blocks_order.append(key)
     return blocks
 
 
@@ -425,7 +444,7 @@ class _CalibAttn(torch.autograd.Function):
             # (both round the accumulator once and then scale it), so the
             # gradient stays bit-identical while the separate full-size
             # multiply over the score gradient disappears.
-            zero = d_s.new_zeros(())
+            zero = _zero_scalar(d_s.device, d_s.dtype)
             d_q = q.new_empty(bh, T, q.size(-1))
             torch.baddbmm(zero, d_s, k, beta=0.0, alpha=scale, out=d_q)
             d_k = k.new_empty(bh, T, k.size(-1))
@@ -446,7 +465,7 @@ class _CalibAttn(torch.autograd.Function):
         gbuf = _get_scratch(("calib_f", bh, T, rows0), q.device, q.dtype, bh * rows0 * T) if grad_ent is not None else None
         mbuf = _get_scratch(("calib_bwd_mbuf", bh, T, rows0), q.device, torch.bool, bh * rows0 * T) if grad_ent is not None else None
         dpb = _get_scratch(("calib_dp", bh, T, rows0), q.device, q.dtype, bh * rows0 * T)
-        zero = q.new_zeros(())
+        zero = _zero_scalar(q.device, q.dtype)
         for i0, i1 in blocks:
             n = bh * (i1 - i0) * i1
             p = _softmax_inplace(torch.baddbmm(
@@ -511,7 +530,7 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
         # ``(p > _EPS) * (log(clamp_min(p, _EPS)) + 1)``: the selector zeroes
         # the sub-eps rows, applied as one select.
         logterm.add_(1.0)
-        torch.where(mask, logterm, logterm.new_zeros(()), out=logterm)
+        torch.where(mask, logterm, _zero_scalar(logterm.device, logterm.dtype), out=logterm)
         d_p.addcmul_(logterm, grad_ent.unsqueeze(-1), value=-1.0)
     d_p.mul_(p)
     return d_p.addcmul_(p, d_p.sum(dim=-1, keepdim=True), value=-1.0)
@@ -787,22 +806,12 @@ class Attention(nn.Module):
         dropping = self.training and drop_p > 0.0
 
         qkv = self.qkv(x).view(B, T, 3, h, dk)
-        # Gather all three projections into the head-major (B*h, T, dk)
-        # layout; the same views feed the hand-written kernel path and the
-        # explicit dropout path.  Transposing each projection on its own is
-        # the same permutation as a single 5-D permute but touches one
-        # C-wide block at a time, which the copy kernel walks more cheaply.
-        # Splitting on the projection axis (instead of indexing three
-        # slices) keeps the backward a single cat of the three (B, T, C)
-        # grads rather than three zero-fills of the whole (B, T, 3C) buffer
-        # plus two adds; the squeeze has to come *before* the transpose,
-        # because ``reshape`` linearizes a size-1 axis away and the head
-        # transpose would silently vanish.
-        parts = qkv.split(1, dim=2)
-        qb = parts[0].squeeze(2).transpose(1, 2).reshape(bh, T, dk)
-        kb = parts[1].squeeze(2).transpose(1, 2).reshape(bh, T, dk)
-        vb = parts[2].squeeze(2).transpose(1, 2).reshape(bh, T, dk)
-        del parts, qkv
+        # Single permute+reshape replaces split/squeeze/transpose/reshape
+        # (B, T, 3, h, dk) -> (3, B, h, T, dk) -> split into 3 of (B, h, T, dk)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        qb = qkv[0].reshape(bh, T, dk)
+        kb = qkv[1].reshape(bh, T, dk)
+        vb = qkv[2].reshape(bh, T, dk)
 
         ent = None
         if not dropping:
