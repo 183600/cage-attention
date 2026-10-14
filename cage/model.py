@@ -337,10 +337,15 @@ class _CalibAttn(torch.autograd.Function):
             d_k = torch.bmm(d_s.transpose(1, 2), q).mul_(scale)
             return d_q, d_k, d_v, None, None, None
         d_q = torch.empty_like(q)
-        # every block writes a *prefix* of d_k / d_v, so the first block
-        # overwrites and no zeros fill is needed
-        d_k = torch.empty_like(k)
-        d_v = torch.empty_like(v)
+        # block bi contributes to *every* key column < i1 of its own query
+        # rows, so each block writes a prefix of d_k / d_v whose length i1
+        # grows with the block index.  The tail of that prefix (columns
+        # i1_prev .. i1) has not been touched by any earlier block, so the
+        # buffers must start at zero and every block *adds* its own prefix;
+        # overwriting from the first block alone would leave the tails of
+        # the later (longer) prefixes holding undefined memory.
+        d_k = torch.zeros_like(k)
+        d_v = torch.zeros_like(v)
         rows0 = blocks[0][1] - blocks[0][0]
         dk = q.size(-1)
         dv = v.size(-1)
@@ -351,7 +356,7 @@ class _CalibAttn(torch.autograd.Function):
         dvb = q.new_empty(bh * T * dv)
         dkb = q.new_empty(bh * T * dk)
         dqb = q.new_empty(bh * rows0 * dk)
-        for bi, (i0, i1) in enumerate(blocks):
+        for i0, i1 in blocks:
             n = bh * (i1 - i0) * i1
             p = _softmax_inplace(torch.baddbmm(
                 mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
@@ -369,12 +374,8 @@ class _CalibAttn(torch.autograd.Function):
             torch.bmm(d_s.transpose(1, 2), q[:, i0:i1], out=ok).mul_(scale)
             oq = dqb[:bh * r * dk].view(bh, r, dk)
             torch.bmm(d_s, k[:, :i1], out=oq).mul_(scale)
-            if bi:
-                d_v[:, :i1].add_(ov)
-                d_k[:, :i1].add_(ok)
-            else:
-                d_v[:, :i1] = ov
-                d_k[:, :i1] = ok
+            d_v[:, :i1].add_(ov)
+            d_k[:, :i1].add_(ok)
             d_q[:, i0:i1] = oq
         return d_q, d_k, d_v, None, None, None
 
@@ -520,19 +521,21 @@ class _NullAttn(torch.autograd.Function):
         nkw = nkt.transpose(1, 2)
         multi = len(blocks) > 1
         d_q = torch.empty_like(q) if multi else None
-        d_k = torch.empty_like(k) if multi else None
-        d_v = torch.empty_like(v) if multi else None
+        # like _CalibAttn, every block contributes to all key columns < i1 of
+        # its own query rows, so the d_k / d_v prefixes grow with the block
+        # index and their tails have never been written by earlier blocks:
+        # start from zeros and let each block add its own prefix
+        d_k = torch.zeros_like(k) if multi else None
+        d_v = torch.zeros_like(v) if multi else None
         d_null_k = torch.zeros_like(null_k)
         d_null_v = torch.zeros_like(null_v)
         sbuf = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
-        # per-block result scratch, shared by the loop; never escapes, so the
-        # accumulated grads above can be plain empty tensors whose first
-        # block overwrites instead of accumulating onto a zeros fill
+        # per-block result scratch, shared by the loop
         peb = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
         dvb = q.new_empty(bh * T * dk)
         dkb = q.new_empty(bh * T * dk)
         dqb = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * dk)
-        for bi, (i0, i1) in enumerate(blocks):
+        for i0, i1 in blocks:
             # rebuild the joint weights of this block only
             q_blk = q[:, i0:i1]
             g = grad_y[:, i0:i1]
@@ -557,12 +560,8 @@ class _NullAttn(torch.autograd.Function):
             ok = dkb[:bh * i1 * dk].view(bh, i1, dk)
             torch.bmm(d_s.transpose(1, 2), q_blk, out=ok)
             if multi:
-                if bi:
-                    d_v[:, :i1].add_(ov)
-                    d_k[:, :i1].add_(ok)
-                else:
-                    d_v[:, :i1] = ov
-                    d_k[:, :i1] = ok
+                d_v[:, :i1].add_(ov)
+                d_k[:, :i1].add_(ok)
                 d_q[:, i0:i1] = oq
             else:
                 # single-block: the results must be fresh tensors, not views

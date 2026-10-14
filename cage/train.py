@@ -55,7 +55,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
         sched.step()
-        if step % log_every == 0 or step == steps - 1:
+        if (log_every > 0 and step % log_every == 0) or step == steps - 1:
             lv = loss.item()
             hist.append((step, lv))
             print(f"  step {step:5d}  loss {lv:.4f}")
