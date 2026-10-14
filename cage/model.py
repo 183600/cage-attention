@@ -225,6 +225,7 @@ def _pick_tokens(x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
 
 
 _query_blocks_cache: dict = {}
+_QUERY_BLOCKS_CACHE_MAX = 512
 
 
 def _query_blocks(bh: int, T: int):
@@ -241,6 +242,10 @@ def _query_blocks(bh: int, T: int):
             max_rows = 32
         rows = min(T, max_rows)
         blocks = tuple((i, min(i + rows, T)) for i in range(0, T, rows))
+    if len(_query_blocks_cache) >= _QUERY_BLOCKS_CACHE_MAX:
+        # shapes come from (batch, seq) in practice, so the key space is
+        # bounded; the cap keeps an unbounded sweep from growing it forever
+        _query_blocks_cache.clear()
     _query_blocks_cache[key] = blocks
     return blocks
 
@@ -291,7 +296,12 @@ class _CalibAttn(torch.autograd.Function):
             p = _softmax_inplace(torch.baddbmm(mask, q, kt, beta=1.0, alpha=scale))
             y = q.new_empty(bh, T, v.size(-1))
             torch.bmm(p, v, out=y)
-            ent = _row_entropy(p, eps) if need_ent else None
+            if need_ent:
+                # same one-buffer scheme the blocked path uses: no temporaries
+                ent = q.new_empty(bh, T)
+                _row_entropy(p, eps, out=ent, buf=q.new_empty(p.numel()))
+            else:
+                ent = None
         else:
             y = q.new_empty(bh, T, v.size(-1))
             ent = q.new_empty(bh, T) if need_ent else None
@@ -330,8 +340,15 @@ class _CalibAttn(torch.autograd.Function):
         # recompute probabilities (identical op sequence to forward)
         if len(blocks) == 1:
             p = _softmax_inplace(torch.baddbmm(mask, q, kt, beta=1.0, alpha=scale))
+            # one scratch each for the log(p) term and the p > _EPS selector,
+            # exactly like the blocked path below - no per-call temporaries
+            n = p.numel()
+            gbuf = mbuf = None
+            if grad_ent is not None:
+                gbuf = q.new_empty(n)
+                mbuf = torch.empty(n, dtype=torch.bool, device=q.device)
             d_s = _softmax_grad_from_p(
-                torch.bmm(grad_y, vt), p, grad_ent)
+                torch.bmm(grad_y, vt), p, grad_ent, buf=gbuf, mbuf=mbuf)
             d_v = torch.bmm(p.transpose(1, 2), grad_y)
             d_q = torch.bmm(d_s, k).mul_(scale)
             d_k = torch.bmm(d_s.transpose(1, 2), q).mul_(scale)
@@ -532,9 +549,10 @@ class _NullAttn(torch.autograd.Function):
         sbuf = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
         # per-block result scratch, shared by the loop
         peb = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * T)
-        dvb = q.new_empty(bh * T * dk)
-        dkb = q.new_empty(bh * T * dk)
-        dqb = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * dk)
+        if multi:
+            dvb = q.new_empty(bh * T * dk)
+            dkb = q.new_empty(bh * T * dk)
+            dqb = q.new_empty(bh * (blocks[0][1] - blocks[0][0]) * dk)
         for i0, i1 in blocks:
             # rebuild the joint weights of this block only
             q_blk = q[:, i0:i1]
@@ -551,24 +569,30 @@ class _NullAttn(torch.autograd.Function):
             d_u = e.sub_(dot)
             gu0.sub_(dot)
             r = i1 - i0
-            ov = dvb[:bh * i1 * dk].view(bh, i1, dk)
+            if multi:
+                ov = dvb[:bh * i1 * dk].view(bh, i1, dk)
+                oq = dqb[:bh * r * dk].view(bh, r, dk)
+                ok = dkb[:bh * i1 * dk].view(bh, i1, dk)
+            else:
+                # single block: the results escape the loop, so make them
+                # the bmm destinations directly instead of staging into
+                # scratch and doing a second, identical bmm per key/value
+                ov = q.new_empty(bh, i1, dk)
+                oq = q.new_empty(bh, r, dk)
+                ok = q.new_empty(bh, i1, dk)
             torch.bmm(p.transpose(1, 2), g, out=ov)
             d_s = d_u.mul_(p).mul_(scale)
             d_s0 = gu0.mul_(p0).mul_(scale)
-            oq = dqb[:bh * r * dk].view(bh, r, dk)
             torch.bmm(d_s, k[:, :i1], out=oq).addcmul_(d_s0, nkw)
-            ok = dkb[:bh * i1 * dk].view(bh, i1, dk)
             torch.bmm(d_s.transpose(1, 2), q_blk, out=ok)
             if multi:
                 d_v[:, :i1].add_(ov)
                 d_k[:, :i1].add_(ok)
                 d_q[:, i0:i1] = oq
             else:
-                # single-block: the results must be fresh tensors, not views
-                # of the shared scratch
-                d_v = torch.bmm(p.transpose(1, 2), g)
-                d_q = torch.bmm(d_s, k[:, :i1]).addcmul_(d_s0, nkw)
-                d_k = torch.bmm(d_s.transpose(1, 2), q_blk)
+                # single-block: the three results *are* the outputs, so
+                # return them straight (the buffers above never escape)
+                d_v, d_k, d_q = ov, ok, oq
             # the null slot is a per-head parameter replicated across the batch
             q4 = q_blk.view(B, h, i1 - i0, dk)
             d_null_k.add_(torch.matmul(d_s0.view(B, h, -1, 1).transpose(-2, -1),
@@ -689,10 +713,17 @@ class Attention(nn.Module):
         # explicit dropout path.  Transposing each projection on its own is
         # the same permutation as a single 5-D permute but touches one
         # C-wide block at a time, which the copy kernel walks more cheaply.
-        qb = qkv[:, :, 0].transpose(1, 2).reshape(bh, T, dk)
-        kb = qkv[:, :, 1].transpose(1, 2).reshape(bh, T, dk)
-        vb = qkv[:, :, 2].transpose(1, 2).reshape(bh, T, dk)
-        del qkv
+        # Splitting on the projection axis (instead of indexing three
+        # slices) keeps the backward a single cat of the three (B, T, C)
+        # grads rather than three zero-fills of the whole (B, T, 3C) buffer
+        # plus two adds; the squeeze has to come *before* the transpose,
+        # because ``reshape`` linearizes a size-1 axis away and the head
+        # transpose would silently vanish.
+        parts = qkv.split(1, dim=2)
+        qb = parts[0].squeeze(2).transpose(1, 2).reshape(bh, T, dk)
+        kb = parts[1].squeeze(2).transpose(1, 2).reshape(bh, T, dk)
+        vb = parts[2].squeeze(2).transpose(1, 2).reshape(bh, T, dk)
+        del parts, qkv
 
         ent = None
         if not dropping:
