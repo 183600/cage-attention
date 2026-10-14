@@ -583,8 +583,6 @@ def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
     torch.maximum(m, s0mul, out=m)
     s.sub_(m).exp_()
     s0mul.sub_(m).exp_()
-    # the row maximum is dead once both exponentiations have consumed it, so
-    # the denominator is reduced into the same buffer instead of a third one
     torch.sum(s, dim=-1, keepdim=True, out=m).add_(s0mul)
     s.div_(m)
     s0mul.div_(m)
