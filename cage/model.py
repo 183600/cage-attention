@@ -50,7 +50,8 @@ def _zero_scalar(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     key = (device, dtype)
     z = _zero_scalar_cache.get(key)
     if z is None:
-        z = torch.zeros((), device=device, dtype=dtype)
+        with torch.inference_mode(False):
+            z = torch.zeros((), device=device, dtype=dtype)
         _zero_scalar_cache[key] = z
     return z
 
@@ -62,7 +63,8 @@ def _neg_inf_scalar(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     key = (device, dtype)
     z = _neg_inf_scalar_cache.get(key)
     if z is None:
-        z = torch.full((), float("-inf"), device=device, dtype=dtype)
+        with torch.inference_mode(False):
+            z = torch.full((), float("-inf"), device=device, dtype=dtype)
         _neg_inf_scalar_cache[key] = z
     return z
 
@@ -101,7 +103,6 @@ class Cfg:
 
 
 class Norm(nn.Module):
-    __slots__ = ("ln",)
     def __init__(self, dim: int):
         super().__init__()
         self.ln = nn.LayerNorm(dim, elementwise_affine=True)
@@ -112,7 +113,6 @@ class Norm(nn.Module):
 
 class SeeDNorm(nn.Module):
     """Dynamic normalization: per-token scale predicted from hidden state."""
-    __slots__ = ("ln", "scale")
     def __init__(self, dim: int):
         super().__init__()
         self.ln = nn.LayerNorm(dim, elementwise_affine=False)
@@ -260,13 +260,14 @@ class _RowEntropy(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_out):
         (p,) = ctx.saved_tensors
-        n = p.numel()
-        key = tuple(p.shape)
-        mask = _get_scratch(("rowent_m", *key), p.device, torch.bool, n)[:n].view_as(p)
-        torch.gt(p, ctx.eps, out=mask)
-        d = _get_scratch(("rowent_d", *key), p.device, p.dtype, n)[:n].view_as(p)
-        torch.clamp_min(p, ctx.eps, out=d)
-        d.log_()
+        # NOTE: the gradient must be a fresh tensor. An earlier revision
+        # returned a shared scratch slice here, so two _RowEntropy nodes with
+        # the same shape (e.g. two layers of the dropout path) aliased the
+        # same buffer and the second backward overwrote the first layer's
+        # grad (identical data_ptr, wrong values). Fresh temporaries keep the
+        # exact D7 formula (log(p)+1 on p > _EPS, else 0, times -grad_out).
+        mask = p > ctx.eps
+        d = p.clamp_min(ctx.eps).log()
         d.add_(mask).mul_(mask).mul_(grad_out.unsqueeze(-1)).neg_()
         return d, None
 
@@ -696,9 +697,6 @@ class _NullAttn(torch.autograd.Function):
 
 
 class Attention(nn.Module):
-    __slots__ = ("cfg", "gate_kind", "h", "dk", "scale", "inv_scale",
-                 "qkv", "proj", "attn_dropout", "gate", "calib_a", "calib_c",
-                 "calib_tau", "calib_scale", "null_k", "null_v", "max_len")
     def __init__(self, cfg: Cfg):
         super().__init__()
         self.cfg = cfg
@@ -922,7 +920,6 @@ class _GeluLinear(nn.Linear):
 
 
 class Block(nn.Module):
-    __slots__ = ("cfg", "layer_idx", "post", "ln1", "ln2", "attn", "mlp", "ls1", "ls2")
     def __init__(self, cfg: Cfg, layer_idx: int):
         super().__init__()
         self.cfg = cfg
@@ -976,7 +973,6 @@ class Block(nn.Module):
 
 
 class CAGE(nn.Module):
-    __slots__ = ("cfg", "tok", "pos", "drop", "blocks", "ln_f", "head")
     def __init__(self, cfg: Cfg):
         super().__init__()
         self.cfg = cfg
