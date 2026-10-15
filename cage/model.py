@@ -118,49 +118,41 @@ def make_norm(kind: str, dim: int) -> nn.Module:
 
 _MAX_MASK_CACHE = 64
 
-_causal_mask_cache: dict[tuple, torch.Tensor] = {}
-_causal_mask_order: list[tuple] = []
+_causal_mask_cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
 
 
 def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     key = (T, device, dtype)
     m = _causal_mask_cache.get(key)
     if m is not None:
-        _causal_mask_order.remove(key)
-        _causal_mask_order.append(key)
+        _causal_mask_cache.move_to_end(key)
         return m
     with torch.inference_mode(False):
         m = torch.full((T, T), float("-inf"), device=device, dtype=dtype)
         m.triu_(1)
     _causal_mask_cache[key] = m
-    _causal_mask_order.append(key)
     if len(_causal_mask_cache) > _MAX_MASK_CACHE:
-        old_key = _causal_mask_order.pop(0)
-        _causal_mask_cache.pop(old_key, None)
+        _causal_mask_cache.popitem(last=False)
     return m
 
 
-_causal_bool_cache: dict[tuple, torch.Tensor] = {}
-_causal_bool_order: list[tuple] = []
 _MAX_BOOL_CACHE = 64
+_causal_bool_cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
 
 
 def _causal_bool_mask(T: int, device: torch.device) -> torch.Tensor:
     key = (T, device)
     m = _causal_bool_cache.get(key)
     if m is not None:
-        _causal_bool_order.remove(key)
-        _causal_bool_order.append(key)
+        _causal_bool_cache.move_to_end(key)
         return m
     with torch.inference_mode(False):
         m = torch.ones(T, T + 1, dtype=torch.bool, device=device)
         m[:, 0] = False
         m[:, 1:].triu_(1)
     _causal_bool_cache[key] = m
-    _causal_bool_order.append(key)
     if len(_causal_bool_cache) > _MAX_BOOL_CACHE:
-        old_key = _causal_bool_order.pop(0)
-        _causal_bool_cache.pop(old_key, None)
+        _causal_bool_cache.popitem(last=False)
     return m
 
 
@@ -271,7 +263,7 @@ def _pick_tokens(x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
     return x[_arange(x.size(0), x.device), pos]
 
 
-_query_blocks_cache: dict = {}
+_query_blocks_cache: OrderedDict = OrderedDict()
 _QUERY_BLOCKS_CACHE_MAX = 512
 
 
@@ -336,6 +328,7 @@ def _query_blocks(bh: int, T: int):
     key = (bh, T)
     blocks = _query_blocks_cache.get(key)
     if blocks is not None:
+        _query_blocks_cache.move_to_end(key)
         return blocks
     if T <= 32:
         blocks = ((0, T),)
@@ -345,9 +338,9 @@ def _query_blocks(bh: int, T: int):
             max_rows = 32
         rows = min(T, max_rows)
         blocks = tuple((i, min(i + rows, T)) for i in range(0, T, rows))
-    if len(_query_blocks_cache) >= _QUERY_BLOCKS_CACHE_MAX:
-        _query_blocks_cache.pop(next(iter(_query_blocks_cache)))
     _query_blocks_cache[key] = blocks
+    if len(_query_blocks_cache) > _QUERY_BLOCKS_CACHE_MAX:
+        _query_blocks_cache.popitem(last=False)
     return blocks
 
 
@@ -737,7 +730,7 @@ class Attention(nn.Module):
             # competes, so it has to be renormalised before it means anything
             null_mass = rows[..., 0]
             pr = rows[..., 1:]
-            pr = pr / pr.sum(-1, keepdim=True).clamp_min(_EPS)
+            pr.div_(pr.sum(-1, keepdim=True).clamp_min(_EPS))
         else:
             null_mass = None
             pr = rows
