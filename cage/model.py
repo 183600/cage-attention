@@ -454,15 +454,14 @@ class _CalibAttn(torch.autograd.Function):
                                        buf=None if gbuf is None else gbuf[:n],
                                        mbuf=None if mbuf is None else mbuf[:n])
             tmp = tmpb[:bh * i1 * dk].view(bh, i1, dk)
-            torch.bmm(p.transpose(1, 2), g, out=tmp)
             if first:
-                d_v[:, :i1].copy_(tmp)
+                torch.bmm(p.transpose(1, 2), g, out=d_v)
             else:
+                torch.bmm(p.transpose(1, 2), g, out=tmp)
                 d_v[:, :i1].add_(tmp)
             torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1], beta=0.0,
-                          alpha=scale, out=tmp)
+                          alpha=scale, out=d_k if first else tmp)
             if first:
-                d_k[:, :i1].copy_(tmp)
                 first = False
             else:
                 d_k[:, :i1].add_(tmp)
@@ -639,14 +638,14 @@ class _NullAttn(torch.autograd.Function):
             d_s0 = gu0.mul_(p0).mul_(scale)
             if multi:
                 tmp = tmpb[:bh * i1 * dk].view(bh, i1, dk)
-                torch.bmm(p.transpose(1, 2), g, out=tmp)
                 if first:
-                    d_v[:, :i1].copy_(tmp)
+                    torch.bmm(p.transpose(1, 2), g, out=d_v)
                 else:
+                    torch.bmm(p.transpose(1, 2), g, out=tmp)
                     d_v[:, :i1].add_(tmp)
-                torch.bmm(d_s.transpose(1, 2), q_blk, out=tmp)
+                torch.bmm(d_s.transpose(1, 2), q_blk,
+                          out=d_k if first else tmp)
                 if first:
-                    d_k[:, :i1].copy_(tmp)
                     first = False
                 else:
                     d_k[:, :i1].add_(tmp)
@@ -707,6 +706,11 @@ class Attention(nn.Module):
         else:
             self.null_k = self.null_v = None
 
+    @staticmethod
+    def _pack(t: torch.Tensor, B: int, h: int, T: int, dk: int) -> torch.Tensor:
+        """``(B, T, h*dk) -> (B*h, T, dk)`` with one contiguous copy."""
+        return t.view(B, T, h, dk).transpose(1, 2).contiguous().view(B * h, T, dk)
+
     def _row_stats(self, rows: torch.Tensor, T: int, is_null: bool):
         """Entropy / max-prob / null-mass for a ``(B, H, S)`` slice of the
         attention distribution.  ``S`` is ``T`` or ``T + 1``, and in the
@@ -763,11 +767,10 @@ class Attention(nn.Module):
         drop_p = self.cfg.dropout
         dropping = self.training and drop_p > 0.0
 
-        qkv = self.qkv(x).view(B, T, 3, h, dk).permute(2, 0, 3, 1, 4).contiguous()
-        qb = qkv[0].view(bh, T, dk)
-        kb = qkv[1].view(bh, T, dk)
-        vb = qkv[2].view(bh, T, dk)
-        del qkv
+        wq, wk, wv = self.qkv.weight.chunk(3, dim=0)
+        qb = self._pack(F.linear(x, wq), B, h, T, dk)
+        kb = self._pack(F.linear(x, wk), B, h, T, dk)
+        vb = self._pack(F.linear(x, wv), B, h, T, dk)
 
         ent = None
         y4 = None
