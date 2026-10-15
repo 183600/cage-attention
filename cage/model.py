@@ -707,9 +707,14 @@ class Attention(nn.Module):
             self.null_k = self.null_v = None
 
     @staticmethod
-    def _pack(t: torch.Tensor, B: int, h: int, T: int, dk: int) -> torch.Tensor:
-        """``(B, T, h*dk) -> (B*h, T, dk)`` with one contiguous copy."""
-        return t.view(B, T, h, dk).transpose(1, 2).contiguous().view(B * h, T, dk)
+    def _pack(qkv: torch.Tensor, B: int, h: int, T: int, dk: int):
+        """``(B, T, 3*h*dk) ->`` three ``(B*h, T, dk)`` head-major views,
+        all slices of one shared head-major copy.
+        """
+        packed = qkv.view(B, T, 3, h, dk).permute(2, 0, 3, 1, 4).contiguous()
+        return (packed[0].view(B * h, T, dk),
+                packed[1].view(B * h, T, dk),
+                packed[2].view(B * h, T, dk))
 
     def _row_stats(self, rows: torch.Tensor, T: int, is_null: bool):
         """Entropy / max-prob / null-mass for a ``(B, H, S)`` slice of the
@@ -767,11 +772,7 @@ class Attention(nn.Module):
         drop_p = self.cfg.dropout
         dropping = self.training and drop_p > 0.0
 
-        q_lin, k_lin, v_lin = F.linear(x, self.qkv.weight).chunk(3, dim=-1)
-        qb = self._pack(q_lin, B, h, T, dk)
-        kb = self._pack(k_lin, B, h, T, dk)
-        vb = self._pack(v_lin, B, h, T, dk)
-        del q_lin, k_lin, v_lin
+        qb, kb, vb = self._pack(F.linear(x, self.qkv.weight), B, h, T, dk)
 
         ent = None
         y4 = None
