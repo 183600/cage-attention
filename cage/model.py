@@ -108,8 +108,13 @@ class SeeDNorm(nn.Module):
         nn.init.normal_(self.scale.weight, std=0.02)
 
     def forward(self, x):
-        s = self.scale(x).sigmoid_()
-        return self.ln(x).mul_(s).mul_(2.0)
+        # the sigmoid is written out of place: ``self.scale(x)`` is a view of
+        # the flattened projection result, and an in-place op on such a view
+        # makes autograd insert a CopyBackwards node that clones the whole
+        # (B, T, dim) activation once per call.  ``self.ln(x)`` is a fresh
+        # tensor, so the two following in-place multiplies stay free.
+        s = torch.sigmoid(self.scale(x))
+        return self.ln(x).mul(s).mul_(2.0)
 
 
 def make_norm(kind: str, dim: int) -> nn.Module:
@@ -411,13 +416,20 @@ class _CalibAttn(torch.autograd.Function):
         else:
             ent = q.new_empty(bh, T) if need_ent else None
             ebuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
+            yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
+                                bh * max_rows * dv)
             for i0, i1 in blocks:
                 r = i1 - i0
                 p = _softmax_inplace(torch.baddbmm(
                     mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
                     beta=1.0, alpha=scale,
                     out=s[:bh * r * i1].view(bh, r, i1)))
-                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
+                # the GEMM writes a contiguous block and the rows are then
+                # copied into y: bmm into the strided view y[:, i0:i1] drops
+                # the batched-GEMM fast path and costs ~3x more than the copy.
+                yb = yblk[:bh * r * dv].view(bh, r, dv)
+                torch.bmm(p, v[:, :i1], out=yb)
+                y[:, i0:i1].copy_(yb)
                 if need_ent:
                     _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
         if any(ctx.needs_input_grad):
@@ -480,19 +492,22 @@ class _CalibAttn(torch.autograd.Function):
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
         tmpb = _get_scratch(("calib_bwd_tmp",), q.device, q.dtype,
                             bh * blocks[-1][0] * dk)
+        qblk = _get_scratch(("calib_dqblk",), q.device, q.dtype,
+                            bh * max_rows * dk)
         zero = _zero_scalar(q.device, q.dtype)
         # the last block spans every key, so it writes d_k/d_v first and the
         # remaining blocks only accumulate into them.
         first = True
         for i0, i1 in reversed(blocks):
-            n = bh * (i1 - i0) * i1
+            r = i1 - i0
+            n = bh * r * i1
             p = _softmax_inplace(torch.baddbmm(
                 mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
                 beta=1.0, alpha=scale,
-                out=s[:n].view(bh, i1 - i0, i1)))
+                out=s[:n].view(bh, r, i1)))
             g = grad_y[:, i0:i1]
             ge = None if grad_ent is None else grad_ent[:, i0:i1]
-            d_p = dpb[:n].view(bh, i1 - i0, i1)
+            d_p = dpb[:n].view(bh, r, i1)
             torch.bmm(g, vt[:, :, :i1], out=d_p)
             d_s = _softmax_grad_from_p(d_p, p, ge,
                                        buf=None if gbuf is None else gbuf[:n],
@@ -509,9 +524,12 @@ class _CalibAttn(torch.autograd.Function):
                 torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1], beta=0.0,
                               alpha=scale, out=tmp)
                 d_k[:, :i1].add_(tmp)
-            # the query-gradient rows are written exactly once, in place.
-            torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
-                          out=d_q[:, i0:i1])
+            # the query-gradient rows are written exactly once, in place -
+            # through a contiguous block buffer, because baddbmm into the
+            # strided view d_q[:, i0:i1] misses the batched-GEMM fast path.
+            dqb = qblk[:bh * r * dk].view(bh, r, dk)
+            torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale, out=dqb)
+            d_q[:, i0:i1].copy_(dqb)
         return d_q, d_k, d_v, None, None, None
 
 
@@ -606,12 +624,16 @@ class _NullAttn(torch.autograd.Function):
         y4 = y.view(B, h, T, dv)
         nv4 = null_v.view(1, h, 1, dv)
         sbuf = _get_scratch(("null_s",), q.device, q.dtype, bh * max_rows * max_i1)
+        yblk = _get_scratch(("null_yblk",), q.device, q.dtype, bh * max_rows * dv)
         for i0, i1 in blocks:
             r = i1 - i0
             p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, null_k, B, h,
                                 scale, sbuf)
-            # the output rows are written exactly once, in place.
-            torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
+            # contiguous block buffer + copy: bmm into the strided view
+            # y[:, i0:i1] misses the batched-GEMM fast path (~3x slower).
+            yb = yblk[:bh * r * dv].view(bh, r, dv)
+            torch.bmm(p, v[:, :i1], out=yb)
+            y[:, i0:i1].copy_(yb)
             y4[:, :, i0:i1].addcmul_(p0.view(B, h, r, 1), nv4)
         if any(ctx.needs_input_grad):
             ctx.save_for_backward(q, k, v, null_k, null_v)
@@ -655,6 +677,8 @@ class _NullAttn(torch.autograd.Function):
         tmp_rows = blocks[-1][0] if multi else 1
         tmpb = _get_scratch(("null_bwd_tmp",), q.device, q.dtype,
                             bh * tmp_rows * dk)
+        qblk = _get_scratch(("null_bwd_dqblk",), q.device, q.dtype,
+                            bh * max_rows * dk)
         acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         # the last block spans every key, so it writes d_k/d_v first and the
@@ -689,14 +713,18 @@ class _NullAttn(torch.autograd.Function):
                     d_v[:, :i1].add_(tmp)
                     torch.bmm(d_s.transpose(1, 2), q_blk, out=tmp)
                     d_k[:, :i1].add_(tmp)
-                # the query-gradient rows are written exactly once, in place.
-                torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1])
+                # the query-gradient rows are written exactly once, through a
+                # contiguous block buffer: bmm into the strided view
+                # d_q[:, i0:i1] misses the batched-GEMM fast path (~3x slower).
+                dqb = qblk[:bh * r * dk].view(bh, r, dk)
+                torch.bmm(d_s, k[:, :i1], out=dqb)
+                d_q[:, i0:i1].copy_(dqb)
             else:
                 d_v = q.new_empty(bh, i1, dk)
                 d_k = q.new_empty(bh, i1, dk)
                 torch.bmm(p.transpose(1, 2), g, out=d_v)
                 torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
-                torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1])
+                torch.bmm(d_s, k[:, :i1], out=d_q)
             d_q4[:, :, i0:i1].addcmul_(d_s0.view(B, h, r, 1), nk4)
             acc_blk = tmpb[:bh * dk].view(bh, 1, dk)
             torch.bmm(d_s0.transpose(-2, -1), q_blk, out=acc_blk)
@@ -863,9 +891,13 @@ class Attention(nn.Module):
                 if dropping:
                     p = self.attn_dropout(p)
                 pb = p.view(bh, T, T + 1)
-                y4 = torch.bmm(pb[..., 1:], vb).view(B, h, T, dk)
-                y4.addcmul_(p.view(B, h, T, T + 1)[..., :1],
-                            self.null_v.view(1, h, 1, dk))
+                # the addcmul runs out of place: an in-place op on the bmm
+                # result would make autograd clone it first (it is the view of
+                # a flattened GEMM output), which copies (B, h, T, dk) for
+                # nothing - the non-in-place form allocates the same buffer.
+                y4 = torch.addcmul(torch.bmm(pb[..., 1:], vb).view(B, h, T, dk),
+                                   p.view(B, h, T, T + 1)[..., :1],
+                                   self.null_v.view(1, h, 1, dk))
             else:
                 mask = _causal_mask(T, x.device, x.dtype)
                 att = torch.baddbmm(mask, qb, kb.transpose(1, 2),
@@ -886,21 +918,29 @@ class Attention(nn.Module):
                 y4 = torch.bmm(p, vb).view(B, h, T, dk)
 
         # ---- gating ----
+        #
+        # The projection output is a *view* of the flattened (B*T, d_model)
+        # GEMM result, and autograd reacts to an in-place op on a view by
+        # inserting a CopyBackwards node that clones the whole (B, T, C)
+        # activation (Note [In place operations on views]).  The first step of
+        # each gate therefore has to run out of place; every later step works
+        # in place on that fresh, non-view tensor, which costs nothing and
+        # keeps the number of live (B, T, C) buffers at two.
         gate_val = None
         if kind == "query":
-            gate_val = self.gate(x)
-            gate_val.sigmoid_()
+            gate_val = torch.sigmoid(self.gate(x))
         elif is_calib:
             log_len = math.log(max(T, 2))
             # gate(x) - calib_a*log_len
             #     - (calib_c*calib_scale/log_len) * ent.mean(1, keepdim=True)
-            gate_val = self.gate(x)
-            gate_val.sub_(self.calib_a * log_len)
+            gate_val = self.gate(x).sub(self.calib_a * log_len)
             # mean(dim=1) -> (B, T), unsqueeze(-1) -> (B, T, 1) for broadcasting
             conc = ent.mean(dim=1).div_(log_len).unsqueeze(-1)
-            gate_val.addcmul_(conc, self.calib_c * self.calib_scale, value=-1.0)
+            gate_val.sub_(conc * (self.calib_c * self.calib_scale))
             tau = F.softplus(self.calib_tau).add_(0.1)
-            gate_val.div_(tau).sigmoid_()
+            # div() out of place, sigmoid_() in place: div_ would have to save
+            # its input for tau's gradient and would clone the gate again.
+            gate_val = gate_val.div(tau).sigmoid_()
             del ent
             ent = None
 
@@ -948,11 +988,14 @@ class Block(nn.Module):
         self.ln1 = make_norm(cfg.norm, cfg.d_model)
         self.ln2 = make_norm(cfg.norm, cfg.d_model)
         self.attn = Attention(cfg)
-        # the GELU is folded into the second projection (see _GeluLinear)
+        # the GELU is folded into the second projection (see _GeluLinear).
+        # The dropout is *not* in-place: the input is the view of a flattened
+        # GEMM output, so an in-place op there only makes autograd clone the
+        # whole (B, T, d_model) first - the same buffer either way.
         self.mlp = nn.Sequential(
             nn.Linear(cfg.d_model, 4 * cfg.d_model),
             _GeluLinear(4 * cfg.d_model, cfg.d_model),
-            nn.Dropout(cfg.dropout, inplace=True),
+            nn.Dropout(cfg.dropout),
         )
         if cfg.layer_scale is not None:
             ls_val = float(cfg.layer_scale)
