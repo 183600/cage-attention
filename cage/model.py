@@ -542,13 +542,16 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
 def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
                 mask: torch.Tensor, null_k: torch.Tensor, B: int, h: int,
                 scale: float, sbuf: torch.Tensor | None = None):
+    # NOTE: callers pre-slice `kt` to (..., :i1) and `mask` to [i0:i1, :i1],
+    # so they are used directly here (slicing again would empty the mask
+    # for i0 > 0 and break multi-block / long-sequence runs).
     n, r = q_blk.size(0), q_blk.size(1)
     if sbuf is None:
-        s = torch.baddbmm(mask[i0:i1, :i1], q_blk, kt[:, :, :i1],
+        s = torch.baddbmm(mask, q_blk, kt,
                           beta=1.0, alpha=scale)
     else:
         s = sbuf[:n * r * i1].view(n, r, i1)
-        torch.baddbmm(mask[i0:i1, :i1], q_blk, kt[:, :, :i1],
+        torch.baddbmm(mask, q_blk, kt,
                       beta=1.0, alpha=scale, out=s)
     s0 = _get_scratch(("null_s0",), q_blk.device, q_blk.dtype, n * r)
     s0 = s0[:n * r]
