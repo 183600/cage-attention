@@ -109,7 +109,7 @@ class SeeDNorm(nn.Module):
 
     def forward(self, x):
         s = self.scale(x).sigmoid_()
-        return self.ln(x).mul(s).mul_(2.0)
+        return self.ln(x).mul_(s).mul_(2.0)
 
 
 def make_norm(kind: str, dim: int) -> nn.Module:
@@ -822,9 +822,10 @@ class Attention(nn.Module):
             gate_val.sub_(self.calib_a * log_len)
             calib_cs = self.calib_c * self.calib_scale
             conc = ent.mean(dim=1).div_(log_len).unsqueeze(-1)
-            gate_val.sub_(conc * calib_cs)
+            conc.mul_(calib_cs)
+            gate_val.sub_(conc)
             tau = F.softplus(self.calib_tau).add_(0.1)
-            gate_val = gate_val.div(tau).sigmoid_()
+            gate_val = gate_val.div_(tau).sigmoid_()
             del ent
             ent = None
 
@@ -885,12 +886,12 @@ class Block(nn.Module):
         if self.post:
             a, s = self.attn(x, stat_pos)
             if ls1 is None:
-                x = x + a
+                x = a.add_(x)
             else:
                 x = torch.addcmul(x, a, ls1)
             x = self.ln1(x)
             if ls2 is None:
-                x = x + self.mlp(x)
+                x = self.mlp(x).add_(x)
             else:
                 x = torch.addcmul(x, self.mlp(x), ls2)
             x = self.ln2(x)
@@ -898,13 +899,13 @@ class Block(nn.Module):
             x_norm = self.ln1(x)
             a, s = self.attn(x_norm, stat_pos)
             if ls1 is None:
-                x = x + a
+                x = a.add_(x)
             else:
                 x = torch.addcmul(x, a, ls1)
             x_norm = self.ln2(x)
             m = self.mlp(x_norm)
             if ls2 is None:
-                x = x + m
+                x = m.add_(x)
             else:
                 x = torch.addcmul(x, m, ls2)
         return x, s
