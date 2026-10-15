@@ -156,23 +156,34 @@ def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tens
     return m
 
 
-_MAX_BOOL_CACHE = 64
-_causal_bool_cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
+_MAX_NULL_CACHE = 64
+_causal_null_cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
 
 
-def _causal_bool_mask(T: int, device: torch.device) -> torch.Tensor:
-    key = (T, device)
-    m = _causal_bool_cache.get(key)
+def _causal_null_mask(T: int, device: torch.device,
+                      dtype: torch.dtype) -> torch.Tensor:
+    """Additive causal mask with an *unmasked* null column.
+
+    Shape ``(T, T + 1)``: column 0 (the learnable null slot) is 0 and the
+    real-key columns hold the usual strictly-upper ``-inf``.  It is added
+    to the ``(B*H, T, T+1)`` scores instead of being used as a
+    ``masked_fill`` boolean: ``add`` backward never saves the (constant)
+    mask operand, so a mask buffer that was first materialized inside a
+    compiled inference-mode forward cannot poison a later training-mode
+    backward.
+    """
+    key = (T, device, dtype)
+    m = _causal_null_cache.get(key)
     if m is not None:
-        _causal_bool_cache.move_to_end(key)
+        _causal_null_cache.move_to_end(key)
         return m
     with torch.inference_mode(False):
-        m = torch.ones(T, T + 1, dtype=torch.bool, device=device)
-        m[:, 0] = False
+        m = torch.full((T, T + 1), float("-inf"), device=device, dtype=dtype)
+        m[:, 0] = 0.0
         m[:, 1:].triu_(1)
-    _causal_bool_cache[key] = m
-    if len(_causal_bool_cache) > _MAX_BOOL_CACHE:
-        _causal_bool_cache.popitem(last=False)
+    _causal_null_cache[key] = m
+    if len(_causal_null_cache) > _MAX_NULL_CACHE:
+        _causal_null_cache.popitem(last=False)
     return m
 
 
@@ -819,8 +830,7 @@ class Attention(nn.Module):
                 nk = self.null_k.view(1, h, 1, dk).expand(B, h, 1, dk)
                 kv_k = torch.cat([nk, k_], dim=2)
                 att = torch.matmul(q_, kv_k.transpose(-2, -1)).mul_(self.inv_scale)
-                att.masked_fill_(_causal_bool_mask(T, x.device),
-                                 float("-inf"))
+                att.add_(_causal_null_mask(T, x.device, x.dtype))
                 p = _SoftmaxInPlace.apply(att)
                 if not need_stats:
                     stats = None
