@@ -457,8 +457,8 @@ class _CalibAttn(torch.autograd.Function):
                           out=d_k)
             return d_q, d_k, d_v, None, None, None
         d_q = torch.empty_like(q)
-        d_k = torch.zeros_like(k)
-        d_v = torch.zeros_like(v)
+        d_k = torch.empty_like(k)
+        d_v = torch.empty_like(v)
         max_rows = rows0
         max_i1 = T
         dk = q.size(-1)
@@ -466,9 +466,17 @@ class _CalibAttn(torch.autograd.Function):
         gbuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if grad_ent is not None else None
         mbuf = _get_scratch(("calib_bwd_mbuf",), q.device, torch.bool, bh * max_rows * max_i1) if grad_ent is not None else None
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
-        tmpb = _get_scratch(("calib_bwd_tmp",), q.device, q.dtype, bh * T * dk)
+        # the last block writes d_k/d_v directly, so the staging buffer only has
+        # to hold one of the remaining blocks: their widest key extent is the
+        # start of the last block, not T.
+        tmpb = _get_scratch(("calib_bwd_tmp",), q.device, q.dtype,
+                            bh * blocks[-1][0] * dk)
         zero = _zero_scalar(q.device, q.dtype)
-        for i0, i1 in blocks:
+        # Walk the query blocks last-to-first: the last block spans every key,
+        # so it initialises d_k/d_v in place and the remaining blocks only
+        # accumulate.  That removes the full zero-fill of both gradients.
+        first = True
+        for i0, i1 in reversed(blocks):
             n = bh * (i1 - i0) * i1
             p = _softmax_inplace(torch.baddbmm(
                 mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
@@ -481,12 +489,18 @@ class _CalibAttn(torch.autograd.Function):
             d_s = _softmax_grad_from_p(d_p, p, ge,
                                        buf=None if gbuf is None else gbuf[:n],
                                        mbuf=None if mbuf is None else mbuf[:n])
-            tmp = tmpb[:bh * i1 * dk].view(bh, i1, dk)
-            torch.bmm(p.transpose(1, 2), g, out=tmp)
-            d_v[:, :i1].add_(tmp)
-            torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1], beta=0.0,
-                          alpha=scale, out=tmp)
-            d_k[:, :i1].add_(tmp)
+            if first:
+                torch.bmm(p.transpose(1, 2), g, out=d_v[:, :i1])
+                torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1], beta=0.0,
+                              alpha=scale, out=d_k[:, :i1])
+                first = False
+            else:
+                tmp = tmpb[:bh * i1 * dk].view(bh, i1, dk)
+                torch.bmm(p.transpose(1, 2), g, out=tmp)
+                d_v[:, :i1].add_(tmp)
+                torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1], beta=0.0,
+                              alpha=scale, out=tmp)
+                d_k[:, :i1].add_(tmp)
             # the query-gradient rows are written exactly once, straight into
             # place; no staging copy is needed.
             torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
@@ -609,8 +623,8 @@ class _NullAttn(torch.autograd.Function):
         kt = k.transpose(1, 2)
         vt = v.transpose(1, 2)
         multi = len(blocks) > 1
-        d_k = torch.zeros_like(k) if multi else None
-        d_v = torch.zeros_like(v) if multi else None
+        d_k = torch.empty_like(k) if multi else None
+        d_v = torch.empty_like(v) if multi else None
         d_q = torch.empty_like(q)
         d_q4 = d_q.view(B, h, T, dk)
         nk4 = null_k.view(1, h, 1, dk)
@@ -623,10 +637,18 @@ class _NullAttn(torch.autograd.Function):
         eb = _get_scratch(("null_bwd_e",), q.device, q.dtype, bh * max_rows * max_i1)
         gub = _get_scratch(("null_bwd_gu",), q.device, q.dtype, bh * max_rows)
         dotb = _get_scratch(("null_bwd_dot",), q.device, q.dtype, bh * max_rows)
-        tmpb = _get_scratch(("null_bwd_tmp",), q.device, q.dtype, bh * T * dk)
+        # staging only needs one non-last block's width (see _CalibAttn); for
+        # the single-block case it still has to hold the tiny acc_blk scratch.
+        tmp_rows = blocks[-1][0] if multi else 1
+        tmpb = _get_scratch(("null_bwd_tmp",), q.device, q.dtype,
+                            bh * tmp_rows * dk)
         acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
-        for i0, i1 in blocks:
+        # Walk the query blocks last-to-first: the last block spans every key,
+        # so it initialises d_k/d_v in place and the rest only accumulate,
+        # removing the full zero-fill of both key/value gradients.
+        first = True
+        for i0, i1 in reversed(blocks):
             q_blk = q[:, i0:i1]
             g = grad_y[:, i0:i1]
             r = i1 - i0
@@ -645,11 +667,16 @@ class _NullAttn(torch.autograd.Function):
             d_s = d_u.mul_(p).mul_(scale)
             d_s0 = gu0.mul_(p0).mul_(scale)
             if multi:
-                tmp = tmpb[:bh * i1 * dk].view(bh, i1, dk)
-                torch.bmm(p.transpose(1, 2), g, out=tmp)
-                d_v[:, :i1].add_(tmp)
-                torch.bmm(d_s.transpose(1, 2), q_blk, out=tmp)
-                d_k[:, :i1].add_(tmp)
+                if first:
+                    torch.bmm(p.transpose(1, 2), g, out=d_v[:, :i1])
+                    torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k[:, :i1])
+                    first = False
+                else:
+                    tmp = tmpb[:bh * i1 * dk].view(bh, i1, dk)
+                    torch.bmm(p.transpose(1, 2), g, out=tmp)
+                    d_v[:, :i1].add_(tmp)
+                    torch.bmm(d_s.transpose(1, 2), q_blk, out=tmp)
+                    d_k[:, :i1].add_(tmp)
                 # the query-gradient rows are written exactly once, straight
                 # into place; no staging copy is needed.
                 torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1])
