@@ -362,8 +362,9 @@ class _CalibAttn(torch.autograd.Function):
 
     @staticmethod
     @_no_compile
-    def forward(ctx, q, k, v, scale: float, eps: float, need_ent: bool = True):
+    def forward(ctx, qkv, scale: float, eps: float, need_ent: bool = True):
         ctx.set_materialize_grads(False)
+        q, k, v = qkv[0], qkv[1], qkv[2]
         bh, T = q.size(0), q.size(1)
         blocks = _query_blocks(bh, T)
         mask = _causal_mask(T, q.device, q.dtype)
@@ -401,9 +402,7 @@ class _CalibAttn(torch.autograd.Function):
                 if need_ent:
                     _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
         if any(ctx.needs_input_grad):
-            ctx.save_for_backward(q, k, v)
-        else:
-            ctx.qkv_saved = False
+            ctx.save_for_backward(qkv)
         ctx.scale = scale
         ctx.eps = eps
         return y, ent
@@ -412,8 +411,9 @@ class _CalibAttn(torch.autograd.Function):
     def backward(ctx, grad_y, grad_ent):
         saved = ctx.saved_tensors
         if not saved:
-            return None, None, None, None, None, None
-        q, k, v = saved
+            return None, None, None, None
+        (qkv,) = saved
+        q, k, v = qkv[0], qkv[1], qkv[2]
         scale, eps = ctx.scale, ctx.eps
         bh, T = q.size(0), q.size(1)
         if grad_y is None:
@@ -436,18 +436,17 @@ class _CalibAttn(torch.autograd.Function):
             d_p = _get_scratch(("calib_dp",), q.device, q.dtype, n).view(bh, T, T)
             torch.bmm(grad_y, vt, out=d_p)
             d_s = _softmax_grad_from_p(d_p, p, grad_ent, buf=gbuf, mbuf=mbuf)
-            d_v = q.new_empty(bh, T, v.size(-1))
-            torch.bmm(p.transpose(1, 2), grad_y, out=d_v)
+            d_qkv = torch.empty_like(qkv)
+            torch.bmm(p.transpose(1, 2), grad_y, out=d_qkv[2])
             zero = _zero_scalar(d_s.device, d_s.dtype)
-            d_q = q.new_empty(bh, T, q.size(-1))
-            torch.baddbmm(zero, d_s, k, beta=0.0, alpha=scale, out=d_q)
-            d_k = k.new_empty(bh, T, k.size(-1))
+            torch.baddbmm(zero, d_s, k, beta=0.0, alpha=scale, out=d_qkv[0])
             torch.baddbmm(zero, d_s.transpose(1, 2), q, beta=0.0, alpha=scale,
-                          out=d_k)
-            return d_q, d_k, d_v, None, None, None
-        d_q = torch.empty_like(q)
-        d_k = torch.empty_like(k)
-        d_v = torch.empty_like(v)
+                          out=d_qkv[1])
+            return d_qkv, None, None, None
+        d_qkv = torch.empty_like(qkv)
+        d_q = d_qkv[0].view_as(q)
+        d_k = d_qkv[1].view_as(k)
+        d_v = d_qkv[2].view_as(v)
         max_rows = rows0
         max_i1 = T
         dk = q.size(-1)
@@ -490,7 +489,7 @@ class _CalibAttn(torch.autograd.Function):
             torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
                           out=dqblk)
             d_q[:, i0:i1].copy_(dqblk)
-        return d_q, d_k, d_v, None, None, None
+        return d_qkv, None, None, None
 
 
 def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
@@ -521,7 +520,7 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
                 mask = mbuf[:p.numel()].view_as(p)
                 torch.gt(p, _EPS, out=mask)
         logterm.add_(1.0)
-        logterm.mul_(mask)
+        logterm.masked_fill_(mask.logical_not_(), 0.0)
         d_p.addcmul_(logterm, grad_ent.unsqueeze(-1), value=-1.0)
     d_p.mul_(p)
     return d_p.addcmul_(p, d_p.sum(dim=-1, keepdim=True), value=-1.0)
@@ -569,7 +568,8 @@ class _NullAttn(torch.autograd.Function):
 
     @staticmethod
     @_no_compile
-    def forward(ctx, q, k, v, null_k, null_v, scale, B):
+    def forward(ctx, qkv, null_k, null_v, scale, B):
+        q, k, v = qkv[0], qkv[1], qkv[2]
         bh, T = q.size(0), q.size(1)
         h = null_k.size(0)
         blocks = _query_blocks(bh, T)
@@ -593,9 +593,7 @@ class _NullAttn(torch.autograd.Function):
             torch.addcmul(yblk.view(B, h, r, dv), p0.view(B, h, r, 1), nv4,
                           out=y4[:, :, i0:i1])
         if any(ctx.needs_input_grad):
-            ctx.save_for_backward(q, k, v, null_k, null_v)
-        else:
-            ctx.qkv_saved = False
+            ctx.save_for_backward(qkv, null_k, null_v)
         ctx.scale = scale
         ctx.shape = (B, h)
         return y
@@ -604,8 +602,9 @@ class _NullAttn(torch.autograd.Function):
     def backward(ctx, grad_y):
         saved = ctx.saved_tensors
         if not saved:
-            return None, None, None, None, None, None, None
-        q, k, v, null_k, null_v = saved
+            return None, None, None, None, None
+        qkv, null_k, null_v = saved
+        q, k, v = qkv[0], qkv[1], qkv[2]
         scale = ctx.scale
         B, h = ctx.shape
         bh, T = q.size(0), q.size(1)
@@ -617,9 +616,10 @@ class _NullAttn(torch.autograd.Function):
         kt = k.transpose(1, 2)
         vt = v.transpose(1, 2)
         multi = len(blocks) > 1
-        d_k = torch.empty_like(k) if multi else None
-        d_v = torch.empty_like(v) if multi else None
-        d_q = torch.empty_like(q)
+        d_qkv = torch.empty_like(qkv)
+        d_q = d_qkv[0]
+        d_k = d_qkv[1] if multi else None
+        d_v = d_qkv[2] if multi else None
         d_q4 = d_q.view(B, h, T, dk)
         nk4 = null_k.view(1, h, 1, dk)
         nv4t = null_v.view(1, h, dk, 1)
@@ -675,11 +675,9 @@ class _NullAttn(torch.autograd.Function):
                 torch.bmm(d_s, k[:, :i1], out=dqblk)
                 d_q[:, i0:i1].copy_(dqblk)
             else:
-                d_v = q.new_empty(bh, i1, dk)
-                d_k = q.new_empty(bh, i1, dk)
-                torch.bmm(p.transpose(1, 2), g, out=d_v)
-                torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
-                torch.bmm(d_s, k[:, :i1], out=d_q)
+                torch.bmm(p.transpose(1, 2), g, out=d_qkv[2])
+                torch.bmm(d_s.transpose(1, 2), q_blk, out=d_qkv[1])
+                torch.bmm(d_s, k[:, :i1], out=d_qkv[0])
             d_q4[:, :, i0:i1].addcmul_(d_s0.view(B, h, r, 1), nk4)
             acc_blk = tmpb[:bh * dk].view(bh, 1, dk)
             torch.bmm(d_s0.transpose(-2, -1), q_blk, out=acc_blk)
@@ -688,7 +686,7 @@ class _NullAttn(torch.autograd.Function):
             acc_v.add_(acc_blk)
         d_null_k = acc_k.view(B, h, dk).sum(0)
         d_null_v = acc_v.view(B, h, dk).sum(0)
-        return d_q, d_k, d_v, d_null_k, d_null_v, None, None
+        return d_qkv, d_null_k, d_null_v, None, None
 
 
 class Attention(nn.Module):
@@ -729,14 +727,15 @@ class Attention(nn.Module):
             self.null_k = self.null_v = None
 
     @staticmethod
-    def _pack(qkv: torch.Tensor, B: int, h: int, T: int, dk: int):
-        """``(B, T, 3*h*dk) ->`` three ``(B*h, T, dk)`` head-major views,
-        all slices of one shared head-major copy.
+    def _pack(qkv: torch.Tensor, B: int, h: int, T: int, dk: int) -> torch.Tensor:
+        """``(B, T, 3*h*dk) -> (3, B*h, T, dk)`` head-major, one shared copy.
+
+        The three slices are handed to the attention kernel as a *single*
+        tensor: three independent views would each materialize a full-size
+        zeros grad in backward, which is pure overhead.
         """
-        packed = qkv.view(B, T, 3, h, dk).permute(2, 0, 3, 1, 4).contiguous()
-        return (packed[0].view(B * h, T, dk),
-                packed[1].view(B * h, T, dk),
-                packed[2].view(B * h, T, dk))
+        return qkv.view(B, T, 3, h, dk).permute(2, 0, 3, 1, 4).contiguous().view(
+            3, B * h, T, dk)
 
     def _row_stats(self, rows: torch.Tensor, T: int, is_null: bool):
         """Entropy / max-prob / null-mass for a ``(B, H, S)`` slice of the
@@ -794,17 +793,18 @@ class Attention(nn.Module):
         drop_p = self.cfg.dropout
         dropping = self.training and drop_p > 0.0
 
-        qb, kb, vb = self._pack(F.linear(x, self.qkv.weight), B, h, T, dk)
+        packed = self._pack(F.linear(x, self.qkv.weight), B, h, T, dk)
+        qb, kb, vb = packed[0], packed[1], packed[2]
 
         ent = None
         y4 = None
         stats = None
         if not dropping:
             if is_null:
-                y4 = _NullAttn.apply(qb, kb, vb, self.null_k, self.null_v,
+                y4 = _NullAttn.apply(packed, self.null_k, self.null_v,
                                      self.inv_scale, B).view(B, h, T, dk)
             else:
-                y, ent = _CalibAttn.apply(qb, kb, vb, self.inv_scale, _EPS,
+                y, ent = _CalibAttn.apply(packed, self.inv_scale, _EPS,
                                           is_calib)
                 y4 = y.view(B, h, T, dk)
                 ent = None if ent is None else ent.view(B, h, T)
@@ -853,18 +853,25 @@ class Attention(nn.Module):
                 y4 = torch.bmm(p, vb).view(B, h, T, dk)
 
         gate_val = None
+        grad_on = torch.is_grad_enabled()
         if kind == "query":
-            gate_val = self.gate(x).sigmoid_()
+            gate_val = self.gate(x)
+            if grad_on:
+                gate_val = gate_val.sigmoid()
+            else:
+                gate_val.sigmoid_()
         elif is_calib:
             log_len = self._log_len_cache.get(T)
             if log_len is None:
                 log_len = math.log(max(T, 2))
                 self._log_len_cache[T] = log_len
-            gate_val = self.gate(x)
-            gate_val.sub_(self.calib_a * log_len)
             calib_cs = self.calib_c * self.calib_scale
-            conc = ent.mean(dim=1).div_(log_len).unsqueeze(-1)
-            conc.mul_(calib_cs)
+            conc = ent.mean(dim=1).div_(log_len).mul_(calib_cs).unsqueeze(-1)
+            gate_val = self.gate(x)
+            if grad_on:
+                gate_val = gate_val.sub(self.calib_a * log_len)
+            else:
+                gate_val.sub_(self.calib_a * log_len)
             gate_val.sub_(conc)
             tau = F.softplus(self.calib_tau).add_(0.1)
             gate_val = gate_val.div_(tau).sigmoid_()
