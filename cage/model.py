@@ -201,11 +201,15 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
     m = _get_scratch(("mask_rows", B, h, T), pos.device, dtype, B * h * T)
     m = m[:B * h * T].view(B, h, T)
     m.zero_()
-    # Inline comparison to avoid scratch allocation for the boolean mask
+    # Inline comparison into a scratch boolean selector:
     # cols: (T,) -> (1, 1, T), pos: (B,) -> (B, 1, 1)
-    # Result: (B, 1, T) boolean mask where True means mask with -inf
-    mask_bool = cols.view(1, 1, T) > pos.view(B, 1, 1)
-    m.masked_fill_(mask_bool, float("-inf"))
+    # Result: (B, 1, T) boolean mask where True means mask with -inf.
+    # The selector is scratch: it is consumed by the masked_fill_ below and
+    # never returned, so sharing one buffer across calls is aliasing-safe.
+    mb = _get_scratch(("mask_rows_b", B, T), pos.device, torch.bool, B * T)
+    mb = mb[:B * T].view(B, 1, T)
+    torch.gt(cols.view(1, 1, T), pos.view(B, 1, 1), out=mb)
+    m.masked_fill_(mb, float("-inf"))
     return m.view(B * h, 1, T)
 
 
@@ -396,7 +400,6 @@ class _CalibAttn(torch.autograd.Function):
         max_rows = rows0
         max_i1 = T
         s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
-        yb = _get_scratch(("calib_y",), q.device, q.dtype, bh * max_rows * dv)
         if len(blocks) == 1:
             p = _softmax_inplace(torch.baddbmm(
                 mask, q, kt, beta=1.0, alpha=scale,
@@ -417,8 +420,9 @@ class _CalibAttn(torch.autograd.Function):
                     mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
                     beta=1.0, alpha=scale,
                     out=s[:bh * r * i1].view(bh, r, i1)))
-                torch.bmm(p, v[:, :i1], out=yb[:bh * r * dv].view(bh, r, dv))
-                y[:, i0:i1].copy_(yb[:bh * r * dv].view(bh, r, dv))
+                # write straight into the output rows: the slice is the only
+                # writer of those rows, so no staging buffer is needed.
+                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
                 if need_ent:
                     _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
         ctx.save_for_backward(q, k, v)
@@ -490,10 +494,10 @@ class _CalibAttn(torch.autograd.Function):
             torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1], beta=0.0,
                           alpha=scale, out=tmp)
             d_k[:, :i1].add_(tmp)
-            tmp = tmpb[:bh * (i1 - i0) * dk].view(bh, i1 - i0, dk)
+            # the query-gradient rows are written exactly once, straight into
+            # place; no staging copy is needed.
             torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
-                          out=tmp)
-            d_q[:, i0:i1].copy_(tmp)
+                          out=d_q[:, i0:i1])
         return d_q, d_k, d_v, None, None, None
 
 
@@ -588,14 +592,12 @@ class _NullAttn(torch.autograd.Function):
         y4 = y.view(B, h, T, dv)
         nv4 = null_v.view(1, h, 1, dv)
         sbuf = _get_scratch(("null_s",), q.device, q.dtype, bh * max_rows * max_i1)
-        yb = _get_scratch(("null_y",), q.device, q.dtype, bh * max_rows * dv)
         for i0, i1 in blocks:
             r = i1 - i0
             p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, null_k, B, h,
                                 scale, sbuf)
-            yblk = yb[:bh * r * dv].view(bh, r, dv)
-            torch.bmm(p, v[:, :i1], out=yblk)
-            y[:, i0:i1].copy_(yblk)
+            # the output rows are written exactly once, straight into place.
+            torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
             y4[:, :, i0:i1].addcmul_(p0.view(B, h, r, 1), nv4)
         ctx.save_for_backward(q, k, v, null_k, null_v)
         ctx.scale = scale
@@ -655,9 +657,9 @@ class _NullAttn(torch.autograd.Function):
                 d_v[:, :i1].add_(tmp)
                 torch.bmm(d_s.transpose(1, 2), q_blk, out=tmp)
                 d_k[:, :i1].add_(tmp)
-                tmp = tmpb[:bh * (i1 - i0) * dk].view(bh, i1 - i0, dk)
-                torch.bmm(d_s, k[:, :i1], out=tmp)
-                d_q[:, i0:i1].copy_(tmp)
+                # the query-gradient rows are written exactly once, straight
+                # into place; no staging copy is needed.
+                torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1])
             else:
                 d_v = q.new_empty(bh, i1, dk)
                 d_k = q.new_empty(bh, i1, dk)
