@@ -192,12 +192,12 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
     """
     B = pos.size(0)
     cols = _arange(T, pos.device)
-    m = _get_scratch(("mask_rows", B, h, T), pos.device, dtype, B * h * T)
+    m = _get_scratch(("mask_rows",), pos.device, dtype, B * h * T)
     m = m[:B * h * T].view(B, h, T)
     m.zero_()
     # cols: (T,) -> (1, 1, T), pos: (B,) -> (B, 1, 1)
     # Result: (B, 1, T) boolean mask where True means mask with -inf.
-    mb = _get_scratch(("mask_rows_b", B, T), pos.device, torch.bool, B * T)
+    mb = _get_scratch(("mask_rows_b",), pos.device, torch.bool, B * T)
     mb = mb[:B * T].view(B, 1, T)
     torch.gt(cols.view(1, 1, T), pos.view(B, 1, 1), out=mb)
     m.masked_fill_(mb, float("-inf"))
@@ -240,7 +240,7 @@ class _RowEntropy(torch.autograd.Function):
         if any(ctx.needs_input_grad):
             ctx.save_for_backward(p)
         ctx.eps = eps
-        buf = _get_scratch(("rowent", *p.shape), p.device, p.dtype, p.numel())
+        buf = _get_scratch(("rowent",), p.device, p.dtype, p.numel())
         return _row_entropy(p, eps, buf=buf)
 
     @staticmethod
@@ -253,7 +253,7 @@ class _RowEntropy(torch.autograd.Function):
             return None, None
         # the gradient must be a fresh tensor, per the exact D7 formula
         # (log(p)+1 on p > _EPS, else 0, times -grad_out)
-        mask = _get_scratch(("rowent_bwd_m", *p.shape), p.device, torch.bool,
+        mask = _get_scratch(("rowent_bwd_m",), p.device, torch.bool,
                             p.numel())
         mask = mask[:p.numel()].view_as(p)
         torch.gt(p, ctx.eps, out=mask)
@@ -277,59 +277,19 @@ _query_blocks_cache: OrderedDict = OrderedDict()
 _QUERY_BLOCKS_CACHE_MAX = 512
 
 
-class _ScratchCache:
-    __slots__ = ("cache", "bytes", "max_entries", "max_bytes")
-
-    def __init__(self, max_entries: int = 128, max_bytes: int = 64 << 20):
-        self.cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
-        self.bytes = 0
-        self.max_entries = max_entries
-        self.max_bytes = max_bytes
-
-    def get(self, key: tuple, device: torch.device, dtype: torch.dtype, numel: int) -> torch.Tensor:
-        # Only ``key[0]`` (the purpose name), device and dtype take part in the
-        # identity; the shape dims are informational.  Call sites use distinct
-        # purpose names for concurrently-live temporaries, and every scratch
-        # use stays outside autograd tracking (custom Function forward/backward
-        # interiors), so sharing is aliasing-safe.
-        name = key[0] if isinstance(key, tuple) else key
-        ckey = (name, device, dtype)
-        entry = self.cache.get(ckey)
-        if entry is not None and entry.numel() >= numel:
-            # Move to end (MRU)
-            self.cache.move_to_end(ckey)
-            return entry[:numel]
-
-        nbytes = numel * dtype.itemsize
-        # Remove old entry if exists
-        if ckey in self.cache:
-            old = self.cache.pop(ckey)
-            self.bytes -= old.numel() * old.element_size()
-
-        # Evict by count
-        while len(self.cache) >= self.max_entries:
-            _, old = self.cache.popitem(last=False)
-            self.bytes -= old.numel() * old.element_size()
-
-        # Evict by bytes
-        if nbytes <= self.max_bytes:
-            while self.bytes + nbytes > self.max_bytes and self.cache:
-                _, old = self.cache.popitem(last=False)
-                self.bytes -= old.numel() * old.element_size()
-
-        with torch.inference_mode(False):
-            buf = torch.empty(numel, device=device, dtype=dtype)
-
-        self.cache[ckey] = buf
-        self.bytes += buf.numel() * buf.element_size()
-        return buf[:numel]
-
-
-_scratch_cache = _ScratchCache()
+_scratch_cache: dict[tuple, torch.Tensor] = {}
 
 
 def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: int) -> torch.Tensor:
-    return _scratch_cache.get(key, device, dtype, numel)
+    name = key[0] if isinstance(key, tuple) else key
+    ckey = (name, device, dtype)
+    entry = _scratch_cache.get(ckey)
+    if entry is not None and entry.numel() >= numel:
+        return entry[:numel]
+    with torch.inference_mode(False):
+        buf = torch.empty(numel, device=device, dtype=dtype)
+    _scratch_cache[ckey] = buf
+    return buf[:numel]
 
 
 def _query_blocks(bh: int, T: int):
@@ -418,17 +378,18 @@ class _CalibAttn(torch.autograd.Function):
             ebuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
             yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
                                 bh * max_rows * dv)
-            for i0, i1 in blocks:
+            # Pre-slice mask, kt, v for each block to avoid repeated view creation
+            mask_slices = [mask[i0:i1, :i1] for i0, i1 in blocks]
+            kt_slices = [kt[:, :, :i1] for _, i1 in blocks]
+            v_slices = [v[:, :i1] for _, i1 in blocks]
+            for (i0, i1), m_slice, kt_slice, v_slice in zip(blocks, mask_slices, kt_slices, v_slices):
                 r = i1 - i0
                 p = _softmax_inplace(torch.baddbmm(
-                    mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
+                    m_slice, q[:, i0:i1], kt_slice,
                     beta=1.0, alpha=scale,
                     out=s[:bh * r * i1].view(bh, r, i1)))
-                # the GEMM writes a contiguous block and the rows are then
-                # copied into y: bmm into the strided view y[:, i0:i1] drops
-                # the batched-GEMM fast path and costs ~3x more than the copy.
                 yb = yblk[:bh * r * dv].view(bh, r, dv)
-                torch.bmm(p, v[:, :i1], out=yb)
+                torch.bmm(p, v_slice, out=yb)
                 y[:, i0:i1].copy_(yb)
                 if need_ent:
                     _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
@@ -495,40 +456,49 @@ class _CalibAttn(torch.autograd.Function):
         qblk = _get_scratch(("calib_dqblk",), q.device, q.dtype,
                             bh * max_rows * dk)
         zero = _zero_scalar(q.device, q.dtype)
+        # Pre-slice for backward loop
+        rev_blocks = list(reversed(blocks))
+        mask_slices = [mask[i0:i1, :i1] for i0, i1 in rev_blocks]
+        q_slices = [q[:, i0:i1] for i0, i1 in rev_blocks]
+        kt_slices = [kt[:, :, :i1] for _, i1 in rev_blocks]
+        vt_slices = [vt[:, :, :i1] for _, i1 in rev_blocks]
+        k_slices = [k[:, :i1] for _, i1 in rev_blocks]
+        grad_y_slices = [grad_y[:, i0:i1] for i0, i1 in rev_blocks]
+        grad_ent_slices = [None if grad_ent is None else grad_ent[:, i0:i1] for i0, i1 in rev_blocks]
         # the last block spans every key, so it writes d_k/d_v first and the
         # remaining blocks only accumulate into them.
         first = True
-        for i0, i1 in reversed(blocks):
+        for idx, (i0, i1) in enumerate(rev_blocks):
             r = i1 - i0
             n = bh * r * i1
             p = _softmax_inplace(torch.baddbmm(
-                mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
+                mask_slices[idx], q_slices[idx], kt_slices[idx],
                 beta=1.0, alpha=scale,
                 out=s[:n].view(bh, r, i1)))
-            g = grad_y[:, i0:i1]
-            ge = None if grad_ent is None else grad_ent[:, i0:i1]
+            g = grad_y_slices[idx]
+            ge = grad_ent_slices[idx]
             d_p = dpb[:n].view(bh, r, i1)
-            torch.bmm(g, vt[:, :, :i1], out=d_p)
+            torch.bmm(g, vt_slices[idx], out=d_p)
             d_s = _softmax_grad_from_p(d_p, p, ge,
                                        buf=None if gbuf is None else gbuf[:n],
                                        mbuf=None if mbuf is None else mbuf[:n])
             if first:
                 torch.bmm(p.transpose(1, 2), g, out=d_v[:, :i1])
-                torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1], beta=0.0,
+                torch.baddbmm(zero, d_s.transpose(1, 2), q_slices[idx], beta=0.0,
                               alpha=scale, out=d_k[:, :i1])
                 first = False
             else:
                 tmp = tmpb[:bh * i1 * dk].view(bh, i1, dk)
                 torch.bmm(p.transpose(1, 2), g, out=tmp)
                 d_v[:, :i1].add_(tmp)
-                torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1], beta=0.0,
+                torch.baddbmm(zero, d_s.transpose(1, 2), q_slices[idx], beta=0.0,
                               alpha=scale, out=tmp)
                 d_k[:, :i1].add_(tmp)
             # the query-gradient rows are written exactly once, in place -
             # through a contiguous block buffer, because baddbmm into the
             # strided view d_q[:, i0:i1] misses the batched-GEMM fast path.
             dqb = qblk[:bh * r * dk].view(bh, r, dk)
-            torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale, out=dqb)
+            torch.baddbmm(zero, d_s, k_slices[idx], beta=0.0, alpha=scale, out=dqb)
             d_q[:, i0:i1].copy_(dqb)
         return d_q, d_k, d_v, None, None, None
 
@@ -625,14 +595,16 @@ class _NullAttn(torch.autograd.Function):
         nv4 = null_v.view(1, h, 1, dv)
         sbuf = _get_scratch(("null_s",), q.device, q.dtype, bh * max_rows * max_i1)
         yblk = _get_scratch(("null_yblk",), q.device, q.dtype, bh * max_rows * dv)
-        for i0, i1 in blocks:
+        # Pre-slice for forward loop
+        mask_slices = [mask[i0:i1, :i1] for i0, i1 in blocks]
+        kt_slices = [kt[:, :, :i1] for _, i1 in blocks]
+        v_slices = [v[:, :i1] for _, i1 in blocks]
+        for (i0, i1), m_slice, kt_slice, v_slice in zip(blocks, mask_slices, kt_slices, v_slices):
             r = i1 - i0
-            p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, null_k, B, h,
+            p, p0 = _null_probs(q[:, i0:i1], kt_slice, i0, i1, m_slice, null_k, B, h,
                                 scale, sbuf)
-            # contiguous block buffer + copy: bmm into the strided view
-            # y[:, i0:i1] misses the batched-GEMM fast path (~3x slower).
             yb = yblk[:bh * r * dv].view(bh, r, dv)
-            torch.bmm(p, v[:, :i1], out=yb)
+            torch.bmm(p, v_slice, out=yb)
             y[:, i0:i1].copy_(yb)
             y4[:, :, i0:i1].addcmul_(p0.view(B, h, r, 1), nv4)
         if any(ctx.needs_input_grad):
@@ -681,16 +653,25 @@ class _NullAttn(torch.autograd.Function):
                             bh * max_rows * dk)
         acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
+        # Pre-slice for backward loop
+        rev_blocks = list(reversed(blocks))
+        mask_slices = [mask[i0:i1, :i1] for i0, i1 in rev_blocks]
+        q_slices = [q[:, i0:i1] for i0, i1 in rev_blocks]
+        kt_slices = [kt[:, :, :i1] for _, i1 in rev_blocks]
+        vt_slices = [vt[:, :, :i1] for _, i1 in rev_blocks]
+        k_slices = [k[:, :i1] for _, i1 in rev_blocks]
+        grad_y_slices = [grad_y[:, i0:i1] for i0, i1 in rev_blocks]
         # the last block spans every key, so it writes d_k/d_v first and the
         # remaining blocks only accumulate into them.
         first = True
-        for i0, i1 in reversed(blocks):
-            q_blk = q[:, i0:i1]
-            g = grad_y[:, i0:i1]
+        for idx, (i0, i1) in enumerate(rev_blocks):
+            q_blk = q_slices[idx]
+            g = grad_y_slices[idx]
             r = i1 - i0
-            p, p0 = _null_probs(q_blk, kt, i0, i1, mask, null_k, B, h, scale, sbuf)
+            p, p0 = _null_probs(q_blk, kt_slices[idx], i0, i1, mask_slices[idx],
+                                null_k, B, h, scale, sbuf)
             n = bh * r * i1
-            e = torch.bmm(g, vt[:, :, :i1], out=eb[:n].view(bh, r, i1))
+            e = torch.bmm(g, vt_slices[idx], out=eb[:n].view(bh, r, i1))
             gu0 = gub[:bh * r].view(bh, r, 1)
             torch.matmul(g.view(B, h, r, -1), nv4t, out=gu0.view(B, h, r, 1))
             pe = peb[:n].view(bh, r, i1)
@@ -717,14 +698,14 @@ class _NullAttn(torch.autograd.Function):
                 # contiguous block buffer: bmm into the strided view
                 # d_q[:, i0:i1] misses the batched-GEMM fast path (~3x slower).
                 dqb = qblk[:bh * r * dk].view(bh, r, dk)
-                torch.bmm(d_s, k[:, :i1], out=dqb)
+                torch.bmm(d_s, k_slices[idx], out=dqb)
                 d_q[:, i0:i1].copy_(dqb)
             else:
                 d_v = q.new_empty(bh, i1, dk)
                 d_k = q.new_empty(bh, i1, dk)
                 torch.bmm(p.transpose(1, 2), g, out=d_v)
                 torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
-                torch.bmm(d_s, k[:, :i1], out=d_q)
+                torch.bmm(d_s, k_slices[idx], out=d_q)
             d_q4[:, :, i0:i1].addcmul_(d_s0.view(B, h, r, 1), nk4)
             acc_blk = tmpb[:bh * dk].view(bh, 1, dk)
             torch.bmm(d_s0.transpose(-2, -1), q_blk, out=acc_blk)
@@ -768,12 +749,14 @@ class Attention(nn.Module):
             tau_init = math.log(math.expm1(cfg.calib_tau_init))
             self.calib_tau = nn.Parameter(torch.tensor(tau_init))
             self.calib_scale = nn.Parameter(torch.tensor(float(cfg.calib_scale)))
+            self._log_len_cache: dict[int, float] = {}
             # calib_tau initialized so softplus(tau) = calib_tau_init initially
             # (tau_init = log(expm1(calib_tau_init))):
             # softplus(log(expm1(calib_tau_init))) = log(1 + exp(log(expm1(calib_tau_init)))) = log(1 + expm1(calib_tau_init)) = log(exp(calib_tau_init)) = calib_tau_init
             # gate temperature = softplus(tau) + 0.1 = calib_tau_init + 0.1 (default 0.9 + 0.1 = 1.0)
         else:
             self.calib_a = self.calib_c = self.calib_tau = self.calib_scale = None
+            self._log_len_cache = None
         if cfg.gate == "null":
             self.null_k = nn.Parameter(torch.zeros(self.h, self.dk))
             self.null_v = nn.Parameter(torch.zeros(self.h, self.dk))
@@ -930,13 +913,17 @@ class Attention(nn.Module):
         if kind == "query":
             gate_val = torch.sigmoid(self.gate(x))
         elif is_calib:
-            log_len = math.log(max(T, 2))
+            log_len = self._log_len_cache.get(T)
+            if log_len is None:
+                log_len = math.log(max(T, 2))
+                self._log_len_cache[T] = log_len
             # gate(x) - calib_a*log_len
             #     - (calib_c*calib_scale/log_len) * ent.mean(1, keepdim=True)
-            gate_val = self.gate(x).sub(self.calib_a * log_len)
-            # mean(dim=1) -> (B, T), unsqueeze(-1) -> (B, T, 1) for broadcasting
+            gate_val = self.gate(x)
+            gate_val.sub_(self.calib_a * log_len)
+            calib_cs = self.calib_c * self.calib_scale
             conc = ent.mean(dim=1).div_(log_len).unsqueeze(-1)
-            gate_val.sub_(conc * (self.calib_c * self.calib_scale))
+            gate_val.sub_(conc * calib_cs)
             tau = F.softplus(self.calib_tau).add_(0.1)
             # div() out of place, sigmoid_() in place: div_ would have to save
             # its input for tau's gradient and would clone the gate again.
