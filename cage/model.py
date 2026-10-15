@@ -68,13 +68,13 @@ class Cfg:
     n_layers: int = 8
     max_len: int = 256
     dropout: float = 0.0
-    gate: str = "none"          # none | query | calib | null
-    norm: str = "pre"           # pre | post | mix | seednorm
-    layer_scale: float | None = None  # initial LayerScale value or None
-    calib_a: float = 1.0        # length-correction strength (learnable scale)
-    calib_c: float = 1.0        # concentration-correction strength
-    calib_scale: float = 1.0    # additional concentration scaling
-    calib_tau_init: float = 0.9  # initial gate temperature (softplus(tau)+0.1 = this)
+    gate: str = "none"
+    norm: str = "pre"
+    layer_scale: float | None = None
+    calib_a: float = 1.0
+    calib_c: float = 1.0
+    calib_scale: float = 1.0
+    calib_tau_init: float = 0.9
     use_gradient_checkpointing: bool = False
 
     def __post_init__(self):
@@ -108,11 +108,6 @@ class SeeDNorm(nn.Module):
         nn.init.normal_(self.scale.weight, std=0.02)
 
     def forward(self, x):
-        # the sigmoid is written out of place: ``self.scale(x)`` is a view of
-        # the flattened projection result, and an in-place op on such a view
-        # makes autograd insert a CopyBackwards node that clones the whole
-        # (B, T, dim) activation once per call.  ``self.ln(x)`` is a fresh
-        # tensor, so the two following in-place multiplies stay free.
         s = torch.sigmoid(self.scale(x))
         return self.ln(x).mul(s).mul_(2.0)
 
@@ -195,8 +190,6 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
     m = _get_scratch(("mask_rows",), pos.device, dtype, B * h * T)
     m = m[:B * h * T].view(B, h, T)
     m.zero_()
-    # cols: (T,) -> (1, 1, T), pos: (B,) -> (B, 1, 1)
-    # Result: (B, 1, T) boolean mask where True means mask with -inf.
     mb = _get_scratch(("mask_rows_b",), pos.device, torch.bool, B * T)
     mb = mb[:B * T].view(B, 1, T)
     torch.gt(cols.view(1, 1, T), pos.view(B, 1, 1), out=mb)
@@ -251,8 +244,6 @@ class _RowEntropy(torch.autograd.Function):
         (p,) = saved
         if grad_out is None:
             return None, None
-        # the gradient must be a fresh tensor, per the exact D7 formula
-        # (log(p)+1 on p > _EPS, else 0, times -grad_out)
         mask = _get_scratch(("rowent_bwd_m",), p.device, torch.bool,
                             p.numel())
         mask = mask[:p.numel()].view_as(p)
@@ -378,7 +369,6 @@ class _CalibAttn(torch.autograd.Function):
             ebuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
             yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
                                 bh * max_rows * dv)
-            # Pre-slice mask, kt, v for each block to avoid repeated view creation
             mask_slices = [mask[i0:i1, :i1] for i0, i1 in blocks]
             kt_slices = [kt[:, :, :i1] for _, i1 in blocks]
             v_slices = [v[:, :i1] for _, i1 in blocks]
@@ -409,8 +399,6 @@ class _CalibAttn(torch.autograd.Function):
         q, k, v = saved
         scale, eps = ctx.scale, ctx.eps
         bh, T = q.size(0), q.size(1)
-        # gradient through the attention output may be absent (e.g. tests that
-        # differentiate only the entropy by-product): present it as zeros.
         if grad_y is None:
             grad_y = q.new_zeros(bh, T, v.size(-1))
         blocks = _query_blocks(bh, T)
@@ -418,7 +406,6 @@ class _CalibAttn(torch.autograd.Function):
         kt = k.transpose(1, 2)
         vt = v.transpose(1, 2)
         rows0 = blocks[0][1] - blocks[0][0]
-        # recompute probabilities (identical op sequence to forward)
         if len(blocks) == 1:
             s = _get_scratch(("calib_s",), q.device, q.dtype, bh * rows0 * T)
             p = _softmax_inplace(torch.baddbmm(
@@ -456,7 +443,6 @@ class _CalibAttn(torch.autograd.Function):
         qblk = _get_scratch(("calib_dqblk",), q.device, q.dtype,
                             bh * max_rows * dk)
         zero = _zero_scalar(q.device, q.dtype)
-        # Pre-slice for backward loop
         rev_blocks = list(reversed(blocks))
         mask_slices = [mask[i0:i1, :i1] for i0, i1 in rev_blocks]
         q_slices = [q[:, i0:i1] for i0, i1 in rev_blocks]
@@ -465,8 +451,6 @@ class _CalibAttn(torch.autograd.Function):
         k_slices = [k[:, :i1] for _, i1 in rev_blocks]
         grad_y_slices = [grad_y[:, i0:i1] for i0, i1 in rev_blocks]
         grad_ent_slices = [None if grad_ent is None else grad_ent[:, i0:i1] for i0, i1 in rev_blocks]
-        # the last block spans every key, so it writes d_k/d_v first and the
-        # remaining blocks only accumulate into them.
         first = True
         for idx, (i0, i1) in enumerate(rev_blocks):
             r = i1 - i0
@@ -494,9 +478,6 @@ class _CalibAttn(torch.autograd.Function):
                 torch.baddbmm(zero, d_s.transpose(1, 2), q_slices[idx], beta=0.0,
                               alpha=scale, out=tmp)
                 d_k[:, :i1].add_(tmp)
-            # the query-gradient rows are written exactly once, in place -
-            # through a contiguous block buffer, because baddbmm into the
-            # strided view d_q[:, i0:i1] misses the batched-GEMM fast path.
             dqb = qblk[:bh * r * dk].view(bh, r, dk)
             torch.baddbmm(zero, d_s, k_slices[idx], beta=0.0, alpha=scale, out=dqb)
             d_q[:, i0:i1].copy_(dqb)
@@ -530,8 +511,6 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
             else:
                 mask = mbuf[:p.numel()].view_as(p)
                 torch.gt(p, _EPS, out=mask)
-        # ``(p > _EPS) * (log(clamp_min(p, _EPS)) + 1)``: the selector zeroes
-        # the sub-eps rows, applied as one select.
         logterm.add_(1.0)
         logterm.mul_(mask)
         d_p.addcmul_(logterm, grad_ent.unsqueeze(-1), value=-1.0)
@@ -542,9 +521,6 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
 def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
                 mask: torch.Tensor, null_k: torch.Tensor, B: int, h: int,
                 scale: float, sbuf: torch.Tensor | None = None):
-    # NOTE: callers pre-slice `kt` to (..., :i1) and `mask` to [i0:i1, :i1],
-    # so they are used directly here (slicing again would empty the mask
-    # for i0 > 0 and break multi-block / long-sequence runs).
     n, r = q_blk.size(0), q_blk.size(1)
     if sbuf is None:
         s = torch.baddbmm(mask, q_blk, kt,
@@ -598,7 +574,6 @@ class _NullAttn(torch.autograd.Function):
         nv4 = null_v.view(1, h, 1, dv)
         sbuf = _get_scratch(("null_s",), q.device, q.dtype, bh * max_rows * max_i1)
         yblk = _get_scratch(("null_yblk",), q.device, q.dtype, bh * max_rows * dv)
-        # Pre-slice for forward loop
         mask_slices = [mask[i0:i1, :i1] for i0, i1 in blocks]
         kt_slices = [kt[:, :, :i1] for _, i1 in blocks]
         v_slices = [v[:, :i1] for _, i1 in blocks]
@@ -656,7 +631,6 @@ class _NullAttn(torch.autograd.Function):
                             bh * max_rows * dk)
         acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
-        # Pre-slice for backward loop
         rev_blocks = list(reversed(blocks))
         mask_slices = [mask[i0:i1, :i1] for i0, i1 in rev_blocks]
         q_slices = [q[:, i0:i1] for i0, i1 in rev_blocks]
@@ -664,8 +638,6 @@ class _NullAttn(torch.autograd.Function):
         vt_slices = [vt[:, :, :i1] for _, i1 in rev_blocks]
         k_slices = [k[:, :i1] for _, i1 in rev_blocks]
         grad_y_slices = [grad_y[:, i0:i1] for i0, i1 in rev_blocks]
-        # the last block spans every key, so it writes d_k/d_v first and the
-        # remaining blocks only accumulate into them.
         first = True
         for idx, (i0, i1) in enumerate(rev_blocks):
             q_blk = q_slices[idx]
@@ -697,9 +669,6 @@ class _NullAttn(torch.autograd.Function):
                     d_v[:, :i1].add_(tmp)
                     torch.bmm(d_s.transpose(1, 2), q_blk, out=tmp)
                     d_k[:, :i1].add_(tmp)
-                # the query-gradient rows are written exactly once, through a
-                # contiguous block buffer: bmm into the strided view
-                # d_q[:, i0:i1] misses the batched-GEMM fast path (~3x slower).
                 dqb = qblk[:bh * r * dk].view(bh, r, dk)
                 torch.bmm(d_s, k_slices[idx], out=dqb)
                 d_q[:, i0:i1].copy_(dqb)
@@ -733,11 +702,6 @@ class Attention(nn.Module):
         self.attn_dropout = nn.Dropout(cfg.dropout)
 
         if cfg.gate in ("query", "calib"):
-            # The gate is the only gate-variant-specific module in the model.
-            # It is initialised from a forked copy of the global RNG, so the
-            # shared stream ``CAGE.apply(_init)`` consumes afterwards is left
-            # exactly where it was and all four variants stay init-matched
-            # (E1 is a controlled comparison).
             with torch.random.fork_rng(devices=[]):
                 self.gate = nn.Linear(cfg.d_model, cfg.d_model, bias=True)
                 nn.init.normal_(self.gate.weight, std=0.02)
@@ -753,10 +717,6 @@ class Attention(nn.Module):
             self.calib_tau = nn.Parameter(torch.tensor(tau_init))
             self.calib_scale = nn.Parameter(torch.tensor(float(cfg.calib_scale)))
             self._log_len_cache: dict[int, float] = {}
-            # calib_tau initialized so softplus(tau) = calib_tau_init initially
-            # (tau_init = log(expm1(calib_tau_init))):
-            # softplus(log(expm1(calib_tau_init))) = log(1 + exp(log(expm1(calib_tau_init)))) = log(1 + expm1(calib_tau_init)) = log(exp(calib_tau_init)) = calib_tau_init
-            # gate temperature = softplus(tau) + 0.1 = calib_tau_init + 0.1 (default 0.9 + 0.1 = 1.0)
         else:
             self.calib_a = self.calib_c = self.calib_tau = self.calib_scale = None
             self._log_len_cache = None
@@ -778,8 +738,6 @@ class Attention(nn.Module):
         entropy by ``keep*(log keep - 1)`` if it were read as one.
         """
         if is_null:
-            # the real-token mass no longer sums to one once the null slot
-            # competes, so it has to be renormalised before it means anything
             null_mass = rows[..., 0]
             pr = rows[..., 1:]
             pr.div_(pr.sum(-1, keepdim=True).clamp_min(_EPS))
@@ -831,21 +789,13 @@ class Attention(nn.Module):
         del qkv
 
         ent = None
-        # head-major attention output (B, h, T, dk)
         y4 = None
         stats = None
         if not dropping:
-            # [fixed design, docs/design_notes.md D1] All four gate variants
-            # share ONE hand-written kernel family: E1 is a controlled
-            # comparison, so the numerics must not depend on the gate variant.
-            # The calibrated kernel emits the row entropy as a by-product.
-            # Do NOT switch any variant to a fused/flash attention call.
             if is_null:
                 y4 = _NullAttn.apply(qb, kb, vb, self.null_k, self.null_v,
                                      self.inv_scale, B).view(B, h, T, dk)
             else:
-                # none / query / calib share the same kernel; the row entropy
-                # by-product is materialised only for the calibrated gate
                 y, ent = _CalibAttn.apply(qb, kb, vb, self.inv_scale, _EPS,
                                           is_calib)
                 y4 = y.view(B, h, T, dk)
@@ -855,17 +805,12 @@ class Attention(nn.Module):
                     qb.view(B, h, T, dk), kb, B, h, T, stat_pos, is_null,
                     ent_full=ent)
         else:
-            # attention dropout acts on the probabilities; the statistics are
-            # read from the clean softmax rows before the dropout.
             q_ = qb.view(B, h, T, dk)
             k_ = kb.view(B, h, T, dk)
             if is_null:
                 nk = self.null_k.view(1, h, 1, dk).expand(B, h, 1, dk)
                 kv_k = torch.cat([nk, k_], dim=2)
                 att = torch.matmul(q_, kv_k.transpose(-2, -1)).mul_(self.inv_scale)
-                # fill the real-key columns with -inf and leave the null
-                # column untouched; identical to adding the additive 0/-inf
-                # mask (the (T+1)-wide bool form comes from the module cache).
                 att.masked_fill_(_causal_bool_mask(T, x.device),
                                  float("-inf"))
                 p = _SoftmaxInPlace.apply(att)
@@ -877,10 +822,6 @@ class Attention(nn.Module):
                 if dropping:
                     p = self.attn_dropout(p)
                 pb = p.view(bh, T, T + 1)
-                # the addcmul runs out of place: an in-place op on the bmm
-                # result would make autograd clone it first (it is the view of
-                # a flattened GEMM output), which copies (B, h, T, dk) for
-                # nothing - the non-in-place form allocates the same buffer.
                 y4 = torch.addcmul(torch.bmm(pb[..., 1:], vb).view(B, h, T, dk),
                                    p.view(B, h, T, T + 1)[..., :1],
                                    self.null_v.view(1, h, 1, dk))
@@ -903,15 +844,6 @@ class Attention(nn.Module):
                     p = self.attn_dropout(p)
                 y4 = torch.bmm(p, vb).view(B, h, T, dk)
 
-        # ---- gating ----
-        #
-        # The projection output is a *view* of the flattened (B*T, d_model)
-        # GEMM result, and autograd reacts to an in-place op on a view by
-        # inserting a CopyBackwards node that clones the whole (B, T, C)
-        # activation (Note [In place operations on views]).  The first step of
-        # each gate therefore has to run out of place; every later step works
-        # in place on that fresh, non-view tensor, which costs nothing and
-        # keeps the number of live (B, T, C) buffers at two.
         gate_val = None
         if kind == "query":
             gate_val = torch.sigmoid(self.gate(x))
@@ -920,16 +852,12 @@ class Attention(nn.Module):
             if log_len is None:
                 log_len = math.log(max(T, 2))
                 self._log_len_cache[T] = log_len
-            # gate(x) - calib_a*log_len
-            #     - (calib_c*calib_scale/log_len) * ent.mean(1, keepdim=True)
             gate_val = self.gate(x)
             gate_val.sub_(self.calib_a * log_len)
             calib_cs = self.calib_c * self.calib_scale
             conc = ent.mean(dim=1).div_(log_len).unsqueeze(-1)
             gate_val.sub_(conc * calib_cs)
             tau = F.softplus(self.calib_tau).add_(0.1)
-            # div() out of place, sigmoid_() in place: div_ would have to save
-            # its input for tau's gradient and would clone the gate again.
             gate_val = gate_val.div(tau).sigmoid_()
             del ent
             ent = None
@@ -937,10 +865,6 @@ class Attention(nn.Module):
         if gate_val is None:
             y = y4.transpose(1, 2).reshape(B, T, C)
         else:
-            # the gate is the leading operand so the product keeps the
-            # token-major contiguous layout; the elementwise product is
-            # commutative, so this is the same value as transposing first and
-            # multiplying afterwards.
             y = torch.mul(gate_val.view(B, T, h, dk), y4.transpose(1, 2))
             y = y.reshape(B, T, C)
 
@@ -978,10 +902,6 @@ class Block(nn.Module):
         self.ln1 = make_norm(cfg.norm, cfg.d_model)
         self.ln2 = make_norm(cfg.norm, cfg.d_model)
         self.attn = Attention(cfg)
-        # the GELU is folded into the second projection (see _GeluLinear).
-        # The dropout is *not* in-place: the input is the view of a flattened
-        # GEMM output, so an in-place op there only makes autograd clone the
-        # whole (B, T, d_model) first - the same buffer either way.
         self.mlp = nn.Sequential(
             nn.Linear(cfg.d_model, 4 * cfg.d_model),
             _GeluLinear(4 * cfg.d_model, cfg.d_model),
@@ -1040,10 +960,6 @@ class CAGE(nn.Module):
     @staticmethod
     def _init(m):
         if isinstance(m, nn.Linear):
-            # The gate was already given its weight and its "start open" bias
-            # in Attention.__init__ under a forked RNG; re-drawing it here
-            # would consume the shared stream this walk draws from, so the
-            # four gate variants stay init-matched (see Attention.__init__).
             if hasattr(m, "_is_gate") and m._is_gate:
                 return
             nn.init.normal_(m.weight, std=0.02)
@@ -1074,7 +990,6 @@ class CAGE(nn.Module):
         if targets is not None:
             flat_t = targets.reshape(-1)
             if sup_pos is not None:
-                # `mul` yields a private tensor, so it is scaled in place
                 sup = _arange(targets.size(0), targets.device).mul(
                     targets.size(1)).add_(sup_pos)
             else:

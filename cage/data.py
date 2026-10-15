@@ -34,8 +34,8 @@ def _sample_keys(batch: int, n_pairs: int, vocab: int, gen, device) -> torch.Ten
     available (0/1 are reserved), so a request beyond that is rejected rather
     than silently downgraded to sampling with replacement.
     """
-    n_avail = vocab - 2                      # 0/1 are reserved (PAD / SEP)
-    if n_pairs > n_avail:                    # cannot sample without replacement
+    n_avail = vocab - 2
+    if n_pairs > n_avail:
         raise ValueError(
             f"n_pairs={n_pairs} needs {n_pairs} distinct keys per sequence but "
             f"vocab={vocab} only offers {n_avail} (ids 0=PAD and 1=SEP are "
@@ -70,8 +70,8 @@ def make_batch(batch: int, n_pairs: int, vocab: int, device, dense_lm: bool = Fa
     seq[:, -1].copy_(answer)
     idx = seq[:, :-1]
     tgt_full = seq[:, 1:]
-    key_pos = 2 * qi_idx                       # position of matching key in `idx`
-    query_pos = torch.full_like(qi_idx, width + 1)  # last position: predict answer here
+    key_pos = 2 * qi_idx
+    query_pos = torch.full_like(qi_idx, width + 1)
     if dense_lm:
         targets = tgt_full
     else:

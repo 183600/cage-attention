@@ -66,7 +66,6 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4, seed=123)
     for _ in range(batches):
         idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
         logits, _, _ = model(idx)
-        # logits carry a single query position, so column 0 is a contiguous view
         pred = logits.squeeze(1).argmax(-1)
         correct += int((pred == meta["answer"]).sum())
         total += idx.size(0)
@@ -86,22 +85,21 @@ def collect_stats(model, n_pairs, vocab, device, batch=128, batches=4, seed=7):
            "correct": [], "resid_norm": []}
     for _ in range(batches):
         idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        # the model evaluates the diagnostics on the query positions directly
         logits, _, layer_stats = model(idx, stat_pos=meta["query_pos"])
         pred = logits.squeeze(1).argmax(-1)
         out["correct"].append((pred == meta["answer"]).float())
         ents, maxps, nulls, gates, rns = [], [], [], [], []
         for s in layer_stats:
-            ents.append(s["entropy"].mean(1))                # (B,h) -> B
-            maxps.append(s["maxprob"].max(1)[0])             # (B,h) -> B
+            ents.append(s["entropy"].mean(1))
+            maxps.append(s["maxprob"].max(1)[0])
             rns.append(s["resid_norm"])
             if s["gate"] is not None:
-                gates.append(s["gate"].mean(-1))             # (B,C) -> B
+                gates.append(s["gate"].mean(-1))
             if s["null_mass"] is not None:
-                nulls.append(s["null_mass"].mean(1))         # (B,h) -> B
-        out["entropy"].append(torch.stack(ents, 1))                    # B, L
+                nulls.append(s["null_mass"].mean(1))
+        out["entropy"].append(torch.stack(ents, 1))
         out["maxprob"].append(torch.stack(maxps, 1))
-        out["resid_norm"].append(torch.stack(rns, 1))                  # B, L
+        out["resid_norm"].append(torch.stack(rns, 1))
         if gates:
             out["gate"].append(torch.stack(gates, 1))
         if nulls:
@@ -184,7 +182,7 @@ def false_concentration_analysis(stats, maxprob_thresh=0.5):
     correct samples - a good calibrated gate should close (lower value)
     when concentration is false.
     """
-    mp = stats["maxprob"].max(dim=1)[0]   # best layer maxprob per sample
+    mp = stats["maxprob"].max(dim=1)[0]
     high = mp > maxprob_thresh
     corr = stats["correct"].bool()
     r = {
