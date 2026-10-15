@@ -211,12 +211,18 @@ class _SoftmaxInPlace(torch.autograd.Function):
     def forward(ctx, x):
         ctx.mark_dirty(x)
         torch.softmax(x, dim=-1, out=x)
-        ctx.save_for_backward(x)
+        if any(ctx.needs_input_grad):
+            ctx.save_for_backward(x)
         return x
 
     @staticmethod
     def backward(ctx, grad_out):
-        (y,) = ctx.saved_tensors
+        saved = ctx.saved_tensors
+        if not saved:
+            return None
+        (y,) = saved
+        if grad_out is None:
+            return None
         gy = grad_out.mul(y)
         return gy.addcmul_(y, gy.sum(-1, keepdim=True), value=-1.0)
 
@@ -226,14 +232,20 @@ class _RowEntropy(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, p, eps: float):
-        ctx.save_for_backward(p)
+        if any(ctx.needs_input_grad):
+            ctx.save_for_backward(p)
         ctx.eps = eps
         buf = _get_scratch(("rowent", *p.shape), p.device, p.dtype, p.numel())
         return _row_entropy(p, eps, buf=buf)
 
     @staticmethod
     def backward(ctx, grad_out):
-        (p,) = ctx.saved_tensors
+        saved = ctx.saved_tensors
+        if not saved:
+            return None, None
+        (p,) = saved
+        if grad_out is None:
+            return None, None
         # the gradient must be a fresh tensor, per the exact D7 formula
         # (log(p)+1 on p > _EPS, else 0, times -grad_out)
         mask = _get_scratch(("rowent_bwd_m", *p.shape), p.device, torch.bool,
@@ -408,16 +420,26 @@ class _CalibAttn(torch.autograd.Function):
                 torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
                 if need_ent:
                     _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
-        ctx.save_for_backward(q, k, v)
+        if any(ctx.needs_input_grad):
+            ctx.save_for_backward(q, k, v)
+        else:
+            ctx.qkv_saved = False
         ctx.scale = scale
         ctx.eps = eps
         return y, ent
 
     @staticmethod
     def backward(ctx, grad_y, grad_ent):
-        q, k, v = ctx.saved_tensors
+        saved = ctx.saved_tensors
+        if not saved:
+            return None, None, None, None, None, None
+        q, k, v = saved
         scale, eps = ctx.scale, ctx.eps
         bh, T = q.size(0), q.size(1)
+        # gradient through the attention output may be absent (e.g. tests that
+        # differentiate only the entropy by-product): present it as zeros.
+        if grad_y is None:
+            grad_y = q.new_zeros(bh, T, v.size(-1))
         blocks = _query_blocks(bh, T)
         mask = _causal_mask(T, q.device, q.dtype)
         kt = k.transpose(1, 2)
@@ -591,17 +613,25 @@ class _NullAttn(torch.autograd.Function):
             # the output rows are written exactly once, in place.
             torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
             y4[:, :, i0:i1].addcmul_(p0.view(B, h, r, 1), nv4)
-        ctx.save_for_backward(q, k, v, null_k, null_v)
+        if any(ctx.needs_input_grad):
+            ctx.save_for_backward(q, k, v, null_k, null_v)
+        else:
+            ctx.qkv_saved = False
         ctx.scale = scale
         ctx.shape = (B, h)
         return y
 
     @staticmethod
     def backward(ctx, grad_y):
-        q, k, v, null_k, null_v = ctx.saved_tensors
+        saved = ctx.saved_tensors
+        if not saved:
+            return None, None, None, None, None, None, None
+        q, k, v, null_k, null_v = saved
         scale = ctx.scale
         B, h = ctx.shape
         bh, T = q.size(0), q.size(1)
+        if grad_y is None:
+            grad_y = q.new_zeros(bh, T, v.size(-1))
         dk = null_k.size(-1)
         blocks = _query_blocks(bh, T)
         mask = _causal_mask(T, q.device, q.dtype)
@@ -871,6 +901,8 @@ class Attention(nn.Module):
             gate_val.addcmul_(conc, self.calib_c * self.calib_scale, value=-1.0)
             tau = F.softplus(self.calib_tau).add_(0.1)
             gate_val.div_(tau).sigmoid_()
+            del ent
+            ent = None
 
         if gate_val is None:
             y = y4.transpose(1, 2).reshape(B, T, C)
