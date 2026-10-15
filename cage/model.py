@@ -65,13 +65,9 @@ def _zero_scalar(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
 def _servable(t: torch.Tensor) -> bool:
     """Whether a cached tensor may be handed back in the current mode.
 
-    ``torch.compile`` traces the ``torch.inference_mode(False)`` guards in
-    the cache fillers away, so a buffer first allocated while tracing a
-    compiled eval forward is still created under the *ambient* inference
-    mode and lands in the cache as an inference tensor.  Inference tensors
-    can only be written in place (and used as index tensors) inside
-    inference mode, so they are served to an active inference mode only;
-    in every other mode the entry is reallocated.
+    Inference tensors can only be written in place (and used as index
+    tensors) inside inference mode, so they are served to an active
+    inference mode only.
     """
     return not t.is_inference() or torch.is_inference_mode_enabled()
 
@@ -166,11 +162,8 @@ def _causal_null_mask(T: int, device: torch.device,
 
     Shape ``(T, T + 1)``: column 0 (the learnable null slot) is 0 and the
     real-key columns hold the usual strictly-upper ``-inf``.  It is added
-    to the ``(B*H, T, T+1)`` scores instead of being used as a
-    ``masked_fill`` boolean: ``add`` backward never saves the (constant)
-    mask operand, so a mask buffer that was first materialized inside a
-    compiled inference-mode forward cannot poison a later training-mode
-    backward.
+    to the ``(B*H, T, T+1)`` scores rather than used as a ``masked_fill``
+    boolean.
     """
     key = (T, device, dtype)
     m = _causal_null_cache.get(key)
@@ -192,11 +185,7 @@ _arange_cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
 
 
 def _arange(n: int, device: torch.device) -> torch.Tensor:
-    """Read-only ``arange(n)`` shared across calls (index tensors only).
-
-    Allocated with inference mode *off* so one cached entry serves every
-    context, including the training-mode forward.  LRU eviction.
-    """
+    """Read-only ``arange(n)`` shared across calls (index tensors only)."""
     key = (n, device)
     a = _arange_cache.get(key)
     if a is not None and _servable(a):
@@ -739,11 +728,10 @@ class Attention(nn.Module):
 
     @staticmethod
     def _pack(qkv: torch.Tensor, B: int, h: int, T: int, dk: int) -> torch.Tensor:
-        """``(B, T, 3*h*dk) -> (3, B*h, T, dk)`` head-major, one shared copy.
+        """``(B, T, 3*h*dk) -> (3, B*h, T, dk)`` head-major layout.
 
-        The three slices are handed to the attention kernel as a *single*
-        tensor: three independent views would each materialize a full-size
-        zeros grad in backward, which is pure overhead.
+        The three slices are handed to the attention kernel as a single
+        tensor.
         """
         return qkv.view(B, T, 3, h, dk).permute(2, 0, 3, 1, 4).contiguous().view(
             3, B * h, T, dk)
