@@ -183,21 +183,15 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
     """``(B*h, 1, T)`` additive mask rows for the query positions ``pos``.
 
     Row ``b`` is 0 up to column ``pos[b]`` and ``-inf`` beyond it.  The mask
-    depends on the *values* of ``pos``, so it is rebuilt per call; only the
-    shared per-length causal mask is cached.  The workspace is scratch - the
-    only consumer is the ``baddbmm`` right after the call, which copies the
-    values out.
+    depends on the *values* of ``pos``, so it is rebuilt per call.
     """
     B = pos.size(0)
     cols = _arange(T, pos.device)
     m = _get_scratch(("mask_rows", B, h, T), pos.device, dtype, B * h * T)
     m = m[:B * h * T].view(B, h, T)
     m.zero_()
-    # Inline comparison into a scratch boolean selector:
     # cols: (T,) -> (1, 1, T), pos: (B,) -> (B, 1, 1)
     # Result: (B, 1, T) boolean mask where True means mask with -inf.
-    # The selector is scratch: it is consumed by the masked_fill_ below and
-    # never returned, so sharing one buffer across calls is aliasing-safe.
     mb = _get_scratch(("mask_rows_b", B, T), pos.device, torch.bool, B * T)
     mb = mb[:B * T].view(B, 1, T)
     torch.gt(cols.view(1, 1, T), pos.view(B, 1, 1), out=mb)
@@ -241,8 +235,7 @@ class _RowEntropy(torch.autograd.Function):
     def backward(ctx, grad_out):
         (p,) = ctx.saved_tensors
         # the gradient must be a fresh tensor, per the exact D7 formula
-        # (log(p)+1 on p > _EPS, else 0, times -grad_out); only the selector is
-        # scratch (it is consumed inside this call and never returned)
+        # (log(p)+1 on p > _EPS, else 0, times -grad_out)
         mask = _get_scratch(("rowent_bwd_m", *p.shape), p.device, torch.bool,
                             p.numel())
         mask = mask[:p.numel()].view_as(p)
@@ -277,12 +270,11 @@ class _ScratchCache:
         self.max_bytes = max_bytes
 
     def get(self, key: tuple, device: torch.device, dtype: torch.dtype, numel: int) -> torch.Tensor:
-        # The shape dims carried in ``key`` are informational only: buffers are
-        # shared by purpose (``key[0]``), device and dtype, so one entry serves
-        # every (B, T) shape instead of pinning one buffer per shape.  All call
-        # sites use distinct purpose names for concurrently-live temporaries,
-        # and every scratch use stays outside autograd tracking (custom
-        # Function forward/backward interiors), so sharing is aliasing-safe.
+        # Only ``key[0]`` (the purpose name), device and dtype take part in the
+        # identity; the shape dims are informational.  Call sites use distinct
+        # purpose names for concurrently-live temporaries, and every scratch
+        # use stays outside autograd tracking (custom Function forward/backward
+        # interiors), so sharing is aliasing-safe.
         name = key[0] if isinstance(key, tuple) else key
         ckey = (name, device, dtype)
         entry = self.cache.get(ckey)
@@ -413,8 +405,6 @@ class _CalibAttn(torch.autograd.Function):
                     mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
                     beta=1.0, alpha=scale,
                     out=s[:bh * r * i1].view(bh, r, i1)))
-                # write straight into the output rows: the slice is the only
-                # writer of those rows, so no staging buffer is needed.
                 torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
                 if need_ent:
                     _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
@@ -466,15 +456,11 @@ class _CalibAttn(torch.autograd.Function):
         gbuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if grad_ent is not None else None
         mbuf = _get_scratch(("calib_bwd_mbuf",), q.device, torch.bool, bh * max_rows * max_i1) if grad_ent is not None else None
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
-        # the last block writes d_k/d_v directly, so the staging buffer only has
-        # to hold one of the remaining blocks: their widest key extent is the
-        # start of the last block, not T.
         tmpb = _get_scratch(("calib_bwd_tmp",), q.device, q.dtype,
                             bh * blocks[-1][0] * dk)
         zero = _zero_scalar(q.device, q.dtype)
-        # Walk the query blocks last-to-first: the last block spans every key,
-        # so it initialises d_k/d_v in place and the remaining blocks only
-        # accumulate.  That removes the full zero-fill of both gradients.
+        # the last block spans every key, so it writes d_k/d_v first and the
+        # remaining blocks only accumulate into them.
         first = True
         for i0, i1 in reversed(blocks):
             n = bh * (i1 - i0) * i1
@@ -501,8 +487,7 @@ class _CalibAttn(torch.autograd.Function):
                 torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1], beta=0.0,
                               alpha=scale, out=tmp)
                 d_k[:, :i1].add_(tmp)
-            # the query-gradient rows are written exactly once, straight into
-            # place; no staging copy is needed.
+            # the query-gradient rows are written exactly once, in place.
             torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
                           out=d_q[:, i0:i1])
         return d_q, d_k, d_v, None, None, None
@@ -603,7 +588,7 @@ class _NullAttn(torch.autograd.Function):
             r = i1 - i0
             p, p0 = _null_probs(q[:, i0:i1], kt, i0, i1, mask, null_k, B, h,
                                 scale, sbuf)
-            # the output rows are written exactly once, straight into place.
+            # the output rows are written exactly once, in place.
             torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
             y4[:, :, i0:i1].addcmul_(p0.view(B, h, r, 1), nv4)
         ctx.save_for_backward(q, k, v, null_k, null_v)
@@ -637,16 +622,13 @@ class _NullAttn(torch.autograd.Function):
         eb = _get_scratch(("null_bwd_e",), q.device, q.dtype, bh * max_rows * max_i1)
         gub = _get_scratch(("null_bwd_gu",), q.device, q.dtype, bh * max_rows)
         dotb = _get_scratch(("null_bwd_dot",), q.device, q.dtype, bh * max_rows)
-        # staging only needs one non-last block's width (see _CalibAttn); for
-        # the single-block case it still has to hold the tiny acc_blk scratch.
         tmp_rows = blocks[-1][0] if multi else 1
         tmpb = _get_scratch(("null_bwd_tmp",), q.device, q.dtype,
                             bh * tmp_rows * dk)
         acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
-        # Walk the query blocks last-to-first: the last block spans every key,
-        # so it initialises d_k/d_v in place and the rest only accumulate,
-        # removing the full zero-fill of both key/value gradients.
+        # the last block spans every key, so it writes d_k/d_v first and the
+        # remaining blocks only accumulate into them.
         first = True
         for i0, i1 in reversed(blocks):
             q_blk = q[:, i0:i1]
@@ -677,8 +659,7 @@ class _NullAttn(torch.autograd.Function):
                     d_v[:, :i1].add_(tmp)
                     torch.bmm(d_s.transpose(1, 2), q_blk, out=tmp)
                     d_k[:, :i1].add_(tmp)
-                # the query-gradient rows are written exactly once, straight
-                # into place; no staging copy is needed.
+                # the query-gradient rows are written exactly once, in place.
                 torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1])
             else:
                 d_v = q.new_empty(bh, i1, dk)
@@ -806,9 +787,7 @@ class Attention(nn.Module):
         del qkv
 
         ent = None
-        # head-major attention output (B, h, T, dk): the transpose into the
-        # model layout happens once, after the gate, and is fused into the
-        # per-channel gate multiply below.
+        # head-major attention output (B, h, T, dk)
         y4 = None
         stats = None
         if not dropping:
@@ -883,28 +862,23 @@ class Attention(nn.Module):
             gate_val.sigmoid_()
         elif is_calib:
             log_len = math.log(max(T, 2))
-            # Fused: gate(x) - calib_a*log_len - (calib_c*calib_scale/log_len) * ent.mean(1, keepdim=True)
+            # gate(x) - calib_a*log_len
+            #     - (calib_c*calib_scale/log_len) * ent.mean(1, keepdim=True)
             gate_val = self.gate(x)
             gate_val.sub_(self.calib_a * log_len)
-            # Subtract (calib_c*calib_scale/log_len) * ent.mean(1, keepdim=True)
             # mean(dim=1) -> (B, T), unsqueeze(-1) -> (B, T, 1) for broadcasting
             conc = ent.mean(dim=1).div_(log_len).unsqueeze(-1)
             gate_val.addcmul_(conc, self.calib_c * self.calib_scale, value=-1.0)
             tau = F.softplus(self.calib_tau).add_(0.1)
             gate_val.div_(tau).sigmoid_()
 
-        # The head-major output is transposed into the model layout once.  For
-        # the gated variants the transpose and the per-channel gate multiply
-        # share a single pass: ``out[b, t, h, dk] = y[b, h, t, dk] * g[b, t, ...]``
-        # is the same elementwise product as transposing first and multiplying.
         if gate_val is None:
             y = y4.transpose(1, 2).reshape(B, T, C)
         else:
-            # one pass: the per-channel gate multiply doubles as the
-            # head-major -> token-major transpose.  The gate is the leading
-            # operand so the product keeps the token-major contiguous
-            # layout; the elementwise product is commutative, so this is the
-            # same value as transposing first and multiplying afterwards.
+            # the gate is the leading operand so the product keeps the
+            # token-major contiguous layout; the elementwise product is
+            # commutative, so this is the same value as transposing first and
+            # multiplying afterwards.
             y = torch.mul(gate_val.view(B, T, h, dk), y4.transpose(1, 2))
             y = y.reshape(B, T, C)
 
@@ -1035,8 +1009,7 @@ class CAGE(nn.Module):
         if targets is not None:
             flat_t = targets.reshape(-1)
             if sup_pos is not None:
-                # `mul` already yields a private tensor, so the shared arange
-                # does not have to be cloned before it is scaled in place
+                # `mul` yields a private tensor, so it is scaled in place
                 sup = _arange(targets.size(0), targets.device).mul(
                     targets.size(1)).add_(sup_pos)
             else:
