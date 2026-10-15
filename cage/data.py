@@ -1,13 +1,10 @@
 """Synthetic task data.
 
-Tasks
------
-1. ``copy`` / associative-recall style LM: sequence of key-value pairs plus
-   a query; the model must recall the value. This makes attention quality
-   (and false concentration) measurable: we know the *correct* target token.
-
-2. ``shuffle``: length generalization - evaluate the same task at multiple
-   sequence lengths.
+Associative-recall style LM: sequence of key-value pairs plus a query; the
+model must recall the value. This makes attention quality (and false
+concentration) measurable: we know the *correct* target token. Length
+generalisation (E2) evaluates this same task at multiple sequence lengths
+via ``length_sweep_lengths``.
 
 Format (vocab 0..V-1):
     [k1 v1 k2 v2 ... kn vn, SEP, qi, <predict vi>]
