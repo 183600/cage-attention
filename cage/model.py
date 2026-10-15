@@ -108,7 +108,7 @@ class SeeDNorm(nn.Module):
         nn.init.normal_(self.scale.weight, std=0.02)
 
     def forward(self, x):
-        s = torch.sigmoid(self.scale(x))
+        s = self.scale(x).sigmoid_()
         return self.ln(x).mul(s).mul_(2.0)
 
 
@@ -367,20 +367,13 @@ class _CalibAttn(torch.autograd.Function):
         else:
             ent = q.new_empty(bh, T) if need_ent else None
             ebuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
-            yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
-                                bh * max_rows * dv)
-            mask_slices = [mask[i0:i1, :i1] for i0, i1 in blocks]
-            kt_slices = [kt[:, :, :i1] for _, i1 in blocks]
-            v_slices = [v[:, :i1] for _, i1 in blocks]
-            for (i0, i1), m_slice, kt_slice, v_slice in zip(blocks, mask_slices, kt_slices, v_slices):
+            for i0, i1 in blocks:
                 r = i1 - i0
                 p = _softmax_inplace(torch.baddbmm(
-                    m_slice, q[:, i0:i1], kt_slice,
+                    mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
                     beta=1.0, alpha=scale,
                     out=s[:bh * r * i1].view(bh, r, i1)))
-                yb = yblk[:bh * r * dv].view(bh, r, dv)
-                torch.bmm(p, v_slice, out=yb)
-                y[:, i0:i1].copy_(yb)
+                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
                 if need_ent:
                     _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
         if any(ctx.needs_input_grad):
@@ -440,47 +433,36 @@ class _CalibAttn(torch.autograd.Function):
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
         tmpb = _get_scratch(("calib_bwd_tmp",), q.device, q.dtype,
                             bh * blocks[-1][0] * dk)
-        qblk = _get_scratch(("calib_dqblk",), q.device, q.dtype,
-                            bh * max_rows * dk)
         zero = _zero_scalar(q.device, q.dtype)
-        rev_blocks = list(reversed(blocks))
-        mask_slices = [mask[i0:i1, :i1] for i0, i1 in rev_blocks]
-        q_slices = [q[:, i0:i1] for i0, i1 in rev_blocks]
-        kt_slices = [kt[:, :, :i1] for _, i1 in rev_blocks]
-        vt_slices = [vt[:, :, :i1] for _, i1 in rev_blocks]
-        k_slices = [k[:, :i1] for _, i1 in rev_blocks]
-        grad_y_slices = [grad_y[:, i0:i1] for i0, i1 in rev_blocks]
-        grad_ent_slices = [None if grad_ent is None else grad_ent[:, i0:i1] for i0, i1 in rev_blocks]
         first = True
-        for idx, (i0, i1) in enumerate(rev_blocks):
+        for i0, i1 in reversed(blocks):
             r = i1 - i0
             n = bh * r * i1
             p = _softmax_inplace(torch.baddbmm(
-                mask_slices[idx], q_slices[idx], kt_slices[idx],
+                mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
                 beta=1.0, alpha=scale,
                 out=s[:n].view(bh, r, i1)))
-            g = grad_y_slices[idx]
-            ge = grad_ent_slices[idx]
+            g = grad_y[:, i0:i1]
+            ge = None if grad_ent is None else grad_ent[:, i0:i1]
             d_p = dpb[:n].view(bh, r, i1)
-            torch.bmm(g, vt_slices[idx], out=d_p)
+            torch.bmm(g, vt[:, :, :i1], out=d_p)
             d_s = _softmax_grad_from_p(d_p, p, ge,
                                        buf=None if gbuf is None else gbuf[:n],
                                        mbuf=None if mbuf is None else mbuf[:n])
             if first:
                 torch.bmm(p.transpose(1, 2), g, out=d_v[:, :i1])
-                torch.baddbmm(zero, d_s.transpose(1, 2), q_slices[idx], beta=0.0,
+                torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1], beta=0.0,
                               alpha=scale, out=d_k[:, :i1])
                 first = False
             else:
                 tmp = tmpb[:bh * i1 * dk].view(bh, i1, dk)
                 torch.bmm(p.transpose(1, 2), g, out=tmp)
                 d_v[:, :i1].add_(tmp)
-                torch.baddbmm(zero, d_s.transpose(1, 2), q_slices[idx], beta=0.0,
+                torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1], beta=0.0,
                               alpha=scale, out=tmp)
                 d_k[:, :i1].add_(tmp)
-            dqb = qblk[:bh * r * dk].view(bh, r, dk)
-            torch.baddbmm(zero, d_s, k_slices[idx], beta=0.0, alpha=scale, out=dqb)
-            d_q[:, i0:i1].copy_(dqb)
+            torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
+                          out=d_q[:, i0:i1])
         return d_q, d_k, d_v, None, None, None
 
 
@@ -573,17 +555,11 @@ class _NullAttn(torch.autograd.Function):
         y4 = y.view(B, h, T, dv)
         nv4 = null_v.view(1, h, 1, dv)
         sbuf = _get_scratch(("null_s",), q.device, q.dtype, bh * max_rows * max_i1)
-        yblk = _get_scratch(("null_yblk",), q.device, q.dtype, bh * max_rows * dv)
-        mask_slices = [mask[i0:i1, :i1] for i0, i1 in blocks]
-        kt_slices = [kt[:, :, :i1] for _, i1 in blocks]
-        v_slices = [v[:, :i1] for _, i1 in blocks]
-        for (i0, i1), m_slice, kt_slice, v_slice in zip(blocks, mask_slices, kt_slices, v_slices):
+        for i0, i1 in blocks:
             r = i1 - i0
-            p, p0 = _null_probs(q[:, i0:i1], kt_slice, i0, i1, m_slice, null_k, B, h,
+            p, p0 = _null_probs(q[:, i0:i1], kt[:, :, :i1], i0, i1, mask[i0:i1, :i1], null_k, B, h,
                                 scale, sbuf)
-            yb = yblk[:bh * r * dv].view(bh, r, dv)
-            torch.bmm(p, v_slice, out=yb)
-            y[:, i0:i1].copy_(yb)
+            torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
             y4[:, :, i0:i1].addcmul_(p0.view(B, h, r, 1), nv4)
         if any(ctx.needs_input_grad):
             ctx.save_for_backward(q, k, v, null_k, null_v)
@@ -627,26 +603,17 @@ class _NullAttn(torch.autograd.Function):
         tmp_rows = blocks[-1][0] if multi else 1
         tmpb = _get_scratch(("null_bwd_tmp",), q.device, q.dtype,
                             bh * tmp_rows * dk)
-        qblk = _get_scratch(("null_bwd_dqblk",), q.device, q.dtype,
-                            bh * max_rows * dk)
         acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
-        rev_blocks = list(reversed(blocks))
-        mask_slices = [mask[i0:i1, :i1] for i0, i1 in rev_blocks]
-        q_slices = [q[:, i0:i1] for i0, i1 in rev_blocks]
-        kt_slices = [kt[:, :, :i1] for _, i1 in rev_blocks]
-        vt_slices = [vt[:, :, :i1] for _, i1 in rev_blocks]
-        k_slices = [k[:, :i1] for _, i1 in rev_blocks]
-        grad_y_slices = [grad_y[:, i0:i1] for i0, i1 in rev_blocks]
         first = True
-        for idx, (i0, i1) in enumerate(rev_blocks):
-            q_blk = q_slices[idx]
-            g = grad_y_slices[idx]
+        for i0, i1 in reversed(blocks):
+            q_blk = q[:, i0:i1]
+            g = grad_y[:, i0:i1]
             r = i1 - i0
-            p, p0 = _null_probs(q_blk, kt_slices[idx], i0, i1, mask_slices[idx],
+            p, p0 = _null_probs(q_blk, kt[:, :, :i1], i0, i1, mask[i0:i1, :i1],
                                 null_k, B, h, scale, sbuf)
             n = bh * r * i1
-            e = torch.bmm(g, vt_slices[idx], out=eb[:n].view(bh, r, i1))
+            e = torch.bmm(g, vt[:, :, :i1], out=eb[:n].view(bh, r, i1))
             gu0 = gub[:bh * r].view(bh, r, 1)
             torch.matmul(g.view(B, h, r, -1), nv4t, out=gu0.view(B, h, r, 1))
             pe = peb[:n].view(bh, r, i1)
@@ -669,15 +636,14 @@ class _NullAttn(torch.autograd.Function):
                     d_v[:, :i1].add_(tmp)
                     torch.bmm(d_s.transpose(1, 2), q_blk, out=tmp)
                     d_k[:, :i1].add_(tmp)
-                dqb = qblk[:bh * r * dk].view(bh, r, dk)
-                torch.bmm(d_s, k_slices[idx], out=dqb)
-                d_q[:, i0:i1].copy_(dqb)
+                dqb = d_q[:, i0:i1]
+                torch.bmm(d_s, k[:, :i1], out=dqb)
             else:
                 d_v = q.new_empty(bh, i1, dk)
                 d_k = q.new_empty(bh, i1, dk)
                 torch.bmm(p.transpose(1, 2), g, out=d_v)
                 torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
-                torch.bmm(d_s, k_slices[idx], out=d_q)
+                torch.bmm(d_s, k[:, :i1], out=d_q)
             d_q4[:, :, i0:i1].addcmul_(d_s0.view(B, h, r, 1), nk4)
             acc_blk = tmpb[:bh * dk].view(bh, 1, dk)
             torch.bmm(d_s0.transpose(-2, -1), q_blk, out=acc_blk)
@@ -822,9 +788,9 @@ class Attention(nn.Module):
                 if dropping:
                     p = self.attn_dropout(p)
                 pb = p.view(bh, T, T + 1)
-                y4 = torch.addcmul(torch.bmm(pb[..., 1:], vb).view(B, h, T, dk),
-                                   p.view(B, h, T, T + 1)[..., :1],
-                                   self.null_v.view(1, h, 1, dk))
+                yb = torch.bmm(pb[..., 1:], vb).view(B, h, T, dk)
+                y4 = yb.addcmul_(p.view(B, h, T, T + 1)[..., :1],
+                                 self.null_v.view(1, h, 1, dk))
             else:
                 mask = _causal_mask(T, x.device, x.dtype)
                 att = torch.baddbmm(mask, qb, kb.transpose(1, 2),
@@ -846,7 +812,7 @@ class Attention(nn.Module):
 
         gate_val = None
         if kind == "query":
-            gate_val = torch.sigmoid(self.gate(x))
+            gate_val = self.gate(x).sigmoid_()
         elif is_calib:
             log_len = self._log_len_cache.get(T)
             if log_len is None:
