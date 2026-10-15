@@ -771,6 +771,7 @@ class Attention(nn.Module):
         qb = self._pack(q_lin, B, h, T, dk)
         kb = self._pack(k_lin, B, h, T, dk)
         vb = self._pack(v_lin, B, h, T, dk)
+        del q_lin, k_lin, v_lin
 
         ent = None
         y4 = None
@@ -852,6 +853,7 @@ class Attention(nn.Module):
         else:
             y = torch.mul(gate_val.view(B, T, h, dk), y4.transpose(1, 2))
             y = y.reshape(B, T, C)
+        del y4
 
         out = self.proj(y)
         if not need_stats:
@@ -890,7 +892,7 @@ class Block(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(cfg.d_model, 4 * cfg.d_model),
             _GeluLinear(4 * cfg.d_model, cfg.d_model),
-            nn.Dropout(cfg.dropout),
+            nn.Dropout(cfg.dropout, inplace=True),
         )
         if cfg.layer_scale is not None:
             ls_val = float(cfg.layer_scale)
