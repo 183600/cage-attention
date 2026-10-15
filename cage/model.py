@@ -40,6 +40,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 
+try:
+    from torch.compiler import disable as _no_compile
+except ImportError:  # torch without torch.compile
+    def _no_compile(fn):
+        return fn
+
 
 _EPS = 1e-9
 
@@ -54,6 +60,20 @@ def _zero_scalar(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
             z = torch.zeros((), device=device, dtype=dtype)
         _zero_scalar_cache[key] = z
     return z
+
+
+def _servable(t: torch.Tensor) -> bool:
+    """Whether a cached tensor may be handed back in the current mode.
+
+    ``torch.compile`` traces the ``torch.inference_mode(False)`` guards in
+    the cache fillers away, so a buffer first allocated while tracing a
+    compiled eval forward is still created under the *ambient* inference
+    mode and lands in the cache as an inference tensor.  Inference tensors
+    can only be written in place (and used as index tensors) inside
+    inference mode, so they are served to an active inference mode only;
+    in every other mode the entry is reallocated.
+    """
+    return not t.is_inference() or torch.is_inference_mode_enabled()
 
 
 GATES = ("none", "query", "calib", "null")
@@ -168,7 +188,7 @@ def _arange(n: int, device: torch.device) -> torch.Tensor:
     """
     key = (n, device)
     a = _arange_cache.get(key)
-    if a is not None:
+    if a is not None and _servable(a):
         _arange_cache.move_to_end(key)
         return a
     with torch.inference_mode(False):
@@ -275,7 +295,7 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
     name = key[0] if isinstance(key, tuple) else key
     ckey = (name, device, dtype)
     entry = _scratch_cache.get(ckey)
-    if entry is not None and entry.numel() >= numel:
+    if entry is not None and entry.numel() >= numel and _servable(entry):
         return entry[:numel]
     with torch.inference_mode(False):
         buf = torch.empty(numel, device=device, dtype=dtype)
@@ -341,6 +361,7 @@ class _CalibAttn(torch.autograd.Function):
     """
 
     @staticmethod
+    @_no_compile
     def forward(ctx, q, k, v, scale: float, eps: float, need_ent: bool = True):
         ctx.set_materialize_grads(False)
         bh, T = q.size(0), q.size(1)
@@ -547,6 +568,7 @@ class _NullAttn(torch.autograd.Function):
     """
 
     @staticmethod
+    @_no_compile
     def forward(ctx, q, k, v, null_k, null_v, scale, B):
         bh, T = q.size(0), q.size(1)
         h = null_k.size(0)
