@@ -68,10 +68,10 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4, seed=123)
         logits, _, _ = model(idx)
         # logits carry a single query position, so column 0 is a contiguous view
         pred = logits.squeeze(1).argmax(-1)
-        correct = correct + (pred == meta["answer"]).sum()
+        correct += int((pred == meta["answer"]).sum())
         total += idx.size(0)
     model.train(was_training)
-    return correct.item() / total
+    return correct / total
 
 
 @torch.inference_mode()
