@@ -568,8 +568,8 @@ class _NullAttn(torch.autograd.Function):
                                 scale, sbuf)
             yblk = yb[:bh * r * dv].view(bh, r, dv)
             torch.bmm(p, v[:, :i1], out=yblk)
-            y[:, i0:i1].copy_(yblk)
-            y4[:, :, i0:i1].addcmul_(p0.view(B, h, r, 1), nv4)
+            torch.addcmul(yblk.view(B, h, r, dv), p0.view(B, h, r, 1), nv4,
+                          out=y4[:, :, i0:i1])
         if any(ctx.needs_input_grad):
             ctx.save_for_backward(q, k, v, null_k, null_v)
         else:
@@ -767,10 +767,10 @@ class Attention(nn.Module):
         drop_p = self.cfg.dropout
         dropping = self.training and drop_p > 0.0
 
-        wq, wk, wv = self.qkv.weight.chunk(3, dim=0)
-        qb = self._pack(F.linear(x, wq), B, h, T, dk)
-        kb = self._pack(F.linear(x, wk), B, h, T, dk)
-        vb = self._pack(F.linear(x, wv), B, h, T, dk)
+        q_lin, k_lin, v_lin = F.linear(x, self.qkv.weight).chunk(3, dim=-1)
+        qb = self._pack(q_lin, B, h, T, dk)
+        kb = self._pack(k_lin, B, h, T, dk)
+        vb = self._pack(v_lin, B, h, T, dk)
 
         ent = None
         y4 = None
