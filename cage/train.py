@@ -7,6 +7,13 @@ import math
 import torch
 
 from .data import make_batch
+from .metrics import (
+    brier_score,
+    expected_calibration_error,
+    multiclass_metrics,
+    pr_auc,
+    roc_auc,
+)
 
 
 def _make_adamw(params, lr):
@@ -72,6 +79,46 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4, seed=123)
         total += idx.size(0)
     model.train(was_training)
     return correct / total
+
+
+@torch.inference_mode()
+def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4, seed=123,
+                 topk=5):
+    """Full metric panel at the query position.
+
+    Same evaluation protocol as ``eval_accuracy`` (eval mode restored
+    afterwards, independent fixed seed) extended with the explicitly
+    named F1 variants, top-k accuracy, NLL and calibration metrics for the
+    answer distribution.  ``seed`` defaults to the same fixed 123 as
+    ``eval_accuracy`` so the two functions score identical batches;
+    experiment scripts pass an explicit *validation* seed for model
+    selection and a separate *test* seed for the reported numbers.
+
+    The recall task is balanced multi-class, so ``accuracy`` is the
+    primary metric; ``f1_micro`` equals it by construction and the
+    macro/weighted variants guard against value-frequency skew.  See
+    ``cage/metrics.py`` for the averaging conventions.
+    """
+    gen = torch.Generator(device=device).manual_seed(seed)
+    was_training = model.training
+    model.eval()
+    logits_all, tgt_all = [], []
+    for _ in range(batches):
+        idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+        logits, _, _ = model(idx)
+        logits_all.append(logits.squeeze(1).float().cpu())
+        tgt_all.append(meta["answer"].cpu())
+    model.train(was_training)
+    logits_cat = torch.cat(logits_all, dim=0)
+    tgt_cat = torch.cat(tgt_all, dim=0)
+    out = multiclass_metrics(logits_cat, tgt_cat, topk=topk)
+    out["nll"] = float(torch.nn.functional.cross_entropy(logits_cat, tgt_cat))
+    probs = logits_cat.softmax(dim=-1)
+    confidence, pred = probs.max(dim=-1)
+    out["ece_15bin"] = expected_calibration_error(confidence, pred == tgt_cat,
+                                                  n_bins=15)
+    out["brier"] = brier_score(confidence, pred == tgt_cat)
+    return out
 
 
 @torch.inference_mode()
@@ -198,3 +245,38 @@ def false_concentration_analysis(stats, maxprob_thresh=0.5):
         r["gate_on_false_conc"] = gm[fc].mean().item() if fc.any() else float("nan")
         r["gate_on_correct"] = gm[corr & high].mean().item() if (corr & high).any() else float("nan")
     return r
+
+
+def error_detection_aucs(stats):
+    """ROC-AUC and PR-AUC of attention statistics as *error detectors*.
+
+    The positive class is "model answered wrong".  Scores are oriented so
+    that **higher means more likely wrong** (``-maxprob``, mean entropy,
+    ``-gate``), matching the mechanism hypotheses: concentration should
+    track correctness, and a calibrated gate should close when it does
+    not.  Errors are the rare class after convergence, so PR-AUC is the
+    primary summary; ROC-AUC is reported for completeness only (with a
+    huge negative population it can look optimistic while precision
+    collapses; see ``cage/metrics.py``).
+    """
+    corr = stats["correct"].bool()
+    err = ~corr
+    n = int(corr.numel())
+    n_err = int(err.sum())
+    out = {"n": n, "n_errors": n_err,
+           "error_rate": (n_err / n) if n else float("nan")}
+    scores = {
+        "maxprob": -stats["maxprob"].max(dim=1)[0],
+        "entropy": stats["entropy"].mean(dim=1),
+    }
+    if stats.get("gate") is not None:
+        scores["gate"] = -stats["gate"].mean(dim=1)
+    for name in ("maxprob", "entropy", "gate"):
+        score = scores.get(name)
+        if score is None or n_err == 0 or n_err == n:
+            out[f"rocauc_{name}_to_error"] = float("nan")
+            out[f"prauc_{name}_to_error"] = float("nan")
+            continue
+        out[f"rocauc_{name}_to_error"] = roc_auc(score, err)
+        out[f"prauc_{name}_to_error"] = pr_auc(score, err)
+    return out
