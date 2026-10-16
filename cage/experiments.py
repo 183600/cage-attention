@@ -287,7 +287,8 @@ def _model_cfg(settings: Settings, **overrides) -> dict:
     return cfg
 
 
-def _train_and_eval(settings: Settings, seed: int, lr: float, **model_overrides):
+def _train_and_eval(settings: Settings, seed: int, lr: float,
+                    eval_seed: int = TEST_SEED, **model_overrides):
     torch.manual_seed(seed)
     model = build(_model_cfg(settings, **model_overrides), compile=False)
     params = sum(p.numel() for p in model.parameters())
@@ -296,7 +297,7 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, **model_overrides)
                 device=settings.device, log_every=0, seed=seed)
     metrics = eval_metrics(model, settings.n_pairs, settings.vocab,
                            settings.device, batch=settings.eval_batch,
-                           batches=settings.eval_batches, seed=TEST_SEED)
+                           batches=settings.eval_batches, seed=eval_seed)
     return model, params, metrics
 
 
@@ -313,7 +314,8 @@ def tune_shared_recipe(settings: Settings):
     for lr in settings.lr_grid:
         accs = []
         for seed in tune_seeds:
-            _, _, metrics = _train_and_eval(settings, seed, lr, gate="none")
+            _, _, metrics = _train_and_eval(settings, seed, lr,
+                                            eval_seed=VAL_SEED, gate="none")
             accs.append(metrics["accuracy"])
         mean = sum(accs) / len(accs)
         var = (sum((a - mean) ** 2 for a in accs) / len(accs)) if accs else 0.0
