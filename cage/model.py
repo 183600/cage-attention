@@ -63,7 +63,7 @@ def _zero_scalar(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
 
 
 def _servable(t: torch.Tensor) -> bool:
-    """Whether a cached tensor may be handed back in the current mode.
+    """Whether a tensor may be handed back in the current mode.
 
     Inference tensors can only be written in place (and used as index
     tensors) inside inference mode, so they are served to an active
@@ -248,7 +248,7 @@ class _SoftmaxInPlace(torch.autograd.Function):
 
 
 class _RowEntropy(torch.autograd.Function):
-    """``(p * p.clamp_min(eps).log()).sum(-1).neg()`` computed directly."""
+    """``(p * p.clamp_min(eps).log()).sum(-1).neg()``."""
 
     @staticmethod
     def forward(ctx, p, eps: float):
@@ -331,8 +331,8 @@ def _row_entropy(p: torch.Tensor, eps: float,
                  buf: torch.Tensor | None = None) -> torch.Tensor:
     """``-(p * log p).sum(-1)`` computed row-wise.
 
-    ``buf`` optionally supplies the ``clamp_min`` workspace and must be a
-    flat tensor of at least ``p.numel()`` elements.
+    ``buf`` optionally supplies a flat tensor of at least ``p.numel()``
+    elements as the ``clamp_min`` output.
     """
     if buf is None:
         t = p.clamp_min(eps)
@@ -499,7 +499,7 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     """Score gradient for ``p = softmax(s)`` plus the calibrated-entropy term.
     Consumes ``d_p``.
 
-    ``buf`` optionally supplies a flat scratch for the ``log(p)`` term and
+    ``buf`` optionally supplies a flat buffer for the ``log(p)`` term and
     ``mbuf`` one for the ``p > _EPS`` selector.
 
     The surviving term is ``log(p) + 1`` on ``p > _EPS`` and ``0`` elsewhere;
