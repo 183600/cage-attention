@@ -322,7 +322,7 @@ def _linear_into(x: torch.Tensor, weight: torch.Tensor,
 
 
 def _layer_norm_into(ln: nn.LayerNorm, x: torch.Tensor) -> torch.Tensor:
-    """``ln(x)`` written into scratch buffers."""
+    """``ln(x)`` written into reusable buffers."""
     shape = x.shape
     rows = x.numel() // shape[-1]
     out = _get_scratch(("ln_out",), x.device, x.dtype, x.numel())

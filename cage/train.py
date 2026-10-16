@@ -410,8 +410,9 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
 
     ``early_stop_patience`` (opt-in, default off): stop once the monitored
     validation loss has not improved for that many consecutive evaluations.
-    Off by default because the experiment contract compares fixed-budget
-    runs; ``training_curve_verdict`` reports ``best_val_step`` either way.
+    Off by default because the experiment contract compares runs at a fixed
+    step count; ``training_curve_verdict`` reports ``best_val_step`` either
+    way.
 
     ``nonfinite`` (``"raise"`` | ``"skip"``): what to do when a training
     loss *or the pre-clip gradient norm* is not finite.  ``"raise"``
@@ -568,9 +569,8 @@ def estimate_forward_flops(model, seq_len: int) -> int:
     causal attention products, the output projection, both MLP projections,
     the gate projection of ``query``/``calib`` and the two per-token scale
     projections of ``seednorm``, plus the full-sequence head.  Elementwise
-    work (softmax, GELU, entropy, norms) is excluded: this is a lower bound
-    for *relative* cost comparison across variants, and the honest reading
-    of any accuracy delta needs this denominator next to it.
+    work (softmax, GELU, entropy, norms) is excluded, so the result is a
+    lower bound on the matmul work of the pass.
     """
     cfg = model.cfg
     C, H, L, V = cfg.d_model, cfg.n_heads, cfg.n_layers, cfg.vocab_size
@@ -592,14 +592,12 @@ def estimate_forward_flops(model, seq_len: int) -> int:
 
 def measure_inference_cost(model, n_pairs, vocab, device, batch=64, warmup=3,
                            runs=10, seed=STATS_SEED):
-    """Parameters / FLOPs / latency / memory for the accuracy-cost trade-off.
+    """Parameters / FLOPs / latency / memory of one eval-mode forward pass.
 
-    Latency is the median of ``runs`` eval-mode forward passes after
-    ``warmup`` (batch ``batch`` at ``n_pairs``; fixed seed so every variant
-    scores the same shapes).  Memory is the CUDA peak allocation when on
-    GPU; on CPU it is the profiler-attributed allocation total of one pass
-    (a deterministic, same-protocol *proxy*, not a peak-RSS measurement -
-    compare variants to each other, never to an absolute budget).
+    Latency is the median of ``runs`` passes after ``warmup`` (batch
+    ``batch`` at ``n_pairs``; fixed seed so every variant scores the same
+    shapes).  Memory is the CUDA allocation peak on GPU; on CPU it is the
+    profiler-attributed allocation total of one pass.
     """
     gen = torch.Generator(device=device).manual_seed(seed)
     idx, _, _ = make_batch(batch, n_pairs, vocab, device, gen=gen)
