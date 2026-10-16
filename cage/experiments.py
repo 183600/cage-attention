@@ -24,7 +24,7 @@ tracked tree.
 
 Usage
 -----
-    python3 -m cage.experiments --only baselines            # cheap, no GPU needed
+    python3 -m cage.experiments --only baselines
     python3 -m cage.experiments --only e1 --seeds 5
     python3 -m cage.experiments --only all --quick          # pipeline check only
 """
@@ -303,10 +303,10 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, **model_overrides)
 def tune_shared_recipe(settings: Settings):
     """Tune the learning rate on the plain ``none`` baseline.
 
-    Selection uses the validation seed only (up to two training seeds to
-    keep the cost bounded); the winning rate is then frozen for *every*
-    variant, so a gate variant can never win via a luckier optimizer
-    setting - the E1/E3 comparisons remain controlled.
+    Selection uses the validation seed only (up to two training seeds);
+    the winning rate is then frozen for *every* variant, so a gate variant
+    can never win via a luckier optimizer setting - the E1/E3 comparisons
+    remain controlled.
     """
     tune_seeds = settings.seeds[:max(1, min(2, len(settings.seeds)))]
     table = []
@@ -326,7 +326,7 @@ def tune_shared_recipe(settings: Settings):
 def _resolve_lr(settings: Settings, out_dir: pathlib.Path, tag: str):
     """Return the shared recipe lr, tuning at most once per Settings object
     so E1/E2/E3 in one ``--only all`` run train under an identical recipe
-    (and pay for the tuning only once)."""
+    (the tuning runs only once)."""
     if settings.lr is not None:
         return settings.lr
     cached = getattr(settings, "_tuned_recipe", None)

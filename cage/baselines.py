@@ -1,4 +1,4 @@
-"""Cheapest reasonable baselines for the associative-recall task.
+"""Simple baselines for the associative-recall task.
 
 Why these baselines
 -------------------
