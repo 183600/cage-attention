@@ -749,7 +749,12 @@ class Attention(nn.Module):
             if is_null:
                 null_mass = rows[..., 0]
                 pr = rows[..., 1:]
-                pr.div_(pr.sum(-1, keepdim=True).clamp_min(_EPS))
+                n0, n1 = pr.size(0), pr.size(1)
+                ssum = _get_scratch(("rowstats_sum",), pr.device, pr.dtype,
+                                    n0 * n1)[:n0 * n1].view(n0, n1, 1)
+                torch.sum(pr, dim=-1, keepdim=True, out=ssum)
+                ssum.clamp_min_(_EPS)
+                pr.div_(ssum)
             else:
                 null_mass = None
                 pr = rows
@@ -765,16 +770,22 @@ class Attention(nn.Module):
         """
         dk = q.size(-1)
         cols = T + 1 if is_null else T
+        n = B * h
         q_sel = _pick_rows(q, stat_pos).unsqueeze(1).reshape(-1, 1, dk)
         mask_sel = _mask_rows(stat_pos, T, h, q.dtype)
         with torch.no_grad():
-            att_sel = torch.baddbmm(mask_sel, q_sel, k.transpose(1, 2),
-                                    beta=1.0, alpha=self.inv_scale)
             if is_null:
+                att_sel = torch.baddbmm(mask_sel, q_sel, k.transpose(1, 2),
+                                        beta=1.0, alpha=self.inv_scale)
                 s0 = torch.matmul(q_sel.reshape(B, h, 1, dk),
                                   self.null_k.view(1, h, dk, 1)).reshape(
                                       q_sel.size(0), 1, 1).mul_(self.inv_scale)
                 att_sel = torch.cat([s0, att_sel], dim=-1)
+            else:
+                att_sel = _get_scratch(("rowstats_att",), q.device, q.dtype,
+                                       n * T)[:n * T].view(n, 1, T)
+                torch.baddbmm(mask_sel, q_sel, k.transpose(1, 2),
+                              beta=1.0, alpha=self.inv_scale, out=att_sel)
             probs = _softmax_inplace(att_sel).view(B, h, cols)
             if ent_full is not None and not is_null:
                 return (_pick_rows(ent_full, stat_pos),
