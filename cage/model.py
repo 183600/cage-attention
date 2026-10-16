@@ -937,13 +937,13 @@ class Block(nn.Module):
             if ls1 is None:
                 x = a.add(x) if grad_on else a.add_(x)
             else:
-                x = torch.addcmul(x, a, ls1) if grad_on else a.addcmul_(x, ls1)
+                x = torch.addcmul(x, a, ls1) if grad_on else x.addcmul_(a, ls1)
             x = self.ln1(x)
             m = self.mlp(x)
             if ls2 is None:
                 x = m.add(x) if grad_on else m.add_(x)
             else:
-                x = torch.addcmul(x, m, ls2) if grad_on else m.addcmul_(x, ls2)
+                x = torch.addcmul(x, m, ls2) if grad_on else x.addcmul_(m, ls2)
             x = self.ln2(x)
         else:
             x_norm = self.ln1(x)
@@ -951,13 +951,13 @@ class Block(nn.Module):
             if ls1 is None:
                 x = a.add(x) if grad_on else a.add_(x)
             else:
-                x = torch.addcmul(x, a, ls1) if grad_on else a.addcmul_(x, ls1)
+                x = torch.addcmul(x, a, ls1) if grad_on else x.addcmul_(a, ls1)
             x_norm = self.ln2(x)
             m = self.mlp(x_norm)
             if ls2 is None:
                 x = m.add(x) if grad_on else m.add_(x)
             else:
-                x = torch.addcmul(x, m, ls2) if grad_on else m.addcmul_(x, ls2)
+                x = torch.addcmul(x, m, ls2) if grad_on else x.addcmul_(m, ls2)
         return x, s
 
 
