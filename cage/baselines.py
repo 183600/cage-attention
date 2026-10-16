@@ -56,20 +56,26 @@ def _answer_meta(idx, meta):
 @torch.inference_mode()
 def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
     gen = torch.Generator(device=device).manual_seed(seed)
-    correct = 0
+    correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
     extra = {}
     for _ in range(batches):
         idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
         pred, stats = predict(idx, meta)
-        correct += int((pred == meta["answer"]).sum())
+        correct.add_((pred == meta["answer"]).sum())
         total += idx.size(0)
         for key, value in stats.items():
-            extra[key] = extra.get(key, 0.0) + float(value)
-    ci = wilson_ci(correct, total)
-    out = {"accuracy": correct / max(total, 1), "n": total,
+            acc = extra.get(key)
+            if acc is None:
+                acc = extra[key] = torch.zeros(
+                    (), dtype=torch.float64, device=device)
+            acc.add_(torch.as_tensor(value, dtype=torch.float64))
+    n_correct = correct.item()
+    ci = wilson_ci(n_correct, total)
+    out = {"accuracy": n_correct / max(total, 1), "n": total,
            "accuracy_lo": ci["lo"], "accuracy_hi": ci["hi"]}
-    out.update({key: value / max(batches, 1) for key, value in extra.items()})
+    out.update({key: value.item() / max(batches, 1)
+                for key, value in extra.items()})
     return out
 
 
@@ -176,14 +182,14 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
 def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
                           batches=4, seed=123):
     gen = torch.Generator(device=device).manual_seed(seed)
-    correct = 0
+    correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
     for _ in range(batches):
         idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
         pred = model(idx).argmax(dim=-1)
-        correct += int((pred == meta["answer"]).sum())
+        correct.add_((pred == meta["answer"]).sum())
         total += idx.size(0)
-    return correct / max(total, 1)
+    return correct.item() / max(total, 1)
 
 
 def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),

@@ -506,6 +506,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         opt.zero_grad(set_to_none=True)
         sup_pos = None if dense_lm else meta["query_pos"]
         _, loss, _ = model(idx, tgt, sup_pos=sup_pos)
+        loss.backward()
         lv = loss.item()
         entry = {"step": step, "train_loss": lv}
         if not math.isfinite(lv):
@@ -523,7 +524,6 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                     f"triage first_bad_stage={diag['first_bad_stage']!r}, "
                     f"suggestions={diag['suggestions']}")
             continue
-        loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(params, 1.0)
         gn = float(grad_norm)
         entry["grad_norm"] = gn
@@ -651,8 +651,8 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     """
     was_training = model.training
     model.eval()
-    total_loss = 0.0
-    correct = 0
+    total_loss = torch.zeros((), dtype=torch.float64, device=device)
+    correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
     val_gen.manual_seed(VAL_SEED)
     with torch.no_grad():
@@ -663,12 +663,14 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
                 validate_batch(idx, tgt, meta, vocab)
             sup_pos = None if dense_lm else meta["query_pos"]
             logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
-            total_loss += float(loss)
+            total_loss.add_(loss.detach().to(torch.float64))
             if not dense_lm:
-                correct += int((logits.argmax(-1) == meta["answer"]).sum())
+                correct.add_((logits.argmax(-1) == meta["answer"]).sum())
             total += idx.size(0)
     model.train(was_training)
-    return total_loss / max(1, batches), (correct / total if total else float("nan"))
+    n_batches = max(1, batches)
+    return (total_loss.item() / n_batches,
+            correct.item() / total if total else float("nan"))
 
 
 def estimate_forward_flops(model, seq_len: int) -> int:
@@ -1039,16 +1041,16 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     gen = torch.Generator(device=device).manual_seed(seed)
     was_training = model.training
     model.eval()
-    correct = 0
+    correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
     for _ in range(batches):
         idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
         logits, _, _ = model(idx)
         pred = logits.squeeze(1).argmax(-1)
-        correct += int((pred == meta["answer"]).sum())
+        correct.add_((pred == meta["answer"]).sum())
         total += idx.size(0)
     model.train(was_training)
-    return correct / total
+    return correct.item() / total
 
 
 @torch.inference_mode()
@@ -1083,11 +1085,11 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     for _ in range(batches):
         idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
         logits, _, _ = model(idx)
-        logits_all.append(logits.squeeze(1).float().cpu())
-        tgt_all.append(meta["answer"].cpu())
+        logits_all.append(logits.squeeze(1).float())
+        tgt_all.append(meta["answer"])
     model.train(was_training)
-    logits_cat = torch.cat(logits_all, dim=0)
-    tgt_cat = torch.cat(tgt_all, dim=0)
+    logits_cat = torch.cat(logits_all, dim=0).cpu()
+    tgt_cat = torch.cat(tgt_all, dim=0).cpu()
     out = multiclass_metrics(logits_cat, tgt_cat, topk=topk)
     acc_ci = wilson_ci(int((logits_cat.argmax(-1) == tgt_cat).sum()),
                        int(tgt_cat.numel()))

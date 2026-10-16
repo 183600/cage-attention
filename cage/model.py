@@ -936,7 +936,13 @@ class Attention(nn.Module):
                 log_len = math.log(max(T, 2))
                 self._log_len_cache[T] = log_len
             calib_cs = self.calib_c * self.calib_scale
-            conc = ent.mean(dim=1).div_(log_len).mul_(calib_cs).unsqueeze(-1)
+            if grad_on:
+                conc = ent.mean(dim=1)
+            else:
+                conc = _get_scratch(("calib_conc",), x.device, x.dtype,
+                                    B * T)[:B * T].view(B, T)
+                torch.mean(ent, dim=1, out=conc)
+            conc = conc.div_(log_len).mul_(calib_cs).unsqueeze(-1)
             gate_val = self._gate_proj(x, B, T, C, grad_on)
             gate_val.sub_(self.calib_a * log_len).sub_(conc)
             tau = F.softplus(self.calib_tau) + 0.1
