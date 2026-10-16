@@ -581,15 +581,21 @@ class _NullAttn(torch.autograd.Function):
         y4 = y.view(B, h, T, dv)
         nv4 = null_v.view(1, h, 1, dv)
         sbuf = _get_scratch(("null_s",), q.device, q.dtype, bh * max_rows * max_i1)
-        yb = _get_scratch(("null_yblk",), q.device, q.dtype, bh * max_rows * dv)
-        for i0, i1 in blocks:
-            r = i1 - i0
-            p, p0 = _null_probs(q[:, i0:i1], kt[:, :, :i1], i0, i1, mask[i0:i1, :i1], null_k, B, h,
-                                scale, sbuf)
-            yblk = yb[:bh * r * dv].view(bh, r, dv)
-            torch.bmm(p, v[:, :i1], out=yblk)
-            torch.addcmul(yblk.view(B, h, r, dv), p0.view(B, h, r, 1), nv4,
-                          out=y4[:, :, i0:i1])
+        if len(blocks) == 1:
+            p, p0 = _null_probs(q, kt, 0, T, mask, null_k, B, h, scale, sbuf)
+            torch.bmm(p, v, out=y)
+            y4.addcmul_(p0.view(B, h, T, 1), nv4)
+        else:
+            yb = _get_scratch(("null_yblk",), q.device, q.dtype,
+                              bh * max_rows * dv)
+            for i0, i1 in blocks:
+                r = i1 - i0
+                p, p0 = _null_probs(q[:, i0:i1], kt[:, :, :i1], i0, i1, mask[i0:i1, :i1], null_k, B, h,
+                                    scale, sbuf)
+                yblk = yb[:bh * r * dv].view(bh, r, dv)
+                torch.bmm(p, v[:, :i1], out=yblk)
+                torch.addcmul(yblk.view(B, h, r, dv), p0.view(B, h, r, 1), nv4,
+                              out=y4[:, :, i0:i1])
         if any(ctx.needs_input_grad):
             ctx.save_for_backward(qkv, null_k, null_v)
         ctx.scale = scale
@@ -775,12 +781,16 @@ class Attention(nn.Module):
         mask_sel = _mask_rows(stat_pos, T, h, q.dtype)
         with torch.no_grad():
             if is_null:
-                att_sel = torch.baddbmm(mask_sel, q_sel, k.transpose(1, 2),
-                                        beta=1.0, alpha=self.inv_scale)
-                s0 = torch.matmul(q_sel.reshape(B, h, 1, dk),
-                                  self.null_k.view(1, h, dk, 1)).reshape(
-                                      q_sel.size(0), 1, 1).mul_(self.inv_scale)
-                att_sel = torch.cat([s0, att_sel], dim=-1)
+                att_real = _get_scratch(("rowstats_att_null",), q.device,
+                                        q.dtype, n * T)[:n * T].view(n, 1, T)
+                torch.baddbmm(mask_sel, q_sel, k.transpose(1, 2),
+                              beta=1.0, alpha=self.inv_scale, out=att_real)
+                s0 = _get_scratch(("rowstats_s0_null",), q.device, q.dtype,
+                                  n)[:n].view(B, h, 1, 1)
+                torch.matmul(q_sel.reshape(B, h, 1, dk),
+                             self.null_k.view(1, h, dk, 1), out=s0)
+                s0.mul_(self.inv_scale)
+                att_sel = torch.cat([s0.view(n, 1, 1), att_real], dim=-1)
             else:
                 att_sel = _get_scratch(("rowstats_att",), q.device, q.dtype,
                                        n * T)[:n * T].view(n, 1, T)
