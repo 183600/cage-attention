@@ -16,6 +16,7 @@ from .data import (
     validate_batch,
 )
 from .metrics import (
+    average_ranks,
     brier_score,
     expected_calibration_error,
     multiclass_metrics,
@@ -1076,6 +1077,28 @@ def pearson(x, y):
     return (dx * dy).sum() / (dx.norm() * dy.norm())
 
 
+def spearman(x, y):
+    """Rank correlation (average ranks for ties).
+
+    Robustness companion to ``pearson`` for H1a: the mechanism claim is a
+    *monotone* association ("the gate opens when attention is diffuse"),
+    which Pearson only captures as long as the relation is linear and no
+    outlier dominates it.  Agreement between the two coefficients means
+    the effect is not an artifact of the correlation measure.
+    """
+    x = x.flatten().float()
+    y = y.flatten().float()
+    if x.numel() == 0:
+        return torch.tensor(float("nan"))
+    rx = average_ranks(x)
+    ry = average_ranks(y)
+    dx = rx - rx.mean()
+    dy = ry - ry.mean()
+    if dx.abs().max() <= 1e-12 or dy.abs().max() <= 1e-12:
+        return torch.tensor(float("nan"))
+    return (dx * dy).sum() / (dx.norm() * dy.norm())
+
+
 def _fisher_mean(rs):
     """Mean of Pearson coefficients, weighted correctly through the
     Fisher z-transform; degenerate (NaN) layers are dropped.
@@ -1111,6 +1134,10 @@ def gate_stat_correlations(stats):
         [pearson(g[:, i], mp[:, i]).item() for i in cols])
     r["gate_vs_correct"] = _fisher_mean(
         [pearson(g[:, i], corr).item() for i in cols])
+    r["gate_vs_entropy_spearman"] = _fisher_mean(
+        [spearman(g[:, i], ent[:, i]).item() for i in cols])
+    r["gate_vs_maxprob_spearman"] = _fisher_mean(
+        [spearman(g[:, i], mp[:, i]).item() for i in cols])
     return r
 
 
@@ -1137,6 +1164,23 @@ def false_concentration_analysis(stats, maxprob_thresh=0.5):
         r["gate_on_false_conc"] = gm[fc].mean().item() if fc.any() else float("nan")
         r["gate_on_correct"] = gm[corr & high].mean().item() if (corr & high).any() else float("nan")
     return r
+
+
+def false_concentration_sweep(stats, thresholds=(0.3, 0.5, 0.7, 0.9)) -> dict:
+    """H1b robustness: the false-concentration split at several thresholds.
+
+    ``maxprob_thresh=0.5`` is an a-priori choice, but the whole H1b verdict
+    (gate margin = gate on correct - gate on false concentration) depends
+    on where "high confidence" is cut.  Sweeping the threshold makes the
+    analyst's degree of freedom explicit: a mechanism claim that only
+    holds at one arbitrary cut is a property of the cut, not of the
+    mechanism.  The pre-registered contrast stays at 0.5; the sweep is
+    reported so cherry-picking can be ruled out.
+
+    Returns ``{threshold: false_concentration_analysis(stats, thr)}``.
+    """
+    return {float(thr): false_concentration_analysis(stats, maxprob_thresh=thr)
+            for thr in thresholds}
 
 
 def error_detection_aucs(stats):

@@ -18,7 +18,9 @@ Why these baselines
   a separate *test* seed.  It cannot represent key-value lookup, so it
   should stay near chance (``1 / (vocab - 2)``).  A complex model earns
   its keep only if it clearly beats this tuned probe *and* approaches
-  the rule ceiling.
+  the rule ceiling.  "Near chance" is checked statistically
+  (``probe_vs_chance_test``), not by eyeballing: a point estimate inside
+  "a few x chance" with a wide CI is inconclusive, not evidence.
 
 The transformer with ``gate="none"`` is the architecture-internal
 baseline that the gate variants of E1 are compared against; these
@@ -31,12 +33,14 @@ import torch
 import torch.nn.functional as F
 
 from .data import check_train_seed, make_batch, validate_batch
+from .metrics import paired_bootstrap_ci, wilson_ci
 from .train import _make_adamw
 
 __all__ = [
     "LinearBagProbe",
     "copy_last_token_stats",
     "linear_probe_accuracy",
+    "probe_vs_chance_test",
     "rule_naive_last_match_stats",
     "rule_pair_lookup_stats",
     "train_linear_probe",
@@ -62,7 +66,9 @@ def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
         total += idx.size(0)
         for key, value in stats.items():
             extra[key] = extra.get(key, 0.0) + float(value)
-    out = {"accuracy": correct / max(total, 1), "n": total}
+    ci = wilson_ci(correct, total)
+    out = {"accuracy": correct / max(total, 1), "n": total,
+           "accuracy_lo": ci["lo"], "accuracy_hi": ci["hi"]}
     out.update({key: value / max(batches, 1) for key, value in extra.items()})
     return out
 
@@ -207,3 +213,29 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
                       "val_accuracy_std": var ** 0.5, "n_seeds": len(accs)})
     best = max(table, key=lambda row: row["val_accuracy_mean"])
     return best["lr"], table
+
+
+def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
+                         seed: int = 0) -> dict:
+    """Quantitative HB2 test: does the tuned probe stay near chance?
+
+    ``accuracies`` holds the test-seed accuracy of the tuned probe for each
+    training seed; ``chance`` is ``1 / (vocab - 2)``.  The returned CI is
+    for the mean of ``accuracy - chance``, and ``hb2_supported`` is the
+    pre-registered decision: the probe counts as "near chance" only when
+    the 95% CI upper bound is *below* ``chance`` itself (i.e. the probe is
+    confidently below 2x chance).  A probe whose CI reaches above 2x chance
+    means either answer information leaks into bag-of-token features or
+    the probe is exploiting some shortcut, and the simple-baseline
+    comparison must be re-examined before crediting the transformer.
+
+    Returns the bootstrap CI dict for ``accuracy - chance`` plus the
+    ``chance`` level, the decision flag ``hb2_supported``, and the p-value
+    of the one-sample bootstrap test against the chance baseline.
+    """
+    margins = [float(a) - float(chance) for a in accuracies]
+    ci = paired_bootstrap_ci(margins, n_boot=n_boot, seed=seed)
+    ci["chance"] = float(chance)
+    ci["hb2_supported"] = bool(ci["n"] > 0 and
+                               ci["hi"] < float(chance))
+    return ci

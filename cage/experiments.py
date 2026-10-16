@@ -11,13 +11,21 @@ Design principles
    ceiling), the trivial floor and a learning-rate-tuned linear probe
    run before any transformer grid.  A shared training recipe is tuned
    on the plain ``none`` baseline (validation seed), then frozen for all
-   gate variants so the E1/E3 comparisons stay controlled.
+   gate variants so the E1/E3 comparisons stay controlled.  The
+   baselines are checked *statistically* before the grids run: HB1/HB2/
+   HB3 verdicts are written to ``baselines_verdict.json`` (rule ceiling
+   with a Wilson CI, a bootstrap near-chance test for the tuned probe,
+   and the split audit), and E1 re-reads that verdict and the rule
+   ceiling as a positive control, so a gate variant is only credited for
+   what it does beyond a tuned simple baseline on a task the simple rule
+   can actually solve.
 3. **Honest evaluation.**  Tuning uses the validation seed only.  Final
    numbers are reported on a separate test seed that is never used for
    selection.  Every key claim is reported as mean +- std over
    independent training seeds together with a paired bootstrap 95% CI
    of the difference (``cage/metrics.py``); a claim is only read as
-   supported when that CI excludes 0.  The training curve is monitored
+   supported when that CI excludes 0 *and* the contrast survives FDR
+   control over its family.  The training curve is monitored
    too: every contrast is annotated when either side contains
    curve-invalid runs (plateau / diverging / numerical instability),
    since an underfit run produces "no difference" for reasons unrelated
@@ -27,6 +35,16 @@ Design principles
    construction (``cage.data``): the split is assigned before samples are
    drawn, reserved evaluation seeds are refused for training, and HB3
    audits duplicate overlap and distribution shift before any model runs.
+5. **Multiplicity and power.**  Each experiment interprets a *family* of
+   contrasts, so the family is read through Benjamini-Hochberg FDR
+   control (``--fdr-q``, default 0.05).  Every contrast reports its
+   bootstrap p-value, the fraction of seeds agreeing on the sign, and
+   the design's minimal detectable effect at 80% power (MDE80); "CI
+   includes 0" with ``|effect| < MDE80`` is always reported as
+   *inconclusive*, not as evidence of absence.  This matters at the
+   5-seed scale used here: an uncorrected 95% readout over ~16 null
+   contrasts would produce about one spurious "supported" claim per
+   experiment.
 
 Outputs land in ``results/`` (git-ignored); nothing is written into the
 tracked tree.
@@ -52,6 +70,7 @@ import torch
 from .baselines import (
     copy_last_token_stats,
     linear_probe_accuracy,
+    probe_vs_chance_test,
     rule_naive_last_match_stats,
     rule_pair_lookup_stats,
     train_linear_probe,
@@ -66,7 +85,7 @@ from .data import (
     make_batch,
     split_leakage_audit,
 )
-from .metrics import paired_bootstrap_ci
+from .metrics import benjamini_hochberg, paired_bootstrap_ci
 from .model import GATES, NORMS, build
 from .train import (
     collect_error_cases,
@@ -74,6 +93,7 @@ from .train import (
     error_detection_aucs,
     eval_metrics,
     false_concentration_analysis,
+    false_concentration_sweep,
     gate_depth_ratio,
     gate_stat_correlations,
     measure_inference_cost,
@@ -97,7 +117,9 @@ HYPOTHESES = {
         "hypothesis": "The pair structure admits an exact parameter-free "
                       "lookup rule because keys are distinct per sequence.",
         "prediction": "rule accuracy ~ 1.0 (ceiling) and unique_key_rate = 1.0",
-        "decision": "rule accuracy < 0.99 indicates a broken task/data "
+        "decision": "rule accuracy < 0.99 (point estimate; the Wilson 95% "
+                    "CI is reported to show the precision of the finite "
+                    "evaluation stream) indicates a broken task/data "
                     "construction and invalidates everything above it",
     },
     "HB2": {
@@ -107,9 +129,15 @@ HYPOTHESES = {
         "hypothesis": "A linear model on bag-of-token counts cannot express "
                       "key-value lookup; its accuracy stays near chance "
                       "1/(vocab-2) even after tuning.",
-        "prediction": "tuned linear probe accuracy <= a few x chance",
-        "decision": "a clearly above-chance probe would mean answer "
-                    "information leaks into the bag-of-tokens features",
+        "prediction": "the 95% bootstrap CI of (tuned probe accuracy - chance) "
+                      "stays below +chance, i.e. the probe is confidently "
+                      "below 2x chance",
+        "decision": "The quantitative near-chance test "
+                    "(cage.baselines.probe_vs_chance_test) must be supported; "
+                    "a probe whose CI reaches above 2x chance would mean "
+                    "answer information leaks into the bag-of-tokens "
+                    "features (or a shortcut exists) and invalidates the "
+                    "simple-baseline comparison",
     },
     "HB3": {
         "experiment": "baselines",
@@ -132,9 +160,12 @@ HYPOTHESES = {
         "hypothesis": "The query-only gate has no access to the attention "
                       "distribution, so |gate_vs_entropy| is clearly larger "
                       "for calib than for query.",
-        "prediction": "|gate_vs_entropy|(calib) - |gate_vs_entropy|(query) > 0",
+        "prediction": "|gate_vs_entropy|(calib) - |gate_vs_entropy|(query) > 0; "
+                      "the same direction holds for the rank (Spearman) "
+                      "correlation as a robustness check",
         "decision": "paired bootstrap 95% CI of the seed differences "
-                    "excludes 0",
+                    "excludes 0 after Benjamini-Hochberg FDR control across "
+                    "the E1 contrasts (q=0.05)",
     },
     "H1b": {
         "experiment": "e1",
@@ -144,8 +175,13 @@ HYPOTHESES = {
                       "calibrated gate closes more than on high-max-prob "
                       "correct samples, more so than the query gate.",
         "prediction": "gate_margin = gate_on_correct - gate_on_false_conc "
-                      "is larger for calib than for query",
-        "decision": "paired bootstrap 95% CI excludes 0",
+                      "is larger for calib than for query, and the sign is "
+                      "stable when the high-maxprob threshold is swept "
+                      "(0.3/0.5/0.7/0.9)",
+        "decision": "paired bootstrap 95% CI excludes 0 after "
+                    "Benjamini-Hochberg FDR control across the E1 contrasts "
+                    "(q=0.05); the pre-registered threshold 0.5 is the "
+                    "decision point, the sweep only reports robustness",
     },
     "H1c": {
         "experiment": "e1",
@@ -154,7 +190,9 @@ HYPOTHESES = {
         "hypothesis": "null_mass is higher on errors than on correct "
                       "answers (the null slot absorbs the write).",
         "prediction": "null_mass_error_margin > 0",
-        "decision": "paired bootstrap 95% CI excludes 0",
+        "decision": "paired bootstrap 95% CI excludes 0 after "
+                    "Benjamini-Hochberg FDR control across the E1 contrasts "
+                    "(q=0.05)",
     },
     "H2a": {
         "experiment": "e2",
@@ -165,17 +203,23 @@ HYPOTHESES = {
                       "none when evaluated at 2x-spaced lengths.",
         "prediction": "accuracy_drop(calib) < accuracy_drop(none) and "
                       "accuracy@longest(calib) > accuracy@longest(none)",
-        "decision": "paired bootstrap 95% CI of the differences excludes 0",
+        "decision": "paired bootstrap 95% CI of the differences excludes 0 "
+                    "after Benjamini-Hochberg FDR control across the E2 "
+                    "contrasts (q=0.05)",
     },
     "H2b": {
         "experiment": "e2",
         "question": "Do the attention statistics drift with length as the "
                     "calibration assumes?",
-        "hypothesis": "Raw entropy grows with log(T) while max-prob and the "
-                      "calibrated gate stay comparably flat.",
-        "prediction": "entropy@longest > entropy@base; gate drift smaller "
-                      "in magnitude than entropy drift",
-        "decision": "sign-consistency across seeds",
+        "hypothesis": "Raw entropy grows with log(T), while the quantity the "
+                      "gate normalises by, H/log(T), is length-stable.",
+        "prediction": "raw entropy drift (longest - base) > 0 and "
+                      "normalised entropy drift H/log(T) ~ 0, with the "
+                      "calibrated gate drift small",
+        "decision": "paired bootstrap 95% CIs, FDR-controlled across the E2 "
+                    "contrasts (q=0.05): raw entropy drift CI excludes 0 "
+                    "with a positive mean, and the H/log(T) drift CI "
+                    "includes 0",
     },
     "H3a": {
         "experiment": "e3",
@@ -185,7 +229,9 @@ HYPOTHESES = {
                       "deep/early gate ratio relative to pre-LN.",
         "prediction": "gate_depth_ratio(seednorm) > gate_depth_ratio(pre) "
                       "and deep residual norms grow more",
-        "decision": "paired bootstrap 95% CI excludes 0",
+        "decision": "paired bootstrap 95% CI excludes 0 after "
+                    "Benjamini-Hochberg FDR control across the E3 contrasts "
+                    "(q=0.05)",
     },
     "H3b": {
         "experiment": "e3",
@@ -193,9 +239,13 @@ HYPOTHESES = {
         "hypothesis": "LayerScale (1e-2) damps the initial write strength "
                       "and thereby changes the residual-norm profile and "
                       "the gate depth ratio.",
-        "prediction": "residual-norm growth and/or gate_depth_ratio shift "
-                      "between LayerScale off and on",
-        "decision": "paired bootstrap 95% CI excludes 0",
+        "prediction": "the primary readout "
+                      "resid_norm_last_over_first shifts between LayerScale "
+                      "off and on; gate_depth_ratio is a secondary readout",
+        "decision": "paired bootstrap 95% CI of the primary readout "
+                    "excludes 0 after Benjamini-Hochberg FDR control across "
+                    "the E3 contrasts (q=0.05); the secondary readout is "
+                    "reported for context and is not a decision criterion",
     },
 }
 
@@ -225,6 +275,7 @@ class Settings:
     cost_warmup: int = 2
     cost_runs: int = 7
     max_error_cases: int = 64   # per gate x seed, dumped to disk
+    fdr_q: float = 0.05         # BH false-discovery rate for contrast families
     out_dir: pathlib.Path = field(default_factory=lambda: pathlib.Path("results"))
 
     @classmethod
@@ -262,6 +313,13 @@ def _aggregate_runs(runs, skip=("seed", "lr", "params")):
 
 
 def _paired_diff(runs_a, runs_b, metric):
+    """Paired contrast ``a - b`` plus the control-side level.
+
+    ``baseline_mean`` (the mean of ``metric`` on side ``b``) is attached so
+    the report can print the effect as a relative change: a contrast can be
+    statistically significant with zero variance yet practically
+    negligible, and the relative effect is what exposes that.
+    """
     by_seed = {r["seed"]: r for r in runs_b}
     diffs = []
     for ra in runs_a:
@@ -270,15 +328,28 @@ def _paired_diff(runs_a, runs_b, metric):
             continue
         if _finite(ra[metric]) and _finite(rb[metric]):
             diffs.append(float(ra[metric]) - float(rb[metric]))
-    return paired_bootstrap_ci(diffs)
+    ci = paired_bootstrap_ci(diffs)
+    base = _mean_std([r[metric] for r in runs_b if metric in r])
+    ci["baseline_mean"] = base["mean"]
+    return ci
 
 
 def _fmt_ci(ci) -> str:
     if ci["n"] == 0 or not math.isfinite(ci["mean"]):
         return "n/a"
     supported = (ci["lo"] > 0.0) or (ci["hi"] < 0.0)
+    mde = ci.get("mde80", float("nan"))
+    if supported:
+        verdict = "CI excludes 0"
+    elif math.isfinite(mde) and abs(ci["mean"]) < mde:
+        verdict = (f"inconclusive: |effect| < MDE80={mde:.4f} "
+                   f"(design cannot resolve it)")
+    else:
+        verdict = "CI includes 0"
+    p = ci.get("p_value", float("nan"))
+    p_s = f"p={p:.3f} " if math.isfinite(p) else ""
     return (f"{ci['mean']:+.4f} [{ci['lo']:+.4f}, {ci['hi']:+.4f}] "
-            f"n={ci['n']} {'CI excludes 0' if supported else 'CI includes 0'}")
+            f"n={ci['n']} {p_s}{verdict}")
 
 
 CURVE_INVALID_VERDICTS = (
@@ -324,11 +395,70 @@ def _curve_warn(*labeled_runs) -> str:
     return "WARN " + "; ".join(parts) if parts else ""
 
 
-def _print_contrast(rule, hyp, metric, ci, warn=""):
-    line = f"  [{hyp}] {rule} ({metric}): {_fmt_ci(ci)}"
-    if warn:
-        line += f"  [{warn}]"
-    print(line)
+class ContrastLog:
+    """One experiment's pre-registered contrast family, FDR-controlled.
+
+    Every contrast is printed as soon as it is computed (the readout is
+    unchanged), and :meth:`finalize` applies Benjamini-Hochberg control
+    across the whole family.  The family is the unit of inference: with
+    ~16 contrasts per experiment, an uncorrected per-contrast 95% readout
+    would be expected to produce about one spurious "supported" claim when
+    every null is true.  The finalize report prints each contrast's
+    bootstrap p-value, adjusted p, effect size, MDE80 and seed
+    sign-consistency, and writes the table to ``<tag>_contrasts.json`` so
+    the corrected readout is auditable next to the run records.
+    """
+
+    def __init__(self, tag: str):
+        self.tag = tag
+        self.rows: list[dict] = []
+
+    def print(self, rule, hyp, metric, ci, warn="") -> None:
+        self.rows.append({
+            "rule": rule, "hypothesis": hyp, "metric": metric,
+            "mean": ci.get("mean"), "lo": ci.get("lo"), "hi": ci.get("hi"),
+            "n": ci.get("n"), "p_value": ci.get("p_value"),
+            "mde80": ci.get("mde80"),
+            "sign_consistency": ci.get("sign_consistency"),
+            "baseline_mean": ci.get("baseline_mean"),
+        })
+        line = f"  [{hyp}] {rule} ({metric}): {_fmt_ci(ci)}"
+        if warn:
+            line += f"  [{warn}]"
+        print(line)
+
+    def finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
+        adj = benjamini_hochberg([r["p_value"] for r in self.rows], q=q)
+        for row, a in zip(self.rows, adj):
+            row["p_adj"] = a["p_adj"]
+            row["fdr_reject"] = a["reject"]
+            base = row.get("baseline_mean")
+            row["rel_effect"] = (
+                row["mean"] / abs(base)
+                if base is not None and math.isfinite(base) and base != 0.0
+                else float("nan"))
+        testable = [r for r in self.rows if math.isfinite(r["p_adj"])]
+        surviving = [r for r in testable if r["fdr_reject"]]
+        print(f"\n[{self.tag}] multiplicity control (Benjamini-Hochberg FDR, "
+              f"q={q:g}): {len(surviving)}/{len(testable)} testable "
+              f"contrasts survive (uncorrected p -> adjusted p; only "
+              f"'SURVIVES' supports a pre-registered decision; rel = effect "
+              f"relative to the control-side mean, read it for practical "
+              f"significance):")
+        for r in testable:
+            rel_s = (f", rel={r['rel_effect']:+.2%}"
+                     if math.isfinite(r["rel_effect"]) else "")
+            print(f"  [{r['hypothesis']}] {r['rule']} ({r['metric']}): "
+                  f"p={r['p_value']:.4f} -> p_adj={r['p_adj']:.4f} "
+                  f"{'SURVIVES' if r['fdr_reject'] else 'not significant'} "
+                  f"(effect={r['mean']:+.4f}{rel_s}, "
+                  f"MDE80={r['mde80']:.4f}, seeds={r['n']}, "
+                  f"sign-consistency={r['sign_consistency']:.2f})")
+        payload = {"tag": self.tag, "q": q, "n_contrasts": len(self.rows),
+                   "n_testable": len(testable),
+                   "n_surviving": len(surviving), "rows": self.rows}
+        _write_json(out_dir / f"{self.tag}_contrasts.json", payload)
+        return payload
 
 
 def _format_case(case) -> str:
@@ -381,6 +511,22 @@ def _git_sha() -> str:
                               text=True, check=True).stdout.strip()
     except Exception:
         return "unknown"
+
+
+def _load_baseline_verdict(out_dir: pathlib.Path):
+    """The HB1/HB2/HB3 verdicts written by ``run_baselines``, if present.
+
+    E1/E2/E3 read the learned model against the simple baselines, so a
+    missing verdict file is surfaced as a note instead of silently
+    treating the baseline check as passed.
+    """
+    path = out_dir / "baselines_verdict.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def _model_cfg(settings: Settings, **overrides) -> dict:
@@ -592,7 +738,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     record = {"experiment": "baselines", "hypotheses": ["HB1", "HB2", "HB3"],
               "git_sha": sha, "seed": TEST_SEED}
 
-    _audit_data_splits(settings, out_dir)
+    audit = _audit_data_splits(settings, out_dir)
 
     balance = _answer_balance(settings)
     print(f"[baselines] answer-value balance over {balance['n_samples']} "
@@ -601,6 +747,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
           f"(uniform={balance['expected_uniform_share']:.5f})")
     _write_json(out_dir / "baselines_balance.json", balance)
 
+    hb1_supported = None
     for name, fn in (
         ("rule_pair_lookup", rule_pair_lookup_stats),
         ("rule_naive_last_match", rule_naive_last_match_stats),
@@ -610,9 +757,17 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                    batch=settings.eval_batch, batches=settings.eval_batches,
                    seed=TEST_SEED)
         print(f"[baselines] {name}: accuracy={stats['accuracy']:.4f} "
-              f"(n={stats['n']})")
+              f"[{stats['accuracy_lo']:.4f}, {stats['accuracy_hi']:.4f}] "
+              f"(Wilson 95%, n={stats['n']})")
         _write_result(out_dir / "baselines_runs.jsonl",
                       {**record, "name": name, **stats})
+        if name == "rule_pair_lookup":
+            hb1_supported = bool(stats["accuracy"] >= 0.99
+                                 and stats["unique_key_rate"] == 1.0)
+    if not hb1_supported:
+        print("[baselines] WARNING: HB1 failed - the parameter-free rule does "
+              "not reach the ceiling, so the task/data construction is broken "
+              "and every number reported above is invalid")
 
     best_lr, table = tune_linear_probe(
         settings.n_pairs, settings.vocab, settings.device,
@@ -639,9 +794,37 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                        "n": settings.eval_batch * settings.eval_batches})
     summary = _mean_std(probe_accs)
     chance = 1.0 / (settings.vocab - 2)
+    hb2 = probe_vs_chance_test(probe_accs, chance,
+                               seed=settings.seeds[0] if settings.seeds else 0)
     print(f"[baselines] tuned linear probe (test seed {TEST_SEED}): "
           f"accuracy={summary['mean']:.4f} +- {summary['std']:.4f} "
           f"(chance={chance:.4f}, n_seeds={summary['n']})")
+    print(f"[baselines] HB2 near-chance test: accuracy - chance = "
+          f"{hb2['mean']:+.4f} [{hb2['lo']:+.4f}, {hb2['hi']:+.4f}] "
+          f"(p={hb2['p_value']:.3f}, MDE80={hb2['mde80']:.4f}); "
+          f"{'SUPPORTED (probe confidently <2x chance)' if hb2['hb2_supported'] else 'NOT SUPPORTED - inspect the simple-baseline comparison'}")
+    verdict = {
+        "train_seed": settings.seeds[0] if settings.seeds else None,
+        "test_seed": TEST_SEED,
+        "val_seed": VAL_SEED,
+        "chance": chance,
+        "hb1_supported": bool(hb1_supported),
+        "hb2_supported": bool(hb2["hb2_supported"]),
+        "hb3_supported": bool(audit.get("hb3_supported")),
+        "probe_accuracy_mean": summary["mean"],
+        "probe_accuracy_std": summary["std"],
+        "hb2_accuracy_minus_chance": {
+            "mean": hb2["mean"], "lo": hb2["lo"], "hi": hb2["hi"],
+            "p_value": hb2["p_value"], "mde80": hb2["mde80"],
+            "n": hb2["n"],
+        },
+    }
+    _write_json(out_dir / "baselines_verdict.json", verdict)
+    print(f"[baselines] verdict: HB1={'ok' if verdict['hb1_supported'] else 'FAILED'}"
+          f" HB2={'ok' if verdict['hb2_supported'] else 'FAILED'}"
+          f" HB3={'ok' if verdict['hb3_supported'] else 'FAILED'} "
+          f"(stored in baselines_verdict.json; a failed baseline check "
+          f"invalidates the corresponding claims above it)")
 
 
 def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
@@ -660,6 +843,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                                   seed=STATS_SEED)
             corr = gate_stat_correlations(stats)
             fc = false_concentration_analysis(stats)
+            fc_sweep = false_concentration_sweep(stats)
             ed = error_detection_aucs(stats)
             errors = collect_error_cases(
                 model, settings.n_pairs, settings.vocab, settings.device,
@@ -686,6 +870,13 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             if _finite(fc.get("gate_on_correct")) and \
                     _finite(fc.get("gate_on_false_conc")):
                 rec["gate_margin"] = fc["gate_on_correct"] - fc["gate_on_false_conc"]
+            rec["false_conc_thresholds"] = sorted(fc_sweep)
+            for thr, row in fc_sweep.items():
+                if _finite(row.get("gate_on_correct")) and \
+                        _finite(row.get("gate_on_false_conc")):
+                    rec[f"gate_margin_thr{thr:g}"] = (
+                        row["gate_on_correct"] - row["gate_on_false_conc"])
+            rec["false_conc_sweep"] = fc_sweep
             if gate == "null":
                 rec["null_mass_error_margin"] = _null_mass_margin(stats)
             _write_result(out_dir / "e1_runs.jsonl", rec)
@@ -710,26 +901,95 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{cell('top5_accuracy'):>16} {cell('abs_gate_vs_entropy'):>16} "
               f"{cell('prauc_gate_to_error'):>16}")
 
+    print(f"\n[e1] positive control: the parameter-free structural rule is "
+          f"the task ceiling, so every learned accuracy must be read as a "
+          f"gap to it (a gate far below the ceiling means the mechanism "
+          f"statistics describe an underfit solution, not the mechanism):")
+    ceiling = rule_pair_lookup_stats(
+        settings.n_pairs, settings.vocab, settings.device,
+        batch=settings.eval_batch, batches=settings.eval_batches,
+        seed=TEST_SEED)
+    print(f"  rule ceiling = {ceiling['accuracy']:.4f} "
+          f"[{ceiling['accuracy_lo']:.4f}, {ceiling['accuracy_hi']:.4f}] "
+          f"(Wilson 95%, n={ceiling['n']}, unique_key_rate="
+          f"{ceiling['unique_key_rate']:.3f})")
+    print(f"{'gate':>6} {'accuracy':>10} {'ceiling_gap':>12}")
+    for gate in GATES:
+        agg = table[gate].get("accuracy", {})
+        acc = agg.get("mean", float("nan"))
+        gap = (ceiling["accuracy"] - acc) if math.isfinite(acc) else float("nan")
+        print(f"{gate:>6} {acc:>10.4f} {gap:>12.4f}")
+    verdict = _load_baseline_verdict(out_dir)
+    if verdict is None:
+        print("[e1] note: no baselines_verdict.json in the output dir - run "
+              "`--only baselines` first so the learned models can be read "
+              "against the tuned simple baselines (probe, rules) before "
+              "crediting any gate variant")
+    else:
+        probe = verdict.get("probe_accuracy_mean", float("nan"))
+        marks = "/".join("ok" if verdict.get(k) else "FAILED"
+                         for k in ("hb1_supported", "hb2_supported",
+                                   "hb3_supported"))
+        print(f"[e1] simple-baseline check (from --only baselines): "
+              f"HB1/HB2/HB3={marks}, tuned linear probe test accuracy="
+              f"{probe:.4f} vs chance {verdict.get('chance', float('nan')):.4f} "
+              f"- the transformer is only credited for what it does beyond "
+              f"this tuned baseline and the rule ceiling")
+
+    print("\n[e1] H1a robustness: rank (Spearman) gate-entropy correlation "
+          "alongside Pearson (a monotone effect must survive the change of "
+          "association measure):")
+    print(f"{'gate':>6} {'r_entropy':>10} {'rho_entropy':>12} "
+          f"{'r_maxprob':>10} {'rho_maxprob':>12}")
+    for gate in GATES:
+        t = table[gate]
+        def rcell(key):
+            m = t.get(key)
+            if not m or not math.isfinite(m["mean"]):
+                return float("nan")
+            return m["mean"]
+        print(f"{gate:>6} {rcell('gate_vs_entropy'):>10.4f} "
+              f"{rcell('gate_vs_entropy_spearman'):>12.4f} "
+              f"{rcell('gate_vs_maxprob'):>10.4f} "
+              f"{rcell('gate_vs_maxprob_spearman'):>12.4f}")
+
+    print("\n[e1] H1b robustness: gate margin (correct - false-conc) across "
+          "the high-maxprob threshold sweep (pre-registered decision point "
+          "is thr=0.5; a sign flip at other cutoffs means the margin is a "
+          "property of the cutoff, not the mechanism):")
+    thresholds = sorted({float(t) for r in runs
+                         for t in r.get("false_conc_thresholds", ())})
+    print(f"{'gate':>6}" + "".join(f"{f'thr={t:g}':>12}" for t in thresholds))
+    for gate in GATES:
+        cells = []
+        for thr in thresholds:
+            agg = table[gate].get(f"gate_margin_thr{thr:g}", {})
+            m = agg.get("mean", float("nan"))
+            cells.append("n/a" if not math.isfinite(m) else f"{m:+.4f}")
+        print(f"{gate:>6}" + "".join(f"{c:>12}" for c in cells))
+
     print("\n[e1] pre-registered contrasts (calib vs query/none):")
-    _print_contrast("calib - none", "H1a", "accuracy",
-                    _paired_diff(by_gate["calib"], by_gate["none"], "accuracy"),
-                    warn=_curve_warn(("calib", by_gate["calib"]),
-                                     ("none", by_gate["none"])))
-    _print_contrast("calib - query", "H1a", "abs_gate_vs_entropy",
-                    _paired_diff(by_gate["calib"], by_gate["query"],
-                                 "abs_gate_vs_entropy"),
-                    warn=_curve_warn(("calib", by_gate["calib"]),
-                                     ("query", by_gate["query"])))
-    _print_contrast("calib - query", "H1b", "gate_margin",
-                    _paired_diff(by_gate["calib"], by_gate["query"],
-                                 "gate_margin"),
-                    warn=_curve_warn(("calib", by_gate["calib"]),
-                                     ("query", by_gate["query"])))
+    clog = ContrastLog("e1")
+    clog.print("calib - none", "H1a", "accuracy",
+               _paired_diff(by_gate["calib"], by_gate["none"], "accuracy"),
+               warn=_curve_warn(("calib", by_gate["calib"]),
+                                ("none", by_gate["none"])))
+    clog.print("calib - query", "H1a", "abs_gate_vs_entropy",
+               _paired_diff(by_gate["calib"], by_gate["query"],
+                            "abs_gate_vs_entropy"),
+               warn=_curve_warn(("calib", by_gate["calib"]),
+                                ("query", by_gate["query"])))
+    clog.print("calib - query", "H1b", "gate_margin",
+               _paired_diff(by_gate["calib"], by_gate["query"],
+                            "gate_margin"),
+               warn=_curve_warn(("calib", by_gate["calib"]),
+                                ("query", by_gate["query"])))
     null_margins = [r["null_mass_error_margin"] for r in by_gate["null"]
                     if _finite(r.get("null_mass_error_margin"))]
-    _print_contrast("null margin vs 0", "H1c", "null_mass_error_margin",
-                    paired_bootstrap_ci(null_margins),
-                    warn=_curve_warn(("null", by_gate["null"])))
+    clog.print("null margin vs 0", "H1c", "null_mass_error_margin",
+               paired_bootstrap_ci(null_margins),
+               warn=_curve_warn(("null", by_gate["null"])))
+    clog.finalize(out_dir, q=settings.fdr_q)
 
     print(f"\n[e1] training curves (val monitored on fixed stream seed "
           f"{VAL_SEED}; verdict -> recommendation; gradmax = max pre-clip "
@@ -787,9 +1047,11 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             return float("nan")
         return ma / mb
 
-    print(f"[e1] accuracy delta vs relative cost, each gate vs none (a gain "
-          f"is only read as supported when the CI excludes 0; a supported "
-          f"gain still has to be read against the multipliers):")
+    print(f"[e1] accuracy delta vs relative cost, each gate vs none "
+          f"(exploratory and uncorrected - the pre-registered family above "
+          f"is FDR-controlled; a gain is only read as supported when the CI "
+          f"excludes 0, and a supported gain still has to be read against "
+          f"the multipliers):")
     for gate in GATES:
         if gate == "none":
             continue
@@ -876,8 +1138,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             rec = {"experiment": "e2", "hypotheses": ["H2a", "H2b"],
                    "git_sha": sha, "gate": gate, "seed": seed, "lr": lr,
                    "params": params, "accuracy_by_length": {},
-                   "entropy_by_length": {}, "maxprob_by_length": {},
-                   "gate_by_length": {},
+                   "entropy_by_length": {}, "entropy_norm_by_length": {},
+                   "maxprob_by_length": {}, "gate_by_length": {},
                    **_cost_record(settings, model), **curve}
             for length in lengths:
                 metrics = eval_metrics(model, length, settings.vocab,
@@ -890,6 +1152,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                                       seed=STATS_SEED)
                 rec["accuracy_by_length"][length] = metrics["accuracy"]
                 rec["entropy_by_length"][length] = float(stats["entropy"].mean())
+                rec["entropy_norm_by_length"][length] = (
+                    rec["entropy_by_length"][length] / math.log(max(length, 2)))
                 rec["maxprob_by_length"][length] = float(stats["maxprob"].mean())
                 if stats.get("gate") is not None:
                     rec["gate_by_length"][length] = float(stats["gate"].mean())
@@ -900,6 +1164,9 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             rec["accuracy_drop"] = base_acc - long_acc
             rec["entropy_drift"] = (rec["entropy_by_length"][lengths[-1]]
                                     - rec["entropy_by_length"][settings.n_pairs])
+            rec["entropy_norm_drift"] = (
+                rec["entropy_norm_by_length"][lengths[-1]]
+                - rec["entropy_norm_by_length"][settings.n_pairs])
             errors = collect_error_cases(
                 model, lengths[-1], settings.vocab, settings.device,
                 batch=settings.stats_batch, batches=settings.stats_batches,
@@ -988,28 +1255,34 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             print(f"  [{gate}] {_format_case(case)}")
 
     print("\n[e2] pre-registered contrasts:")
-    _print_contrast("calib - none", "H2a", "accuracy_at_longest",
-                    _paired_diff(by_gate["calib"], by_gate["none"],
-                                 "accuracy_at_longest"),
-                    warn=_curve_warn(("calib", by_gate["calib"]),
-                                     ("none", by_gate["none"])))
-    _print_contrast("calib - none", "H2a", "accuracy_drop",
-                    _paired_diff(by_gate["calib"], by_gate["none"],
-                                 "accuracy_drop"),
-                    warn=_curve_warn(("calib", by_gate["calib"]),
-                                     ("none", by_gate["none"])))
+    clog = ContrastLog("e2")
     calib_runs = by_gate["calib"]
     calib_warn = _curve_warn(("calib", calib_runs))
-    _print_contrast("calib entropy drift vs 0", "H2b", "entropy_drift",
-                    paired_bootstrap_ci([r["entropy_drift"]
-                                         for r in calib_runs]),
-                    warn=calib_warn)
+    clog.print("calib - none", "H2a", "accuracy_at_longest",
+               _paired_diff(by_gate["calib"], by_gate["none"],
+                            "accuracy_at_longest"),
+               warn=_curve_warn(("calib", by_gate["calib"]),
+                                ("none", by_gate["none"])))
+    clog.print("calib - none", "H2a", "accuracy_drop",
+               _paired_diff(by_gate["calib"], by_gate["none"],
+                            "accuracy_drop"),
+               warn=_curve_warn(("calib", by_gate["calib"]),
+                                ("none", by_gate["none"])))
+    clog.print("calib raw entropy drift vs 0", "H2b", "entropy_drift",
+               paired_bootstrap_ci([r["entropy_drift"] for r in calib_runs]),
+               warn=calib_warn)
+    clog.print("calib normalised entropy drift vs 0", "H2b",
+               "entropy_norm_drift",
+               paired_bootstrap_ci([r["entropy_norm_drift"]
+                                    for r in calib_runs]),
+               warn=calib_warn)
     if calib_runs[0]["gate_by_length"]:
         gate_drifts = [r["gate_by_length"][lengths[-1]]
                        - r["gate_by_length"][settings.n_pairs]
                        for r in calib_runs]
-        _print_contrast("calib gate drift vs 0", "H2b", "gate_drift",
-                        paired_bootstrap_ci(gate_drifts), warn=calib_warn)
+        clog.print("calib gate drift vs 0", "H2b", "gate_drift",
+                   paired_bootstrap_ci(gate_drifts), warn=calib_warn)
+    clog.finalize(out_dir, q=settings.fdr_q)
     _write_json(out_dir / "e2_summary.json",
                 {g: {str(L): _mean_std([r["accuracy_by_length"][L]
                                         for r in by_gate[g]])
@@ -1079,7 +1352,9 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                       f"{mem['mean']:>8.2f} {invalid}/{len(rs)} "
                       f"{'/'.join(verdicts):>10}")
 
-    print("\n[e3] seednorm vs pre cost (accuracy delta vs relative cost):")
+    print("\n[e3] seednorm vs pre cost (exploratory and uncorrected: the "
+          "pre-registered family below is FDR-controlled; accuracy delta vs "
+          "relative cost):")
     for gate in ("query", "calib"):
         acc_ci = _paired_diff(index[(gate, "seednorm", None)],
                               index[(gate, "pre", None)], "accuracy")
@@ -1100,32 +1375,36 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
         print(f"  [{gate}] {_fmt_ci(acc_ci)} | {'  '.join(ratios)}"
               + (f"  [{warn}]" if warn else ""))
 
-    print("\n[e3] pre-registered contrasts:")
+    print("\n[e3] pre-registered contrasts (H3b: "
+          "resid_norm_last_over_first is the primary readout; "
+          "gate_depth_ratio is secondary):")
+    clog = ContrastLog("e3")
     for gate in ("query", "calib"):
         for layer_scale in (None, 1e-2):
             a = index[(gate, "seednorm", layer_scale)]
             b = index[(gate, "pre", layer_scale)]
-            _print_contrast(f"{gate}: seednorm - pre (ls={layer_scale})",
-                            "H3a", "gate_depth_ratio",
-                            _paired_diff(a, b, "gate_depth_ratio"),
-                            warn=_curve_warn((f"{gate}/seednorm", a),
-                                             (f"{gate}/pre", b)))
+            clog.print(f"{gate}: seednorm - pre (ls={layer_scale})",
+                       "H3a", "gate_depth_ratio",
+                       _paired_diff(a, b, "gate_depth_ratio"),
+                       warn=_curve_warn((f"{gate}/seednorm", a),
+                                        (f"{gate}/pre", b)))
     for gate in ("query", "calib"):
         for norm in NORMS:
             a = index[(gate, norm, 1e-2)]
             b = index[(gate, norm, None)]
-            _print_contrast(f"{gate}/{norm}: ls=1e-2 - off", "H3b",
-                            "resid_norm_last_over_first",
-                            _paired_diff(a, b, "resid_norm_last_over_first"),
-                            warn=_curve_warn((f"{gate}/{norm}/ls", a),
-                                             (f"{gate}/{norm}/off", b)))
+            clog.print(f"{gate}/{norm}: ls=1e-2 - off", "H3b",
+                       "resid_norm_last_over_first",
+                       _paired_diff(a, b, "resid_norm_last_over_first"),
+                       warn=_curve_warn((f"{gate}/{norm}/ls", a),
+                                        (f"{gate}/{norm}/off", b)))
     for norm in NORMS:
         a = index[("calib", norm, None)]
         b = index[("query", norm, None)]
-        _print_contrast(f"{norm}: calib - query", "H3a", "accuracy",
-                        _paired_diff(a, b, "accuracy"),
-                        warn=_curve_warn((f"calib/{norm}", a),
-                                         (f"query/{norm}", b)))
+        clog.print(f"{norm}: calib - query", "H3a", "accuracy",
+                   _paired_diff(a, b, "accuracy"),
+                   warn=_curve_warn((f"calib/{norm}", a),
+                                    (f"query/{norm}", b)))
+    clog.finalize(out_dir, q=settings.fdr_q)
     _write_json(out_dir / "e3_summary.json",
                 {f"{g}|{n}|{ls}": _aggregate_runs(rs)
                  for (g, n, ls), rs in index.items()})
@@ -1154,6 +1433,9 @@ def main(argv=None) -> int:
                         help="skip recipe tuning and use this lr directly")
     parser.add_argument("--d-model", type=int, default=None)
     parser.add_argument("--n-layers", type=int, default=None)
+    parser.add_argument("--fdr-q", type=float, default=0.05,
+                        help="Benjamini-Hochberg FDR level for the "
+                             "pre-registered contrast families")
     parser.add_argument("--out", default="results")
     args = parser.parse_args(argv)
 
@@ -1181,6 +1463,7 @@ def main(argv=None) -> int:
         settings.d_model = args.d_model
     if args.n_layers is not None:
         settings.n_layers = args.n_layers
+    settings.fdr_q = args.fdr_q
     out_dir = pathlib.Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     _write_json(out_dir / "hypotheses.json", HYPOTHESES)
@@ -1188,6 +1471,7 @@ def main(argv=None) -> int:
     print(f"[runner] only={args.only} quick={args.quick} "
           f"seeds={settings.seeds} steps={settings.steps} "
           f"lr={settings.lr if settings.lr is not None else 'tuned'} "
+          f"fdr_q={settings.fdr_q:g} "
           f"device={settings.device} out={out_dir}")
     if args.only == "baselines":
         run_baselines(settings, out_dir)

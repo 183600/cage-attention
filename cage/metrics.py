@@ -23,21 +23,34 @@ Metric choices (and why)
   distribution are first-class metrics rather than extras.
 * Comparisons across configurations are **paired over training seeds**;
   ``paired_bootstrap_ci`` quantifies the uncertainty of the mean
-  difference without assuming normality (and without SciPy).
+  difference without assuming normality (and without SciPy).  The same
+  routine returns a bootstrap p-value, the design's minimal detectable
+  effect at 80% power (``mde80``) and the sign consistency across seeds,
+  because a CI that merely *includes* 0 is not evidence of "no effect"
+  when the experiment cannot resolve the effect in the first place.
+* Each experiment interprets a family of contrasts, so
+  ``benjamini_hochberg`` controls the false-discovery rate across that
+  family; an uncorrected per-contrast 95% readout would be expected to
+  produce ~1 false "supported" claim per experiment made of all-null
+  hypotheses.
 """
 
 from __future__ import annotations
+
+import math
 
 import torch
 
 __all__ = [
     "average_ranks",
+    "benjamini_hochberg",
     "roc_auc",
     "pr_auc",
     "multiclass_metrics",
     "expected_calibration_error",
     "brier_score",
     "paired_bootstrap_ci",
+    "wilson_ci",
 ]
 
 
@@ -218,15 +231,108 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
     seed under two configurations).  Differencing removes the between-unit
     variance that a two-sample test would fold in, which matters with the
     small seed counts used here.  NaNs must be filtered by the caller.
+
+    Besides the CI the result carries the quantities needed to interpret
+    *why* it looks the way it does:
+
+    * ``p_value`` - two-sided bootstrap p-value
+      ``2 * min(P(mean* <= 0), P(mean* >= 0))`` with ``+1`` smoothing
+      (the fraction of resampled means on the wrong side of zero);
+    * ``half_width`` / ``sd`` - CI half-width and paired-difference SD;
+    * ``mde80`` - the minimal detectable effect at 80% power,
+      ``(z_0.975 + z_0.8) * sd / sqrt(n)``.  An observed ``|mean|`` below
+      it means the design could not have resolved an effect this small
+      even if it were real, so "CI includes 0" must be read as
+      *inconclusive*, not as evidence of absence;
+    * ``sign_consistency`` - fraction of non-zero paired differences that
+      share the sign of the mean (robustness to a single seed driving the
+      mean).
     """
     d = _flatten_float(diffs)
     n = d.numel()
     if n == 0:
         return {"mean": float("nan"), "lo": float("nan"),
-                "hi": float("nan"), "n": 0}
+                "hi": float("nan"), "n": 0, "sd": float("nan"),
+                "half_width": float("nan"), "mde80": float("nan"),
+                "p_value": float("nan"), "sign_consistency": float("nan"),
+                "alpha": float(alpha)}
     gen = torch.Generator(device=d.device).manual_seed(seed)
     idx = torch.randint(0, n, (n_boot, n), generator=gen, device=d.device)
     means = d[idx].mean(dim=1)
     lo = float(torch.quantile(means, alpha / 2.0))
     hi = float(torch.quantile(means, 1.0 - alpha / 2.0))
-    return {"mean": float(d.mean()), "lo": lo, "hi": hi, "n": int(n)}
+    p_lo = float((means <= 0.0).to(torch.float64).mean())
+    p_hi = float((means >= 0.0).to(torch.float64).mean())
+    p_two = min(1.0, 2.0 * (min(p_lo, p_hi) * n_boot + 1.0) / (n_boot + 1.0))
+    sd = float(d.std(unbiased=True)) if n > 1 else 0.0
+    pos = float((d > 0.0).to(torch.float64).mean())
+    neg = float((d < 0.0).to(torch.float64).mean())
+    sign_consistency = max(pos, neg) if pos + neg > 0.0 else float("nan")
+    return {
+        "mean": float(d.mean()),
+        "lo": lo,
+        "hi": hi,
+        "n": int(n),
+        "sd": sd,
+        "half_width": (hi - lo) / 2.0,
+        "mde80": 2.8015852 * sd / math.sqrt(n),
+        "p_value": p_two,
+        "sign_consistency": sign_consistency,
+        "alpha": float(alpha),
+    }
+
+
+def benjamini_hochberg(p_values, q: float = 0.05) -> list:
+    """Benjamini-Hochberg step-up FDR control over one contrast family.
+
+    ``p_values`` is a sequence of per-contrast p-values (NaN = not
+    testable, e.g. a degenerate metric).  Returns one dict per input with
+    ``p``, ``p_adj`` (monotone step-up adjusted p) and ``reject``
+    (``p_adj <= q``).  Applying BH to the whole family *before* reading
+    any contrast as supported is what keeps a grid of ~16 pre-registered
+    contrasts from accumulating ~1 spurious "supported" claim under the
+    null.
+    """
+    out = [{"p": float("nan"), "p_adj": float("nan"), "reject": False}
+           for _ in p_values]
+    finite = []
+    for i, p in enumerate(p_values):
+        if p is None:
+            continue
+        fp = float(p)
+        if math.isfinite(fp):
+            finite.append((i, min(max(fp, 0.0), 1.0)))
+    m = len(finite)
+    if not m:
+        return out
+    order = sorted(finite, key=lambda t: (t[1], t[0]))
+    adjusted: dict[int, float] = {}
+    prev = 1.0
+    for rank in range(m, 0, -1):
+        i, p = order[rank - 1]
+        value = min(prev, p * m / rank)
+        adjusted[i] = value
+        prev = value
+    for i, p in finite:
+        out[i] = {"p": p, "p_adj": adjusted[i], "reject": adjusted[i] <= q}
+    return out
+
+
+def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
+    """Wilson score interval for a binomial proportion.
+
+    Used for the parameter-free baselines, whose accuracy is a count over
+    a finite evaluation stream: reporting ``accuracy`` without this
+    interval would hide that a rule can only be checked to +-binomial
+    noise at the evaluated sample size.
+    """
+    if total <= 0:
+        return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
+                "n": 0}
+    p = successes / total
+    z2 = z * z
+    denom = 1.0 + z2 / total
+    center = (p + z2 / (2.0 * total)) / denom
+    half = z * math.sqrt(p * (1.0 - p) / total + z2 / (4.0 * total * total)) / denom
+    return {"p": p, "lo": max(0.0, center - half),
+            "hi": min(1.0, center + half), "n": total}
