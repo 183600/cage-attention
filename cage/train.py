@@ -744,24 +744,27 @@ def _attention_mass_on_key(x, weight, meta, n_heads, inv_scale, null_k):
     exactly as the kernel does, keeping the mass comparable across
     variants.
     """
-    B = x.size(0)
+    B, T, _ = x.shape
     C = weight.size(0) // 3
     dk = C // n_heads
-    q_all = F.linear(x[torch.arange(B, device=x.device), meta["query_pos"]],
-                     weight)[:, :C]
-    mass = torch.zeros(B, device=x.device, dtype=torch.float32)
-    for b in range(B):
-        qp, kp = int(meta["query_pos"][b]), int(meta["key_pos"][b])
-        qb = q_all[b].view(n_heads, dk)
-        kb = F.linear(x[b, :qp + 1], weight)[:, C:2 * C].view(qp + 1, n_heads, dk)
-        scores = torch.einsum("hd,thd->th", qb, kb) * inv_scale
-        if null_k is not None:
-            s0 = (qb * null_k).sum(-1) * inv_scale
-            scores = torch.cat([s0.unsqueeze(0), scores], dim=0)
-            mass[b] = torch.softmax(scores, dim=0)[kp + 1].mean()
-        else:
-            mass[b] = torch.softmax(scores, dim=0)[kp].mean()
-    return mass
+    qp = meta["query_pos"]
+    kp = meta["key_pos"]
+    qk = F.linear(x, weight)
+    rows = torch.arange(B, device=x.device)
+    q_all = qk[rows, qp, :C].view(B, n_heads, dk)
+    k_all = qk[:, :, C:2 * C].view(B, T, n_heads, dk)
+    scores = torch.einsum("bhd,bthd->bth", q_all, k_all).mul_(inv_scale)
+    cols = torch.arange(T, device=x.device).view(1, T, 1)
+    scores.masked_fill_(cols > qp.view(B, 1, 1), float("-inf"))
+    if null_k is not None:
+        s0 = torch.einsum("bhd,hd->bh", q_all, null_k).mul_(inv_scale)
+        scores = torch.cat([s0.unsqueeze(1), scores], dim=1)
+        tapped = torch.softmax(scores, dim=1).gather(
+            1, (kp + 1).view(B, 1, 1).expand(B, 1, n_heads))
+    else:
+        tapped = torch.softmax(scores, dim=1).gather(
+            1, kp.view(B, 1, 1).expand(B, 1, n_heads))
+    return tapped.squeeze(1).mean(-1)
 
 
 def _error_case_flags(idx, meta, pred, n_pairs):

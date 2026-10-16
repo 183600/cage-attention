@@ -111,7 +111,9 @@ class Norm(nn.Module):
         self.ln = nn.LayerNorm(dim, elementwise_affine=True)
 
     def forward(self, x):
-        return self.ln(x)
+        if torch.is_grad_enabled():
+            return self.ln(x)
+        return _layer_norm_into(self.ln, x)
 
 
 class SeeDNorm(nn.Module):
@@ -124,12 +126,16 @@ class SeeDNorm(nn.Module):
         nn.init.normal_(self.scale.weight, std=0.02)
 
     def forward(self, x):
-        s = self.scale(x)
         if torch.is_grad_enabled():
-            s = torch.sigmoid(s)
-        else:
-            s.sigmoid_()
-        return self.ln(x).mul_(s).mul_(2.0)
+            s = torch.sigmoid(self.scale(x))
+            return self.ln(x).mul_(s).mul_(2.0)
+        shape = x.shape
+        n = x.numel() // shape[-1]
+        s = _get_scratch(("seed_scale",), x.device, x.dtype, x.numel())
+        _linear_into(x.reshape(n, shape[-1]), self.scale.weight,
+                     self.scale.bias, s.view(n, shape[-1]))
+        s.sigmoid_()
+        return _layer_norm_into(self.ln, x).mul_(s.view(shape)).mul_(2.0)
 
 
 def make_norm(kind: str, dim: int) -> nn.Module:
@@ -305,6 +311,30 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
     return buf[:numel]
 
 
+def _linear_into(x: torch.Tensor, weight: torch.Tensor,
+                 bias: torch.Tensor | None, out: torch.Tensor) -> torch.Tensor:
+    """``F.linear(x, weight, bias)`` written into ``out``."""
+    if bias is None:
+        torch.mm(x, weight.t(), out=out)
+    else:
+        torch.addmm(bias, x, weight.t(), out=out)
+    return out
+
+
+def _layer_norm_into(ln: nn.LayerNorm, x: torch.Tensor) -> torch.Tensor:
+    """``ln(x)`` written into scratch buffers."""
+    shape = x.shape
+    rows = x.numel() // shape[-1]
+    out = _get_scratch(("ln_out",), x.device, x.dtype, x.numel())
+    mean = _get_scratch(("ln_mean",), x.device, x.dtype, rows)
+    rstd = _get_scratch(("ln_rstd",), x.device, x.dtype, rows)
+    torch.ops.aten.native_layer_norm.out(
+        x, [shape[-1]], ln.weight, ln.bias, ln.eps,
+        out0=out.view(shape), out1=mean.view(shape[:-1] + (1,)),
+        out2=rstd.view(shape[:-1] + (1,)))
+    return out.view(shape)
+
+
 def _query_blocks(bh: int, T: int):
     """``[(start, stop), ...]`` query blocks for a ``bh``-fold batch of ``T``."""
     key = (bh, T)
@@ -370,7 +400,11 @@ class _CalibAttn(torch.autograd.Function):
         mask = _causal_mask(T, q.device, q.dtype)
         kt = k.transpose(1, 2)
         dv = v.size(-1)
-        y = q.new_empty(bh, T, dv)
+        if any(ctx.needs_input_grad):
+            y = q.new_empty(bh, T, dv)
+        else:
+            y = _get_scratch(("calib_y",), q.device, q.dtype,
+                             bh * T * dv).view(bh, T, dv)
         rows0 = blocks[0][1] - blocks[0][0]
         max_rows = rows0
         max_i1 = T
@@ -580,7 +614,11 @@ class _NullAttn(torch.autograd.Function):
         rows0 = blocks[0][1] - blocks[0][0]
         max_rows = rows0
         max_i1 = T
-        y = q.new_empty(bh, T, dv)
+        if any(ctx.needs_input_grad):
+            y = q.new_empty(bh, T, dv)
+        else:
+            y = _get_scratch(("null_y",), q.device, q.dtype,
+                             bh * T * dv).view(bh, T, dv)
         y4 = y.view(B, h, T, dv)
         nv4 = null_v.view(1, h, 1, dv)
         sbuf = _get_scratch(("null_s",), q.device, q.dtype, bh * max_rows * max_i1)
@@ -743,6 +781,15 @@ class Attention(nn.Module):
         return qkv.view(B, T, 3, h, dk).permute(2, 0, 3, 1, 4).contiguous().view(
             3, B * h, T, dk)
 
+    def _gate_proj(self, x: torch.Tensor, B: int, T: int, C: int,
+                   grad_on: bool) -> torch.Tensor:
+        if grad_on:
+            return self.gate(x)
+        out = _get_scratch(("gate_out",), x.device, x.dtype, B * T * C)
+        _linear_into(x.reshape(B * T, C), self.gate.weight, self.gate.bias,
+                     out.view(B * T, C))
+        return out.view(B, T, C)
+
     def _row_stats(self, rows: torch.Tensor, T: int, is_null: bool):
         """Entropy / max-prob / null-mass for a ``(B, H, S)`` slice of the
         attention distribution.  ``S`` is ``T`` or ``T + 1``, and in the
@@ -815,8 +862,18 @@ class Attention(nn.Module):
         is_calib = kind == "calib"
         drop_p = self.cfg.dropout
         dropping = self.training and drop_p > 0.0
+        grad_on = torch.is_grad_enabled()
 
-        packed = self._pack(F.linear(x, self.qkv.weight), B, h, T, dk)
+        if grad_on:
+            packed = self._pack(F.linear(x, self.qkv.weight), B, h, T, dk)
+        else:
+            qkv_buf = _get_scratch(("qkv_out",), x.device, x.dtype, B * T * 3 * C)
+            _linear_into(x.reshape(B * T, C), self.qkv.weight, None,
+                         qkv_buf.view(B * T, 3 * C))
+            packed = _get_scratch(
+                ("packed",), x.device, x.dtype, 3 * bh * T * dk).view(3, bh, T, dk)
+            packed.view(3, B, h, T, dk).copy_(
+                qkv_buf.view(B, T, 3, h, dk).permute(2, 0, 3, 1, 4))
 
         ent = None
         y4 = None
@@ -875,9 +932,8 @@ class Attention(nn.Module):
                 y4 = torch.bmm(p, packed[2]).view(B, h, T, dk)
 
         gate_val = None
-        grad_on = torch.is_grad_enabled()
         if kind == "query":
-            gate_val = self.gate(x)
+            gate_val = self._gate_proj(x, B, T, C, grad_on)
             gate_val = torch.sigmoid(gate_val) if grad_on else gate_val.sigmoid_()
         elif is_calib:
             log_len = self._log_len_cache.get(T)
@@ -889,7 +945,7 @@ class Attention(nn.Module):
                 conc = (ent.mean(dim=1) / log_len * calib_cs).unsqueeze(-1)
             else:
                 conc = ent.mean(dim=1).div_(log_len).mul_(calib_cs).unsqueeze(-1)
-            gate_val = self.gate(x)
+            gate_val = self._gate_proj(x, B, T, C, grad_on)
             if grad_on:
                 gate_val = gate_val.sub(self.calib_a * log_len).sub(conc)
             else:
@@ -901,10 +957,22 @@ class Attention(nn.Module):
             ent = None
 
         if gate_val is None:
-            y = y4.transpose(1, 2).reshape(B, T, C)
+            if grad_on:
+                y = y4.transpose(1, 2).reshape(B, T, C)
+            else:
+                y = _get_scratch(("attn_y",), x.device, x.dtype,
+                                 B * T * C).view(B, T, h, dk)
+                y.copy_(y4.transpose(1, 2))
+                y = y.view(B, T, C)
         else:
-            y = torch.mul(gate_val.view(B, T, h, dk), y4.transpose(1, 2))
-            y = y.reshape(B, T, C)
+            if grad_on:
+                y = torch.mul(gate_val.view(B, T, h, dk), y4.transpose(1, 2))
+                y = y.reshape(B, T, C)
+            else:
+                y4t = _get_scratch(("attn_y",), x.device, x.dtype, B * T * C)
+                torch.mul(gate_val.view(B, T, h, dk), y4.transpose(1, 2),
+                          out=y4t.view(B, T, h, dk))
+                y = y4t.view(B, T, C)
         del y4
 
         out = self.proj(y)
@@ -953,6 +1021,16 @@ class Block(nn.Module):
         else:
             self.ls1 = self.ls2 = None
 
+    def _mlp(self, h: torch.Tensor) -> torch.Tensor:
+        if torch.is_grad_enabled():
+            return self.mlp(h)
+        c = self.cfg.d_model
+        n = h.numel() // c
+        up = _get_scratch(("mlp_up",), h.device, h.dtype, 4 * n * c)
+        _linear_into(h.reshape(n, c), self.mlp[0].weight, self.mlp[0].bias,
+                     up.view(n, 4 * c))
+        return self.mlp[2](self.mlp[1](up.view(n, 4 * c))).view_as(h)
+
     def forward(self, x, stat_pos=None):
         ls1, ls2 = self.ls1, self.ls2
         grad_on = torch.is_grad_enabled()
@@ -963,7 +1041,7 @@ class Block(nn.Module):
             else:
                 x = torch.addcmul(x, a, ls1) if grad_on else x.addcmul_(a, ls1)
             x = self.ln1(x)
-            m = self.mlp(x)
+            m = self._mlp(x)
             if ls2 is None:
                 x = torch.add(m, x) if grad_on else m.add_(x)
             else:
@@ -977,7 +1055,7 @@ class Block(nn.Module):
             else:
                 x = torch.addcmul(x, a, ls1) if grad_on else x.addcmul_(a, ls1)
             x_norm = self.ln2(x)
-            m = self.mlp(x_norm)
+            m = self._mlp(x_norm)
             if ls2 is None:
                 x = torch.add(m, x) if grad_on else m.add_(x)
             else:
