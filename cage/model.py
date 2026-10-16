@@ -52,7 +52,7 @@ _EPS = 1e-9
 _zero_scalar_cache: dict = {}
 
 def _zero_scalar(device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    """Cached zero scalar for the given device and dtype."""
+    """Zero scalar for the given device and dtype."""
     key = (device, dtype)
     z = _zero_scalar_cache.get(key)
     if z is None:
@@ -162,8 +162,7 @@ def _causal_null_mask(T: int, device: torch.device,
 
     Shape ``(T, T + 1)``: column 0 (the learnable null slot) is 0 and the
     real-key columns hold the usual strictly-upper ``-inf``.  It is added
-    to the ``(B*H, T, T+1)`` scores rather than used as a ``masked_fill``
-    boolean.
+    to the ``(B*H, T, T+1)`` scores.
     """
     key = (T, device, dtype)
     m = _causal_null_cache.get(key)
@@ -185,7 +184,7 @@ _arange_cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
 
 
 def _arange(n: int, device: torch.device) -> torch.Tensor:
-    """Read-only ``arange(n)`` shared across calls (index tensors only)."""
+    """Read-only ``arange(n)`` (index tensors only)."""
     key = (n, device)
     a = _arange_cache.get(key)
     if a is not None and _servable(a):
@@ -202,8 +201,7 @@ def _arange(n: int, device: torch.device) -> torch.Tensor:
 def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.Tensor:
     """``(B*h, 1, T)`` additive mask rows for the query positions ``pos``.
 
-    Row ``b`` is 0 up to column ``pos[b]`` and ``-inf`` beyond it.  The mask
-    depends on the *values* of ``pos``, so it is rebuilt per call.
+    Row ``b`` is 0 up to column ``pos[b]`` and ``-inf`` beyond it.
     """
     B = pos.size(0)
     cols = _arange(T, pos.device)
@@ -218,7 +216,7 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
 
 
 def _softmax_inplace(s: torch.Tensor) -> torch.Tensor:
-    """Row softmax written back into ``s`` (no autograd node)."""
+    """Row softmax written back into ``s``."""
     return torch.softmax(s, dim=-1, out=s)
 
 
@@ -353,9 +351,7 @@ class _CalibAttn(torch.autograd.Function):
         y   = p v
         ent = -(p * log p).rowsum
 
-    The probabilities are rebuilt block by block: forward scores them one
-    block at a time and backward recomputes them from ``q, k, v``.  The
-    entropy output is only produced when ``need_ent`` is set (calibrated
+    The entropy output is only produced when ``need_ent`` is set (calibrated
     gate or diagnostics); the attention output itself is identical either
     way, so the kernel stays shared by all gate variants.
     """
@@ -496,8 +492,8 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
                          grad_ent: torch.Tensor | None,
                          buf: torch.Tensor | None = None,
                          mbuf: torch.Tensor | None = None) -> torch.Tensor:
-    """Score gradient for ``p = softmax(s)`` plus the calibrated-entropy term,
-    both read off the recomputed probabilities.  Consumes ``d_p``.
+    """Score gradient for ``p = softmax(s)`` plus the calibrated-entropy term.
+    Consumes ``d_p``.
 
     ``buf`` optionally supplies a flat scratch for the ``log(p)`` term and
     ``mbuf`` one for the ``p > _EPS`` selector.
@@ -561,9 +557,7 @@ class _NullAttn(torch.autograd.Function):
     The null slot is one extra score that is *not* causally masked, so it
     competes with the real tokens at every position and "choosing" it
     suppresses the attention write.  Scoring it as ``q . null_k`` keeps the
-    score matrix rectangular in the real keys only, and - as for
-    ``_CalibAttn`` - the backward pass rebuilds the ``T + 1``-way weights one
-    query block at a time.
+    score matrix rectangular in the real keys only.
     """
 
     @staticmethod
@@ -762,8 +756,7 @@ class Attention(nn.Module):
         Only the rows at ``stat_pos`` are scored.  ``q`` is ``(B, h, T, dk)``,
         ``k`` the head-major key tensor.  ``ent_full`` optionally supplies the
         full-sequence entropy ``(B, h, T)`` already produced by the calibrated
-        kernel, so the entropy of the selected rows is sliced instead of
-        recomputed.
+        kernel.
         """
         dk = q.size(-1)
         cols = T + 1 if is_null else T
