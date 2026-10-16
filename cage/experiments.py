@@ -193,7 +193,8 @@ HYPOTHESES = {
         "prediction": "final train loss <= 0.1 and train accuracy = 1.0",
         "decision": "failure invalidates the training loop and blocks the "
                     "interpretation of every grid result (necessary, not "
-                    "sufficient: data/label bugs can survive memorisation)",
+                    "sufficient: data/label problems can survive "
+                    "memorisation)",
     },
     "H1a": {
         "experiment": "e1",
@@ -630,8 +631,8 @@ def _load_baseline_verdict(out_dir: pathlib.Path):
     missing verdict file is surfaced as a note instead of silently
     treating the baseline check as passed.  A verdict file written by an
     older version lacks the HB4/HB5 keys; those are reported as ``n/a``
-    (not ``FAILED``) so the fix is to re-run ``--only baselines``, not to
-    read the missing checks as failures.
+    (not ``FAILED``) so the right response is to re-run
+    ``--only baselines``, not to read the missing checks as failures.
     """
     path = out_dir / "baselines_verdict.json"
     if not path.exists():
@@ -862,8 +863,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
           f"(uniform={balance['expected_uniform_share']:.5f})")
     _write_json(out_dir / "baselines_balance.json", balance)
 
-    # HB5 first: the cheapest check, and a broken training loop invalidates
-    # every learned number below it (including the negative control).
+    # HB5 first: a broken training loop invalidates every learned number
+    # below it (including the negative control).
     tiny = build(_model_cfg(settings, gate="none", d_model=48, n_layers=2),
                  compile=False)
     gen = torch.Generator(device=settings.device).manual_seed(SANITY_SEED)

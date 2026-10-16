@@ -444,7 +444,8 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     the *unchanged* evaluation streams must stay at chance - a clear
     above-chance result means answer information leaks through the
     pipeline.  The staged non-finite triage is fed the un-permuted batch,
-    so the intentional label mismatch is never misread as a data bug.
+    so the intentional label mismatch is never mistaken for a data
+    problem.
 
     ``seed`` must not collide with a held-out evaluation stream
     (``cage.data.RESERVED_EVAL_SEEDS``); the first batch of the run is
@@ -601,8 +602,9 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
     no grid result above it is interpretable.
 
     This is a *necessary, not sufficient* check: passing it does not prove
-    the data pipeline, augmentation or label mapping are right (bugs there
-    survive memorisation); failing it blocks every downstream claim.
+    the data pipeline, augmentation or label mapping are right (such
+    problems survive memorisation); failing it blocks every downstream
+    claim.
 
     Trains ``model`` in place (pass a throwaway instance) and returns the
     sampled loss/accuracy curves plus the ``passed`` verdict.  Uses the
