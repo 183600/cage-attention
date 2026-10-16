@@ -423,16 +423,13 @@ class _CalibAttn(torch.autograd.Function):
         else:
             ent = q.new_empty(bh, T) if need_ent else None
             ebuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
-            yb = _get_scratch(("calib_yblk",), q.device, q.dtype, bh * max_rows * dv)
             for i0, i1 in blocks:
                 r = i1 - i0
                 p = _softmax_inplace(torch.baddbmm(
                     mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
                     beta=1.0, alpha=scale,
                     out=s[:bh * r * i1].view(bh, r, i1)))
-                yblk = yb[:bh * r * dv].view(bh, r, dv)
-                torch.bmm(p, v[:, :i1], out=yblk)
-                y[:, i0:i1].copy_(yblk)
+                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
                 if need_ent:
                     _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
         if any(ctx.needs_input_grad):
@@ -489,8 +486,6 @@ class _CalibAttn(torch.autograd.Function):
         mbuf = _get_scratch(("calib_bwd_mbuf",), q.device, torch.bool, bh * max_rows * max_i1) if grad_ent is not None else None
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
         tmpb = _get_scratch(("calib_bwd_tmp",), q.device, q.dtype, bh * T * dk)
-        dqb = _get_scratch(("calib_bwd_dqb",), q.device, q.dtype,
-                           bh * max_rows * dk)
         zero = _zero_scalar(q.device, q.dtype)
         first = True
         for i0, i1 in reversed(blocks):
@@ -519,10 +514,8 @@ class _CalibAttn(torch.autograd.Function):
                 first = False
             else:
                 d_k[:, :i1].add_(tmp)
-            dqblk = dqb[:bh * r * dk].view(bh, r, dk)
             torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
-                          out=dqblk)
-            d_q[:, i0:i1].copy_(dqblk)
+                          out=d_q[:, i0:i1])
         return d_qkv, None, None, None
 
 
@@ -603,7 +596,7 @@ class _NullAttn(torch.autograd.Function):
 
     @staticmethod
     @_no_compile
-    def forward(ctx, qkv, null_k, null_v, scale, B):
+    def forward(ctx, qkv, null_k, null_v, scale, B, need_grad: bool = True):
         q, k, v = qkv[0], qkv[1], qkv[2]
         bh, T = q.size(0), q.size(1)
         h = null_k.size(0)
@@ -614,7 +607,7 @@ class _NullAttn(torch.autograd.Function):
         rows0 = blocks[0][1] - blocks[0][0]
         max_rows = rows0
         max_i1 = T
-        if any(ctx.needs_input_grad):
+        if need_grad:
             y = q.new_empty(bh, T, dv)
         else:
             y = _get_scratch(("null_y",), q.device, q.dtype,
@@ -627,17 +620,13 @@ class _NullAttn(torch.autograd.Function):
             torch.bmm(p, v, out=y)
             y4.addcmul_(p0.view(B, h, T, 1), nv4)
         else:
-            yb = _get_scratch(("null_yblk",), q.device, q.dtype,
-                              bh * max_rows * dv)
             for i0, i1 in blocks:
                 r = i1 - i0
                 p, p0 = _null_probs(q[:, i0:i1], kt[:, :, :i1], i0, i1, mask[i0:i1, :i1], null_k, B, h,
                                     scale, sbuf)
-                yblk = yb[:bh * r * dv].view(bh, r, dv)
-                torch.bmm(p, v[:, :i1], out=yblk)
-                torch.addcmul(yblk.view(B, h, r, dv), p0.view(B, h, r, 1), nv4,
-                              out=y4[:, :, i0:i1])
-        if any(ctx.needs_input_grad):
+                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
+                y4[:, :, i0:i1].addcmul_(p0.view(B, h, r, 1), nv4)
+        if need_grad:
             ctx.save_for_backward(qkv, null_k, null_v)
         ctx.scale = scale
         ctx.shape = (B, h)
@@ -647,7 +636,7 @@ class _NullAttn(torch.autograd.Function):
     def backward(ctx, grad_y):
         saved = ctx.saved_tensors
         if not saved:
-            return None, None, None, None, None
+            return None, None, None, None, None, None
         qkv, null_k, null_v = saved
         q, k, v = qkv[0], qkv[1], qkv[2]
         scale = ctx.scale
@@ -679,8 +668,6 @@ class _NullAttn(torch.autograd.Function):
         tmp_rows = T if multi else 1
         tmpb = _get_scratch(("null_bwd_tmp",), q.device, q.dtype,
                             bh * tmp_rows * dk)
-        dqb = _get_scratch(("null_bwd_dqb",), q.device, q.dtype,
-                           bh * max_rows * dk) if multi else None
         acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         first = True
@@ -716,9 +703,7 @@ class _NullAttn(torch.autograd.Function):
                     first = False
                 else:
                     d_k[:, :i1].add_(tmp)
-                dqblk = dqb[:bh * r * dk].view(bh, r, dk)
-                torch.bmm(d_s, k[:, :i1], out=dqblk)
-                d_q[:, i0:i1].copy_(dqblk)
+                torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1])
             else:
                 torch.bmm(p.transpose(1, 2), g, out=d_qkv[2])
                 torch.bmm(d_s.transpose(1, 2), q_blk, out=d_qkv[1])
@@ -731,7 +716,7 @@ class _NullAttn(torch.autograd.Function):
             acc_v.add_(acc_blk)
         d_null_k = acc_k.view(B, h, dk).sum(0)
         d_null_v = acc_v.view(B, h, dk).sum(0)
-        return d_qkv, d_null_k, d_null_v, None, None
+        return d_qkv, d_null_k, d_null_v, None, None, None
 
 
 class Attention(nn.Module):
@@ -881,7 +866,7 @@ class Attention(nn.Module):
         if not dropping:
             if is_null:
                 y4 = _NullAttn.apply(packed, self.null_k, self.null_v,
-                                     self.inv_scale, B).view(B, h, T, dk)
+                                     self.inv_scale, B, grad_on).view(B, h, T, dk)
             else:
                 y, ent = _CalibAttn.apply(packed, self.inv_scale, _EPS,
                                           is_calib)
@@ -975,7 +960,13 @@ class Attention(nn.Module):
                 y = y4t.view(B, T, C)
         del y4
 
-        out = self.proj(y)
+        if grad_on:
+            out = self.proj(y)
+        else:
+            out = _get_scratch(("proj_out",), x.device, x.dtype,
+                               B * T * C).view(B, T, C)
+            _linear_into(y.view(B * T, C), self.proj.weight, None,
+                         out.view(B * T, C))
         if not need_stats:
             return out, None
 
@@ -996,7 +987,17 @@ class _GeluLinear(nn.Linear):
     """
 
     def forward(self, h):
-        return F.linear(F.gelu(h), self.weight, self.bias)
+        if torch.is_grad_enabled():
+            return F.linear(F.gelu(h), self.weight, self.bias)
+        shape = h.shape
+        rows = h.numel() // shape[-1]
+        g = _get_scratch(("gelu_out",), h.device, h.dtype, h.numel())
+        torch.ops.aten.gelu.out(h, approximate="none", out=g.view(shape))
+        out = _get_scratch(("mlp_down",), h.device, h.dtype,
+                           rows * self.out_features)
+        _linear_into(g.view(rows, shape[-1]), self.weight, self.bias,
+                     out.view(rows, self.out_features))
+        return out.view(*shape[:-1], self.out_features)
 
 
 class Block(nn.Module):
