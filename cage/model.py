@@ -1044,7 +1044,7 @@ class Block(nn.Module):
             x = self.ln1(x)
             m = self._mlp(x)
             if ls2 is None:
-                x = torch.add(m, x) if grad_on else m.add_(x)
+                x = m.add_(x)
             else:
                 x = torch.addcmul(x, m, ls2) if grad_on else x.addcmul_(m, ls2)
             x = self.ln2(x)
@@ -1058,7 +1058,7 @@ class Block(nn.Module):
             x_norm = self.ln2(x)
             m = self._mlp(x_norm)
             if ls2 is None:
-                x = torch.add(m, x) if grad_on else m.add_(x)
+                x = m.add_(x)
             else:
                 x = torch.addcmul(x, m, ls2) if grad_on else x.addcmul_(m, ls2)
         return x, s

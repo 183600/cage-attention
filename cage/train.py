@@ -919,10 +919,9 @@ def _attention_mass_on_key(x, weight, meta, n_heads, inv_scale, null_k):
     dk = C // n_heads
     qp = meta["query_pos"]
     kp = meta["key_pos"]
-    qk = F.linear(x, weight)
     rows = torch.arange(B, device=x.device)
-    q_all = qk[rows, qp, :C].view(B, n_heads, dk)
-    k_all = qk[:, :, C:2 * C].view(B, T, n_heads, dk)
+    q_all = F.linear(x[rows, qp], weight[:C]).view(B, n_heads, dk)
+    k_all = F.linear(x, weight[C:2 * C]).view(B, T, n_heads, dk)
     scores = torch.einsum("bhd,bthd->bth", q_all, k_all).mul_(inv_scale)
     cols = torch.arange(T, device=x.device).view(1, T, 1)
     scores.masked_fill_(cols > qp.view(B, 1, 1), float("-inf"))

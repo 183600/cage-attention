@@ -128,8 +128,10 @@ class LinearBagProbe(torch.nn.Module):
         self.linear = torch.nn.Linear(vocab, vocab)
 
     def forward(self, idx):
-        x = F.one_hot(idx, self.vocab).to(self.linear.weight.dtype)
-        return self.linear(x.sum(dim=1))
+        counts = torch.zeros(idx.size(0), self.vocab, device=idx.device,
+                             dtype=self.linear.weight.dtype)
+        counts.scatter_add_(1, idx, torch.ones_like(idx, dtype=counts.dtype))
+        return self.linear(counts)
 
 
 def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
