@@ -125,10 +125,7 @@ class SeeDNorm(nn.Module):
 
     def forward(self, x):
         s = self.scale(x)
-        if torch.is_grad_enabled():
-            s = s.sigmoid()
-        else:
-            s.sigmoid_()
+        s.sigmoid_()
         return self.ln(x).mul_(s).mul_(2.0)
 
 
@@ -851,13 +848,9 @@ class Attention(nn.Module):
                 y4 = torch.bmm(p, packed[2]).view(B, h, T, dk)
 
         gate_val = None
-        grad_on = torch.is_grad_enabled()
         if kind == "query":
             gate_val = self.gate(x)
-            if grad_on:
-                gate_val = gate_val.sigmoid()
-            else:
-                gate_val.sigmoid_()
+            gate_val.sigmoid_()
         elif is_calib:
             log_len = self._log_len_cache.get(T)
             if log_len is None:
@@ -866,10 +859,7 @@ class Attention(nn.Module):
             calib_cs = self.calib_c * self.calib_scale
             conc = ent.mean(dim=1).div_(log_len).mul_(calib_cs).unsqueeze(-1)
             gate_val = self.gate(x)
-            if grad_on:
-                gate_val = gate_val.sub(self.calib_a * log_len)
-            else:
-                gate_val.sub_(self.calib_a * log_len)
+            gate_val.sub_(self.calib_a * log_len)
             gate_val.sub_(conc)
             tau = F.softplus(self.calib_tau).add_(0.1)
             gate_val = gate_val.div_(tau).sigmoid_()
@@ -935,13 +925,13 @@ class Block(nn.Module):
         if self.post:
             a, s = self.attn(x, stat_pos)
             if ls1 is None:
-                x = a.add(x) if grad_on else a.add_(x)
+                x = a.add_(x)
             else:
                 x = torch.addcmul(x, a, ls1) if grad_on else x.addcmul_(a, ls1)
             x = self.ln1(x)
             m = self.mlp(x)
             if ls2 is None:
-                x = m.add(x) if grad_on else m.add_(x)
+                x = m.add_(x)
             else:
                 x = torch.addcmul(x, m, ls2) if grad_on else x.addcmul_(m, ls2)
             x = self.ln2(x)
@@ -949,13 +939,13 @@ class Block(nn.Module):
             x_norm = self.ln1(x)
             a, s = self.attn(x_norm, stat_pos)
             if ls1 is None:
-                x = a.add(x) if grad_on else a.add_(x)
+                x = a.add_(x)
             else:
                 x = torch.addcmul(x, a, ls1) if grad_on else x.addcmul_(a, ls1)
             x_norm = self.ln2(x)
             m = self.mlp(x_norm)
             if ls2 is None:
-                x = m.add(x) if grad_on else m.add_(x)
+                x = m.add_(x)
             else:
                 x = torch.addcmul(x, m, ls2) if grad_on else x.addcmul_(m, ls2)
         return x, s
