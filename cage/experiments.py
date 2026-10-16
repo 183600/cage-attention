@@ -64,13 +64,16 @@ from .data import (
 from .metrics import paired_bootstrap_ci
 from .model import GATES, NORMS, build
 from .train import (
+    collect_error_cases,
     collect_stats,
     error_detection_aucs,
     eval_metrics,
     false_concentration_analysis,
     gate_depth_ratio,
     gate_stat_correlations,
+    measure_inference_cost,
     train_model,
+    training_curve_verdict,
 )
 
 # Seeds with fixed roles (independent of every training seed) are defined in
@@ -212,6 +215,11 @@ class Settings:
     probe_batch: int = 64
     lr: float | None = None
     lr_grid: tuple = (1e-3, 3e-4, 1e-4)
+    curve_points: int = 10      # validation checks per run (0 disables)
+    val_batches: int = 2        # validation batches per check (fixed stream)
+    cost_warmup: int = 2
+    cost_runs: int = 7
+    max_error_cases: int = 64   # per gate x seed, dumped to disk
     out_dir: pathlib.Path = field(default_factory=lambda: pathlib.Path("results"))
 
     @classmethod
@@ -272,6 +280,29 @@ def _print_contrast(rule, hyp, metric, ci):
     print(f"  [{hyp}] {rule} ({metric}): {_fmt_ci(ci)}")
 
 
+def _format_case(case) -> str:
+    """One-line, human-readable bad case for the console."""
+    ctx = case["context"]
+    n_pairs = max(0, (len(ctx) - 2) // 2)
+    pairs = " ".join(f"{ctx[2 * i]}:{ctx[2 * i + 1]}" for i in range(n_pairs))
+    flags = []
+    if case["confidence"] >= 0.9:
+        flags.append("high_conf")
+    if case["confidence"] < 0.5:
+        flags.append("low_conf")
+    if case["pred_in_context"]:
+        flags.append("pred_in_context")
+    if case["naive_confusable"]:
+        flags.append("naive_confusable")
+    if case["value_repeats"]:
+        flags.append("value_repeats")
+    return (f"pair#{case['key_pair_idx']} key={case['query_key']} "
+            f"ans={case['answer']} pred={case['pred']} "
+            f"conf={case['confidence']:.2f} "
+            f"mass_key={case['attn_mass_on_key']:.2f} "
+            f"flags=[{','.join(flags) or 'plain'}] pairs=[{pairs}]")
+
+
 def _announce(hyp_ids):
     for hid in hyp_ids:
         h = HYPOTHESES[hid]
@@ -312,6 +343,34 @@ def _model_cfg(settings: Settings, **overrides) -> dict:
     return cfg
 
 
+def _curve_record(hist):
+    """Per-run learning-curve summary (monitor the curve, not just the end)."""
+    verdict = training_curve_verdict(hist)
+    train = [h for h in hist if _finite(h.get("train_loss"))]
+    val = [h for h in hist if h.get("val_loss") is not None
+           and _finite(h.get("val_loss"))]
+    return {
+        "train_loss_first": train[0]["train_loss"] if train else float("nan"),
+        "train_loss_last": train[-1]["train_loss"] if train else float("nan"),
+        "val_loss_first": val[0]["val_loss"] if val else float("nan"),
+        "val_loss_last": val[-1]["val_loss"] if val else float("nan"),
+        "train_delta": verdict["train_delta"],
+        "val_delta": verdict["val_delta"],
+        "generalization_gap": verdict["generalization_gap"],
+        "best_val_loss": verdict["best_val_loss"],
+        "best_val_step": verdict["best_val_step"],
+        "curve_verdict": verdict["verdict"],
+        "curve_recommendation": verdict["recommendation"],
+    }
+
+
+def _cost_record(settings: Settings, model):
+    return measure_inference_cost(
+        model, settings.n_pairs, settings.vocab, settings.device,
+        batch=min(settings.eval_batch, 128), warmup=settings.cost_warmup,
+        runs=settings.cost_runs)
+
+
 def _train_and_eval(settings: Settings, seed: int, lr: float,
                     eval_seed: int = TEST_SEED, **model_overrides):
     if eval_seed in tuple(settings.seeds):
@@ -323,13 +382,16 @@ def _train_and_eval(settings: Settings, seed: int, lr: float,
     torch.manual_seed(seed)
     model = build(_model_cfg(settings, **model_overrides), compile=False)
     params = sum(p.numel() for p in model.parameters())
-    train_model(model, steps=settings.steps, batch=settings.batch,
-                n_pairs=settings.n_pairs, lr=lr, vocab=settings.vocab,
-                device=settings.device, log_every=0, seed=seed)
+    eval_every = (max(1, settings.steps // settings.curve_points)
+                  if settings.curve_points > 0 else 0)
+    hist = train_model(model, steps=settings.steps, batch=settings.batch,
+                       n_pairs=settings.n_pairs, lr=lr, vocab=settings.vocab,
+                       device=settings.device, log_every=0, seed=seed,
+                       eval_every=eval_every, val_batches=settings.val_batches)
     metrics = eval_metrics(model, settings.n_pairs, settings.vocab,
                            settings.device, batch=settings.eval_batch,
                            batches=settings.eval_batches, seed=eval_seed)
-    return model, params, metrics
+    return model, params, metrics, _curve_record(hist)
 
 
 def tune_shared_recipe(settings: Settings):
@@ -345,8 +407,8 @@ def tune_shared_recipe(settings: Settings):
     for lr in settings.lr_grid:
         accs = []
         for seed in tune_seeds:
-            _, _, metrics = _train_and_eval(settings, seed, lr,
-                                            eval_seed=VAL_SEED, gate="none")
+            _, _, metrics, _ = _train_and_eval(settings, seed, lr,
+                                               eval_seed=VAL_SEED, gate="none")
             accs.append(metrics["accuracy"])
         mean = sum(accs) / len(accs)
         var = (sum((a - mean) ** 2 for a in accs) / len(accs)) if accs else 0.0
@@ -500,10 +562,11 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     lr = _resolve_lr(settings, out_dir, "e1")
     sha = _git_sha()
     runs = []
+    examples = {}
     for gate in GATES:
         for seed in settings.seeds:
-            model, params, metrics = _train_and_eval(settings, seed, lr,
-                                                     gate=gate)
+            model, params, metrics, curve = _train_and_eval(settings, seed, lr,
+                                                            gate=gate)
             stats = collect_stats(model, settings.n_pairs, settings.vocab,
                                   settings.device, batch=settings.stats_batch,
                                   batches=settings.stats_batches,
@@ -511,10 +574,24 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             corr = gate_stat_correlations(stats)
             fc = false_concentration_analysis(stats)
             ed = error_detection_aucs(stats)
+            errors = collect_error_cases(
+                model, settings.n_pairs, settings.vocab, settings.device,
+                batch=settings.stats_batch, batches=settings.stats_batches,
+                seed=STATS_SEED, max_cases=settings.max_error_cases)
+            if gate not in examples or \
+                    errors["summary"]["n_errors"] > examples[gate][0]:
+                examples[gate] = (errors["summary"]["n_errors"],
+                                  errors["cases"][:3])
+            for case in errors["cases"]:
+                _write_result(out_dir / "e1_error_cases.jsonl",
+                              {"experiment": "e1", "gate": gate, "seed": seed,
+                               "lr": lr, **case})
             rec = {
                 "experiment": "e1", "hypotheses": ["H1a", "H1b", "H1c"],
                 "git_sha": sha, "gate": gate, "seed": seed, "lr": lr,
                 "params": params, **metrics, **corr, **fc, **ed,
+                **{f"err_{k}": v for k, v in errors["summary"].items()},
+                **_cost_record(settings, model), **curve,
             }
             if _finite(rec.get("gate_vs_entropy")):
                 rec["abs_gate_vs_entropy"] = abs(rec["gate_vs_entropy"])
@@ -558,6 +635,83 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                     if _finite(r.get("null_mass_error_margin"))]
     _print_contrast("null margin vs 0", "H1c", "null_mass_error_margin",
                     paired_bootstrap_ci(null_margins))
+
+    print(f"\n[e1] training curves (val monitored on fixed stream seed "
+          f"{VAL_SEED}; verdict -> recommendation):")
+    for gate in GATES:
+        verdicts = {}
+        for r in by_gate[gate]:
+            verdicts[r["curve_verdict"]] = verdicts.get(r["curve_verdict"], 0) + 1
+        gap = _mean_std([r["generalization_gap"] for r in by_gate[gate]])
+        first = by_gate[gate][0]
+        print(f"{gate:>6} train {first['train_loss_first']:.3f}->"
+              f"{first['train_loss_last']:.3f}  val "
+              f"{first['val_loss_first']:.3f}->{first['val_loss_last']:.3f}  "
+              f"gap={gap['mean']:.4f}  verdicts={verdicts}")
+        for label, count in verdicts.items():
+            rec = next(r["curve_recommendation"] for r in by_gate[gate]
+                       if r["curve_verdict"] == label)
+            print(f"       [{label} x{count}] {rec}")
+
+    print(f"\n[e1] inference cost (batch="
+          f"{min(settings.eval_batch, 128)}, seq_len={by_gate['none'][0]['seq_len']};"
+          f" latency = median of {settings.cost_runs} runs; cpu memory is a"
+          f" profiler alloc-sum proxy, not peak RSS):")
+    print(f"{'gate':>6} {'params':>10} {'flops/M':>9} {'ms/sample':>10} "
+          f"{'mem/MB':>9}")
+    for gate in GATES:
+        t = table[gate]
+
+        def cell(key, fmt="{:.3f}"):
+            m = t.get(key)
+            if not m or not math.isfinite(m["mean"]):
+                return "n/a"
+            return fmt.format(m["mean"])
+
+        flops = t.get("flops_per_forward", {}).get("mean", float("nan")) / 1e6
+        flops_s = f"{flops:.2f}" if math.isfinite(flops) else "n/a"
+        print(f"{gate:>6} {cell('params_total', '{:.0f}'):>10} "
+              f"{flops_s:>9} "
+              f"{cell('latency_ms_per_sample'):>10} "
+              f"{cell('peak_mem_mb', '{:.2f}'):>9}")
+
+    def _ratio(a, b, key):
+        ma = table[a].get(key, {}).get("mean")
+        mb = table[b].get(key, {}).get("mean")
+        if not ma or not mb or not math.isfinite(ma) or not math.isfinite(mb) \
+                or mb == 0:
+            return float("nan")
+        return ma / mb
+
+    acc_ci = _paired_diff(by_gate["calib"], by_gate["none"], "accuracy")
+    print(f"[e1] marginal cost calib vs none (accuracy delta vs relative "
+          f"cost): {_fmt_ci(acc_ci)} | params x{_ratio('calib', 'none', 'params_total'):.3f}"
+          f"  flops x{_ratio('calib', 'none', 'flops_per_forward'):.3f}"
+          f"  latency x{_ratio('calib', 'none', 'latency_ms_per_sample'):.3f}"
+          f"  mem x{_ratio('calib', 'none', 'peak_mem_mb'):.3f}")
+
+    print(f"\n[e1] bad cases (stats seed {STATS_SEED}; train batch: "
+          f"{settings.stats_batch}x{settings.stats_batches}; raw cases in"
+          f" e1_error_cases.jsonl):")
+    print(f"{'gate':>6} {'err_rate':>9} {'high_conf':>10} {'key_miss':>9} "
+          f"{'in_ctx':>7} {'naive':>6} {'mass_key_err':>13} {'mass_key_ok':>12}")
+    for gate in GATES:
+        t = table[gate]
+        def ecell(key, fmt="{:.3f}"):
+            m = t.get(key)
+            if not m or not math.isfinite(m["mean"]):
+                return "n/a"
+            return fmt.format(m["mean"])
+        print(f"{gate:>6} {ecell('err_error_rate'):>9} "
+              f"{ecell('err_share_high_conf'):>10} "
+              f"{ecell('err_errors_key_missed_share'):>9} "
+              f"{ecell('err_share_pred_in_context'):>7} "
+              f"{ecell('err_share_naive_confusable'):>6} "
+              f"{ecell('err_attn_mass_on_key_error'):>13} "
+              f"{ecell('err_attn_mass_on_key_correct'):>12}")
+    for gate in GATES:
+        for case in examples.get(gate, (0, []))[1]:
+            print(f"  [{gate}] {_format_case(case)}")
     _write_json(out_dir / "e1_summary.json", table)
 
 
@@ -583,12 +737,14 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     runs = []
     for gate in GATES:
         for seed in settings.seeds:
-            model, params, _ = _train_and_eval(settings, seed, lr, gate=gate)
+            model, params, _, curve = _train_and_eval(settings, seed, lr,
+                                                      gate=gate)
             rec = {"experiment": "e2", "hypotheses": ["H2a", "H2b"],
                    "git_sha": sha, "gate": gate, "seed": seed, "lr": lr,
                    "params": params, "accuracy_by_length": {},
                    "entropy_by_length": {}, "maxprob_by_length": {},
-                   "gate_by_length": {}}
+                   "gate_by_length": {},
+                   **_cost_record(settings, model), **curve}
             for length in lengths:
                 metrics = eval_metrics(model, length, settings.vocab,
                                        settings.device, batch=settings.eval_batch,
@@ -629,6 +785,28 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         print(f"{gate:>6}" + "".join(f"{c:>12}" for c in cells)
               + f"{drop['mean']:>10.3f} {drift['mean']:>14.3f}")
 
+    print(f"\n[e2] inference cost at the training length (same protocol as "
+          f"e1; check whether the length benefit costs latency):")
+    print(f"{'gate':>6} {'params':>10} {'flops/M':>9} {'ms/sample':>10} "
+          f"{'mem/MB':>9} {'curve':>10}")
+    for gate in GATES:
+        t = _aggregate_runs(by_gate[gate])
+
+        def cell(key, fmt="{:.3f}"):
+            m = t.get(key)
+            if not m or not math.isfinite(m["mean"]):
+                return "n/a"
+            return fmt.format(m["mean"])
+
+        flops = t.get("flops_per_forward", {}).get("mean", float("nan")) / 1e6
+        flops_s = f"{flops:.2f}" if math.isfinite(flops) else "n/a"
+        verdicts = sorted({r["curve_verdict"] for r in by_gate[gate]})
+        print(f"{gate:>6} {cell('params_total', '{:.0f}'):>10} "
+              f"{flops_s:>9} "
+              f"{cell('latency_ms_per_sample'):>10} "
+              f"{cell('peak_mem_mb', '{:.2f}'):>9} "
+              f"{'/'.join(verdicts):>10}")
+
     print("\n[e2] pre-registered contrasts:")
     _print_contrast("calib - none", "H2a", "accuracy_at_longest",
                     _paired_diff(by_gate["calib"], by_gate["none"],
@@ -663,7 +841,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
         for norm in NORMS:
             for layer_scale in (None, 1e-2):
                 for seed in settings.seeds:
-                    model, params, metrics = _train_and_eval(
+                    model, params, metrics, curve = _train_and_eval(
                         settings, seed, lr, gate=gate, norm=norm,
                         layer_scale=layer_scale)
                     stats = collect_stats(model, settings.n_pairs,
@@ -682,12 +860,14 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                         "resid_norm_by_layer": resid.tolist(),
                         "resid_norm_last_over_first": float(
                             resid[-1] / resid[0].clamp_min(1e-12)),
+                        **_cost_record(settings, model), **curve,
                     }
                     _write_result(out_dir / "e3_runs.jsonl", rec)
                     runs.append(rec)
 
     print(f"\n[e3] {'gate':>5} {'norm':>9} {'ls':>5} {'accuracy':>16} "
-          f"{'gate_depth_ratio':>18} {'resid_growth':>14}")
+          f"{'gate_depth_ratio':>18} {'resid_growth':>14} "
+          f"{'params':>9} {'ms/sample':>10} {'mem/MB':>8}")
     index = {}
     for gate in ("query", "calib"):
         for norm in NORMS:
@@ -699,11 +879,33 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                 acc = _mean_std([r["accuracy"] for r in rs])
                 ratio = _mean_std([r["gate_depth_ratio"] for r in rs])
                 growth = _mean_std([r["resid_norm_last_over_first"] for r in rs])
+                params = _mean_std([r["params_total"] for r in rs])
+                lat = _mean_std([r["latency_ms_per_sample"] for r in rs])
+                mem = _mean_std([r["peak_mem_mb"] for r in rs])
                 ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
                 print(f"{gate:>5} {norm:>9} {ls_label:>5} "
                       f"{acc['mean']:>8.4f}±{acc['std']:<7.4f} "
                       f"{ratio['mean']:>9.4f}±{ratio['std']:<8.4f} "
-                      f"{growth['mean']:>7.3f}±{growth['std']:<6.3f}")
+                      f"{growth['mean']:>7.3f}±{growth['std']:<6.3f} "
+                      f"{params['mean']:>9.0f} {lat['mean']:>10.3f} "
+                      f"{mem['mean']:>8.2f}")
+
+    print("\n[e3] seednorm vs pre cost (accuracy delta vs relative cost):")
+    for gate in ("query", "calib"):
+        acc_ci = _paired_diff(index[(gate, "seednorm", None)],
+                              index[(gate, "pre", None)], "accuracy")
+        a = _aggregate_runs(index[(gate, "seednorm", None)])
+        b = _aggregate_runs(index[(gate, "pre", None)])
+        ratios = []
+        for key, label in (("params_total", "params"),
+                           ("flops_per_forward", "flops"),
+                           ("latency_ms_per_sample", "latency")):
+            ma = a.get(key, {}).get("mean")
+            mb = b.get(key, {}).get("mean")
+            r = (ma / mb) if ma and mb else float("nan")
+            ratios.append(f"{label} x{r:.3f}" if math.isfinite(r)
+                          else f"{label} n/a")
+        print(f"  [{gate}] {_fmt_ci(acc_ci)} | {'  '.join(ratios)}")
 
     print("\n[e3] pre-registered contrasts:")
     for gate in ("query", "calib"):
