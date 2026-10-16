@@ -774,7 +774,7 @@ def _error_case_flags(idx, meta, pred, n_pairs):
     visible = pos < meta["query_pos"].unsqueeze(1)
     query = idx.gather(1, meta["query_pos"].unsqueeze(1)).squeeze(1)
     answer = meta["answer"]
-    vals = idx[:, 1::2]
+    vals = idx[:, 1:2 * n_pairs:2]
     match = (idx == query.unsqueeze(1)) & visible
     last = torch.where(match, pos, torch.full_like(pos, -1)).max(dim=1).values
     return {
