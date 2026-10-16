@@ -1153,7 +1153,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 rec["accuracy_by_length"][length] = metrics["accuracy"]
                 rec["entropy_by_length"][length] = float(stats["entropy"].mean())
                 rec["entropy_norm_by_length"][length] = (
-                    rec["entropy_by_length"][length] / math.log(max(length, 2)))
+                    rec["entropy_by_length"][length]
+                    / math.log(max(2 * length + 2, 2)))
                 rec["maxprob_by_length"][length] = float(stats["maxprob"].mean())
                 if stats.get("gate") is not None:
                     rec["gate_by_length"][length] = float(stats["gate"].mean())
