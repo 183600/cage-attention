@@ -125,7 +125,10 @@ class SeeDNorm(nn.Module):
 
     def forward(self, x):
         s = self.scale(x)
-        s.sigmoid_()
+        if torch.is_grad_enabled():
+            s = torch.sigmoid(s)
+        else:
+            s.sigmoid_()
         return self.ln(x).mul_(s).mul_(2.0)
 
 
@@ -872,21 +875,28 @@ class Attention(nn.Module):
                 y4 = torch.bmm(p, packed[2]).view(B, h, T, dk)
 
         gate_val = None
+        grad_on = torch.is_grad_enabled()
         if kind == "query":
             gate_val = self.gate(x)
-            gate_val.sigmoid_()
+            gate_val = torch.sigmoid(gate_val) if grad_on else gate_val.sigmoid_()
         elif is_calib:
             log_len = self._log_len_cache.get(T)
             if log_len is None:
                 log_len = math.log(max(T, 2))
                 self._log_len_cache[T] = log_len
             calib_cs = self.calib_c * self.calib_scale
-            conc = ent.mean(dim=1).div_(log_len).mul_(calib_cs).unsqueeze(-1)
+            if grad_on:
+                conc = (ent.mean(dim=1) / log_len * calib_cs).unsqueeze(-1)
+            else:
+                conc = ent.mean(dim=1).div_(log_len).mul_(calib_cs).unsqueeze(-1)
             gate_val = self.gate(x)
-            gate_val.sub_(self.calib_a * log_len)
-            gate_val.sub_(conc)
-            tau = F.softplus(self.calib_tau).add_(0.1)
-            gate_val = gate_val.div_(tau).sigmoid_()
+            if grad_on:
+                gate_val = gate_val.sub(self.calib_a * log_len).sub(conc)
+            else:
+                gate_val.sub_(self.calib_a * log_len).sub_(conc)
+            tau = F.softplus(self.calib_tau) + 0.1
+            gate_val = (torch.sigmoid(gate_val / tau) if grad_on
+                        else gate_val.div_(tau).sigmoid_())
             del ent
             ent = None
 
@@ -955,7 +965,7 @@ class Block(nn.Module):
             x = self.ln1(x)
             m = self.mlp(x)
             if ls2 is None:
-                x = m.add_(x)
+                x = torch.add(m, x) if grad_on else m.add_(x)
             else:
                 x = torch.addcmul(x, m, ls2) if grad_on else x.addcmul_(m, ls2)
             x = self.ln2(x)
@@ -969,7 +979,7 @@ class Block(nn.Module):
             x_norm = self.ln2(x)
             m = self.mlp(x_norm)
             if ls2 is None:
-                x = m.add_(x)
+                x = torch.add(m, x) if grad_on else m.add_(x)
             else:
                 x = torch.addcmul(x, m, ls2) if grad_on else x.addcmul_(m, ls2)
         return x, s
