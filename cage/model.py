@@ -548,17 +548,17 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     ``mbuf`` one for the ``p <= _EPS`` drop selector.
 
     The surviving term is ``log(p) + 1`` on ``p > _EPS`` and ``0`` elsewhere;
-    the sub-eps entries are dropped by the trailing select, so clamping ``p``
-    to ``_EPS`` in front of the ``log`` cannot change the result.
+    the sub-eps entries are dropped by the trailing select, so no clamp in
+    front of the ``log`` is needed (the ``-inf`` at ``p == 0`` is overwritten
+    before anything multiplies it).
     """
     if grad_ent is not None:
         if buf is None:
-            logterm = p.clamp_min(_EPS).log_()
+            logterm = torch.log(p)
             mask = p <= _EPS
         else:
             logterm = buf[:p.numel()].view_as(p)
-            torch.clamp_min(p, _EPS, out=logterm)
-            logterm.log_()
+            torch.log(p, out=logterm)
             if mbuf is None:
                 mask = p <= _EPS
             else:
@@ -1149,7 +1149,16 @@ class CAGE(nn.Module):
                 sup = (flat_t != -1).nonzero(as_tuple=True)[0]
                 if sup.numel() == flat_t.numel():
                     sup = None
-        x = self.tok(idx)
+        if torch.is_grad_enabled():
+            x = self.tok(idx)
+        else:
+            n = idx.numel()
+            base = _get_scratch(("embed_out",), idx.device,
+                                self.tok.weight.dtype, n * self.cfg.d_model)
+            x = base[:n * self.cfg.d_model].view(idx.size(0), T,
+                                                 self.cfg.d_model)
+            torch.index_select(self.tok.weight, 0, idx.reshape(-1),
+                               out=x.view(n, self.cfg.d_model))
         x.add_(self.pos.weight[:T])
         x = self.drop(x)
         layer_stats = [] if stat_pos is not None else None
