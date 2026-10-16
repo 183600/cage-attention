@@ -519,7 +519,11 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
         logterm.masked_fill_(mask.logical_not_(), 0.0)
         d_p.addcmul_(logterm, grad_ent.unsqueeze(-1), value=-1.0)
     d_p.mul_(p)
-    return d_p.addcmul_(p, d_p.sum(dim=-1, keepdim=True), value=-1.0)
+    n0, n1 = d_p.size(0), d_p.size(1)
+    rowsum = _get_scratch(("calib_rowsum",), d_p.device, d_p.dtype, n0 * n1)[
+        :n0 * n1].view(n0, n1, 1)
+    torch.sum(d_p, dim=-1, keepdim=True, out=rowsum)
+    return d_p.addcmul_(p, rowsum, value=-1.0)
 
 
 def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
@@ -786,7 +790,6 @@ class Attention(nn.Module):
         dropping = self.training and drop_p > 0.0
 
         packed = self._pack(F.linear(x, self.qkv.weight), B, h, T, dk)
-        qb, kb, vb = packed[0], packed[1], packed[2]
 
         ent = None
         y4 = None
@@ -802,11 +805,11 @@ class Attention(nn.Module):
                 ent = None if ent is None else ent.view(B, h, T)
             if need_stats:
                 stats = self._row_stats_at(
-                    qb.view(B, h, T, dk), kb, B, h, T, stat_pos, is_null,
-                    ent_full=ent)
+                    packed[0].view(B, h, T, dk), packed[1], B, h, T,
+                    stat_pos, is_null, ent_full=ent)
         else:
-            q_ = qb.view(B, h, T, dk)
-            k_ = kb.view(B, h, T, dk)
+            q_ = packed[0].view(B, h, T, dk)
+            k_ = packed[1].view(B, h, T, dk)
             if is_null:
                 nk = self.null_k.view(1, h, 1, dk).expand(B, h, 1, dk)
                 kv_k = torch.cat([nk, k_], dim=2)
@@ -821,12 +824,12 @@ class Attention(nn.Module):
                 if dropping:
                     p = self.attn_dropout(p)
                 pb = p.view(bh, T, T + 1)
-                yb = torch.bmm(pb[..., 1:], vb).view(B, h, T, dk)
+                yb = torch.bmm(pb[..., 1:], packed[2]).view(B, h, T, dk)
                 y4 = yb.addcmul_(p.view(B, h, T, T + 1)[..., :1],
                                  self.null_v.view(1, h, 1, dk))
             else:
                 mask = _causal_mask(T, x.device, x.dtype)
-                att = torch.baddbmm(mask, qb, kb.transpose(1, 2),
+                att = torch.baddbmm(mask, packed[0], packed[1].transpose(1, 2),
                                     beta=1.0, alpha=self.inv_scale)
                 p = _SoftmaxInPlace.apply(att)
                 if is_calib:
@@ -841,7 +844,7 @@ class Attention(nn.Module):
                         _pick_rows(p.view(B, h, T, -1), stat_pos), T, False)
                 if dropping:
                     p = self.attn_dropout(p)
-                y4 = torch.bmm(p, vb).view(B, h, T, dk)
+                y4 = torch.bmm(p, packed[2]).view(B, h, T, dk)
 
         gate_val = None
         grad_on = torch.is_grad_enabled()
