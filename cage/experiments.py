@@ -17,7 +17,12 @@ Design principles
    selection.  Every key claim is reported as mean +- std over
    independent training seeds together with a paired bootstrap 95% CI
    of the difference (``cage/metrics.py``); a claim is only read as
-   supported when that CI excludes 0.
+   supported when that CI excludes 0.  The training curve is monitored
+   too: every contrast is annotated when either side contains
+   curve-invalid runs (plateau / diverging / numerical instability),
+   since an underfit run produces "no difference" for reasons unrelated
+   to the hypothesis, and a recipe selected between such curves is
+   flagged when it is frozen.
 4. **Split hygiene.**  Train/val/test streams are disjoint by
    construction (``cage.data``): the split is assigned before samples are
    drawn, reserved evaluation seeds are refused for training, and HB3
@@ -276,8 +281,54 @@ def _fmt_ci(ci) -> str:
             f"n={ci['n']} {'CI excludes 0' if supported else 'CI includes 0'}")
 
 
-def _print_contrast(rule, hyp, metric, ci):
-    print(f"  [{hyp}] {rule} ({metric}): {_fmt_ci(ci)}")
+CURVE_INVALID_VERDICTS = (
+    "plateau", "diverging", "numerical_instability", "insufficient_points")
+
+
+def _curve_health(runs):
+    """Verdict counts and the number of curve-invalid runs in ``runs``.
+
+    A curve-invalid run never learned (``plateau``), diverged, or hit
+    non-finite values: the accuracies and mechanism statistics measured on
+    it cannot support *any* claim about the variant - an underfit run
+    produces "no difference" for reasons unrelated to the hypothesis (and
+    a test set cannot measure the value of a mechanism the optimiser never
+    engaged).  ``overfitting`` stays claim-valid under the fixed-step
+    contract but is surfaced through ``late_overfit`` /
+    ``val_regression_after_best`` instead.
+    """
+    counts = {}
+    for r in runs:
+        verdict = r.get("curve_verdict")
+        counts[verdict] = counts.get(verdict, 0) + 1
+    bad = sum(counts.get(v, 0) for v in CURVE_INVALID_VERDICTS)
+    return counts, bad
+
+
+def _curve_warn(*labeled_runs) -> str:
+    """Contrast annotation: which side has curve-invalid runs, and how many.
+
+    Contrasts are printed regardless (they are the pre-registered readout),
+    but a supported CI that rests on curves which never learned is not
+    evidence about the mechanism, so the pair is flagged at the point of
+    interpretation.
+    """
+    parts = []
+    for label, runs in labeled_runs:
+        counts, bad = _curve_health(runs)
+        if not bad:
+            continue
+        detail = ",".join(f"{v}*{counts[v]}" for v in CURVE_INVALID_VERDICTS
+                          if counts.get(v))
+        parts.append(f"{label}: {bad}/{len(runs)} curve-invalid ({detail})")
+    return "WARN " + "; ".join(parts) if parts else ""
+
+
+def _print_contrast(rule, hyp, metric, ci, warn=""):
+    line = f"  [{hyp}] {rule} ({metric}): {_fmt_ci(ci)}"
+    if warn:
+        line += f"  [{warn}]"
+    print(line)
 
 
 def _format_case(case) -> str:
@@ -300,6 +351,7 @@ def _format_case(case) -> str:
             f"ans={case['answer']} pred={case['pred']} "
             f"conf={case['confidence']:.2f} "
             f"mass_key={case['attn_mass_on_key']:.2f} "
+            f"type={case['error_type']} "
             f"flags=[{','.join(flags) or 'plain'}] pairs=[{pairs}]")
 
 
@@ -365,6 +417,7 @@ def _curve_record(hist):
         "best_val_loss": verdict["best_val_loss"],
         "best_val_step": verdict["best_val_step"],
         "val_regression_after_best": verdict["val_regression_after_best"],
+        "late_overfit": verdict["late_overfit"],
         "grad_norm_max": verdict["grad_norm_max"],
         "grad_norm_explode_count": verdict["grad_norm_explode_count"],
         "curve_steps": [int(h["step"]) for h in train],
@@ -415,19 +468,27 @@ def tune_shared_recipe(settings: Settings):
     the winning rate is then frozen for *every* variant, so a gate variant
     can never win via a luckier optimizer setting - the E1/E3 comparisons
     remain controlled.
+
+    The learning-curve verdict of every tuning run is stored with the
+    table: if the selected rate's runs are all curve-invalid (plateau /
+    diverging / instability) the selection was made between underfit or
+    broken runs, and the frozen recipe cannot be trusted to expose the
+    mechanism under test - ``_resolve_lr`` prints that warning.
     """
     tune_seeds = settings.seeds[:max(1, min(2, len(settings.seeds)))]
     table = []
     for lr in settings.lr_grid:
-        accs = []
+        accs, verdicts = [], []
         for seed in tune_seeds:
-            _, _, metrics, _ = _train_and_eval(settings, seed, lr,
-                                               eval_seed=VAL_SEED, gate="none")
+            _, _, metrics, curve = _train_and_eval(
+                settings, seed, lr, eval_seed=VAL_SEED, gate="none")
             accs.append(metrics["accuracy"])
+            verdicts.append(curve["curve_verdict"])
         mean = sum(accs) / len(accs)
         var = (sum((a - mean) ** 2 for a in accs) / len(accs)) if accs else 0.0
         table.append({"lr": lr, "val_accuracy_mean": mean,
-                      "val_accuracy_std": var ** 0.5, "n_seeds": len(accs)})
+                      "val_accuracy_std": var ** 0.5, "n_seeds": len(accs),
+                      "curve_verdicts": verdicts})
     best = max(table, key=lambda row: row["val_accuracy_mean"])
     return best["lr"], table
 
@@ -445,9 +506,21 @@ def _resolve_lr(settings: Settings, out_dir: pathlib.Path, tag: str):
         print(f"[{tag}] shared recipe tuned on gate=none (val seed {VAL_SEED}): "
               f"lr={cached[0]:g}")
         for row in cached[1]:
+            verdicts = {}
+            for v in row.get("curve_verdicts", ()):
+                verdicts[v] = verdicts.get(v, 0) + 1
             print(f"    lr={row['lr']:<8g} "
                   f"val_acc={row['val_accuracy_mean']:.4f} "
-                  f"+- {row['val_accuracy_std']:.4f}")
+                  f"+- {row['val_accuracy_std']:.4f}  curves={verdicts}")
+        chosen = next(r for r in cached[1] if r["lr"] == cached[0])
+        invalid = [v for v in chosen.get("curve_verdicts", ())
+                   if v in CURVE_INVALID_VERDICTS]
+        if invalid:
+            print(f"[{tag}] WARNING: the selected lr={cached[0]:g} has "
+                  f"{len(invalid)}/{len(chosen['curve_verdicts'])} "
+                  f"curve-invalid tuning run(s) ({sorted(set(invalid))}): the "
+                  f"selection is between underfit/broken curves, so the frozen "
+                  f"recipe may make every variant look equally flat")
     else:
         print(f"[{tag}] reusing shared tuned recipe lr={cached[0]:g}")
     lr, table = cached
@@ -639,25 +712,34 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
 
     print("\n[e1] pre-registered contrasts (calib vs query/none):")
     _print_contrast("calib - none", "H1a", "accuracy",
-                    _paired_diff(by_gate["calib"], by_gate["none"], "accuracy"))
+                    _paired_diff(by_gate["calib"], by_gate["none"], "accuracy"),
+                    warn=_curve_warn(("calib", by_gate["calib"]),
+                                     ("none", by_gate["none"])))
     _print_contrast("calib - query", "H1a", "abs_gate_vs_entropy",
                     _paired_diff(by_gate["calib"], by_gate["query"],
-                                 "abs_gate_vs_entropy"))
+                                 "abs_gate_vs_entropy"),
+                    warn=_curve_warn(("calib", by_gate["calib"]),
+                                     ("query", by_gate["query"])))
     _print_contrast("calib - query", "H1b", "gate_margin",
                     _paired_diff(by_gate["calib"], by_gate["query"],
-                                 "gate_margin"))
+                                 "gate_margin"),
+                    warn=_curve_warn(("calib", by_gate["calib"]),
+                                     ("query", by_gate["query"])))
     null_margins = [r["null_mass_error_margin"] for r in by_gate["null"]
                     if _finite(r.get("null_mass_error_margin"))]
     _print_contrast("null margin vs 0", "H1c", "null_mass_error_margin",
-                    paired_bootstrap_ci(null_margins))
+                    paired_bootstrap_ci(null_margins),
+                    warn=_curve_warn(("null", by_gate["null"])))
 
     print(f"\n[e1] training curves (val monitored on fixed stream seed "
           f"{VAL_SEED}; verdict -> recommendation; gradmax = max pre-clip "
-          f"gradient norm; vreg = val loss regression past its best point):")
+          f"gradient norm; vreg = val loss regression past its best point; "
+          f"invalid = plateau/diverging/instability runs, whose claims cannot "
+          f"be read as evidence; late = U-shaped val curves where the global "
+          f"slope hides the regression):")
     for gate in GATES:
-        verdicts = {}
-        for r in by_gate[gate]:
-            verdicts[r["curve_verdict"]] = verdicts.get(r["curve_verdict"], 0) + 1
+        verdicts, invalid = _curve_health(by_gate[gate])
+        late = sum(1 for r in by_gate[gate] if r.get("late_overfit"))
         gap = _mean_std([r["generalization_gap"] for r in by_gate[gate]])
         gmax = _mean_std([r["grad_norm_max"] for r in by_gate[gate]])
         vreg = _mean_std([r["val_regression_after_best"] for r in by_gate[gate]])
@@ -668,6 +750,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{first['train_loss_last']:.3f}  val "
               f"{first['val_loss_first']:.3f}->{first['val_loss_last']:.3f}  "
               f"gap={gap['mean']:.4f}  gradmax={gmax_s}  vreg={vreg_s}  "
+              f"invalid={invalid}/{len(by_gate[gate])}  late={late}  "
               f"verdicts={verdicts}")
         for label, count in verdicts.items():
             rec = next(r["curve_recommendation"] for r in by_gate[gate]
@@ -711,11 +794,13 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         if gate == "none":
             continue
         acc_ci = _paired_diff(by_gate[gate], by_gate["none"], "accuracy")
+        warn = _curve_warn((gate, by_gate[gate]), ("none", by_gate["none"]))
         print(f"  {gate:>6}: {_fmt_ci(acc_ci)} | "
               f"params x{_ratio(gate, 'none', 'params_total'):.3f}"
               f"  flops x{_ratio(gate, 'none', 'flops_per_forward'):.3f}"
               f"  latency x{_ratio(gate, 'none', 'latency_ms_per_sample'):.3f}"
-              f"  mem x{_ratio(gate, 'none', 'peak_mem_mb'):.3f}")
+              f"  mem x{_ratio(gate, 'none', 'peak_mem_mb'):.3f}"
+              + (f"  [{warn}]" if warn else ""))
 
     print(f"\n[e1] bad cases (stats seed {STATS_SEED}; train batch: "
           f"{settings.stats_batch}x{settings.stats_batches}; raw cases in"
@@ -783,6 +868,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
           f"(test seed {TEST_SEED}, stats seed {STATS_SEED})")
     sha = _git_sha()
     runs = []
+    examples = {}
     for gate in GATES:
         for seed in settings.seeds:
             model, params, _, curve = _train_and_eval(settings, seed, lr,
@@ -814,6 +900,20 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             rec["accuracy_drop"] = base_acc - long_acc
             rec["entropy_drift"] = (rec["entropy_by_length"][lengths[-1]]
                                     - rec["entropy_by_length"][settings.n_pairs])
+            errors = collect_error_cases(
+                model, lengths[-1], settings.vocab, settings.device,
+                batch=settings.stats_batch, batches=settings.stats_batches,
+                seed=STATS_SEED, max_cases=settings.max_error_cases)
+            rec.update({f"err_{k}": v for k, v in errors["summary"].items()})
+            for case in errors["cases"]:
+                _write_result(out_dir / "e2_error_cases.jsonl",
+                              {"experiment": "e2", "gate": gate, "seed": seed,
+                               "length": lengths[-1], "lr": lr, **case})
+            if gate not in examples or \
+                    errors["summary"]["n_errors"] > examples[gate][0]:
+                ranked = sorted(errors["cases"],
+                                key=lambda c: -float(c["confidence"]))
+                examples[gate] = (errors["summary"]["n_errors"], ranked[:3])
             _write_result(out_dir / "e2_runs.jsonl", rec)
             runs.append(rec)
 
@@ -834,9 +934,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
               + f"{drop['mean']:>10.3f} {drift['mean']:>14.3f}")
 
     print(f"\n[e2] inference cost at the training length (same protocol as "
-          f"e1; check whether the length benefit costs latency):")
+          f"e1; check whether the length benefit costs latency; curve_ok = "
+          f"curve-valid runs / all runs):")
     print(f"{'gate':>6} {'params':>10} {'flops/M':>9} {'ms/sample':>10} "
-          f"{'mem/MB':>9} {'curve':>10}")
+          f"{'mem/MB':>9} {'curve_ok':>8} {'curve':>10}")
     for gate in GATES:
         t = _aggregate_runs(by_gate[gate])
 
@@ -848,30 +949,67 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
 
         flops = t.get("flops_per_forward", {}).get("mean", float("nan")) / 1e6
         flops_s = f"{flops:.2f}" if math.isfinite(flops) else "n/a"
+        _, invalid = _curve_health(by_gate[gate])
         verdicts = sorted({r["curve_verdict"] for r in by_gate[gate]})
         print(f"{gate:>6} {cell('params_total', '{:.0f}'):>10} "
               f"{flops_s:>9} "
               f"{cell('latency_ms_per_sample'):>10} "
               f"{cell('peak_mem_mb', '{:.2f}'):>9} "
-              f"{'/'.join(verdicts):>10}")
+              f"{invalid}/{len(by_gate[gate])} {'/'.join(verdicts):>10}")
+
+    print(f"\n[e2] bad cases at the longest length (n_pairs={lengths[-1]}; "
+          f"stats seed {STATS_SEED}, batch {settings.stats_batch}x"
+          f"{settings.stats_batches}; raw cases in e2_error_cases.jsonl).  "
+          f"retrieval = attention mass < 0.5 on the correct key (the model "
+          f"never found it); readout = key found but the wrong value read "
+          f"out - the split that tells apart 'cannot find' from 'cannot "
+          f"use':")
+    print(f"{'gate':>6} {'err_rate':>9} {'label':>7} {'struct':>7} "
+          f"{'retrieval':>10} {'readout':>8} {'key_miss':>9} {'mass_key_err':>13}")
+    for gate in GATES:
+        t = _aggregate_runs(by_gate[gate])
+
+        def ecell(key, fmt="{:.3f}"):
+            m = t.get(key)
+            if not m or not math.isfinite(m["mean"]):
+                return "n/a"
+            return fmt.format(m["mean"])
+
+        print(f"{gate:>6} {ecell('err_error_rate'):>9} "
+              f"{ecell('err_taxonomy_label_error'):>7} "
+              f"{ecell('err_taxonomy_hard_structural'):>7} "
+              f"{ecell('err_taxonomy_retrieval_miss'):>10} "
+              f"{ecell('err_taxonomy_readout_wrong'):>8} "
+              f"{ecell('err_errors_key_missed_share'):>9} "
+              f"{ecell('err_attn_mass_on_key_error'):>13}")
+    print("  most confident wrong samples per gate at the longest length:")
+    for gate in GATES:
+        for case in examples.get(gate, (0, []))[1]:
+            print(f"  [{gate}] {_format_case(case)}")
 
     print("\n[e2] pre-registered contrasts:")
     _print_contrast("calib - none", "H2a", "accuracy_at_longest",
                     _paired_diff(by_gate["calib"], by_gate["none"],
-                                 "accuracy_at_longest"))
+                                 "accuracy_at_longest"),
+                    warn=_curve_warn(("calib", by_gate["calib"]),
+                                     ("none", by_gate["none"])))
     _print_contrast("calib - none", "H2a", "accuracy_drop",
                     _paired_diff(by_gate["calib"], by_gate["none"],
-                                 "accuracy_drop"))
+                                 "accuracy_drop"),
+                    warn=_curve_warn(("calib", by_gate["calib"]),
+                                     ("none", by_gate["none"])))
     calib_runs = by_gate["calib"]
+    calib_warn = _curve_warn(("calib", calib_runs))
     _print_contrast("calib entropy drift vs 0", "H2b", "entropy_drift",
                     paired_bootstrap_ci([r["entropy_drift"]
-                                         for r in calib_runs]))
+                                         for r in calib_runs]),
+                    warn=calib_warn)
     if calib_runs[0]["gate_by_length"]:
         gate_drifts = [r["gate_by_length"][lengths[-1]]
                        - r["gate_by_length"][settings.n_pairs]
                        for r in calib_runs]
         _print_contrast("calib gate drift vs 0", "H2b", "gate_drift",
-                        paired_bootstrap_ci(gate_drifts))
+                        paired_bootstrap_ci(gate_drifts), warn=calib_warn)
     _write_json(out_dir / "e2_summary.json",
                 {g: {str(L): _mean_std([r["accuracy_by_length"][L]
                                         for r in by_gate[g]])
@@ -915,7 +1053,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
 
     print(f"\n[e3] {'gate':>5} {'norm':>9} {'ls':>5} {'accuracy':>16} "
           f"{'gate_depth_ratio':>18} {'resid_growth':>14} "
-          f"{'params':>9} {'ms/sample':>10} {'mem/MB':>8} {'curve':>10}")
+          f"{'params':>9} {'ms/sample':>10} {'mem/MB':>8} {'curve_ok':>9} {'curve':>10}")
     index = {}
     for gate in ("query", "calib"):
         for norm in NORMS:
@@ -931,13 +1069,15 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                 lat = _mean_std([r["latency_ms_per_sample"] for r in rs])
                 mem = _mean_std([r["peak_mem_mb"] for r in rs])
                 verdicts = sorted({r["curve_verdict"] for r in rs})
+                _, invalid = _curve_health(rs)
                 ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
                 print(f"{gate:>5} {norm:>9} {ls_label:>5} "
                       f"{acc['mean']:>8.4f}±{acc['std']:<7.4f} "
                       f"{ratio['mean']:>9.4f}±{ratio['std']:<8.4f} "
                       f"{growth['mean']:>7.3f}±{growth['std']:<6.3f} "
                       f"{params['mean']:>9.0f} {lat['mean']:>10.3f} "
-                      f"{mem['mean']:>8.2f} {'/'.join(verdicts):>10}")
+                      f"{mem['mean']:>8.2f} {invalid}/{len(rs)} "
+                      f"{'/'.join(verdicts):>10}")
 
     print("\n[e3] seednorm vs pre cost (accuracy delta vs relative cost):")
     for gate in ("query", "calib"):
@@ -954,7 +1094,11 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
             r = (ma / mb) if ma and mb else float("nan")
             ratios.append(f"{label} x{r:.3f}" if math.isfinite(r)
                           else f"{label} n/a")
-        print(f"  [{gate}] {_fmt_ci(acc_ci)} | {'  '.join(ratios)}")
+        warn = _curve_warn(
+            (f"{gate}/seednorm", index[(gate, "seednorm", None)]),
+            (f"{gate}/pre", index[(gate, "pre", None)]))
+        print(f"  [{gate}] {_fmt_ci(acc_ci)} | {'  '.join(ratios)}"
+              + (f"  [{warn}]" if warn else ""))
 
     print("\n[e3] pre-registered contrasts:")
     for gate in ("query", "calib"):
@@ -963,19 +1107,25 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
             b = index[(gate, "pre", layer_scale)]
             _print_contrast(f"{gate}: seednorm - pre (ls={layer_scale})",
                             "H3a", "gate_depth_ratio",
-                            _paired_diff(a, b, "gate_depth_ratio"))
+                            _paired_diff(a, b, "gate_depth_ratio"),
+                            warn=_curve_warn((f"{gate}/seednorm", a),
+                                             (f"{gate}/pre", b)))
     for gate in ("query", "calib"):
         for norm in NORMS:
             a = index[(gate, norm, 1e-2)]
             b = index[(gate, norm, None)]
             _print_contrast(f"{gate}/{norm}: ls=1e-2 - off", "H3b",
                             "resid_norm_last_over_first",
-                            _paired_diff(a, b, "resid_norm_last_over_first"))
+                            _paired_diff(a, b, "resid_norm_last_over_first"),
+                            warn=_curve_warn((f"{gate}/{norm}/ls", a),
+                                             (f"{gate}/{norm}/off", b)))
     for norm in NORMS:
         a = index[("calib", norm, None)]
         b = index[("query", norm, None)]
         _print_contrast(f"{norm}: calib - query", "H3a", "accuracy",
-                        _paired_diff(a, b, "accuracy"))
+                        _paired_diff(a, b, "accuracy"),
+                        warn=_curve_warn((f"calib/{norm}", a),
+                                         (f"query/{norm}", b)))
     _write_json(out_dir / "e3_summary.json",
                 {f"{g}|{n}|{ls}": _aggregate_runs(rs)
                  for (g, n, ls), rs in index.items()})

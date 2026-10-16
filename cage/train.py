@@ -74,6 +74,14 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
     whose curves are all ``plateau`` is underfitting/noise, not evidence
     about the mechanism under test.
 
+    ``late_overfit`` catches the regression the global slope dilutes: a
+    U-shaped validation curve can fall and rise by comparable amounts, so
+    the fitted relative delta stays near zero and the verdict would read
+    "learning"/"plateau" even though the run has been getting worse since
+    ``best_val_step``.  It is set when the final validation loss exceeds
+    its best by more than ``rel_tol`` of that best, and the recommendation
+    then names the early-stop point.
+
     Returns a dict with the verdict, the relative deltas, the best
     validation point and a human-readable ``recommendation``.
     """
@@ -93,6 +101,7 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
         "best_val_loss": float("nan"),
         "best_val_step": None,
         "val_regression_after_best": float("nan"),
+        "late_overfit": False,
         "grad_norm_max": float("nan"),
         "grad_norm_last": float("nan"),
         "grad_norm_explode_count": 0,
@@ -144,6 +153,10 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
         if common:
             out["generalization_gap"] = float(
                 common[-1]["val_loss"] - common[-1]["train_loss"])
+        if (len(val) >= 3 and math.isfinite(out["best_val_loss"])
+                and out["val_regression_after_best"]
+                > rel_tol * abs(out["best_val_loss"])):
+            out["late_overfit"] = True
 
     td, vd = out["train_delta"], out["val_delta"]
     if unstable:
@@ -184,6 +197,13 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
         out["recommendation"] = (
             "neither curve moves: underfitting, wrong learning rate, or a "
             "data-pipeline problem - not convergence")
+    if out["late_overfit"] and out["verdict"] not in (
+            "overfitting", "numerical_instability"):
+        out["recommendation"] = (
+            f"{out['recommendation']}; late overfitting: val loss is "
+            f"{out['val_regression_after_best']:.4f} above its best "
+            f"(@ step {out['best_val_step']}) - the global slope hides it, "
+            f"the early-stop point is best_val_step")
     if out["grad_norm_explode_count"]:
         out["grad_note"] = (
             f"{out['grad_norm_explode_count']} logged step(s) had a pre-clip "
@@ -194,7 +214,8 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
 
 
 def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
-                       grad_norm_explode: float = 100.0):
+                       grad_norm_explode: float = 100.0,
+                       dense_lm: bool = False):
     """Staged triage for a non-finite loss (the standard debugging order).
 
     1. **Data**: NaN/Inf tokens or targets, structural/label violations
@@ -212,6 +233,12 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     ``param.grad`` (``torch.autograd.grad``), so it is safe to call from
     inside a training loop.  Returns a report dict; ``first_bad_stage``
     names the earliest failing stage.
+
+    ``dense_lm`` must match the loss the training loop actually uses:
+    with the default ``False`` only the query position is supervised,
+    with ``True`` every position is (the full-sequence backward is a
+    different graph and can surface non-finite values the single-token
+    loss never touches).
     """
     report = {
         "data": "ok",
@@ -262,7 +289,9 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     was_training = model.training
     model.train()
     logits = loss = None
-    sup_pos = meta.get("query_pos") if isinstance(meta, dict) else None
+    sup_pos = None
+    if not dense_lm and isinstance(meta, dict):
+        sup_pos = meta.get("query_pos")
     try:
         with torch.inference_mode(False), torch.enable_grad():
             logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
@@ -453,7 +482,8 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         lv = loss.item()
         entry = {"step": step, "train_loss": lv}
         if not math.isfinite(lv):
-            diag = diagnose_nonfinite(model, idx, tgt, meta, vocab, device=device)
+            diag = diagnose_nonfinite(model, idx, tgt, meta, vocab,
+                                      device=device, dense_lm=dense_lm)
             entry["diagnosis"] = diag
             print(f"  step {step:5d}  loss {lv}  <- non-finite; triage "
                   f"first_bad_stage={diag['first_bad_stage']}")
@@ -472,7 +502,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         entry["grad_norm"] = gn
         if not math.isfinite(gn):
             diag = diagnose_nonfinite(model, idx, tgt, meta, vocab,
-                                      device=device)
+                                      device=device, dense_lm=dense_lm)
             diag["clip_grad_norm"] = gn
             entry["diagnosis"] = diag
             print(f"  step {step:5d}  loss {lv:.4f}  grad_norm {gn}  <- "
