@@ -275,10 +275,12 @@ class _RowEntropy(torch.autograd.Function):
         mask = _get_scratch(("rowent_bwd_m",), p.device, torch.bool,
                             p.numel())
         mask = mask[:p.numel()].view_as(p)
-        torch.gt(p, ctx.eps, out=mask)
+        torch.le(p, ctx.eps, out=mask)
         d = p.clamp_min(ctx.eps)
         d.log_()
-        d.add_(mask).mul_(mask).mul_(grad_out.unsqueeze(-1)).neg_()
+        d.add_(1.0)
+        d.masked_fill_(mask, 0.0)
+        d.mul_(grad_out.unsqueeze(-1)).neg_()
         return d, None
 
 
@@ -324,6 +326,8 @@ def _linear_into(x: torch.Tensor, weight: torch.Tensor,
 def _layer_norm_into(ln: nn.LayerNorm, x: torch.Tensor) -> torch.Tensor:
     """``ln(x)`` written into reusable buffers."""
     shape = x.shape
+    if not x.is_cuda:
+        return F.layer_norm(x, (shape[-1],), ln.weight, ln.bias, ln.eps)
     rows = x.numel() // shape[-1]
     out = _get_scratch(("ln_out",), x.device, x.dtype, x.numel())
     mean = _get_scratch(("ln_mean",), x.device, x.dtype, rows)
@@ -408,6 +412,7 @@ class _CalibAttn(torch.autograd.Function):
         rows0 = blocks[0][1] - blocks[0][0]
         max_rows = rows0
         max_i1 = T
+        grad_needed = any(ctx.needs_input_grad)
         s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
         if len(blocks) == 1:
             p = _softmax_inplace(torch.baddbmm(
@@ -415,13 +420,17 @@ class _CalibAttn(torch.autograd.Function):
                 out=s[:bh * T * T].view(bh, T, T)))
             torch.bmm(p, v, out=y)
             if need_ent:
-                ent = q.new_empty(bh, T)
+                ent = (q.new_empty(bh, T) if grad_needed else
+                       _get_scratch(("calib_ent",), q.device, q.dtype,
+                                    bh * T).view(bh, T))
                 _row_entropy(p, eps, out=ent,
                              buf=_get_scratch(("calib_f",), q.device, q.dtype, bh * T * T))
             else:
                 ent = None
         else:
-            ent = q.new_empty(bh, T) if need_ent else None
+            ent = (q.new_empty(bh, T) if grad_needed else
+                   _get_scratch(("calib_ent",), q.device, q.dtype,
+                                bh * T).view(bh, T)) if need_ent else None
             ebuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
             for i0, i1 in blocks:
                 r = i1 - i0
@@ -527,7 +536,7 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     Consumes ``d_p``.
 
     ``buf`` optionally supplies a flat buffer for the ``log(p)`` term and
-    ``mbuf`` one for the ``p > _EPS`` selector.
+    ``mbuf`` one for the ``p <= _EPS`` drop selector.
 
     The surviving term is ``log(p) + 1`` on ``p > _EPS`` and ``0`` elsewhere;
     the sub-eps entries are dropped by the trailing select, so clamping ``p``
@@ -536,17 +545,18 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     if grad_ent is not None:
         if buf is None:
             logterm = p.clamp_min(_EPS).log_()
-            mask = p > _EPS
+            mask = p <= _EPS
         else:
             logterm = buf[:p.numel()].view_as(p)
             torch.clamp_min(p, _EPS, out=logterm)
             logterm.log_()
             if mbuf is None:
-                mask = p > _EPS
+                mask = p <= _EPS
             else:
                 mask = mbuf[:p.numel()].view_as(p)
-                torch.gt(p, _EPS, out=mask)
-        logterm.add_(1.0).mul_(mask)
+                torch.le(p, _EPS, out=mask)
+        logterm.add_(1.0)
+        logterm.masked_fill_(mask, 0.0)
         d_p.addcmul_(logterm, grad_ent.unsqueeze(-1), value=-1.0)
     d_p.mul_(p)
     n0, n1 = d_p.size(0), d_p.size(1)
@@ -816,16 +826,16 @@ class Attention(nn.Module):
         mask_sel = _mask_rows(stat_pos, T, h, q.dtype)
         with torch.no_grad():
             if is_null:
-                att_real = _get_scratch(("rowstats_att_null",), q.device,
-                                        q.dtype, n * T)[:n * T].view(n, 1, T)
+                att_sel = _get_scratch(("rowstats_att_null",), q.device,
+                                       q.dtype, n * (T + 1))[
+                    :n * (T + 1)].view(n, 1, T + 1)
                 torch.baddbmm(mask_sel, q_sel, k.transpose(1, 2),
-                              beta=1.0, alpha=self.inv_scale, out=att_real)
-                s0 = _get_scratch(("rowstats_s0_null",), q.device, q.dtype,
-                                  n)[:n].view(B, h, 1, 1)
+                              beta=1.0, alpha=self.inv_scale,
+                              out=att_sel[..., 1:])
+                s0 = att_sel[..., :1]
                 torch.matmul(q_sel.reshape(B, h, 1, dk),
-                             self.null_k.view(1, h, dk, 1), out=s0)
+                             self.null_k.view(1, h, dk, 1), out=s0.view(B, h, 1, 1))
                 s0.mul_(self.inv_scale)
-                att_sel = torch.cat([s0.view(n, 1, 1), att_real], dim=-1)
             else:
                 att_sel = _get_scratch(("rowstats_att",), q.device, q.dtype,
                                        n * T)[:n * T].view(n, 1, T)
@@ -926,18 +936,11 @@ class Attention(nn.Module):
                 log_len = math.log(max(T, 2))
                 self._log_len_cache[T] = log_len
             calib_cs = self.calib_c * self.calib_scale
-            if grad_on:
-                conc = (ent.mean(dim=1) / log_len * calib_cs).unsqueeze(-1)
-            else:
-                conc = ent.mean(dim=1).div_(log_len).mul_(calib_cs).unsqueeze(-1)
+            conc = ent.mean(dim=1).div_(log_len).mul_(calib_cs).unsqueeze(-1)
             gate_val = self._gate_proj(x, B, T, C, grad_on)
-            if grad_on:
-                gate_val = gate_val.sub(self.calib_a * log_len).sub(conc)
-            else:
-                gate_val.sub_(self.calib_a * log_len).sub_(conc)
+            gate_val.sub_(self.calib_a * log_len).sub_(conc)
             tau = F.softplus(self.calib_tau) + 0.1
-            gate_val = (torch.sigmoid(gate_val / tau) if grad_on
-                        else gate_val.div_(tau).sigmoid_())
+            gate_val.div_(tau).sigmoid_()
             del ent
             ent = None
 
