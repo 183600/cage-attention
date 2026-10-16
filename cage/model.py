@@ -883,8 +883,8 @@ class Attention(nn.Module):
         if gate_val is None:
             y = y4.transpose(1, 2).reshape(B, T, C)
         else:
-            y4.mul_(gate_val.view(B, T, h, dk).transpose(1, 2))
-            y = y4.transpose(1, 2).reshape(B, T, C)
+            y = torch.mul(gate_val.view(B, T, h, dk), y4.transpose(1, 2))
+            y = y.reshape(B, T, C)
         del y4
 
         out = self.proj(y)
