@@ -6,7 +6,13 @@ import math
 
 import torch
 
-from .data import make_batch
+from .data import (
+    STATS_SEED,
+    VAL_SEED,
+    check_train_seed,
+    make_batch,
+    validate_batch,
+)
 from .metrics import (
     brier_score,
     expected_calibration_error,
@@ -39,7 +45,12 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     ``seed`` governs *all* run-to-run randomness: the data generator and the
     global RNG that draws the attention/MLP dropout masks.  Without the
     latter two runs of the same config would silently differ.
+
+    ``seed`` must not collide with a held-out evaluation stream
+    (``cage.data.RESERVED_EVAL_SEEDS``); the first batch of the run is
+    validated as a data-cleaning gate before any gradient step.
     """
+    check_train_seed(seed)
     torch.manual_seed(seed)
     gen = torch.Generator(device=device).manual_seed(seed)
     params = list(model.parameters())
@@ -49,6 +60,8 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     model.train()
     for step in range(steps):
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, dense_lm=dense_lm, gen=gen)
+        if step == 0:
+            validate_batch(idx, tgt, meta, vocab)
         opt.zero_grad(set_to_none=True)
         sup_pos = None if dense_lm else meta["query_pos"]
         _, loss, _ = model(idx, tgt, sup_pos=sup_pos)
@@ -64,7 +77,8 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
 
 
 @torch.inference_mode()
-def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4, seed=123):
+def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
+                  seed=VAL_SEED):
     """Recall accuracy at the query position."""
     gen = torch.Generator(device=device).manual_seed(seed)
     was_training = model.training
@@ -82,8 +96,8 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4, seed=123)
 
 
 @torch.inference_mode()
-def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4, seed=123,
-                 topk=5):
+def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
+                 seed=VAL_SEED, topk=5):
     """Full metric panel at the query position.
 
     Same evaluation protocol as ``eval_accuracy`` (eval mode restored
@@ -122,7 +136,8 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4, seed=123,
 
 
 @torch.inference_mode()
-def collect_stats(model, n_pairs, vocab, device, batch=128, batches=4, seed=7):
+def collect_stats(model, n_pairs, vocab, device, batch=128, batches=4,
+                  seed=STATS_SEED):
     """Collect per-layer gate / entropy / maxprob / null-mass at query positions,
     plus false-concentration labels (high max-prob but wrong answer).
     """

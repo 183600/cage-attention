@@ -18,6 +18,10 @@ Design principles
    independent training seeds together with a paired bootstrap 95% CI
    of the difference (``cage/metrics.py``); a claim is only read as
    supported when that CI excludes 0.
+4. **Split hygiene.**  Train/val/test streams are disjoint by
+   construction (``cage.data``): the split is assigned before samples are
+   drawn, reserved evaluation seeds are refused for training, and HB3
+   audits duplicate overlap and distribution shift before any model runs.
 
 Outputs land in ``results/`` (git-ignored); nothing is written into the
 tracked tree.
@@ -48,7 +52,15 @@ from .baselines import (
     train_linear_probe,
     tune_linear_probe,
 )
-from .data import length_sweep_lengths, make_batch
+from .data import (
+    RESERVED_EVAL_SEEDS,
+    STATS_SEED,
+    TEST_SEED,
+    VAL_SEED,
+    length_sweep_lengths,
+    make_batch,
+    split_leakage_audit,
+)
 from .metrics import paired_bootstrap_ci
 from .model import GATES, NORMS, build
 from .train import (
@@ -61,15 +73,14 @@ from .train import (
     train_model,
 )
 
-# Seeds with fixed roles (independent of every training seed):
+# Seeds with fixed roles (independent of every training seed) are defined in
+# ``cage.data`` so that every entry point shares one source of truth:
 #   VAL_SEED   - model selection only (learning-rate tuning, baseline checks)
 #   TEST_SEED  - the reported numbers; never used for any decision
 #   STATS_SEED - mechanism statistics (matches the collect_stats default)
-VAL_SEED = 123
-TEST_SEED = 2024
-STATS_SEED = 7
 
-HYPO_IDS = ("HB1", "HB2", "H1a", "H1b", "H1c", "H2a", "H2b", "H3a", "H3b")
+HYPO_IDS = ("HB1", "HB2", "HB3", "H1a", "H1b", "H1c", "H2a", "H2b", "H3a",
+            "H3b")
 
 HYPOTHESES = {
     "HB1": {
@@ -91,6 +102,20 @@ HYPOTHESES = {
         "prediction": "tuned linear probe accuracy <= a few x chance",
         "decision": "a clearly above-chance probe would mean answer "
                     "information leaks into the bag-of-tokens features",
+    },
+    "HB3": {
+        "experiment": "baselines",
+        "question": "Are the train / validation / test / stats streams "
+                    "disjoint (no data leakage)?",
+        "hypothesis": "The split is assigned before generation and each split "
+                      "owns a disjoint RNG stream, so no sample is shared "
+                      "between splits and no fitted statistic is computed on "
+                      "held-out data.",
+        "prediction": "exact-duplicate overlap between the training stream "
+                      "and each held-out stream is 0; token total-variation "
+                      "distance stays within the same-stream noise floor",
+        "decision": "a shared sample, or a distribution gap above the noise "
+                    "floor, invalidates every reported number",
     },
     "H1a": {
         "experiment": "e1",
@@ -289,6 +314,12 @@ def _model_cfg(settings: Settings, **overrides) -> dict:
 
 def _train_and_eval(settings: Settings, seed: int, lr: float,
                     eval_seed: int = TEST_SEED, **model_overrides):
+    if eval_seed in tuple(settings.seeds):
+        raise ValueError(
+            f"eval_seed={eval_seed} is also a configured training seed; "
+            f"evaluation data must come from a stream that never trained "
+            f"the model"
+        )
     torch.manual_seed(seed)
     model = build(_model_cfg(settings, **model_overrides), compile=False)
     params = sum(p.numel() for p in model.parameters())
@@ -368,11 +399,51 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seed=VAL_SEED):
     }
 
 
+def _audit_data_splits(settings: Settings, out_dir: pathlib.Path) -> dict:
+    """HB3: verify the train/val/test streams are disjoint and IID before
+    any model is trained.
+
+    The audit only reads data (it selects nothing), but a shared sample or
+    a distribution gap between train and the held-out splits invalidates
+    every number reported afterwards, so the outcome is printed and stored
+    next to the baselines.  Distribution shift is judged against the
+    same-stream sampling-noise floor instead of an arbitrary constant.
+    """
+    train_seed = settings.seeds[0] if settings.seeds else 0
+    audit = split_leakage_audit(
+        settings.n_pairs, settings.vocab, settings.device,
+        batch=settings.eval_batch, batches=settings.eval_batches,
+        train_seed=train_seed)
+    floor = audit["token_tv_noise_floor"]
+    tol = max(3.0 * floor, 0.02) if math.isfinite(floor) else float("inf")
+    overlaps = {name: audit[f"duplicate_overlap_train_{name}"]
+                for name in ("val", "test", "stats")}
+    tvs = {name: audit[f"token_tv_train_{name}"]
+           for name in ("val", "test", "stats")}
+    overlap_ok = all(v == 0 for v in overlaps.values())
+    shift_ok = all(v <= tol for v in tvs.values())
+    audit["tv_tolerance"] = tol
+    audit["hb3_supported"] = bool(overlap_ok and shift_ok)
+    detail = "; ".join(
+        f"{name}: overlap={overlaps[name]} tv={tvs[name]:.5f}"
+        for name in ("val", "test", "stats"))
+    print(f"[baselines] split audit (HB3, train seed {audit['train_seed']}): "
+          f"{detail} (same-stream noise floor {floor:.5f}, tol {tol:.5f}); "
+          f"unique_key_rate={audit['unique_key_rate']:.4f}")
+    if not audit["hb3_supported"]:
+        print("[baselines] WARNING: HB3 split/disjointness audit failed; "
+              "all reported numbers are suspect")
+    _write_json(out_dir / "baselines_split_audit.json", audit)
+    return audit
+
+
 def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("HB1", "HB2"))
+    _announce(("HB1", "HB2", "HB3"))
     sha = _git_sha()
-    record = {"experiment": "baselines", "hypotheses": ["HB1", "HB2"],
+    record = {"experiment": "baselines", "hypotheses": ["HB1", "HB2", "HB3"],
               "git_sha": sha, "seed": TEST_SEED}
+
+    _audit_data_splits(settings, out_dir)
 
     balance = _answer_balance(settings)
     print(f"[baselines] answer-value balance over {balance['n_samples']} "
@@ -688,7 +759,19 @@ def main(argv=None) -> int:
     settings = Settings.quick(args.device) if args.quick else Settings(
         device=args.device)
     if args.seeds is not None:
-        settings.seeds = tuple(range(args.seeds))
+        requested = tuple(range(args.seeds))
+        dropped = tuple(s for s in requested if s in RESERVED_EVAL_SEEDS)
+        settings.seeds = tuple(s for s in requested
+                               if s not in RESERVED_EVAL_SEEDS)
+        if dropped:
+            print(f"[runner] WARNING: dropping training seeds {dropped}: "
+                  f"they are reserved held-out evaluation streams "
+                  f"{RESERVED_EVAL_SEEDS}; training on them would fit the "
+                  f"model on validation/test data")
+        if not settings.seeds:
+            print("[runner] no training seed left after excluding reserved "
+                  "evaluation streams; aborting")
+            return 2
     if args.steps is not None:
         settings.steps = args.steps
     if args.lr is not None:

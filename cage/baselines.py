@@ -30,7 +30,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from .data import make_batch
+from .data import check_train_seed, make_batch, validate_batch
 from .train import _make_adamw
 
 __all__ = [
@@ -135,7 +135,13 @@ class LinearBagProbe(torch.nn.Module):
 def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
                        lr=3e-4, seed=0):
     """Fit the probe with the same optimizer/schedule recipe pinned for the
-    transformer (``_make_adamw``, cosine schedule, gradient clipping)."""
+    transformer (``_make_adamw``, cosine schedule, gradient clipping).
+
+    ``seed`` must not collide with a held-out evaluation stream; the first
+    batch is validated as a data-cleaning gate (same protocol as
+    ``train_model``).
+    """
+    check_train_seed(seed)
     torch.manual_seed(seed)
     gen = torch.Generator(device=device).manual_seed(seed)
     model = LinearBagProbe(vocab).to(device)
@@ -144,8 +150,10 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=steps, eta_min=lr * 0.1)
     model.train()
-    for _ in range(steps):
-        idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+    for step in range(steps):
+        idx, targets, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+        if step == 0:
+            validate_batch(idx, targets, meta, vocab)
         opt.zero_grad(set_to_none=True)
         loss = F.cross_entropy(model(idx), meta["answer"])
         loss.backward()
@@ -176,6 +184,11 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
     """Pick the probe learning rate by *mean validation accuracy* over the
     probe seeds.  Model selection happens on ``val_seed`` only; the chosen
     rate is then reported on a disjoint test seed by the caller."""
+    if val_seed in tuple(seeds):
+        raise ValueError(
+            f"validation seed {val_seed} is also a probe training seed; "
+            f"selection data must be disjoint from fitting data"
+        )
     table = []
     for lr in lr_grid:
         accs = []
