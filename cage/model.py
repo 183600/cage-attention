@@ -745,14 +745,15 @@ class Attention(nn.Module):
         therefore is not a distribution any more, which would bias the
         entropy by ``keep*(log keep - 1)`` if it were read as one.
         """
-        if is_null:
-            null_mass = rows[..., 0]
-            pr = rows[..., 1:]
-            pr.div_(pr.sum(-1, keepdim=True).clamp_min(_EPS))
-        else:
-            null_mass = None
-            pr = rows
-        return _RowEntropy.apply(pr, _EPS), pr.max(-1).values, null_mass
+        with torch.no_grad():
+            if is_null:
+                null_mass = rows[..., 0]
+                pr = rows[..., 1:]
+                pr.div_(pr.sum(-1, keepdim=True).clamp_min(_EPS))
+            else:
+                null_mass = None
+                pr = rows
+            return _RowEntropy.apply(pr, _EPS), pr.max(-1).values, null_mass
 
     def _row_stats_at(self, q, k, B, h, T, stat_pos, is_null, ent_full=None):
         """Diagnostics for the queried rows only.
@@ -766,17 +767,19 @@ class Attention(nn.Module):
         cols = T + 1 if is_null else T
         q_sel = _pick_rows(q, stat_pos).unsqueeze(1).reshape(-1, 1, dk)
         mask_sel = _mask_rows(stat_pos, T, h, q.dtype)
-        att_sel = torch.baddbmm(mask_sel, q_sel, k.transpose(1, 2),
-                                beta=1.0, alpha=self.inv_scale)
-        if is_null:
-            s0 = torch.matmul(q_sel.reshape(B, h, 1, dk),
-                              self.null_k.view(1, h, dk, 1)).reshape(
-                                  q_sel.size(0), 1, 1).mul_(self.inv_scale)
-            att_sel = torch.cat([s0, att_sel], dim=-1)
-        probs = _softmax_inplace(att_sel).view(B, h, cols)
-        if ent_full is not None and not is_null:
-            return _pick_rows(ent_full, stat_pos), probs.max(-1).values, None
-        return self._row_stats(probs, T, is_null)
+        with torch.no_grad():
+            att_sel = torch.baddbmm(mask_sel, q_sel, k.transpose(1, 2),
+                                    beta=1.0, alpha=self.inv_scale)
+            if is_null:
+                s0 = torch.matmul(q_sel.reshape(B, h, 1, dk),
+                                  self.null_k.view(1, h, dk, 1)).reshape(
+                                      q_sel.size(0), 1, 1).mul_(self.inv_scale)
+                att_sel = torch.cat([s0, att_sel], dim=-1)
+            probs = _softmax_inplace(att_sel).view(B, h, cols)
+            if ent_full is not None and not is_null:
+                return (_pick_rows(ent_full, stat_pos),
+                        probs.max(-1).values, None)
+            return self._row_stats(probs, T, is_null)
 
     def forward(self, x, stat_pos: torch.Tensor | None = None):
         B, T, C = x.shape
@@ -869,8 +872,8 @@ class Attention(nn.Module):
         if gate_val is None:
             y = y4.transpose(1, 2).reshape(B, T, C)
         else:
-            y = torch.mul(gate_val.view(B, T, h, dk), y4.transpose(1, 2))
-            y = y.reshape(B, T, C)
+            y4.mul_(gate_val.view(B, T, h, dk).transpose(1, 2))
+            y = y4.transpose(1, 2).reshape(B, T, C)
         del y4
 
         out = self.proj(y)
