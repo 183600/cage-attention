@@ -40,7 +40,8 @@ def _make_adamw(params, lr):
     return torch.optim.AdamW(params, **kw)
 
 
-def training_curve_verdict(hist, rel_tol: float = 0.05):
+def training_curve_verdict(hist, rel_tol: float = 0.05,
+                           grad_norm_explode: float = 100.0):
     """Read the *curve*, not just the final number (over/underfit triage).
 
     ``hist`` is the list of dicts returned by :func:`train_model`.  The
@@ -60,17 +61,30 @@ def training_curve_verdict(hist, rel_tol: float = 0.05):
                                 or a broken data pipeline, not "converged";
     * ``diverging``           - train rises: unstable optimisation / lr too
                                 high;
-    * ``numerical_instability`` - a non-finite loss appeared anywhere;
+    * ``numerical_instability`` - a non-finite loss *or* gradient norm
+                                appeared anywhere;
     * ``insufficient_points`` - fewer than two finite points.
+
+    Beyond the loss deltas the verdict reports the optimization-side curve:
+    pre-clip gradient norms (``grad_norm_max``, ``grad_norm_last``,
+    ``grad_norm_explode_count``) and, when validation is monitored, how far
+    the final validation loss regressed past its best point
+    (``val_regression_after_best``: a positive value is the loss the
+    experiment contract accepted by not early-stopping).  A grid of runs
+    whose curves are all ``plateau`` is underfitting/noise, not evidence
+    about the mechanism under test.
 
     Returns a dict with the verdict, the relative deltas, the best
     validation point and a human-readable ``recommendation``.
     """
     finite = [h for h in hist
               if math.isfinite(float(h.get("train_loss", float("nan"))))]
+
+    def _bad(v):
+        return v is not None and not math.isfinite(float(v))
+
     unstable = len(finite) < len(hist) or any(
-        h.get("val_loss") is not None
-        and not math.isfinite(float(h["val_loss"])) for h in hist)
+        _bad(h.get("val_loss")) or _bad(h.get("grad_norm")) for h in hist)
     out = {
         "verdict": "insufficient_points",
         "train_delta": float("nan"),
@@ -78,14 +92,26 @@ def training_curve_verdict(hist, rel_tol: float = 0.05):
         "generalization_gap": float("nan"),
         "best_val_loss": float("nan"),
         "best_val_step": None,
+        "val_regression_after_best": float("nan"),
+        "grad_norm_max": float("nan"),
+        "grad_norm_last": float("nan"),
+        "grad_norm_explode_count": 0,
+        "grad_note": None,
         "n_points": len(finite),
         "recommendation": "not enough logged points to judge the curve",
     }
     if unstable:
         out["verdict"] = "numerical_instability"
         out["recommendation"] = (
-            "a non-finite loss appeared; run the staged triage in "
-            "diagnose_nonfinite (data -> activations -> loss -> gradients)")
+            "a non-finite loss or gradient appeared; run the staged triage "
+            "in diagnose_nonfinite (data -> activations -> loss -> gradients)")
+    grad_norms = [float(h["grad_norm"]) for h in finite
+                  if h.get("grad_norm") is not None]
+    if grad_norms:
+        out["grad_norm_max"] = max(grad_norms)
+        out["grad_norm_last"] = grad_norms[-1]
+        out["grad_norm_explode_count"] = sum(
+            1 for g in grad_norms if g > grad_norm_explode)
     if len(finite) < 2:
         return out
 
@@ -112,6 +138,8 @@ def training_curve_verdict(hist, rel_tol: float = 0.05):
         best = min(val, key=lambda h: h["val_loss"])
         out["best_val_loss"] = float(best["val_loss"])
         out["best_val_step"] = int(best["step"])
+        out["val_regression_after_best"] = float(
+            val[-1]["val_loss"] - best["val_loss"])
         common = [h for h in finite if h.get("val_loss") is not None]
         if common:
             out["generalization_gap"] = float(
@@ -156,6 +184,12 @@ def training_curve_verdict(hist, rel_tol: float = 0.05):
         out["recommendation"] = (
             "neither curve moves: underfitting, wrong learning rate, or a "
             "data-pipeline problem - not convergence")
+    if out["grad_norm_explode_count"]:
+        out["grad_note"] = (
+            f"{out['grad_norm_explode_count']} logged step(s) had a pre-clip "
+            f"gradient norm above {grad_norm_explode:g}: lower the learning "
+            f"rate or check for rare spiking batches")
+        out["recommendation"] = f"{out['recommendation']}; {out['grad_note']}"
     return out
 
 
@@ -261,6 +295,13 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     logits_ok = torch.is_tensor(logits) and bool(torch.isfinite(logits.float()).all())
     if not logits_ok:
         mark("loss", "logits contain NaN/Inf")
+    elif logits.numel():
+        logit_max = float(logits.detach().abs().max())
+        if logit_max > 80.0:
+            report["notes"].append(
+                f"max |logit| {logit_max:.1f} exceeds the fp16 range: under "
+                f"autocast this saturates/overflows the softmax without a "
+                f"max-subtracted stable pass")
     if not loss_ok:
         val = "None" if loss is None else f"{float(loss)}"
         mark("loss", f"non-finite loss (value {val})")
@@ -300,14 +341,20 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
 
     # ---- 5. precision ----------------------------------------------------
     autocast_on = False
-    if hasattr(torch, "is_autocast_enabled"):
-        autocast_on = bool(torch.is_autocast_enabled())
-    if torch.cuda.is_available() and hasattr(torch, "is_autocast_cuda_enabled"):
-        autocast_on = autocast_on or bool(torch.is_autocast_cuda_enabled())
+    for probe in ("is_autocast_enabled", "is_autocast_cpu_enabled",
+                  "is_autocast_cuda_enabled"):
+        fn = getattr(torch, probe, None)
+        if fn is None:
+            continue
+        try:
+            autocast_on = autocast_on or bool(fn())
+        except Exception:  # noqa: BLE001 - probe must never break the triage
+            pass
     if autocast_on:
         report["notes"].append(
-            "autocast (fp16/bfloat16) is active: check low-precision "
-            "overflow before blaming the architecture")
+            "autocast (fp16/bfloat16) is active on the current device: check "
+            "low-precision overflow (grad scaling, saturated logits) before "
+            "blaming the architecture")
 
     order = ("data", "activations", "loss", "gradients")
     stage = report["first_bad_stage"]
@@ -340,7 +387,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
 def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                 device="cpu", log_every=250, seed=0, dense_lm=False,
                 eval_every=0, val_batches=2, early_stop_patience=None,
-                nonfinite="raise"):
+                nonfinite="raise", grad_norm_explode=100.0):
     """Train on the recall task with optional learning-curve monitoring.
 
     ``seed`` governs *all* run-to-run randomness: the data generator and the
@@ -367,11 +414,20 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     runs; ``training_curve_verdict`` reports ``best_val_step`` either way.
 
     ``nonfinite`` (``"raise"`` | ``"skip"``): what to do when a training
-    loss is not finite.  ``"raise"`` (default) runs
-    :func:`diagnose_nonfinite` and aborts with the staged report - silently
-    stepping an optimizer with NaN gradients corrupts the run while
-    producing plausible-looking final numbers.  ``"skip"`` records the
-    diagnosis in ``hist`` and skips the update instead.
+    loss *or the pre-clip gradient norm* is not finite.  ``"raise"``
+    (default) runs :func:`diagnose_nonfinite` and aborts with the staged
+    report - silently stepping an optimizer with NaN gradients corrupts the
+    run while producing plausible-looking final numbers.  ``"skip"``
+    records the diagnosis in ``hist`` and skips the update instead.
+
+    The gradient norm returned by the fixed clipping step is logged on
+    every kept entry (``entry["grad_norm"]``), so the optimization curve -
+    not only the loss curve - is monitored: a finite loss can still hide
+    non-finite or exploding gradients (the classic fp16-overflow pattern),
+    and those are caught here *before* the update instead of being
+    misattributed to the next step's activations.  Finite norms above
+    ``grad_norm_explode`` are flagged (``entry["grad_explode"]``) but do
+    not abort: clipping already bounds the update.
     """
     check_train_seed(seed)
     torch.manual_seed(seed)
@@ -384,6 +440,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     best_val = float("inf")
     best_val_step = None
     evals_since_improve = 0
+    printed_grad_spike = 0.0
     model.train()
     for step in range(steps):
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, dense_lm=dense_lm, gen=gen)
@@ -409,7 +466,34 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                     f"suggestions={diag['suggestions']}")
             continue
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(params, 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(params, 1.0)
+        gn = float(grad_norm)
+        entry["grad_norm"] = gn
+        if not math.isfinite(gn):
+            diag = diagnose_nonfinite(model, idx, tgt, meta, vocab,
+                                      device=device)
+            diag["clip_grad_norm"] = gn
+            entry["diagnosis"] = diag
+            print(f"  step {step:5d}  loss {lv:.4f}  grad_norm {gn}  <- "
+                  f"non-finite gradient with finite loss; triage "
+                  f"first_bad_stage={diag['first_bad_stage']}")
+            hist.append(entry)
+            opt.zero_grad(set_to_none=True)
+            sched.step()
+            if nonfinite == "raise":
+                raise RuntimeError(
+                    f"non-finite pre-clip gradient norm {gn} at step {step} "
+                    f"with finite loss {lv}; staged triage "
+                    f"first_bad_stage={diag['first_bad_stage']!r}, "
+                    f"suggestions={diag['suggestions']}")
+            continue
+        if gn > grad_norm_explode:
+            entry["grad_explode"] = True
+            if gn > printed_grad_spike:
+                printed_grad_spike = gn
+                print(f"  step {step:5d}  pre-clip grad_norm {gn:.3g} > "
+                      f"{grad_norm_explode:g} (finite, new record); clipping "
+                      f"bounds the update, watch for instability")
         opt.step()
         sched.step()
 
@@ -421,6 +505,10 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                 dense_lm, validate=step == 0)
             entry["val_loss"] = val_loss
             entry["val_acc"] = val_acc
+            if not math.isfinite(val_loss):
+                print(f"  step {step:5d}  validation loss is non-finite "
+                      f"({val_loss}); the run is numerically unstable "
+                      f"(see the curve verdict)")
             if val_loss < best_val:
                 best_val, best_val_step = val_loss, step
                 evals_since_improve = 0
@@ -566,6 +654,26 @@ def measure_inference_cost(model, n_pairs, vocab, device, batch=64, warmup=3,
     }
 
 
+def _label_audit(idx, meta):
+    """Per-sample label-integrity flags on the generated context.
+
+    Answers "is the annotation itself wrong?" *on the very batches where
+    errors were found* instead of assuming it: a label is valid when the
+    query key occurs exactly once among the keys and the recorded answer
+    is the value paired with it.  Mirrors the ``validate_batch``
+    invariants but returns a boolean per sample so failures can be
+    counted and attached to individual bad cases (``validate_batch``
+    raises on the first bad batch, which is the right behaviour for a
+    training gate and the wrong one for an error audit).
+    """
+    query = idx.gather(1, meta["query_pos"].unsqueeze(1)).squeeze(1)
+    keys = idx[:, 0::2]
+    match = keys.eq(query.unsqueeze(1))
+    key_pos = match.to(torch.int64).argmax(dim=1).mul(2)
+    paired = idx.gather(1, (key_pos + 1).unsqueeze(1)).squeeze(1)
+    return match.sum(dim=1).eq(1) & paired.eq(meta["answer"])
+
+
 @torch.inference_mode()
 def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
                         seed=STATS_SEED, max_cases=64):
@@ -587,12 +695,17 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
       ambiguity rather than a model blind spot);
     * ``value_repeats``             - the answer value occurs more than
       once in the context (harder even for a perfect retriever);
+    * ``label_ok`` / ``error_type`` - whether the annotation of *this*
+      sample is valid (``_label_audit``) and a mutually-exclusive bucket:
+      ``label_error`` > ``hard_structural`` > ``retrieval_miss``
+      (attention mass < 0.5 on the correct key) > ``readout_wrong``
+      (key found, wrong value read out);
     * ``key_pair_idx``              - position of the matching pair;
       aggregated into early/mid/late error rates (long-range retrieval).
 
-    Labels cannot be the cause here: the task is synthetic and
-    ``validate_batch`` verifies query-key uniqueness and the paired value
-    on every batch (``label_noise_rate`` is 0 by construction).
+    The label audit makes "labels cannot be the cause" a *measured* claim:
+    ``label_noise_rate`` is computed over every evaluated sample rather
+    than assumed to be 0 from the construction.
 
     Returns ``{"cases": [...], "summary": {...}}``; cases are capped at
     ``max_cases`` but the summary aggregates every evaluated sample.
@@ -621,10 +734,12 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
         handles.append(blk.attn.register_forward_pre_hook(
             _make_hook(i, getattr(blk.attn, "null_k", None))))
 
-    n_total = n_err = 0
+    n_total = n_err = n_label_err = 0
     case_count = 0
     cases = []
     flags_summary = {"high": 0, "low": 0, "in_ctx": 0, "naive": 0, "repeat": 0}
+    taxonomy = {"label_error": 0, "hard_structural": 0,
+                "retrieval_miss": 0, "readout_wrong": 0}
     mass_err = mass_err_n = 0.0
     mass_corr = mass_corr_n = 0.0
     tertile_n = [0, 0, 0]
@@ -652,6 +767,8 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
 
             n_total += idx.size(0)
             n_err += int(wrong.sum())
+            label_ok = _label_audit(idx, meta)
+            n_label_err += int((~label_ok).sum())
             key_pair_idx = (meta["key_pos"] // 2).clamp(max=n_pairs - 1)
             for b in range(idx.size(0)):
                 third = int(key_pair_idx[b].item() * 3 // max(1, n_pairs))
@@ -677,11 +794,29 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
             key_right_total += float(mass_last[wrong & key_right].sum())
             key_right_n += int((wrong & key_right).sum())
 
+            ambiguous = flags["naive_confusable"] | flags["value_repeats"]
+            key_missed = ~key_right
+            taxonomy["label_error"] += int((wrong & ~label_ok).sum())
+            taxonomy["hard_structural"] += int(
+                (wrong & label_ok & ambiguous).sum())
+            taxonomy["retrieval_miss"] += int(
+                (wrong & label_ok & ~ambiguous & key_missed).sum())
+            taxonomy["readout_wrong"] += int(
+                (wrong & label_ok & ~ambiguous & ~key_missed).sum())
+
             if case_count < max_cases:
                 rows = torch.nonzero(wrong, as_tuple=False).flatten().tolist()
                 for b in rows:
                     if case_count >= max_cases:
                         break
+                    if not bool(label_ok[b]):
+                        etype = "label_error"
+                    elif bool(ambiguous[b]):
+                        etype = "hard_structural"
+                    elif bool(key_missed[b]):
+                        etype = "retrieval_miss"
+                    else:
+                        etype = "readout_wrong"
                     cases.append({
                         "context": [int(t) for t in idx[b].tolist()],
                         "query_pos": int(meta["query_pos"][b]),
@@ -697,6 +832,8 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
                         "pred_in_context": bool(flags["pred_in_context"][b]),
                         "naive_confusable": bool(flags["naive_confusable"][b]),
                         "value_repeats": bool(flags["value_repeats"][b]),
+                        "label_ok": bool(label_ok[b]),
+                        "error_type": etype,
                     })
                     case_count += 1
     finally:
@@ -711,7 +848,12 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
         "n_samples": int(n_total),
         "n_errors": int(n_err),
         "error_rate": (n_err / n_total) if n_total else float("nan"),
-        "label_noise_rate": 0.0,
+        "n_label_errors": int(n_label_err),
+        "label_noise_rate": (n_label_err / n_total) if n_total else float("nan"),
+        "taxonomy_label_error": _share(taxonomy["label_error"]),
+        "taxonomy_hard_structural": _share(taxonomy["hard_structural"]),
+        "taxonomy_retrieval_miss": _share(taxonomy["retrieval_miss"]),
+        "taxonomy_readout_wrong": _share(taxonomy["readout_wrong"]),
         "share_high_conf": _share(flags_summary["high"]),
         "share_low_conf": _share(flags_summary["low"]),
         "share_pred_in_context": _share(flags_summary["in_ctx"]),

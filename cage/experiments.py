@@ -344,7 +344,12 @@ def _model_cfg(settings: Settings, **overrides) -> dict:
 
 
 def _curve_record(hist):
-    """Per-run learning-curve summary (monitor the curve, not just the end)."""
+    """Per-run learning-curve summary (monitor the curve, not just the end).
+
+    Stores both the reduced verdict and the raw series (steps, train loss,
+    validation loss, pre-clip gradient norm), so a run that is later read
+    as overfitting/plateauing can be re-examined without retraining.
+    """
     verdict = training_curve_verdict(hist)
     train = [h for h in hist if _finite(h.get("train_loss"))]
     val = [h for h in hist if h.get("val_loss") is not None
@@ -359,6 +364,15 @@ def _curve_record(hist):
         "generalization_gap": verdict["generalization_gap"],
         "best_val_loss": verdict["best_val_loss"],
         "best_val_step": verdict["best_val_step"],
+        "val_regression_after_best": verdict["val_regression_after_best"],
+        "grad_norm_max": verdict["grad_norm_max"],
+        "grad_norm_explode_count": verdict["grad_norm_explode_count"],
+        "curve_steps": [int(h["step"]) for h in train],
+        "curve_train_loss": [float(h["train_loss"]) for h in train],
+        "curve_val_loss": [None if h.get("val_loss") is None
+                           else float(h["val_loss"]) for h in train],
+        "curve_grad_norm": [None if h.get("grad_norm") is None
+                            else float(h["grad_norm"]) for h in train],
         "curve_verdict": verdict["verdict"],
         "curve_recommendation": verdict["recommendation"],
     }
@@ -580,8 +594,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 seed=STATS_SEED, max_cases=settings.max_error_cases)
             if gate not in examples or \
                     errors["summary"]["n_errors"] > examples[gate][0]:
-                examples[gate] = (errors["summary"]["n_errors"],
-                                  errors["cases"][:3])
+                ranked = sorted(errors["cases"],
+                                key=lambda c: -float(c["confidence"]))
+                examples[gate] = (errors["summary"]["n_errors"], ranked[:3])
             for case in errors["cases"]:
                 _write_result(out_dir / "e1_error_cases.jsonl",
                               {"experiment": "e1", "gate": gate, "seed": seed,
@@ -637,17 +652,23 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                     paired_bootstrap_ci(null_margins))
 
     print(f"\n[e1] training curves (val monitored on fixed stream seed "
-          f"{VAL_SEED}; verdict -> recommendation):")
+          f"{VAL_SEED}; verdict -> recommendation; gradmax = max pre-clip "
+          f"gradient norm; vreg = val loss regression past its best point):")
     for gate in GATES:
         verdicts = {}
         for r in by_gate[gate]:
             verdicts[r["curve_verdict"]] = verdicts.get(r["curve_verdict"], 0) + 1
         gap = _mean_std([r["generalization_gap"] for r in by_gate[gate]])
+        gmax = _mean_std([r["grad_norm_max"] for r in by_gate[gate]])
+        vreg = _mean_std([r["val_regression_after_best"] for r in by_gate[gate]])
         first = by_gate[gate][0]
+        gmax_s = f"{gmax['mean']:.2f}" if math.isfinite(gmax["mean"]) else "n/a"
+        vreg_s = f"{vreg['mean']:+.4f}" if math.isfinite(vreg["mean"]) else "n/a"
         print(f"{gate:>6} train {first['train_loss_first']:.3f}->"
               f"{first['train_loss_last']:.3f}  val "
               f"{first['val_loss_first']:.3f}->{first['val_loss_last']:.3f}  "
-              f"gap={gap['mean']:.4f}  verdicts={verdicts}")
+              f"gap={gap['mean']:.4f}  gradmax={gmax_s}  vreg={vreg_s}  "
+              f"verdicts={verdicts}")
         for label, count in verdicts.items():
             rec = next(r["curve_recommendation"] for r in by_gate[gate]
                        if r["curve_verdict"] == label)
@@ -683,12 +704,18 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             return float("nan")
         return ma / mb
 
-    acc_ci = _paired_diff(by_gate["calib"], by_gate["none"], "accuracy")
-    print(f"[e1] marginal cost calib vs none (accuracy delta vs relative "
-          f"cost): {_fmt_ci(acc_ci)} | params x{_ratio('calib', 'none', 'params_total'):.3f}"
-          f"  flops x{_ratio('calib', 'none', 'flops_per_forward'):.3f}"
-          f"  latency x{_ratio('calib', 'none', 'latency_ms_per_sample'):.3f}"
-          f"  mem x{_ratio('calib', 'none', 'peak_mem_mb'):.3f}")
+    print(f"[e1] accuracy delta vs relative cost, each gate vs none (a gain "
+          f"is only read as supported when the CI excludes 0; a supported "
+          f"gain still has to be read against the multipliers):")
+    for gate in GATES:
+        if gate == "none":
+            continue
+        acc_ci = _paired_diff(by_gate[gate], by_gate["none"], "accuracy")
+        print(f"  {gate:>6}: {_fmt_ci(acc_ci)} | "
+              f"params x{_ratio(gate, 'none', 'params_total'):.3f}"
+              f"  flops x{_ratio(gate, 'none', 'flops_per_forward'):.3f}"
+              f"  latency x{_ratio(gate, 'none', 'latency_ms_per_sample'):.3f}"
+              f"  mem x{_ratio(gate, 'none', 'peak_mem_mb'):.3f}")
 
     print(f"\n[e1] bad cases (stats seed {STATS_SEED}; train batch: "
           f"{settings.stats_batch}x{settings.stats_batches}; raw cases in"
@@ -709,6 +736,27 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{ecell('err_share_naive_confusable'):>6} "
               f"{ecell('err_attn_mass_on_key_error'):>13} "
               f"{ecell('err_attn_mass_on_key_correct'):>12}")
+
+    print(f"\n[e1] error taxonomy (share of errors; priority: label error > "
+          f"structural ambiguity (naive_confusable/value_repeats) > retrieval "
+          f"miss (attention mass < 0.5 on the correct key) > wrong readout; "
+          f"label_noise_rate is *measured* on these batches):")
+    print(f"{'gate':>6} {'label':>8} {'struct':>8} {'retrieval':>10} "
+          f"{'readout':>8} {'label_noise':>12}")
+    for gate in GATES:
+        t = table[gate]
+        def tcell(key):
+            m = t.get(key)
+            if not m or not math.isfinite(m["mean"]):
+                return "n/a"
+            return f"{m['mean']:.3f}"
+        print(f"{gate:>6} {tcell('err_taxonomy_label_error'):>8} "
+              f"{tcell('err_taxonomy_hard_structural'):>8} "
+              f"{tcell('err_taxonomy_retrieval_miss'):>10} "
+              f"{tcell('err_taxonomy_readout_wrong'):>8} "
+              f"{tcell('err_label_noise_rate'):>12}")
+    print("  most confident wrong samples per gate (systematic blind spots "
+          "are the most informative):")
     for gate in GATES:
         for case in examples.get(gate, (0, []))[1]:
             print(f"  [{gate}] {_format_case(case)}")
@@ -867,7 +915,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
 
     print(f"\n[e3] {'gate':>5} {'norm':>9} {'ls':>5} {'accuracy':>16} "
           f"{'gate_depth_ratio':>18} {'resid_growth':>14} "
-          f"{'params':>9} {'ms/sample':>10} {'mem/MB':>8}")
+          f"{'params':>9} {'ms/sample':>10} {'mem/MB':>8} {'curve':>10}")
     index = {}
     for gate in ("query", "calib"):
         for norm in NORMS:
@@ -882,13 +930,14 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                 params = _mean_std([r["params_total"] for r in rs])
                 lat = _mean_std([r["latency_ms_per_sample"] for r in rs])
                 mem = _mean_std([r["peak_mem_mb"] for r in rs])
+                verdicts = sorted({r["curve_verdict"] for r in rs})
                 ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
                 print(f"{gate:>5} {norm:>9} {ls_label:>5} "
                       f"{acc['mean']:>8.4f}±{acc['std']:<7.4f} "
                       f"{ratio['mean']:>9.4f}±{ratio['std']:<8.4f} "
                       f"{growth['mean']:>7.3f}±{growth['std']:<6.3f} "
                       f"{params['mean']:>9.0f} {lat['mean']:>10.3f} "
-                      f"{mem['mean']:>8.2f}")
+                      f"{mem['mean']:>8.2f} {'/'.join(verdicts):>10}")
 
     print("\n[e3] seednorm vs pre cost (accuracy delta vs relative cost):")
     for gate in ("query", "calib"):
