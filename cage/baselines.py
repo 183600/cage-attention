@@ -24,7 +24,13 @@ Why these baselines
 
 The transformer with ``gate="none"`` is the architecture-internal
 baseline that the gate variants of E1 are compared against; these
-external baselines calibrate what "good" even means on this task.
+external baselines calibrate what "good" even means on this task.  On
+the learned side the ladder has a third rung that lives in
+``cage.experiments`` (``_run_shallow_baseline``, hypothesis HB6): the
+same transformer truncated to a single layer, with its learning rate
+tuned on a validation seed and reported on the test seed.  It is the
+simplest *learned* model that could plausibly solve the task, so any
+depth-based motivation must survive comparison against it.
 """
 
 from __future__ import annotations

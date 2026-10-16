@@ -22,6 +22,7 @@ from .metrics import (
     multiclass_metrics,
     pr_auc,
     roc_auc,
+    selection_at_fraction,
     wilson_ci,
 )
 
@@ -1275,35 +1276,73 @@ def false_concentration_sweep(stats, thresholds=(0.3, 0.5, 0.7, 0.9)) -> dict:
 
 
 def error_detection_aucs(stats):
-    """ROC-AUC and PR-AUC of attention statistics as *error detectors*.
+    """Imbalance-aware error-detection summary of attention statistics.
 
     The positive class is "model answered wrong".  Scores are oriented so
     that **higher means more likely wrong** (``-maxprob``, mean entropy,
     ``-gate``), matching the mechanism hypotheses: concentration should
     track correctness, and a calibrated gate should close when it does
-    not.  Errors are the rare class after convergence, so PR-AUC is the
-    primary summary; ROC-AUC is reported for completeness only (with a
-    huge negative population it can look optimistic while precision
-    collapses; see ``cage/metrics.py``).
+    not.
+
+    Errors are the rare class after convergence, so the metric *regime*
+    is measured, not assumed: ``imbalance_ratio`` (negatives per
+    positive), ``error_rate`` = prevalence, and ``metric_regime``
+    (``extreme`` at 1:1000 or worse, ``high`` at 1:10 or worse, else
+    ``balanced``).  Under ``extreme`` imbalance ROC-AUC grows with the
+    huge negative population while precision can still collapse, so the
+    headline is **PR-AUC, read against its chance level** - for a random
+    ranker average precision equals prevalence, so ``prauc_lift_*``
+    (PR-AUC / prevalence) is what says whether a score carries signal,
+    and ``primary_metric`` names the headline explicitly.
+
+    Every score also gets ``recall_at_10pct_*`` / ``lift_at_10pct_*``:
+    the share of errors captured in the 10% most doubtful answers
+    (ranked by that score) and the precision lift of that flagged set
+    over prevalence - the operational reading of the same ranking when
+    PR-AUC alone is hard to interpret (see
+    ``cage.metrics.selection_at_fraction``).
     """
     corr = stats["correct"].bool()
     err = ~corr
     n = int(corr.numel())
     n_err = int(err.sum())
-    out = {"n": n, "n_errors": n_err,
-           "error_rate": (n_err / n) if n else float("nan")}
+    n_neg = n - n_err
+    prevalence = (n_err / n) if n else float("nan")
+    ratio = (n_neg / n_err) if n_err else float("inf")
+    if n_err == 0:
+        regime = "no_errors"
+    elif ratio >= 1000.0:
+        regime = "extreme (>=1:1000; PR-AUC is the headline, ROC-AUC is optimistic)"
+    elif ratio >= 10.0:
+        regime = "high (>=1:10; report both, trust PR-AUC for rare-positive ranking)"
+    else:
+        regime = "balanced"
+    out = {"n": n, "n_errors": n_err, "error_rate": prevalence,
+           "prevalence": prevalence, "imbalance_ratio": ratio,
+           "metric_regime": regime, "flag_fraction": 0.1}
     scores = {
         "maxprob": -stats["maxprob"].max(dim=1)[0],
         "entropy": stats["entropy"].mean(dim=1),
     }
     if stats.get("gate") is not None:
         scores["gate"] = -stats["gate"].mean(dim=1)
+    primary = "gate" if scores.get("gate") is not None else "maxprob"
+    out["primary_metric"] = f"prauc_{primary}_to_error"
     for name in ("maxprob", "entropy", "gate"):
         score = scores.get(name)
         if score is None or n_err == 0 or n_err == n:
             out[f"rocauc_{name}_to_error"] = float("nan")
             out[f"prauc_{name}_to_error"] = float("nan")
+            out[f"prauc_lift_{name}_to_error"] = float("nan")
+            out[f"recall_at_10pct_{name}_to_error"] = float("nan")
+            out[f"lift_at_10pct_{name}_to_error"] = float("nan")
             continue
+        pa = pr_auc(score, err)
         out[f"rocauc_{name}_to_error"] = roc_auc(score, err)
-        out[f"prauc_{name}_to_error"] = pr_auc(score, err)
+        out[f"prauc_{name}_to_error"] = pa
+        out[f"prauc_lift_{name}_to_error"] = (
+            pa / prevalence if prevalence > 0.0 else float("nan"))
+        sel = selection_at_fraction(score, err, 0.1)
+        out[f"recall_at_10pct_{name}_to_error"] = sel["recall"]
+        out[f"lift_at_10pct_{name}_to_error"] = sel["lift"]
     return out

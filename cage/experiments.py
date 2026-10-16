@@ -8,21 +8,26 @@ Design principles
    with every result record, so the E3 grid is not a blind
    hyperparameter sweep: each contrast answers a mechanism question.
 2. **Tuned baselines and sanity checks before complex models.**  The
-   rule system (exact ceiling), the trivial floor and a
-   learning-rate-tuned linear probe run before any transformer grid.  A
-   shared training recipe is tuned on the plain ``none`` baseline
-   (validation seed), then frozen for all gate variants so the E1/E3
-   comparisons stay controlled.  The baselines are checked
-   *statistically* before the grids run: HB1/HB2/HB3 verdicts are
-   written to ``baselines_verdict.json`` (rule ceiling with a Wilson CI,
-   a bootstrap near-chance test for the tuned probe, and the split
-   audit), and the learned path gets two more pre-flight gates: HB5
-   (tiny-batch overfit: the loop must be able to memorise a handful of
-   samples) and HB4 (negative control: the same architecture trained on
-   permuted labels must stay at chance, which rules out answer leakage).
-   E1 re-reads the verdict and the rule ceiling as a positive control,
-   so a gate variant is only credited for what it does beyond a tuned
-   simple baseline on a task the simple rule can actually solve.
+   complexity ladder is explicit and every rung is tuned: the rule
+   system (exact ceiling), the trivial floor, a learning-rate-tuned
+   linear probe, and a learning-rate-tuned **single-layer standard
+   transformer** (HB6, the simplest learned model) all run before any
+   deep grid.  A shared training recipe is tuned on the plain ``none``
+   baseline (validation seed), then frozen for all gate variants so the
+   E1/E3 comparisons stay controlled (each side of every pre-registered
+   contrast carries a machine-checked controlled-variable audit).  The
+   baselines are checked *statistically* before the grids run: HB1/HB2/
+   HB3 verdicts are written to ``baselines_verdict.json`` (rule ceiling
+   with a Wilson CI, a bootstrap near-chance test for the tuned probe,
+   and the split audit), and the learned path gets two more pre-flight
+   gates: HB5 (tiny-batch overfit: the loop must be able to memorise a
+   handful of samples) and HB4 (negative control: the same architecture
+   trained on permuted labels must stay at chance, which rules out
+   answer leakage).  E1 re-reads the verdict, the rule ceiling and the
+   shallow baseline as positive controls and reports a paired
+   deep-vs-shallow complexity contrast, so a gate variant is only
+   credited for what it does beyond tuned simple baselines on a task the
+   simple rule can actually solve.
 3. **Honest evaluation.**  Tuning uses the validation seed only.  Final
    numbers are reported on a separate test seed that is never used for
    selection.  Every key claim is reported as mean +- std over
@@ -39,16 +44,25 @@ Design principles
    construction (``cage.data``): the split is assigned before samples are
    drawn, reserved evaluation seeds are refused for training, and HB3
    audits duplicate overlap and distribution shift before any model runs.
-5. **Multiplicity and power.**  Each experiment interprets a *family* of
-   contrasts, so the family is read through Benjamini-Hochberg FDR
-   control (``--fdr-q``, default 0.05).  Every contrast reports its
-   bootstrap p-value, the fraction of seeds agreeing on the sign, and
-   the design's minimal detectable effect at 80% power (MDE80); "CI
-   includes 0" with ``|effect| < MDE80`` is always reported as
-   *inconclusive*, not as evidence of absence.  This matters at the
-   5-seed scale used here: an uncorrected 95% readout over ~16 null
-   contrasts would produce about one spurious "supported" claim per
-   experiment.
+5. **Multiplicity, power and practical significance.**  Each experiment
+   interprets a *family* of contrasts, so the family is read through
+   Benjamini-Hochberg FDR control (``--fdr-q``, default 0.05).  Every
+   contrast reports its bootstrap p-value, the fraction of seeds
+   agreeing on the sign, and the design's minimal detectable effect at
+   80% power (MDE80); "CI includes 0" with ``|effect| < MDE80`` is
+   always reported as *inconclusive*, not as evidence of absence.  Every
+   hypothesis additionally pre-registers a **SESOI** (smallest effect
+   size of interest) per metric (stored in the hashed registry):
+   statistical significance below the SESOI is reported as
+   *practically negligible* rather than "supported", and the finalize
+   report plans the required seed count at the observed variance
+   (``cage.metrics.seeds_for_power``), so a contrast is only read as
+   supporting its hypothesis when it is both FDR-significant and
+   practically relevant - a complex model that beats a strawman by a
+   statistically detectable sliver has not earned its complexity.  This
+   matters at the 5-seed scale used here: an uncorrected 95% readout over
+   ~16 null contrasts would produce about one spurious "supported" claim
+   per experiment.
 
 Outputs land in ``results/`` (git-ignored); nothing is written into the
 tracked tree.
@@ -94,7 +108,12 @@ from .data import (
     stream_fingerprint,
     validate_batch,
 )
-from .metrics import benjamini_hochberg, paired_bootstrap_ci, wilson_ci
+from .metrics import (
+    benjamini_hochberg,
+    paired_bootstrap_ci,
+    seeds_for_power,
+    wilson_ci,
+)
 from .model import GATES, NORMS, build
 from .train import (
     collect_error_cases,
@@ -117,9 +136,19 @@ from .train import (
 #   TEST_SEED  - the reported numbers; never used for any decision
 #   STATS_SEED - mechanism statistics (matches the collect_stats default)
 
-HYPO_IDS = ("HB1", "HB2", "HB3", "HB4", "HB5", "H1a", "H1b", "H1c", "H1d",
-            "H2a", "H2b", "H2c", "H3a", "H3b")
+HYPO_IDS = ("HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "H1a", "H1b", "H1c",
+            "H1d", "H2a", "H2b", "H2c", "H3a", "H3b")
 
+# Every hypothesis entry may carry ``"sesoi"``: the smallest effect size of
+# interest per metric (same metric keys as the pre-registered contrasts).
+# A contrast is only read as supporting its hypothesis when it is both
+# FDR-significant *and* at least the SESOI: at the seed counts used here an
+# effect of 0.1 accuracy points can be statistically detectable while being
+# scientifically meaningless, and "significant but tiny" must not be
+# reported as "the mechanism works".  SESOI units follow the metric: accuracy
+# and error-margin shares in probability points, correlations/ratios in
+# their own scale (see each entry).  The registry is content-hashed into
+# every result record, so the SESOI is part of the pre-registration.
 HYPOTHESES = {
     "HB1": {
         "experiment": "baselines",
@@ -131,6 +160,7 @@ HYPOTHESES = {
                     "CI is reported to show the precision of the finite "
                     "evaluation stream) indicates a broken task/data "
                     "construction and invalidates everything above it",
+        "sesoi": {"accuracy": 0.01},
     },
     "HB2": {
         "experiment": "baselines",
@@ -196,6 +226,28 @@ HYPOTHESES = {
                     "sufficient: data/label problems can survive "
                     "memorisation)",
     },
+    "HB6": {
+        "experiment": "baselines",
+        "question": "Does the simplest learned model (one attention layer) "
+                    "already solve the recall task, making depth (and the "
+                    "E3 deep-contribution premise) unnecessary?",
+        "hypothesis": "The recall readout needs match-then-shift "
+                      "composition (find the key that equals the query, "
+                      "then read the token one position later), which a "
+                      "single attention layer cannot express, so the tuned "
+                      "1-layer transformer should stay clearly below the "
+                      "parameter-free rule ceiling.",
+        "prediction": "the Wilson 95% upper bound of the tuned 1-layer "
+                      "standard-transformer accuracy on the test stream "
+                      "lies below the rule-ceiling point estimate",
+        "decision": "the baseline is a complexity control, not a pipeline "
+                    "validity gate: if the shallow upper bound reaches the "
+                    "ceiling, every depth-based motivation (E3) must be "
+                    "annotated that a 1-layer model suffices at this scale; "
+                    "if it stays below, depth is measurably required and "
+                    "E1's 8-layer gate contrasts are informative for it",
+        "sesoi": {"accuracy": 0.01},
+    },
     "H1a": {
         "experiment": "e1",
         "question": "Does the calibrated gate use attention concentration / "
@@ -209,6 +261,7 @@ HYPOTHESES = {
         "decision": "paired bootstrap 95% CI of the seed differences "
                     "excludes 0 after Benjamini-Hochberg FDR control across "
                     "the E1 contrasts (q=0.05)",
+        "sesoi": {"accuracy": 0.01, "abs_gate_vs_entropy": 0.05},
     },
     "H1b": {
         "experiment": "e1",
@@ -225,6 +278,7 @@ HYPOTHESES = {
                     "Benjamini-Hochberg FDR control across the E1 contrasts "
                     "(q=0.05); the pre-registered threshold 0.5 is the "
                     "decision point, the sweep only reports robustness",
+        "sesoi": {"gate_margin": 0.02},
     },
     "H1c": {
         "experiment": "e1",
@@ -236,6 +290,7 @@ HYPOTHESES = {
         "decision": "paired bootstrap 95% CI excludes 0 after "
                     "Benjamini-Hochberg FDR control across the E1 contrasts "
                     "(q=0.05)",
+        "sesoi": {"null_mass_error_margin": 0.02},
     },
     "H1d": {
         "experiment": "e1",
@@ -263,6 +318,8 @@ HYPOTHESES = {
                     "family (q=0.05); the mechanism check validates that "
                     "each ablation removed the intended pathway and is "
                     "reported alongside, not as a decision criterion",
+        "sesoi": {"accuracy": 0.01, "gate_margin": 0.02,
+                  "abs_gate_vs_entropy": 0.05},
     },
     "H2a": {
         "experiment": "e2",
@@ -276,6 +333,7 @@ HYPOTHESES = {
         "decision": "paired bootstrap 95% CI of the differences excludes 0 "
                     "after Benjamini-Hochberg FDR control across the E2 "
                     "contrasts (q=0.05)",
+        "sesoi": {"accuracy_at_longest": 0.01, "accuracy_drop": 0.01},
     },
     "H2b": {
         "experiment": "e2",
@@ -290,6 +348,8 @@ HYPOTHESES = {
                     "contrasts (q=0.05): raw entropy drift CI excludes 0 "
                     "with a positive mean, and the H/log(T) drift CI "
                     "includes 0",
+        "sesoi": {"entropy_drift": 0.1, "entropy_norm_drift": 0.05,
+                  "gate_drift": 0.02},
     },
     "H2c": {
         "experiment": "e2",
@@ -309,6 +369,7 @@ HYPOTHESES = {
                     "Benjamini-Hochberg FDR control across the E2 contrasts "
                     "(q=0.05); the calib_len_only arm is the reverse check "
                     "and is read together with it",
+        "sesoi": {"accuracy_at_longest": 0.01, "accuracy_drop": 0.01},
     },
     "H3a": {
         "experiment": "e3",
@@ -321,6 +382,7 @@ HYPOTHESES = {
         "decision": "paired bootstrap 95% CI excludes 0 after "
                     "Benjamini-Hochberg FDR control across the E3 contrasts "
                     "(q=0.05)",
+        "sesoi": {"gate_depth_ratio": 0.05, "accuracy": 0.01},
     },
     "H3b": {
         "experiment": "e3",
@@ -335,6 +397,8 @@ HYPOTHESES = {
                     "excludes 0 after Benjamini-Hochberg FDR control across "
                     "the E3 contrasts (q=0.05); the secondary readout is "
                     "reported for context and is not a decision criterion",
+        "sesoi": {"resid_norm_last_over_first": 0.05,
+                  "gate_depth_ratio": 0.05},
     },
 }
 
@@ -615,6 +679,14 @@ class ContrastLog:
     vary a declared model factor is *not* read as supported, whatever its
     p-value - the difference would not be attributable to the module under
     test.  The audit verdict is printed inline and stored per row.
+
+    The decision layer also separates statistical from *practical*
+    significance: the hypothesis's pre-registered SESOI (looked up in
+    ``HYPOTHESES``, so it is part of the hashed pre-registration) is
+    compared with the effect, ``seeds_for_power`` plans how many seeds the
+    SESOI would need at the observed variance, and an FDR-significant
+    effect below its SESOI is reported as practically negligible instead
+    of "supported".
     """
 
     def __init__(self, tag: str):
@@ -623,11 +695,13 @@ class ContrastLog:
 
     def print(self, rule, hyp, metric, ci, warn="") -> None:
         audit = ci.get("controlled")
+        sesoi = (HYPOTHESES.get(hyp, {}).get("sesoi") or {}).get(metric)
         self.rows.append({
             "rule": rule, "hypothesis": hyp, "metric": metric,
             "mean": ci.get("mean"), "lo": ci.get("lo"), "hi": ci.get("hi"),
             "n": ci.get("n"), "p_value": ci.get("p_value"),
-            "mde80": ci.get("mde80"),
+            "mde80": ci.get("mde80"), "sd": ci.get("sd"),
+            "sesoi": sesoi,
             "sign_consistency": ci.get("sign_consistency"),
             "baseline_mean": ci.get("baseline_mean"),
             "controlled": None if audit is None else audit["controlled"],
@@ -641,6 +715,8 @@ class ContrastLog:
             factors = ",".join(sorted(audit.get("varying_factors", {}))) or "n/a"
             line += (f"  [control: {'ok' if audit['controlled'] else 'FAILED'}"
                      f", varies={factors}]")
+        if sesoi is not None:
+            line += f"  [SESOI={sesoi:g}]"
         if warn:
             line += f"  [{warn}]"
         print(line)
@@ -661,29 +737,63 @@ class ContrastLog:
                 row["mean"] / abs(base)
                 if base is not None and math.isfinite(base) and base != 0.0
                 else float("nan"))
+            sesoi = row.get("sesoi")
+            mean = row.get("mean")
+            finite_effect = mean is not None and math.isfinite(mean)
+            row["practically_relevant"] = bool(
+                sesoi is None
+                or (finite_effect and math.isfinite(float(sesoi))
+                    and abs(mean) >= float(sesoi)))
+            row["supports_hypothesis"] = bool(
+                row["fdr_reject"] and row["practically_relevant"])
+            # A-priori power planning for the pre-registered SESOI at the
+            # observed paired-difference SD: how many seeds would this
+            # contrast need to resolve an effect it cares about?  (Adjust
+            # the design *before* the next run, not after.)
+            row["n_seeds_for_sesoi"] = (
+                float("inf") if sesoi is None
+                else seeds_for_power(row.get("sd"), sesoi))
         testable = [r for r in self.rows if math.isfinite(r["p_adj"])]
         surviving = [r for r in testable if r["fdr_reject"]]
+        supporting = [r for r in testable if r["supports_hypothesis"]]
+        below_sesoi = [r for r in surviving if not r["practically_relevant"]]
         confounded = [r for r in testable if r.get("confounded")]
         controlled_pass = [r for r in self.rows if r.get("controlled") is True]
         audited = [r for r in self.rows if r.get("controlled") is not None]
         print(f"\n[{self.tag}] multiplicity control (Benjamini-Hochberg FDR, "
               f"q={q:g}): {len(surviving)}/{len(testable)} testable "
-              f"contrasts survive (uncorrected p -> adjusted p; only "
-              f"'SURVIVES' supports a pre-registered decision; rel = effect "
-              f"relative to the control-side mean, read it for practical "
-              f"significance):")
+              f"contrasts survive, {len(supporting)} pass the SESOI gate too "
+              f"(uncorrected p -> adjusted p; only 'SURVIVES' supports a "
+              f"pre-registered decision; rel = effect relative to the "
+              f"control-side mean, read it for practical significance; a "
+              f"statistically significant effect below its SESOI is "
+              f"practically negligible and does NOT support the "
+              f"hypothesis):")
         for r in testable:
             rel_s = (f", rel={r['rel_effect']:+.2%}"
                      if math.isfinite(r["rel_effect"]) else "")
-            verdict = "SURVIVES" if r["fdr_reject"] else "not significant"
+            sesoi = r.get("sesoi")
+            sesoi_s = f", SESOI={sesoi:g}" if sesoi is not None else ""
             if r.get("confounded"):
                 verdict = "REFUSED (confounded contrast)"
+            elif not r["fdr_reject"]:
+                verdict = "not significant"
+            elif not r["practically_relevant"]:
+                verdict = ("FDR-significant but |effect| < SESOI "
+                           "(practically negligible)")
+            else:
+                verdict = "SURVIVES"
+            need = r.get("n_seeds_for_sesoi", float("inf"))
+            need_s = ""
+            if math.isfinite(need) and r["n"] > 0 and need > r["n"]:
+                need_s = (f", needs ~{math.ceil(need)} seeds for SESOI at "
+                          f"80% power (has {r['n']})")
             print(f"  [{r['hypothesis']}] {r['rule']} ({r['metric']}): "
                   f"p={r['p_value']:.4f} -> p_adj={r['p_adj']:.4f} "
                   f"{verdict} "
                   f"(effect={r['mean']:+.4f}{rel_s}, "
-                  f"MDE80={r['mde80']:.4f}, seeds={r['n']}, "
-                  f"sign-consistency={r['sign_consistency']:.2f})")
+                  f"MDE80={r['mde80']:.4f}{sesoi_s}, seeds={r['n']}, "
+                  f"sign-consistency={r['sign_consistency']:.2f}{need_s})")
         if audited:
             print(f"[{self.tag}] controlled-variable audit: "
                   f"{len(controlled_pass)}/{len(audited)} contrasts pass "
@@ -693,6 +803,16 @@ class ContrastLog:
             print(f"[{self.tag}] WARNING: {len(confounded)} contrast(s) "
                   f"failed the controlled-variable audit and were refused "
                   f"regardless of their p-values")
+        if below_sesoi:
+            underpowered = [r for r in below_sesoi
+                            if math.isfinite(r.get("n_seeds_for_sesoi", 0.0))
+                            and r["n_seeds_for_sesoi"] > r["n"]]
+            print(f"[{self.tag}] WARNING: {len(below_sesoi)} FDR-significant "
+                  f"contrast(s) are smaller than their pre-registered SESOI: "
+                  f"statistically detectable but practically negligible; "
+                  f"{len(underpowered)} of them would need more seeds "
+                  f"(listed per row above) to resolve the SESOI - do not "
+                  f"read them as supporting the mechanism")
         low_seed = [r for r in testable if r["n"] < 3]
         if low_seed:
             print(f"[{self.tag}] WARNING: {len(low_seed)}/{len(testable)} "
@@ -702,6 +822,8 @@ class ContrastLog:
         payload = {"tag": self.tag, "q": q, "n_contrasts": len(self.rows),
                    "n_testable": len(testable),
                    "n_surviving": len(surviving),
+                   "n_supporting": len(supporting),
+                   "n_below_sesoi": len(below_sesoi),
                    "n_confounded": len(confounded),
                    "n_audited": len(audited),
                    "n_control_passed": len(controlled_pass),
@@ -740,6 +862,12 @@ def _announce(hyp_ids):
         print(f"[hypothesis {hid}] {h['question']}")
         print(f"    prediction: {h['prediction']}")
         print(f"    decision:   {h['decision']}")
+        sesoi = h.get("sesoi") or {}
+        if sesoi:
+            detail = ", ".join(f"{k}>={v:g}" for k, v in sorted(sesoi.items()))
+            print(f"    SESOI (smallest effect size of interest): {detail} "
+                  f"- statistical significance below this is reported as "
+                  f"practically negligible, not as support")
 
 
 def _write_result(path: pathlib.Path, record: dict) -> None:
@@ -1043,10 +1171,93 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path) -> dict:
     return audit
 
 
+def _run_shallow_baseline(settings: Settings, out_dir: pathlib.Path,
+                          ceiling: dict | None) -> dict:
+    """HB6 complexity control: the tuned single-layer standard transformer.
+
+    The simplest *learned* model on the baseline ladder.  It goes through
+    the same entry point as the deep grids (``_train_and_eval``): same
+    optimizer factory, cosine schedule, batch geometry and evaluation
+    streams, with the learning rate tuned on the validation seed (up to
+    two seeds per grid point) and the chosen rate reported on the disjoint
+    test seed.  Depth is the only architectural difference from the
+    ``none`` baseline of E1, so the gap to the rule ceiling measures how
+    much depth the recall readout actually requires, and a complex model
+    is only worth crediting for what it does beyond *this* tuned baseline
+    (E1 pairs the 8-layer ``none`` runs against it as a complexity
+    reference).
+    """
+    tune_seeds = settings.seeds[:max(1, min(2, len(settings.seeds)))]
+    table = []
+    for lr in settings.lr_grid:
+        accs = []
+        for seed in tune_seeds:
+            _, _, metrics, _ = _train_and_eval(
+                settings, seed, lr, eval_seed=VAL_SEED, gate="none",
+                n_layers=1)
+            accs.append(metrics["accuracy"])
+        mean = sum(accs) / len(accs)
+        std = ((sum((a - mean) ** 2 for a in accs) / (len(accs) - 1)) ** 0.5
+               if len(accs) > 1 else 0.0)
+        table.append({"lr": lr, "val_accuracy_mean": mean,
+                      "val_accuracy_std": std, "n_seeds": len(accs)})
+    best = max(table, key=lambda row: row["val_accuracy_mean"])
+    runs = []
+    for seed in settings.seeds:
+        _, params, metrics, curve = _train_and_eval(
+            settings, seed, best["lr"], eval_seed=TEST_SEED, gate="none",
+            n_layers=1)
+        n = int(metrics["n"])
+        runs.append({
+            "seed": seed, "accuracy": metrics["accuracy"],
+            "accuracy_lo": metrics["accuracy_lo"],
+            "accuracy_hi": metrics["accuracy_hi"], "n": n,
+            "correct": int(round(metrics["accuracy"] * n)),
+            "params": params, "curve_verdict": curve["curve_verdict"],
+        })
+        _write_result(out_dir / "baselines_runs.jsonl",
+                      {"experiment": "baselines", "hypotheses": ["HB6"],
+                       "name": "shallow_none_baseline", "lr": best["lr"],
+                       "training_seed": seed, "accuracy": metrics["accuracy"],
+                       "accuracy_lo": metrics["accuracy_lo"],
+                       "accuracy_hi": metrics["accuracy_hi"], "n": n})
+    pooled = wilson_ci(sum(r["correct"] for r in runs),
+                       sum(r["n"] for r in runs))
+    summary = _mean_std([r["accuracy"] for r in runs])
+    ceiling_acc = float(ceiling["accuracy"]) if ceiling else float("nan")
+    hb6_supported = bool(
+        math.isfinite(ceiling_acc) and math.isfinite(pooled["hi"])
+        and pooled["hi"] < ceiling_acc)
+    payload = {
+        "name": "shallow_none", "n_layers": 1,
+        "val_seed": VAL_SEED, "test_seed": TEST_SEED,
+        "chosen_lr": best["lr"], "tuning_table": table,
+        "accuracy_mean": summary["mean"], "accuracy_std": summary["std"],
+        "accuracy_by_seed": {str(r["seed"]): r["accuracy"] for r in runs},
+        "pooled_wilson": pooled, "ceiling": ceiling_acc,
+        "ceiling_gap": (ceiling_acc - summary["mean"]
+                        if math.isfinite(ceiling_acc) else float("nan")),
+        "hb6_supported": hb6_supported, "runs": runs,
+    }
+    print(f"[baselines] HB6 complexity control: tuned 1-layer standard "
+          f"transformer (lr={best['lr']:g} on val seed {VAL_SEED}, test seed "
+          f"{TEST_SEED}): accuracy={summary['mean']:.4f} +- "
+          f"{summary['std']:.4f} (pooled Wilson "
+          f"[{pooled['lo']:.4f}, {pooled['hi']:.4f}], n={pooled['n']}); "
+          f"rule ceiling={ceiling_acc:.4f}, gap="
+          f"{payload['ceiling_gap']:.4f}; "
+          f"{'SUPPORTED (a single layer is not enough: depth is measurably required)' if hb6_supported else 'FLAG - the shallow baseline reaches the rule ceiling within its CI: annotate depth-based (E3) motivations'}")
+    _write_json(out_dir / "baselines_shallow_none.json", payload)
+    _write_json(out_dir / "baselines_shallow_tuning.json",
+                {"val_seed": VAL_SEED, "table": table,
+                 "chosen_lr": best["lr"]})
+    return payload
+
+
 def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("HB1", "HB2", "HB3", "HB4", "HB5"))
+    _announce(("HB1", "HB2", "HB3", "HB4", "HB5", "HB6"))
     record = {"experiment": "baselines",
-              "hypotheses": ["HB1", "HB2", "HB3", "HB4", "HB5"],
+              "hypotheses": ["HB1", "HB2", "HB3", "HB4", "HB5", "HB6"],
               "seed": TEST_SEED, **_run_context(settings)}
 
     audit = _audit_data_splits(settings, out_dir)
@@ -1079,6 +1290,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                   {**record, "name": "overfit_sanity", **sanity})
 
     hb1_supported = None
+    rule_stats = None
     for name, fn in (
         ("rule_pair_lookup", rule_pair_lookup_stats),
         ("rule_naive_last_match", rule_naive_last_match_stats),
@@ -1093,6 +1305,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         _write_result(out_dir / "baselines_runs.jsonl",
                       {**record, "name": name, **stats})
         if name == "rule_pair_lookup":
+            rule_stats = stats
             hb1_supported = bool(stats["accuracy"] >= 0.99
                                  and stats["unique_key_rate"] == 1.0)
     if not hb1_supported:
@@ -1134,6 +1347,12 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
           f"{hb2['mean']:+.4f} [{hb2['lo']:+.4f}, {hb2['hi']:+.4f}] "
           f"(p={hb2['p_value']:.3f}, MDE80={hb2['mde80']:.4f}); "
           f"{'SUPPORTED (probe confidently <2x chance)' if hb2['hb2_supported'] else 'NOT SUPPORTED - inspect the simple-baseline comparison'}")
+
+    # HB6 complexity control: the simplest learned model must be tried --
+    # and tuned -- before the deep grids can claim that depth/gating is
+    # needed.  Runs before the negative control so a shallow-model finding
+    # (single layer already solves the task) is on record next to it.
+    shallow = _run_shallow_baseline(settings, out_dir, rule_stats)
 
     # HB4 negative control: same architecture and shared recipe as E1, but
     # the supervised answers are permuted across the batch during training.
@@ -1193,8 +1412,19 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "hb3_supported": bool(audit.get("hb3_supported")),
         "hb4_supported": hb4_supported,
         "hb5_supported": bool(sanity["passed"]),
+        "hb6_supported": bool(shallow["hb6_supported"]),
         "probe_accuracy_mean": summary["mean"],
         "probe_accuracy_std": summary["std"],
+        "shallow_none": {
+            "n_layers": 1, "lr": shallow["chosen_lr"],
+            "tuning_table": shallow["tuning_table"],
+            "accuracy_mean": shallow["accuracy_mean"],
+            "accuracy_std": shallow["accuracy_std"],
+            "accuracy_by_seed": shallow["accuracy_by_seed"],
+            "pooled_wilson": shallow["pooled_wilson"],
+            "ceiling": shallow["ceiling"],
+            "ceiling_gap": shallow["ceiling_gap"],
+        },
         "hb2_accuracy_minus_chance": {
             "mean": hb2["mean"], "lo": hb2["lo"], "hi": hb2["hi"],
             "p_value": hb2["p_value"], "mde80": hb2["mde80"],
@@ -1220,9 +1450,11 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
           f" HB2={'ok' if verdict['hb2_supported'] else 'FAILED'}"
           f" HB3={'ok' if verdict['hb3_supported'] else 'FAILED'}"
           f" HB4={'ok' if verdict['hb4_supported'] else 'FAILED'}"
-          f" HB5={'ok' if verdict['hb5_supported'] else 'FAILED'} "
+          f" HB5={'ok' if verdict['hb5_supported'] else 'FAILED'}"
+          f" HB6={'ok' if verdict['hb6_supported'] else 'FLAG'} "
           f"(stored in baselines_verdict.json; a failed baseline check "
-          f"invalidates the corresponding claims above it)")
+          f"invalidates the corresponding claims above it, HB6 only flags "
+          f"depth-based motivations)")
 
 
 # E1 calibration-term ablation arms: the full factorisation of the two
@@ -1339,6 +1571,51 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{cell('top5_accuracy'):>16} {cell('abs_gate_vs_entropy'):>16} "
               f"{cell('prauc_gate_to_error'):>16}")
 
+    # Metric regime per gate: error detection is a rare-class problem once
+    # the model converges, so the measured imbalance is reported next to
+    # each score's ranking power.  PR-AUC is read against its chance level
+    # (lift = PR-AUC / prevalence; a random ranker has lift 1.0) and the
+    # operational reading (errors caught in the 10% most doubtful answers)
+    # sits next to ROC-AUC, which stays optimistic under imbalance.
+    print("\n[e1] error-detection regime (positive = wrong answer): lift = "
+          "PR-AUC / prevalence (1.0 = random ranking); recall@10% = share of "
+          "errors captured in the 10% lowest-gate answers")
+    print(f"{'gate':>6} {'primary':>8} {'err_rate':>9} {'imbalance':>10} "
+          f"{'regime':>10} {'prauc':>8} {'lift':>8} {'recall@10%':>11} "
+          f"{'rocauc':>8}")
+    for gate in GATES:
+        t = table[gate]
+        primary = str(by_gate[gate][0].get("primary_metric", ""))
+        if primary.startswith("prauc_"):
+            score = primary.split("_")[1]
+        elif _finite(by_gate[gate][0].get("prauc_gate_to_error")):
+            score = "gate"
+        else:
+            score = "maxprob"
+
+        def ecell(key):
+            m = t.get(key)
+            if not m or not math.isfinite(m["mean"]):
+                return "n/a"
+            return f"{m['mean']:.4f}"
+
+        err_rate = t.get("error_rate", {}).get("mean", float("nan"))
+        ratio = t.get("imbalance_ratio", {}).get("mean", float("nan"))
+        if not math.isfinite(err_rate) or err_rate <= 0.0:
+            regime = "no_errors"
+        elif ratio >= 1000.0:
+            regime = "extreme"
+        elif ratio >= 10.0:
+            regime = "high"
+        else:
+            regime = "balanced"
+        print(f"{gate:>6} {score:>8} {ecell('error_rate'):>9} "
+              f"{ecell('imbalance_ratio'):>10} {regime:>10} "
+              f"{ecell(f'prauc_{score}_to_error'):>8} "
+              f"{ecell(f'prauc_lift_{score}_to_error'):>8} "
+              f"{ecell(f'recall_at_10pct_{score}_to_error'):>11} "
+              f"{ecell(f'rocauc_{score}_to_error'):>8}")
+
     abl_table = {label: _aggregate_runs(rs)
                  for label, rs in ablation_runs.items()}
     abl_table["full"] = table["calib"]
@@ -1387,8 +1664,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     if verdict is None:
         print("[e1] note: no baselines_verdict.json in the output dir - run "
               "`--only baselines` first so the learned models can be read "
-              "against the tuned simple baselines (probe, rules) before "
-              "crediting any gate variant")
+              "against the tuned simple baselines (probe, rules, shallow "
+              "transformer) before crediting any gate variant")
     else:
         probe = verdict.get("probe_accuracy_mean", float("nan"))
 
@@ -1398,14 +1675,41 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
 
         marks = "/".join(_mark(k) for k in ("hb1_supported", "hb2_supported",
                                             "hb3_supported", "hb4_supported",
-                                            "hb5_supported"))
+                                            "hb5_supported", "hb6_supported"))
         print(f"[e1] simple-baseline check (from --only baselines): "
-              f"HB1/HB2/HB3/HB4/HB5={marks}, tuned linear probe test "
+              f"HB1/HB2/HB3/HB4/HB5/HB6={marks}, tuned linear probe test "
               f"accuracy={probe:.4f} vs chance "
               f"{verdict.get('chance', float('nan')):.4f} - the transformer is "
               f"only credited for what it does beyond this tuned baseline and "
               f"the rule ceiling (HB4 = no label leakage, HB5 = loop can "
-              f"memorise a tiny batch)")
+              f"memorise a tiny batch, HB6 = depth is measurably required)")
+        shallow = verdict.get("shallow_none") or {}
+        shallow_by_seed = {}
+        for key, value in (shallow.get("accuracy_by_seed") or {}).items():
+            try:
+                shallow_by_seed[int(key)] = float(value)
+            except (TypeError, ValueError):
+                continue
+        if shallow_by_seed:
+            print(f"[e1] complexity control (HB6): tuned 1-layer standard "
+                  f"transformer (lr={shallow.get('lr', float('nan')):g}) test "
+                  f"accuracy={shallow.get('accuracy_mean', float('nan')):.4f}, "
+                  f"rule ceiling={shallow.get('ceiling', float('nan')):.4f}, "
+                  f"gap={shallow.get('ceiling_gap', float('nan')):.4f}")
+            # Paired complexity reference: same seeds, same test stream,
+            # each side optimised with its own val-tuned learning rate
+            # (that is the point of a tuned-baseline comparison), so the
+            # strict controlled-recipe audit does not apply and this line
+            # is deliberately kept outside the FDR family.
+            diffs = [r["accuracy"] - shallow_by_seed[r["seed"]]
+                     for r in by_gate["none"] if r["seed"] in shallow_by_seed]
+            if len(diffs) >= 2:
+                ci = paired_bootstrap_ci(diffs)
+                print(f"      paired deep(none, 8 layers) - shallow(1 layer) "
+                      f"accuracy: {_fmt_ci(ci)} (each side val-tuned; a "
+                      f"supported gap means the depth of the E1/E3 grids is "
+                      f"measurably required, a gap including 0 means a gate "
+                      f"gain must be beyond what one layer already reaches)")
 
     print("\n[e1] H1a robustness: rank (Spearman) gate-entropy correlation "
           "alongside Pearson (a monotone effect must survive the change of "
@@ -1445,6 +1749,15 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                _paired_diff(by_gate["calib"], by_gate["none"], "accuracy"),
                warn=_curve_warn(("calib", by_gate["calib"]),
                                 ("none", by_gate["none"])))
+    # The query gate is the closest tuned simpler model (same parameter
+    # count, same architecture, gate on the query only): calibration must
+    # earn its keep against *this* baseline, not only against `none`
+    # (which lacks a gate altogether).  Pre-registered so it is read
+    # through the same FDR + SESOI decision layer as the other contrasts.
+    clog.print("calib - query", "H1a", "accuracy",
+               _paired_diff(by_gate["calib"], by_gate["query"], "accuracy"),
+               warn=_curve_warn(("calib", by_gate["calib"]),
+                                ("query", by_gate["query"])))
     clog.print("calib - query", "H1a", "abs_gate_vs_entropy",
                _paired_diff(by_gate["calib"], by_gate["query"],
                             "abs_gate_vs_entropy"),

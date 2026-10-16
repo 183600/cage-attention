@@ -33,11 +33,24 @@ Metric choices (and why)
   family; an uncorrected per-contrast 95% readout would be expected to
   produce ~1 false "supported" claim per experiment made of all-null
   hypotheses.
+* Statistical significance is not practical significance: every
+  hypothesis pre-registers a **SESOI** (smallest effect size of interest)
+  per metric, and ``seeds_for_power`` is the *planning* counterpart of the
+  post-hoc ``mde80`` - it says how many seeds a contrast of practical
+  interest would need at 80% power, so the design can be sized before it
+  is run instead of discovered to be underpowered afterwards.
+* For rare positive classes (error detection after convergence), the
+  ranking summaries are paired with ``selection_at_fraction``: the
+  operational question "if the most doubtful fraction of answers is
+  flagged/reviewed, how many errors are caught (recall) and how much
+  better than prevalence is the flagged set (lift)?" is interpretable
+  where a raw PR-AUC number is not.
 """
 
 from __future__ import annotations
 
 import math
+from statistics import NormalDist
 
 import torch
 
@@ -50,6 +63,8 @@ __all__ = [
     "expected_calibration_error",
     "brier_score",
     "paired_bootstrap_ci",
+    "selection_at_fraction",
+    "seeds_for_power",
     "wilson_ci",
 ]
 
@@ -116,6 +131,45 @@ def pr_auc(scores, positives) -> float:
     precision = tp / torch.arange(1, y.numel() + 1, dtype=torch.float64,
                                   device=s.device)
     return float((precision * y).sum() / n_pos)
+
+
+def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
+    """Error-capture statistics when the top ``frac`` scores are flagged.
+
+    ``scores`` are oriented so that **higher means more likely positive**
+    (an error); the top ``ceil(frac * n)`` rows are "flagged".  Returns
+    ``recall`` (share of all positives that are flagged), ``precision``
+    (share of flagged rows that are positive) and ``lift`` (precision
+    divided by prevalence), plus the flag count and the score threshold.
+
+    Under extreme imbalance this is the interpretable companion to PR-AUC:
+    it answers the operational question ("if we review the most doubtful
+    5-10% of answers, how many errors do we catch and how much of the
+    reviewed set is actually wrong?") instead of asking the reader to
+    calibrate a raw average-precision number against its prevalence
+    baseline.
+    """
+    s = _flatten_float(scores)
+    y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
+    n = s.numel()
+    if n == 0:
+        return {"frac": float("nan"), "k": 0, "recall": float("nan"),
+                "precision": float("nan"), "lift": float("nan"),
+                "threshold": float("nan")}
+    frac = min(max(float(frac), 0.0), 1.0)
+    k = max(1, int(math.ceil(frac * n)))
+    order = torch.argsort(s, descending=True)
+    flagged = torch.zeros(n, dtype=torch.bool, device=s.device)
+    flagged[order[:k]] = True
+    n_pos = int(y.sum())
+    tp = int((flagged & y).sum())
+    prevalence = n_pos / n
+    recall = tp / n_pos if n_pos else float("nan")
+    precision = tp / k
+    lift = precision / prevalence if prevalence > 0.0 else float("nan")
+    return {"frac": k / n, "k": k, "recall": recall,
+            "precision": precision, "lift": lift,
+            "threshold": float(s[order[k - 1]])}
 
 
 def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
@@ -280,6 +334,33 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
         "sign_consistency": sign_consistency,
         "alpha": float(alpha),
     }
+
+
+def seeds_for_power(sd, effect, alpha: float = 0.05,
+                    power: float = 0.8) -> float:
+    """Paired-design seed count for ``power`` at a given effect size.
+
+    Planning counterpart of the post-hoc ``mde80``: with the observed
+    paired-difference standard deviation ``sd``, the normal approximation
+    ``n = ((z_{1-alpha/2} + z_power) * sd / |effect|)^2`` gives the number
+    of independent units (training seeds) a contrast needs to reach the
+    requested power.  Use it *before* running the grid to size the design
+    for the pre-registered SESOI, or on a pilot estimate of ``sd``; a
+    contrast that "includes 0" at fewer seeds than this is underpowered
+    rather than negative.  Returns ``inf`` when ``sd`` is not positive or
+    ``effect`` is zero/non-finite, and the raw (non-integer) count
+    otherwise - callers round up.
+    """
+    if effect is None or sd is None:
+        return float("inf")
+    sd = float(sd)
+    effect = float(effect)
+    if not math.isfinite(sd) or not math.isfinite(effect) \
+            or sd <= 0.0 or effect == 0.0:
+        return float("inf")
+    nd = NormalDist()
+    z = nd.inv_cdf(1.0 - alpha / 2.0) + nd.inv_cdf(power)
+    return (z * sd / abs(effect)) ** 2
 
 
 def benjamini_hochberg(p_values, q: float = 0.05) -> list:
