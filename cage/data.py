@@ -13,6 +13,8 @@ The label for the position right after qi is vi.
 
 from __future__ import annotations
 
+import hashlib
+
 import torch
 
 SEP_ID = 1
@@ -40,6 +42,12 @@ VAL_SEED = 123      # model/recipe selection only (never reported)
 TEST_SEED = 2024    # sealed: final numbers only, never used for a decision
 STATS_SEED = 7      # held-out mechanism statistics (collect_stats default)
 RESERVED_EVAL_SEEDS = (VAL_SEED, TEST_SEED, STATS_SEED)
+
+# Tiny-batch overfit sanity check (``cage.train.overfit_sanity_check``): the
+# single batch is generated from this stream and the model is *meant* to
+# memorise it, so it is not an evaluation split and is deliberately not in
+# ``RESERVED_EVAL_SEEDS`` (no reported metric ever reads it).
+SANITY_SEED = 31337
 
 
 def check_train_seed(seed) -> None:
@@ -178,6 +186,25 @@ def validate_batch(idx, targets, meta, vocab) -> dict:
     n_unique = len({tuple(int(t) for t in row) for row in rows})
     return {"n": int(idx.size(0)), "unique_key_rate": 1.0,
             "n_duplicate_rows": int(len(rows) - n_unique)}
+
+
+def stream_fingerprint(n_pairs, vocab, device="cpu", batch=8, seed=TEST_SEED):
+    """Content hash of the first batch of a data stream (dataset versioning).
+
+    Two runs that agree on the fingerprint drew identical data; a changed
+    fingerprint means the generation protocol changed and numbers from
+    before are not comparable.  Hashing one batch is the smallest
+    deterministic summary of a stream that catches every protocol change
+    (key/value draw order, SEP/query layout, reserved-id handling), and it
+    is recorded with every experiment result next to the code revision.
+    """
+    gen = torch.Generator(device=device).manual_seed(seed)
+    idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+    h = hashlib.sha256()
+    for tensor in (idx, tgt, meta["answer"]):
+        h.update(repr(tensor.detach().cpu().tolist()).encode("ascii"))
+    return {"seed": int(seed), "batch": int(batch), "n_pairs": int(n_pairs),
+            "vocab": int(vocab), "sha256": h.hexdigest()[:16]}
 
 
 def _draw_split(n_pairs, vocab, device, batch, batches, seed):

@@ -7,18 +7,22 @@ Design principles
    runner prints the hypotheses before executing and stores their ids
    with every result record, so the E3 grid is not a blind
    hyperparameter sweep: each contrast answers a mechanism question.
-2. **Tuned baselines before complex models.**  The rule system (exact
-   ceiling), the trivial floor and a learning-rate-tuned linear probe
-   run before any transformer grid.  A shared training recipe is tuned
-   on the plain ``none`` baseline (validation seed), then frozen for all
-   gate variants so the E1/E3 comparisons stay controlled.  The
-   baselines are checked *statistically* before the grids run: HB1/HB2/
-   HB3 verdicts are written to ``baselines_verdict.json`` (rule ceiling
-   with a Wilson CI, a bootstrap near-chance test for the tuned probe,
-   and the split audit), and E1 re-reads that verdict and the rule
-   ceiling as a positive control, so a gate variant is only credited for
-   what it does beyond a tuned simple baseline on a task the simple rule
-   can actually solve.
+2. **Tuned baselines and sanity checks before complex models.**  The
+   rule system (exact ceiling), the trivial floor and a
+   learning-rate-tuned linear probe run before any transformer grid.  A
+   shared training recipe is tuned on the plain ``none`` baseline
+   (validation seed), then frozen for all gate variants so the E1/E3
+   comparisons stay controlled.  The baselines are checked
+   *statistically* before the grids run: HB1/HB2/HB3 verdicts are
+   written to ``baselines_verdict.json`` (rule ceiling with a Wilson CI,
+   a bootstrap near-chance test for the tuned probe, and the split
+   audit), and the learned path gets two more pre-flight gates: HB5
+   (tiny-batch overfit: the loop must be able to memorise a handful of
+   samples) and HB4 (negative control: the same architecture trained on
+   permuted labels must stay at chance, which rules out answer leakage).
+   E1 re-reads the verdict and the rule ceiling as a positive control,
+   so a gate variant is only credited for what it does beyond a tuned
+   simple baseline on a task the simple rule can actually solve.
 3. **Honest evaluation.**  Tuning uses the validation seed only.  Final
    numbers are reported on a separate test seed that is never used for
    selection.  Every key claim is reported as mean +- std over
@@ -59,9 +63,11 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import pathlib
+import platform
 import subprocess
 from dataclasses import dataclass, field
 
@@ -78,14 +84,17 @@ from .baselines import (
 )
 from .data import (
     RESERVED_EVAL_SEEDS,
+    SANITY_SEED,
     STATS_SEED,
     TEST_SEED,
     VAL_SEED,
     length_sweep_lengths,
     make_batch,
     split_leakage_audit,
+    stream_fingerprint,
+    validate_batch,
 )
-from .metrics import benjamini_hochberg, paired_bootstrap_ci
+from .metrics import benjamini_hochberg, paired_bootstrap_ci, wilson_ci
 from .model import GATES, NORMS, build
 from .train import (
     collect_error_cases,
@@ -97,6 +106,7 @@ from .train import (
     gate_depth_ratio,
     gate_stat_correlations,
     measure_inference_cost,
+    overfit_sanity_check,
     train_model,
     training_curve_verdict,
 )
@@ -107,8 +117,8 @@ from .train import (
 #   TEST_SEED  - the reported numbers; never used for any decision
 #   STATS_SEED - mechanism statistics (matches the collect_stats default)
 
-HYPO_IDS = ("HB1", "HB2", "HB3", "H1a", "H1b", "H1c", "H2a", "H2b", "H3a",
-            "H3b")
+HYPO_IDS = ("HB1", "HB2", "HB3", "HB4", "HB5", "H1a", "H1b", "H1c", "H2a",
+            "H2b", "H3a", "H3b")
 
 HYPOTHESES = {
     "HB1": {
@@ -152,6 +162,38 @@ HYPOTHESES = {
                       "distance stays within the same-stream noise floor",
         "decision": "a shared sample, or a distribution gap above the noise "
                     "floor, invalidates every reported number",
+    },
+    "HB4": {
+        "experiment": "baselines",
+        "question": "Does the pipeline leak the answer into the training "
+                    "signal (negative control)?",
+        "hypothesis": "With the supervised answers permuted across the batch "
+                      "during training, no true answer can be learned, so "
+                      "accuracy on the unchanged test stream must stay at "
+                      "chance.",
+        "prediction": "the upper bound of the 95% bootstrap CI of "
+                      "(control accuracy - chance) stays below the "
+                      "pre-registered absolute tolerance "
+                      "(Settings.negative_control_tol, default 0.02); the "
+                      "pooled Wilson interval is reported for the "
+                      "finite-stream uncertainty",
+        "decision": "a control clearly above chance means answer "
+                    "information leaks through the data/pipeline (or a "
+                    "shortcut exists) and every accuracy reported above it "
+                    "is invalid",
+    },
+    "HB5": {
+        "experiment": "baselines",
+        "question": "Can the training loop fit anything at all "
+                    "(gradient/loss sanity)?",
+        "hypothesis": "A small model trained on one fixed tiny batch with "
+                      "dropout off should drive the training loss to ~0 and "
+                      "the batch accuracy to 1.0; if it cannot, gradients, "
+                      "the loss or the precision path are broken.",
+        "prediction": "final train loss <= 0.1 and train accuracy = 1.0",
+        "decision": "failure invalidates the training loop and blocks the "
+                    "interpretation of every grid result (necessary, not "
+                    "sufficient: data/label bugs can survive memorisation)",
     },
     "H1a": {
         "experiment": "e1",
@@ -276,6 +318,10 @@ class Settings:
     cost_runs: int = 7
     max_error_cases: int = 64   # per gate x seed, dumped to disk
     fdr_q: float = 0.05         # BH false-discovery rate for contrast families
+    overfit_steps: int = 300    # HB5 tiny-batch overfit check
+    overfit_batch: int = 8
+    overfit_lr: float = 3e-3
+    negative_control_tol: float = 0.02  # HB4 pre-registered tolerance
     out_dir: pathlib.Path = field(default_factory=lambda: pathlib.Path("results"))
 
     @classmethod
@@ -285,7 +331,7 @@ class Settings:
             device=device, d_model=48, n_heads=4, n_layers=4, max_len=64,
             vocab=64, batch=16, n_pairs=6, steps=12, seeds=(0, 1),
             eval_batch=64, eval_batches=2, stats_batch=32, stats_batches=2,
-            probe_steps=40, probe_batch=16,
+            probe_steps=40, probe_batch=16, overfit_steps=100,
         )
 
 
@@ -454,9 +500,16 @@ class ContrastLog:
                   f"(effect={r['mean']:+.4f}{rel_s}, "
                   f"MDE80={r['mde80']:.4f}, seeds={r['n']}, "
                   f"sign-consistency={r['sign_consistency']:.2f})")
+        low_seed = [r for r in testable if r["n"] < 3]
+        if low_seed:
+            print(f"[{self.tag}] WARNING: {len(low_seed)}/{len(testable)} "
+                  f"testable contrast(s) rest on fewer than 3 independent "
+                  f"seeds; the recommended minimum for a seed-level claim "
+                  f"is 3-5, so treat them as provisional")
         payload = {"tag": self.tag, "q": q, "n_contrasts": len(self.rows),
                    "n_testable": len(testable),
-                   "n_surviving": len(surviving), "rows": self.rows}
+                   "n_surviving": len(surviving),
+                   "n_low_seed": len(low_seed), "rows": self.rows}
         _write_json(out_dir / f"{self.tag}_contrasts.json", payload)
         return payload
 
@@ -513,12 +566,72 @@ def _git_sha() -> str:
         return "unknown"
 
 
+def _hypotheses_sha() -> str:
+    """Content hash of the pre-registered hypothesis registry.
+
+    Records carry the hash so a result can be matched to the exact
+    decision rules in force when it was produced: if the registry is
+    edited mid-analysis, old and new records can no longer be silently
+    pooled under "the same" hypotheses.
+    """
+    payload = json.dumps(HYPOTHESES, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _environment_record(settings: Settings) -> dict:
+    """Software/hardware provenance for reproducibility."""
+    env = {
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "platform": platform.platform(),
+        "device": settings.device,
+        "cuda_available": bool(torch.cuda.is_available()),
+    }
+    if settings.device.startswith("cuda") and torch.cuda.is_available():
+        env["cuda_device"] = torch.cuda.get_device_name(0)
+    return env
+
+
+def _run_context(settings: Settings) -> dict:
+    """Self-contained provenance block attached to every result record.
+
+    Code revision, hypothesis-registry hash, resolved configuration (every
+    hyperparameter and seed actually used), software environment and the
+    data-stream fingerprints travel *with* each record, so a result file is
+    traceable without relying on defaults that may have changed since.
+    Cached on the Settings object: the environment probe (and git call)
+    runs once per process.
+    """
+    ctx = getattr(settings, "_run_context_cache", None)
+    if ctx is not None:
+        return ctx
+    config = {name: getattr(settings, name)
+              for name in Settings.__dataclass_fields__ if name != "out_dir"}
+    ctx = {
+        "git_sha": _git_sha(),
+        "hypotheses_sha256": _hypotheses_sha(),
+        "environment": _environment_record(settings),
+        "config": config,
+        "data_fingerprints": {
+            name: stream_fingerprint(settings.n_pairs, settings.vocab,
+                                     settings.device, seed=seed)
+            for name, seed in (("val", VAL_SEED), ("test", TEST_SEED),
+                               ("stats", STATS_SEED))
+        },
+    }
+    settings._run_context_cache = ctx
+    return ctx
+
+
 def _load_baseline_verdict(out_dir: pathlib.Path):
-    """The HB1/HB2/HB3 verdicts written by ``run_baselines``, if present.
+    """The HB1-HB5 verdicts written by ``run_baselines``, if present.
 
     E1/E2/E3 read the learned model against the simple baselines, so a
     missing verdict file is surfaced as a note instead of silently
-    treating the baseline check as passed.
+    treating the baseline check as passed.  A verdict file written by an
+    older version lacks the HB4/HB5 keys; those are reported as ``n/a``
+    (not ``FAILED``) so the fix is to re-run ``--only baselines``, not to
+    read the missing checks as failures.
     """
     path = out_dir / "baselines_verdict.json"
     if not path.exists():
@@ -585,7 +698,8 @@ def _cost_record(settings: Settings, model):
 
 
 def _train_and_eval(settings: Settings, seed: int, lr: float,
-                    eval_seed: int = TEST_SEED, **model_overrides):
+                    eval_seed: int = TEST_SEED, permute_labels: bool = False,
+                    **model_overrides):
     if eval_seed in tuple(settings.seeds):
         raise ValueError(
             f"eval_seed={eval_seed} is also a configured training seed; "
@@ -600,7 +714,8 @@ def _train_and_eval(settings: Settings, seed: int, lr: float,
     hist = train_model(model, steps=settings.steps, batch=settings.batch,
                        n_pairs=settings.n_pairs, lr=lr, vocab=settings.vocab,
                        device=settings.device, log_every=0, seed=seed,
-                       eval_every=eval_every, val_batches=settings.val_batches)
+                       eval_every=eval_every, val_batches=settings.val_batches,
+                       permute_labels=permute_labels)
     metrics = eval_metrics(model, settings.n_pairs, settings.vocab,
                            settings.device, batch=settings.eval_batch,
                            batches=settings.eval_batches, seed=eval_seed)
@@ -733,10 +848,10 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path) -> dict:
 
 
 def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("HB1", "HB2", "HB3"))
-    sha = _git_sha()
-    record = {"experiment": "baselines", "hypotheses": ["HB1", "HB2", "HB3"],
-              "git_sha": sha, "seed": TEST_SEED}
+    _announce(("HB1", "HB2", "HB3", "HB4", "HB5"))
+    record = {"experiment": "baselines",
+              "hypotheses": ["HB1", "HB2", "HB3", "HB4", "HB5"],
+              "seed": TEST_SEED, **_run_context(settings)}
 
     audit = _audit_data_splits(settings, out_dir)
 
@@ -746,6 +861,26 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
           f"min={balance['min_class_share']:.5f} max={balance['max_class_share']:.5f} "
           f"(uniform={balance['expected_uniform_share']:.5f})")
     _write_json(out_dir / "baselines_balance.json", balance)
+
+    # HB5 first: the cheapest check, and a broken training loop invalidates
+    # every learned number below it (including the negative control).
+    tiny = build(_model_cfg(settings, gate="none", d_model=48, n_layers=2),
+                 compile=False)
+    gen = torch.Generator(device=settings.device).manual_seed(SANITY_SEED)
+    sidx, stgt, smeta = make_batch(settings.overfit_batch, settings.n_pairs,
+                                   settings.vocab, settings.device, gen=gen)
+    validate_batch(sidx, stgt, smeta, settings.vocab)
+    sanity = overfit_sanity_check(tiny, sidx, stgt, smeta,
+                                  lr=settings.overfit_lr,
+                                  steps=settings.overfit_steps)
+    print(f"[baselines] HB5 tiny-batch overfit sanity (batch="
+          f"{sanity['batch']}, steps={sanity['steps']}, lr={sanity['lr']:g}): "
+          f"loss {sanity['loss_first']:.4f} -> {sanity['loss_last']:.4f}, "
+          f"batch acc={sanity['acc_last']:.3f}; "
+          f"{'SUPPORTED (loop can memorise a tiny batch)' if sanity['passed'] else 'FAILED - gradients/loss/precision are broken, do not trust any grid result'}")
+    _write_json(out_dir / "baselines_overfit_sanity.json", sanity)
+    _write_result(out_dir / "baselines_runs.jsonl",
+                  {**record, "name": "overfit_sanity", **sanity})
 
     hb1_supported = None
     for name, fn in (
@@ -803,6 +938,55 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
           f"{hb2['mean']:+.4f} [{hb2['lo']:+.4f}, {hb2['hi']:+.4f}] "
           f"(p={hb2['p_value']:.3f}, MDE80={hb2['mde80']:.4f}); "
           f"{'SUPPORTED (probe confidently <2x chance)' if hb2['hb2_supported'] else 'NOT SUPPORTED - inspect the simple-baseline comparison'}")
+
+    # HB4 negative control: same architecture and shared recipe as E1, but
+    # the supervised answers are permuted across the batch during training.
+    # Chance-level test accuracy is the expected outcome; above-chance means
+    # answer information leaks into the pipeline.
+    lr_shared = _resolve_lr(settings, out_dir, "baselines")
+    ctrl_runs = []
+    for seed in settings.seeds:
+        _, _, metrics, curve = _train_and_eval(
+            settings, seed, lr_shared, gate="none", permute_labels=True)
+        n = int(metrics["n"])
+        ctrl_runs.append({
+            "seed": seed, "accuracy": metrics["accuracy"],
+            "accuracy_lo": metrics["accuracy_lo"],
+            "accuracy_hi": metrics["accuracy_hi"], "n": n,
+            "correct": int(round(metrics["accuracy"] * n)),
+            "train_loss_last": curve["train_loss_last"],
+            "curve_verdict": curve["curve_verdict"],
+        })
+        _write_result(out_dir / "baselines_runs.jsonl",
+                      {**record, "name": "negative_control_permuted_labels",
+                       "lr": lr_shared, "training_seed": seed,
+                       "accuracy": metrics["accuracy"],
+                       "accuracy_lo": metrics["accuracy_lo"],
+                       "accuracy_hi": metrics["accuracy_hi"], "n": n})
+    margins = [r["accuracy"] - chance for r in ctrl_runs]
+    hb4 = paired_bootstrap_ci(margins)
+    pooled = wilson_ci(sum(r["correct"] for r in ctrl_runs),
+                       sum(r["n"] for r in ctrl_runs))
+    ctrl_summary = _mean_std([r["accuracy"] for r in ctrl_runs])
+    hb4_supported = bool(hb4["n"] > 0
+                         and hb4["hi"] < settings.negative_control_tol)
+    print(f"[baselines] HB4 negative control (labels permuted in training, "
+          f"shared recipe lr={lr_shared:g}, test seed {TEST_SEED}): "
+          f"accuracy={ctrl_summary['mean']:.4f} +- {ctrl_summary['std']:.4f} "
+          f"over {ctrl_summary['n']} seeds; accuracy - chance = "
+          f"{hb4['mean']:+.4f} [{hb4['lo']:+.4f}, {hb4['hi']:+.4f}] "
+          f"(pooled Wilson [{pooled['lo']:.4f}, {pooled['hi']:.4f}], "
+          f"tol={settings.negative_control_tol:g}); "
+          f"{'SUPPORTED (no label leakage detected)' if hb4_supported else 'FAILED - the control beats chance: answer information leaks into the pipeline'}")
+    _write_json(out_dir / "baselines_negative_control.json", {
+        "lr": lr_shared, "chance": chance,
+        "tolerance": settings.negative_control_tol,
+        "accuracy_mean": ctrl_summary["mean"],
+        "accuracy_std": ctrl_summary["std"],
+        "margin": hb4, "pooled_wilson": pooled, "runs": ctrl_runs,
+        "hb4_supported": hb4_supported,
+    })
+
     verdict = {
         "train_seed": settings.seeds[0] if settings.seeds else None,
         "test_seed": TEST_SEED,
@@ -811,6 +995,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "hb1_supported": bool(hb1_supported),
         "hb2_supported": bool(hb2["hb2_supported"]),
         "hb3_supported": bool(audit.get("hb3_supported")),
+        "hb4_supported": hb4_supported,
+        "hb5_supported": bool(sanity["passed"]),
         "probe_accuracy_mean": summary["mean"],
         "probe_accuracy_std": summary["std"],
         "hb2_accuracy_minus_chance": {
@@ -818,11 +1004,27 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "p_value": hb2["p_value"], "mde80": hb2["mde80"],
             "n": hb2["n"],
         },
+        "hb4_negative_control": {
+            "lr": lr_shared, "tolerance": settings.negative_control_tol,
+            "accuracy_mean": ctrl_summary["mean"],
+            "accuracy_std": ctrl_summary["std"],
+            "margin": hb4, "pooled_wilson": pooled,
+        },
+        "hb5_overfit_sanity": {
+            "passed": sanity["passed"],
+            "loss_first": sanity["loss_first"],
+            "loss_last": sanity["loss_last"],
+            "acc_last": sanity["acc_last"],
+            "steps": sanity["steps"], "lr": sanity["lr"],
+            "batch": sanity["batch"],
+        },
     }
     _write_json(out_dir / "baselines_verdict.json", verdict)
     print(f"[baselines] verdict: HB1={'ok' if verdict['hb1_supported'] else 'FAILED'}"
           f" HB2={'ok' if verdict['hb2_supported'] else 'FAILED'}"
-          f" HB3={'ok' if verdict['hb3_supported'] else 'FAILED'} "
+          f" HB3={'ok' if verdict['hb3_supported'] else 'FAILED'}"
+          f" HB4={'ok' if verdict['hb4_supported'] else 'FAILED'}"
+          f" HB5={'ok' if verdict['hb5_supported'] else 'FAILED'} "
           f"(stored in baselines_verdict.json; a failed baseline check "
           f"invalidates the corresponding claims above it)")
 
@@ -830,7 +1032,6 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
 def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H1a", "H1b", "H1c"))
     lr = _resolve_lr(settings, out_dir, "e1")
-    sha = _git_sha()
     runs = []
     examples = {}
     for gate in GATES:
@@ -860,10 +1061,11 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                                "lr": lr, **case})
             rec = {
                 "experiment": "e1", "hypotheses": ["H1a", "H1b", "H1c"],
-                "git_sha": sha, "gate": gate, "seed": seed, "lr": lr,
+                "gate": gate, "seed": seed, "lr": lr,
                 "params": params, **metrics, **corr, **fc, **ed,
                 **{f"err_{k}": v for k, v in errors["summary"].items()},
                 **_cost_record(settings, model), **curve,
+                **_run_context(settings),
             }
             if _finite(rec.get("gate_vs_entropy")):
                 rec["abs_gate_vs_entropy"] = abs(rec["gate_vs_entropy"])
@@ -927,14 +1129,21 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               "crediting any gate variant")
     else:
         probe = verdict.get("probe_accuracy_mean", float("nan"))
-        marks = "/".join("ok" if verdict.get(k) else "FAILED"
-                         for k in ("hb1_supported", "hb2_supported",
-                                   "hb3_supported"))
+
+        def _mark(key):
+            value = verdict.get(key)
+            return "n/a" if value is None else ("ok" if value else "FAILED")
+
+        marks = "/".join(_mark(k) for k in ("hb1_supported", "hb2_supported",
+                                            "hb3_supported", "hb4_supported",
+                                            "hb5_supported"))
         print(f"[e1] simple-baseline check (from --only baselines): "
-              f"HB1/HB2/HB3={marks}, tuned linear probe test accuracy="
-              f"{probe:.4f} vs chance {verdict.get('chance', float('nan')):.4f} "
-              f"- the transformer is only credited for what it does beyond "
-              f"this tuned baseline and the rule ceiling")
+              f"HB1/HB2/HB3/HB4/HB5={marks}, tuned linear probe test "
+              f"accuracy={probe:.4f} vs chance "
+              f"{verdict.get('chance', float('nan')):.4f} - the transformer is "
+              f"only credited for what it does beyond this tuned baseline and "
+              f"the rule ceiling (HB4 = no label leakage, HB5 = loop can "
+              f"memorise a tiny batch)")
 
     print("\n[e1] H1a robustness: rank (Spearman) gate-entropy correlation "
           "alongside Pearson (a monotone effect must survive the change of "
@@ -1128,7 +1337,6 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                                    max_len=settings.max_len)
     print(f"[e2] training at n_pairs={settings.n_pairs}, sweep over {lengths} "
           f"(test seed {TEST_SEED}, stats seed {STATS_SEED})")
-    sha = _git_sha()
     runs = []
     examples = {}
     for gate in GATES:
@@ -1136,11 +1344,12 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             model, params, _, curve = _train_and_eval(settings, seed, lr,
                                                       gate=gate)
             rec = {"experiment": "e2", "hypotheses": ["H2a", "H2b"],
-                   "git_sha": sha, "gate": gate, "seed": seed, "lr": lr,
+                   "gate": gate, "seed": seed, "lr": lr,
                    "params": params, "accuracy_by_length": {},
                    "entropy_by_length": {}, "entropy_norm_by_length": {},
                    "maxprob_by_length": {}, "gate_by_length": {},
-                   **_cost_record(settings, model), **curve}
+                   **_cost_record(settings, model), **curve,
+                   **_run_context(settings)}
             for length in lengths:
                 metrics = eval_metrics(model, length, settings.vocab,
                                        settings.device, batch=settings.eval_batch,
@@ -1295,7 +1504,6 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     lr = _resolve_lr(settings, out_dir, "e3")
     print(f"[e3] grid gate x norm x layer_scale at lr={lr:g}, "
           f"test seed {TEST_SEED}, stats seed {STATS_SEED}")
-    sha = _git_sha()
     runs = []
     for gate in ("query", "calib"):
         for norm in NORMS:
@@ -1312,7 +1520,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                     resid = stats["resid_norm"].mean(dim=0)
                     rec = {
                         "experiment": "e3", "hypotheses": ["H3a", "H3b"],
-                        "git_sha": sha, "gate": gate, "norm": norm,
+                        "gate": gate, "norm": norm,
                         "layer_scale": layer_scale, "seed": seed, "lr": lr,
                         "params": params, "accuracy": metrics["accuracy"],
                         "f1_macro": metrics["f1_macro"],
@@ -1321,6 +1529,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                         "resid_norm_last_over_first": float(
                             resid[-1] / resid[0].clamp_min(1e-12)),
                         **_cost_record(settings, model), **curve,
+                        **_run_context(settings),
                     }
                     _write_result(out_dir / "e3_runs.jsonl", rec)
                     runs.append(rec)
@@ -1468,6 +1677,7 @@ def main(argv=None) -> int:
     out_dir = pathlib.Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     _write_json(out_dir / "hypotheses.json", HYPOTHESES)
+    _write_json(out_dir / "environment.json", _run_context(settings))
 
     print(f"[runner] only={args.only} quick={args.quick} "
           f"seeds={settings.seeds} steps={settings.steps} "

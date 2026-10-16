@@ -22,6 +22,7 @@ from .metrics import (
     multiclass_metrics,
     pr_auc,
     roc_auc,
+    wilson_ci,
 )
 
 
@@ -414,15 +415,36 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     return report
 
 
+def _permute_batch_labels(tgt: torch.Tensor, gen: torch.Generator) -> torch.Tensor:
+    """Shuffle the supervised labels across the batch (negative-control mode).
+
+    Every row of ``tgt`` carries its own sample's label (or ``-1``), so a
+    row permutation swaps which answer each sample is trained to predict -
+    the resulting training signal cannot contain the sample's true answer.
+    """
+    perm = torch.randperm(tgt.size(0), generator=gen, device=tgt.device)
+    return tgt[perm]
+
+
 def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                 device="cpu", log_every=250, seed=0, dense_lm=False,
                 eval_every=0, val_batches=2, early_stop_patience=None,
-                nonfinite="raise", grad_norm_explode=100.0):
+                nonfinite="raise", grad_norm_explode=100.0,
+                permute_labels=False):
     """Train on the recall task with optional learning-curve monitoring.
 
     ``seed`` governs *all* run-to-run randomness: the data generator and the
     global RNG that draws the attention/MLP dropout masks.  Without the
     latter two runs of the same config would silently differ.
+
+    ``permute_labels`` (negative control, default off): after the first
+    batch has passed the data-cleaning gate, the supervised labels of every
+    batch are shuffled across the batch before the loss is computed.  A
+    model trained this way cannot learn any true answer, so its accuracy on
+    the *unchanged* evaluation streams must stay at chance - a clear
+    above-chance result means answer information leaks through the
+    pipeline.  The staged non-finite triage is fed the un-permuted batch,
+    so the intentional label mismatch is never misread as a data bug.
 
     ``seed`` must not collide with a held-out evaluation stream
     (``cage.data.RESERVED_EVAL_SEEDS``); the first batch of the run is
@@ -477,13 +499,16 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, dense_lm=dense_lm, gen=gen)
         if step == 0:
             validate_batch(idx, tgt, meta, vocab)
+        diag_tgt = tgt
+        if permute_labels:
+            tgt = _permute_batch_labels(tgt, gen)
         opt.zero_grad(set_to_none=True)
         sup_pos = None if dense_lm else meta["query_pos"]
         _, loss, _ = model(idx, tgt, sup_pos=sup_pos)
         lv = loss.item()
         entry = {"step": step, "train_loss": lv}
         if not math.isfinite(lv):
-            diag = diagnose_nonfinite(model, idx, tgt, meta, vocab,
+            diag = diagnose_nonfinite(model, idx, diag_tgt, meta, vocab,
                                       device=device, dense_lm=dense_lm)
             entry["diagnosis"] = diag
             print(f"  step {step:5d}  loss {lv}  <- non-finite; triage "
@@ -502,7 +527,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         gn = float(grad_norm)
         entry["grad_norm"] = gn
         if not math.isfinite(gn):
-            diag = diagnose_nonfinite(model, idx, tgt, meta, vocab,
+            diag = diagnose_nonfinite(model, idx, diag_tgt, meta, vocab,
                                       device=device, dense_lm=dense_lm)
             diag["clip_grad_norm"] = gn
             entry["diagnosis"] = diag
@@ -561,6 +586,57 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                   f"(best {best_val:.4f} @ step {best_val_step})")
             break
     return hist
+
+
+def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
+                         target_loss=0.1, target_acc=1.0):
+    """Can the training loop fit a single tiny batch? (gradient/loss sanity)
+
+    The classic pre-flight check: take one fixed batch, turn dropout off
+    (caller's config), and train the *actual* architecture on it with the
+    *actual* optimizer factory.  A correct training loop drives the loss
+    to ~0 and the batch accuracy to 1.0 because the batch can be
+    memorised; a loop that cannot overfit a handful of samples has broken
+    gradients, a mis-wired loss or a silent dtype/precision problem, and
+    no grid result above it is interpretable.
+
+    This is a *necessary, not sufficient* check: passing it does not prove
+    the data pipeline, augmentation or label mapping are right (bugs there
+    survive memorisation); failing it blocks every downstream claim.
+
+    Trains ``model`` in place (pass a throwaway instance) and returns the
+    sampled loss/accuracy curves plus the ``passed`` verdict.  Uses the
+    sparse (query-position) supervision the experiment contract reports.
+    """
+    model.train()
+    params = [p for p in model.parameters() if p.requires_grad]
+    opt = _make_adamw(params, lr)
+    sample_every = max(1, steps // 10)
+    curve = []
+    for step in range(steps):
+        opt.zero_grad(set_to_none=True)
+        logits, loss, _ = model(idx, tgt, sup_pos=meta["query_pos"])
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(params, 1.0)
+        opt.step()
+        if step % sample_every == 0 or step == steps - 1:
+            with torch.no_grad():
+                acc = float((logits.detach().argmax(-1)
+                             == meta["answer"]).to(torch.float64).mean())
+            curve.append({"step": step, "loss": float(loss.detach()), "acc": acc})
+    return {
+        "steps": int(steps),
+        "lr": float(lr),
+        "batch": int(idx.size(0)),
+        "loss_first": curve[0]["loss"],
+        "loss_last": curve[-1]["loss"],
+        "acc_last": curve[-1]["acc"],
+        "curve": curve,
+        "passed": bool(curve[-1]["loss"] <= target_loss
+                       and curve[-1]["acc"] >= target_acc),
+        "target_loss": float(target_loss),
+        "target_acc": float(target_acc),
+    }
 
 
 def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
@@ -990,6 +1066,13 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     primary metric; ``f1_micro`` equals it by construction and the
     macro/weighted variants guard against value-frequency skew.  See
     ``cage/metrics.py`` for the averaging conventions.
+
+    ``accuracy_lo`` / ``accuracy_hi`` are the Wilson 95% interval for the
+    accuracy over the finite evaluation stream: seed-level std quantifies
+    training variance, while this interval quantifies how precisely the
+    *reported* stream of ``batch * batches`` samples pins the accuracy
+    down (the two are different uncertainties and both belong next to a
+    headline number).
     """
     gen = torch.Generator(device=device).manual_seed(seed)
     was_training = model.training
@@ -1004,6 +1087,10 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     logits_cat = torch.cat(logits_all, dim=0)
     tgt_cat = torch.cat(tgt_all, dim=0)
     out = multiclass_metrics(logits_cat, tgt_cat, topk=topk)
+    acc_ci = wilson_ci(int((logits_cat.argmax(-1) == tgt_cat).sum()),
+                       int(tgt_cat.numel()))
+    out["accuracy_lo"] = acc_ci["lo"]
+    out["accuracy_hi"] = acc_ci["hi"]
     out["nll"] = float(torch.nn.functional.cross_entropy(logits_cat, tgt_cat))
     probs = logits_cat.softmax(dim=-1)
     confidence, pred = probs.max(dim=-1)
