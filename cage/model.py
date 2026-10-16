@@ -124,7 +124,11 @@ class SeeDNorm(nn.Module):
         nn.init.normal_(self.scale.weight, std=0.02)
 
     def forward(self, x):
-        s = self.scale(x).sigmoid_()
+        s = self.scale(x)
+        if torch.is_grad_enabled():
+            s = s.sigmoid()
+        else:
+            s.sigmoid_()
         return self.ln(x).mul_(s).mul_(2.0)
 
 
@@ -515,8 +519,7 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
             else:
                 mask = mbuf[:p.numel()].view_as(p)
                 torch.gt(p, _EPS, out=mask)
-        logterm.add_(1.0)
-        logterm.masked_fill_(mask.logical_not_(), 0.0)
+        logterm.add_(1.0).mul_(mask)
         d_p.addcmul_(logterm, grad_ent.unsqueeze(-1), value=-1.0)
     d_p.mul_(p)
     n0, n1 = d_p.size(0), d_p.size(1)
@@ -808,13 +811,14 @@ class Attention(nn.Module):
                     packed[0].view(B, h, T, dk), packed[1], B, h, T,
                     stat_pos, is_null, ent_full=ent)
         else:
-            q_ = packed[0].view(B, h, T, dk)
             k_ = packed[1].view(B, h, T, dk)
             if is_null:
                 nk = self.null_k.view(1, h, 1, dk).expand(B, h, 1, dk)
                 kv_k = torch.cat([nk, k_], dim=2)
-                att = torch.matmul(q_, kv_k.transpose(-2, -1)).mul_(self.inv_scale)
-                att.add_(_causal_null_mask(T, x.device, x.dtype))
+                att = torch.baddbmm(
+                    _causal_null_mask(T, x.device, x.dtype), packed[0],
+                    kv_k.reshape(bh, T + 1, dk).transpose(1, 2),
+                    beta=1.0, alpha=self.inv_scale)
                 p = _SoftmaxInPlace.apply(att)
                 if not need_stats:
                     stats = None
@@ -927,31 +931,33 @@ class Block(nn.Module):
 
     def forward(self, x, stat_pos=None):
         ls1, ls2 = self.ls1, self.ls2
+        grad_on = torch.is_grad_enabled()
         if self.post:
             a, s = self.attn(x, stat_pos)
             if ls1 is None:
-                x = a.add_(x)
+                x = a.add(x) if grad_on else a.add_(x)
             else:
-                x = torch.addcmul(x, a, ls1)
+                x = torch.addcmul(x, a, ls1) if grad_on else a.addcmul_(x, ls1)
             x = self.ln1(x)
+            m = self.mlp(x)
             if ls2 is None:
-                x = self.mlp(x).add_(x)
+                x = m.add(x) if grad_on else m.add_(x)
             else:
-                x = torch.addcmul(x, self.mlp(x), ls2)
+                x = torch.addcmul(x, m, ls2) if grad_on else m.addcmul_(x, ls2)
             x = self.ln2(x)
         else:
             x_norm = self.ln1(x)
             a, s = self.attn(x_norm, stat_pos)
             if ls1 is None:
-                x = a.add_(x)
+                x = a.add(x) if grad_on else a.add_(x)
             else:
-                x = torch.addcmul(x, a, ls1)
+                x = torch.addcmul(x, a, ls1) if grad_on else a.addcmul_(x, ls1)
             x_norm = self.ln2(x)
             m = self.mlp(x_norm)
             if ls2 is None:
-                x = m.add_(x)
+                x = m.add(x) if grad_on else m.add_(x)
             else:
-                x = torch.addcmul(x, m, ls2)
+                x = torch.addcmul(x, m, ls2) if grad_on else m.addcmul_(x, ls2)
         return x, s
 
 
