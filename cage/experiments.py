@@ -117,8 +117,8 @@ from .train import (
 #   TEST_SEED  - the reported numbers; never used for any decision
 #   STATS_SEED - mechanism statistics (matches the collect_stats default)
 
-HYPO_IDS = ("HB1", "HB2", "HB3", "HB4", "HB5", "H1a", "H1b", "H1c", "H2a",
-            "H2b", "H3a", "H3b")
+HYPO_IDS = ("HB1", "HB2", "HB3", "HB4", "HB5", "H1a", "H1b", "H1c", "H1d",
+            "H2a", "H2b", "H2c", "H3a", "H3b")
 
 HYPOTHESES = {
     "HB1": {
@@ -237,6 +237,33 @@ HYPOTHESES = {
                     "Benjamini-Hochberg FDR control across the E1 contrasts "
                     "(q=0.05)",
     },
+    "H1d": {
+        "experiment": "e1",
+        "question": "Does each calibration term carry its own contribution "
+                    "(no dead component)?",
+        "hypothesis": "The calib gate claims two additive terms (length "
+                      "-a*log T and concentration -c*Hbar).  Within the "
+                      "identical calib architecture, removing the "
+                      "concentration term must dismantle the gate/entropy "
+                      "association, and removing a term that does work must "
+                      "show up in accuracy or in the false-concentration "
+                      "margin - a component removable at no cost is not "
+                      "doing work.",
+        "prediction": "|gate_vs_entropy| collapses toward the query gate in "
+                      "the no-concentration arms and stays clearly positive "
+                      "in full calib; accuracy and gate_margin of full calib "
+                      "are at least as high as in the ablated arms "
+                      "(the fixed-length main effect of the length term is "
+                      "expected to be small because at a fixed T it is a "
+                      "constant absorbed by the gate bias; H2c tests it "
+                      "where it matters, across lengths)",
+        "decision": "paired bootstrap 95% CIs of accuracy(calib - ablated "
+                    "arm) and gate_margin(calib - ablated arm) exclude 0 "
+                    "after Benjamini-Hochberg FDR control across the E1 "
+                    "family (q=0.05); the mechanism check validates that "
+                    "each ablation removed the intended pathway and is "
+                    "reported alongside, not as a decision criterion",
+    },
     "H2a": {
         "experiment": "e2",
         "question": "Does length calibration slow the degradation beyond "
@@ -263,6 +290,25 @@ HYPOTHESES = {
                     "contrasts (q=0.05): raw entropy drift CI excludes 0 "
                     "with a positive mean, and the H/log(T) drift CI "
                     "includes 0",
+    },
+    "H2c": {
+        "experiment": "e2",
+        "question": "Is the length term (not the concentration term) the "
+                    "specific cause of calib's length robustness?",
+        "hypothesis": "The advantage of calib over none beyond the training "
+                      "length comes from subtracting a*log(T): removing the "
+                      "length term (concentration-only arm) must lose the "
+                      "advantage, while removing the concentration term "
+                      "(length-only arm) must keep it.",
+        "prediction": "accuracy_at_longest(calib) > accuracy_at_longest("
+                      "calib_ent_only) and accuracy_drop(calib) < "
+                      "accuracy_drop(calib_ent_only); calib_len_only stays "
+                      "close to the full calib arm",
+        "decision": "paired bootstrap 95% CI of calib - calib_ent_only on "
+                    "accuracy_at_longest excludes 0 after "
+                    "Benjamini-Hochberg FDR control across the E2 contrasts "
+                    "(q=0.05); the calib_len_only arm is the reverse check "
+                    "and is read together with it",
     },
     "H3a": {
         "experiment": "e3",
@@ -359,6 +405,108 @@ def _aggregate_runs(runs, skip=("seed", "lr", "params")):
     return {k: _mean_std([r[k] for r in runs if k in r]) for k in keys}
 
 
+# Recipe fields that the controlled-comparison contract requires to be
+# *identical* on both sides of every contrast (see ``_controlled_audit``):
+# optimizer-relevant learning rate, schedule length, batch geometry, data
+# sizes and every evaluation-stream size.  ``config`` is the resolved
+# Settings snapshot stored with each run record.
+_AUDIT_RECIPE_KEYS = (
+    "device", "d_model", "n_heads", "n_layers", "max_len", "vocab", "batch",
+    "n_pairs", "steps", "eval_batch", "eval_batches", "stats_batch",
+    "stats_batches", "val_batches", "curve_points", "fdr_q",
+)
+
+# Record fields that describe the module under test.  They are the only
+# dimensions a contrast may vary; every other recorded design setting has to
+# match across the two sides.
+_AUDIT_FACTOR_KEYS = ("gate", "norm", "layer_scale", "calib_variant")
+
+
+def _recipe_view(run):
+    """The controlled part of a run's configuration (a flat dict)."""
+    cfg = run.get("config") or {}
+    view = {k: cfg.get(k) for k in _AUDIT_RECIPE_KEYS}
+    view["lr"] = run.get("lr")
+    return view
+
+
+def _controlled_audit(runs_a, runs_b):
+    """Machine-check the controlled-variable contract of a contrast.
+
+    Comparing method A with method B only attributes a difference to the
+    module under test if *everything else* is held fixed.  This audit
+    verifies, from the stored run records:
+
+    1. **Paired seeds**: both sides were run on the same seed set, so the
+       paired bootstrap differences each seed with itself (fewer / different
+       seeds silently shrink the sample and break the pairing);
+    2. **Within-side recipe**: every run on a side used the same learning
+       rate, step count, batch geometry, data size and evaluation-stream
+       size (no per-variant optimizer or schedule drift);
+    3. **Across-side recipe**: the two recipes are identical;
+    4. **Varying factor**: at least one declared model factor (gate / norm /
+       layer_scale / calibration-ablation arm) actually differs, so the
+       contrast is not degenerate.
+
+    The optimizer factory, cosine schedule, clipping and gradient settings
+    are fixed in the single training entry point (``train.train_model``) and
+    are therefore not per-run fields; ``lr`` plus ``steps`` pin the schedule
+    that factory is combined with.  Returns an audit dict; a contrast whose
+    audit fails is not read as supporting its hypothesis.
+    """
+    audit = {
+        "controlled": True,
+        "seeds_paired": False,
+        "n_a": len(runs_a),
+        "n_b": len(runs_b),
+        "seeds_a": sorted(r.get("seed") for r in runs_a),
+        "seeds_b": sorted(r.get("seed") for r in runs_b),
+        "varying_factors": {},
+        "mismatches": [],
+    }
+    audit["seeds_paired"] = audit["seeds_a"] == audit["seeds_b"]
+    if not audit["seeds_paired"]:
+        audit["mismatches"].append(
+            f"seed sets differ: a={audit['seeds_a']} b={audit['seeds_b']} "
+            f"(contrast must be paired over identical seeds)")
+    for side, runs in (("a", runs_a), ("b", runs_b)):
+        views = [_recipe_view(r) for r in runs]
+        if not views:
+            audit["mismatches"].append(f"side {side} has no runs")
+            continue
+        first = views[0]
+        for j, other in enumerate(views[1:], start=1):
+            for key, val in first.items():
+                if other.get(key) != val:
+                    audit["mismatches"].append(
+                        f"side {side} recipe differs between runs 0 and {j}: "
+                        f"{key}={val!r} vs {other.get(key)!r}")
+    if runs_a and runs_b:
+        va, vb = _recipe_view(runs_a[0]), _recipe_view(runs_b[0])
+        for key, val in va.items():
+            if vb.get(key) != val:
+                audit["mismatches"].append(
+                    f"recipe differs across sides: {key}={val!r} vs "
+                    f"{vb.get(key)!r}")
+        for key in _AUDIT_FACTOR_KEYS:
+            in_a = any(key in r for r in runs_a)
+            in_b = any(key in r for r in runs_b)
+            if not (in_a and in_b):
+                continue
+            set_a = {str(r.get(key)) for r in runs_a}
+            set_b = {str(r.get(key)) for r in runs_b}
+            if set_a != set_b:
+                audit["varying_factors"][key] = {
+                    "a": sorted(set_a), "b": sorted(set_b)}
+        if not audit["varying_factors"]:
+            audit["mismatches"].append(
+                "no declared model factor (gate/norm/layer_scale/"
+                "calib_variant) differs across the sides: degenerate or "
+                "mislabeled contrast")
+    audit["controlled"] = not audit["mismatches"]
+    return audit
+
+
 def _paired_diff(runs_a, runs_b, metric):
     """Paired contrast ``a - b`` plus the control-side level.
 
@@ -366,6 +514,11 @@ def _paired_diff(runs_a, runs_b, metric):
     the report can print the effect as a relative change: a contrast can be
     statistically significant with zero variance yet practically
     negligible, and the relative effect is what exposes that.
+
+    The controlled-variable audit (``_controlled_audit``) is attached as
+    ``controlled``: a difference between recipes (optimizer settings, step
+    count, data geometry, unpaired seeds) would confound the contrast, so
+    the claim is refused downstream instead of being reported as a win.
     """
     by_seed = {r["seed"]: r for r in runs_b}
     diffs = []
@@ -378,6 +531,7 @@ def _paired_diff(runs_a, runs_b, metric):
     ci = paired_bootstrap_ci(diffs)
     base = _mean_std([r[metric] for r in runs_b if metric in r])
     ci["baseline_mean"] = base["mean"]
+    ci["controlled"] = _controlled_audit(runs_a, runs_b)
     return ci
 
 
@@ -454,6 +608,13 @@ class ContrastLog:
     bootstrap p-value, adjusted p, effect size, MDE80 and seed
     sign-consistency, and writes the table to ``<tag>_contrasts.json`` so
     the corrected readout is auditable next to the run records.
+
+    Every contrast built by ``_paired_diff`` also carries its
+    controlled-variable audit: a contrast whose two sides differ in
+    optimizer/recipe settings, whose seeds are not paired, or that does not
+    vary a declared model factor is *not* read as supported, whatever its
+    p-value - the difference would not be attributable to the module under
+    test.  The audit verdict is printed inline and stored per row.
     """
 
     def __init__(self, tag: str):
@@ -461,6 +622,7 @@ class ContrastLog:
         self.rows: list[dict] = []
 
     def print(self, rule, hyp, metric, ci, warn="") -> None:
+        audit = ci.get("controlled")
         self.rows.append({
             "rule": rule, "hypothesis": hyp, "metric": metric,
             "mean": ci.get("mean"), "lo": ci.get("lo"), "hi": ci.get("hi"),
@@ -468,17 +630,32 @@ class ContrastLog:
             "mde80": ci.get("mde80"),
             "sign_consistency": ci.get("sign_consistency"),
             "baseline_mean": ci.get("baseline_mean"),
+            "controlled": None if audit is None else audit["controlled"],
+            "varying_factors": ({} if audit is None
+                                else audit.get("varying_factors")),
+            "control_mismatches": ([] if audit is None
+                                   else audit.get("mismatches", [])),
         })
         line = f"  [{hyp}] {rule} ({metric}): {_fmt_ci(ci)}"
+        if audit is not None:
+            factors = ",".join(sorted(audit.get("varying_factors", {}))) or "n/a"
+            line += (f"  [control: {'ok' if audit['controlled'] else 'FAILED'}"
+                     f", varies={factors}]")
         if warn:
             line += f"  [{warn}]"
         print(line)
+        if audit is not None and not audit["controlled"]:
+            for mismatch in audit["mismatches"]:
+                print(f"      CONTROL WARNING: {mismatch}")
 
     def finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
         adj = benjamini_hochberg([r["p_value"] for r in self.rows], q=q)
         for row, a in zip(self.rows, adj):
             row["p_adj"] = a["p_adj"]
-            row["fdr_reject"] = a["reject"]
+            # A confounded contrast cannot support its hypothesis even if
+            # its p-value is small: refuse the claim at the decision point.
+            row["fdr_reject"] = bool(a["reject"] and row.get("controlled") is not False)
+            row["confounded"] = row.get("controlled") is False
             base = row.get("baseline_mean")
             row["rel_effect"] = (
                 row["mean"] / abs(base)
@@ -486,6 +663,9 @@ class ContrastLog:
                 else float("nan"))
         testable = [r for r in self.rows if math.isfinite(r["p_adj"])]
         surviving = [r for r in testable if r["fdr_reject"]]
+        confounded = [r for r in testable if r.get("confounded")]
+        controlled_pass = [r for r in self.rows if r.get("controlled") is True]
+        audited = [r for r in self.rows if r.get("controlled") is not None]
         print(f"\n[{self.tag}] multiplicity control (Benjamini-Hochberg FDR, "
               f"q={q:g}): {len(surviving)}/{len(testable)} testable "
               f"contrasts survive (uncorrected p -> adjusted p; only "
@@ -495,12 +675,24 @@ class ContrastLog:
         for r in testable:
             rel_s = (f", rel={r['rel_effect']:+.2%}"
                      if math.isfinite(r["rel_effect"]) else "")
+            verdict = "SURVIVES" if r["fdr_reject"] else "not significant"
+            if r.get("confounded"):
+                verdict = "REFUSED (confounded contrast)"
             print(f"  [{r['hypothesis']}] {r['rule']} ({r['metric']}): "
                   f"p={r['p_value']:.4f} -> p_adj={r['p_adj']:.4f} "
-                  f"{'SURVIVES' if r['fdr_reject'] else 'not significant'} "
+                  f"{verdict} "
                   f"(effect={r['mean']:+.4f}{rel_s}, "
                   f"MDE80={r['mde80']:.4f}, seeds={r['n']}, "
                   f"sign-consistency={r['sign_consistency']:.2f})")
+        if audited:
+            print(f"[{self.tag}] controlled-variable audit: "
+                  f"{len(controlled_pass)}/{len(audited)} contrasts pass "
+                  f"(paired seeds + identical training recipe across sides + "
+                  f"a declared model factor varies)")
+        if confounded:
+            print(f"[{self.tag}] WARNING: {len(confounded)} contrast(s) "
+                  f"failed the controlled-variable audit and were refused "
+                  f"regardless of their p-values")
         low_seed = [r for r in testable if r["n"] < 3]
         if low_seed:
             print(f"[{self.tag}] WARNING: {len(low_seed)}/{len(testable)} "
@@ -510,6 +702,9 @@ class ContrastLog:
         payload = {"tag": self.tag, "q": q, "n_contrasts": len(self.rows),
                    "n_testable": len(testable),
                    "n_surviving": len(surviving),
+                   "n_confounded": len(confounded),
+                   "n_audited": len(audited),
+                   "n_control_passed": len(controlled_pass),
                    "n_low_seed": len(low_seed), "rows": self.rows}
         _write_json(out_dir / f"{self.tag}_contrasts.json", payload)
         return payload
@@ -1030,27 +1225,77 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
           f"invalidates the corresponding claims above it)")
 
 
+# E1 calibration-term ablation arms: the full factorisation of the two
+# additive terms inside the identical ``calib`` gate.  The full cell (both
+# terms on) is the ``calib`` condition already present in the GATES grid, so
+# these three arms complete the 2x2 "length term x concentration term"
+# design.  All arms share the frozen recipe and the evaluation streams with
+# the main grid - only the two gate-term flags differ.
+_E1_CALIB_ABLATION = (
+    ("calib_len_only", {"calib_use_len": True, "calib_use_ent": False}),
+    ("calib_ent_only", {"calib_use_len": False, "calib_use_ent": True}),
+    ("calib_no_terms", {"calib_use_len": False, "calib_use_ent": False}),
+)
+
+
+def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
+            record_extra: dict, **model_overrides):
+    """Train + score one E1 condition and build its full run record.
+
+    Every condition goes through the identical entry point (frozen recipe,
+    fixed test/stats streams) so the only difference between conditions is
+    ``model_overrides``; ``record_extra`` carries the ablation label that
+    the controlled-variable audit compares.  Returns ``(record, errors)``.
+    """
+    model, params, metrics, curve = _train_and_eval(
+        settings, seed, lr, gate=gate, **model_overrides)
+    stats = collect_stats(model, settings.n_pairs, settings.vocab,
+                          settings.device, batch=settings.stats_batch,
+                          batches=settings.stats_batches, seed=STATS_SEED)
+    corr = gate_stat_correlations(stats)
+    fc = false_concentration_analysis(stats)
+    fc_sweep = false_concentration_sweep(stats)
+    ed = error_detection_aucs(stats)
+    errors = collect_error_cases(
+        model, settings.n_pairs, settings.vocab, settings.device,
+        batch=settings.stats_batch, batches=settings.stats_batches,
+        seed=STATS_SEED, max_cases=settings.max_error_cases)
+    rec = {
+        "experiment": "e1", "hypotheses": ["H1a", "H1b", "H1c", "H1d"],
+        "gate": gate, "seed": seed, "lr": lr,
+        "params": params, **metrics, **corr, **fc, **ed,
+        **{f"err_{k}": v for k, v in errors["summary"].items()},
+        **_cost_record(settings, model), **curve, **record_extra,
+        **_run_context(settings),
+    }
+    if _finite(rec.get("gate_vs_entropy")):
+        rec["abs_gate_vs_entropy"] = abs(rec["gate_vs_entropy"])
+    if _finite(fc.get("gate_on_correct")) and \
+            _finite(fc.get("gate_on_false_conc")):
+        rec["gate_margin"] = fc["gate_on_correct"] - fc["gate_on_false_conc"]
+    rec["false_conc_thresholds"] = sorted(fc_sweep)
+    for thr, row in fc_sweep.items():
+        if _finite(row.get("gate_on_correct")) and \
+                _finite(row.get("gate_on_false_conc")):
+            rec[f"gate_margin_thr{thr:g}"] = (
+                row["gate_on_correct"] - row["gate_on_false_conc"])
+    rec["false_conc_sweep"] = fc_sweep
+    if gate == "null":
+        rec["null_mass_error_margin"] = _null_mass_margin(stats)
+    return rec, errors
+
+
 def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("H1a", "H1b", "H1c"))
+    _announce(("H1a", "H1b", "H1c", "H1d"))
     lr = _resolve_lr(settings, out_dir, "e1")
     runs = []
     examples = {}
     for gate in GATES:
         for seed in settings.seeds:
-            model, params, metrics, curve = _train_and_eval(settings, seed, lr,
-                                                            gate=gate)
-            stats = collect_stats(model, settings.n_pairs, settings.vocab,
-                                  settings.device, batch=settings.stats_batch,
-                                  batches=settings.stats_batches,
-                                  seed=STATS_SEED)
-            corr = gate_stat_correlations(stats)
-            fc = false_concentration_analysis(stats)
-            fc_sweep = false_concentration_sweep(stats)
-            ed = error_detection_aucs(stats)
-            errors = collect_error_cases(
-                model, settings.n_pairs, settings.vocab, settings.device,
-                batch=settings.stats_batch, batches=settings.stats_batches,
-                seed=STATS_SEED, max_cases=settings.max_error_cases)
+            # The full calib cell is labelled too, so the audit can see that
+            # the ablation contrasts vary exactly the calibration-term flag.
+            extra = {"calib_variant": "full"} if gate == "calib" else {}
+            rec, errors = _e1_run(settings, seed, lr, gate, extra)
             if gate not in examples or \
                     errors["summary"]["n_errors"] > examples[gate][0]:
                 ranked = sorted(errors["cases"],
@@ -1060,30 +1305,20 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 _write_result(out_dir / "e1_error_cases.jsonl",
                               {"experiment": "e1", "gate": gate, "seed": seed,
                                "lr": lr, **case})
-            rec = {
-                "experiment": "e1", "hypotheses": ["H1a", "H1b", "H1c"],
-                "gate": gate, "seed": seed, "lr": lr,
-                "params": params, **metrics, **corr, **fc, **ed,
-                **{f"err_{k}": v for k, v in errors["summary"].items()},
-                **_cost_record(settings, model), **curve,
-                **_run_context(settings),
-            }
-            if _finite(rec.get("gate_vs_entropy")):
-                rec["abs_gate_vs_entropy"] = abs(rec["gate_vs_entropy"])
-            if _finite(fc.get("gate_on_correct")) and \
-                    _finite(fc.get("gate_on_false_conc")):
-                rec["gate_margin"] = fc["gate_on_correct"] - fc["gate_on_false_conc"]
-            rec["false_conc_thresholds"] = sorted(fc_sweep)
-            for thr, row in fc_sweep.items():
-                if _finite(row.get("gate_on_correct")) and \
-                        _finite(row.get("gate_on_false_conc")):
-                    rec[f"gate_margin_thr{thr:g}"] = (
-                        row["gate_on_correct"] - row["gate_on_false_conc"])
-            rec["false_conc_sweep"] = fc_sweep
-            if gate == "null":
-                rec["null_mass_error_margin"] = _null_mass_margin(stats)
             _write_result(out_dir / "e1_runs.jsonl", rec)
             runs.append(rec)
+    ablation_runs = {}
+    for label, overrides in _E1_CALIB_ABLATION:
+        for seed in settings.seeds:
+            rec, errors = _e1_run(settings, seed, lr, "calib",
+                                  {"calib_variant": label}, **overrides)
+            for case in errors["cases"]:
+                _write_result(out_dir / "e1_error_cases.jsonl",
+                              {"experiment": "e1", "gate": "calib",
+                               "ablation": label, "seed": seed, "lr": lr,
+                               **case})
+            _write_result(out_dir / "e1_runs.jsonl", rec)
+            ablation_runs.setdefault(label, []).append(rec)
     by_gate = {g: [r for r in runs if r["gate"] == g] for g in GATES}
     table = {g: _aggregate_runs(rs) for g, rs in by_gate.items()}
 
@@ -1103,6 +1338,32 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{cell('accuracy'):>16} {cell('f1_macro'):>16} "
               f"{cell('top5_accuracy'):>16} {cell('abs_gate_vs_entropy'):>16} "
               f"{cell('prauc_gate_to_error'):>16}")
+
+    abl_table = {label: _aggregate_runs(rs)
+                 for label, rs in ablation_runs.items()}
+    abl_table["full"] = table["calib"]
+    abl_index = {"full": by_gate["calib"], **ablation_runs}
+    print(f"\n[e1] calibration-term ablation (H1d): full 2x2 over the two "
+          f"additive calib terms (length -a*log T, concentration -c*Hbar), "
+          f"all inside the identical architecture with the frozen recipe and "
+          f"the same seeds.  'abs_r_ent' must collapse when the concentration "
+          f"term is removed (validating the ablation); 'full' is the "
+          f"main-grid calib cell:")
+    print(f"{'arm':>16} {'params':>8} {'accuracy':>17} {'abs_r_ent':>17} "
+          f"{'gate_margin':>17}")
+    for label in ("full", "calib_len_only", "calib_ent_only",
+                  "calib_no_terms"):
+        t = abl_table[label]
+
+        def acell(key):
+            m = t.get(key)
+            if not m or not math.isfinite(m["mean"]):
+                return "n/a"
+            return f"{m['mean']:.4f}±{m['std']:.4f}"
+
+        print(f"{label:>16} {int(abl_index[label][0]['params']):>8} "
+              f"{acell('accuracy'):>17} {acell('abs_gate_vs_entropy'):>17} "
+              f"{acell('gate_margin'):>17}")
 
     print(f"\n[e1] positive control: the parameter-free structural rule is "
           f"the task ceiling, so every learned accuracy must be read as a "
@@ -1199,6 +1460,23 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     clog.print("null margin vs 0", "H1c", "null_mass_error_margin",
                paired_bootstrap_ci(null_margins),
                warn=_curve_warn(("null", by_gate["null"])))
+    print(f"\n[e1] H1d calibration-term ablation contrasts (removing a term "
+          f"from the full gate; only the calib_variant factor varies, the "
+          f"recipe stays frozen - every contrast carries its "
+          f"controlled-variable audit):")
+    for label in ("calib_no_terms", "calib_len_only", "calib_ent_only"):
+        rs = ablation_runs[label]
+        warn = _curve_warn(("calib", by_gate["calib"]), (label, rs))
+        clog.print(f"calib - {label}", "H1d", "accuracy",
+                   _paired_diff(by_gate["calib"], rs, "accuracy"), warn=warn)
+        clog.print(f"calib - {label}", "H1d", "gate_margin",
+                   _paired_diff(by_gate["calib"], rs, "gate_margin"),
+                   warn=warn)
+    for label in ("calib_len_only", "calib_no_terms"):
+        rs = ablation_runs[label]
+        clog.print(f"calib - {label}", "H1d", "abs_gate_vs_entropy",
+                   _paired_diff(by_gate["calib"], rs, "abs_gate_vs_entropy"),
+                   warn=_curve_warn(("calib", by_gate["calib"]), (label, rs)))
     clog.finalize(out_dir, q=settings.fdr_q)
 
     print(f"\n[e1] training curves (val monitored on fixed stream seed "
@@ -1331,8 +1609,26 @@ def _null_mass_margin(stats):
     return float(mass[~corr].mean() - mass[corr].mean())
 
 
+# E2 length-generalisation arms: the four gate variants plus the calibration
+# term ablations, so the arm that isolates any H2a/H2b effect (the length
+# term, H2c) is measured on the same frozen recipe and the same length
+# sweep.  The calib arms carry ``calib_variant`` labels next to
+# ``gate="calib"``, so the controlled-variable audit attributes a contrast
+# to the term flag rather than to the gate.
+_E2_VARIANTS = (
+    ("none", "none", {}, {}),
+    ("query", "query", {}, {}),
+    ("calib", "calib", {"calib_variant": "full"}, {}),
+    ("calib_len_only", "calib", {"calib_variant": "calib_len_only"},
+     {"calib_use_len": True, "calib_use_ent": False}),
+    ("calib_ent_only", "calib", {"calib_variant": "calib_ent_only"},
+     {"calib_use_len": False, "calib_use_ent": True}),
+    ("null", "null", {}, {}),
+)
+
+
 def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("H2a", "H2b"))
+    _announce(("H2a", "H2b", "H2c"))
     lr = _resolve_lr(settings, out_dir, "e2")
     lengths = length_sweep_lengths(base=settings.n_pairs, factor=2, n=4,
                                    max_len=settings.max_len)
@@ -1340,15 +1636,16 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
           f"(test seed {TEST_SEED}, stats seed {STATS_SEED})")
     runs = []
     examples = {}
-    for gate in GATES:
+    for label, gate, record_extra, model_overrides in _E2_VARIANTS:
         for seed in settings.seeds:
-            model, params, _, curve = _train_and_eval(settings, seed, lr,
-                                                      gate=gate)
-            rec = {"experiment": "e2", "hypotheses": ["H2a", "H2b"],
-                   "gate": gate, "seed": seed, "lr": lr,
+            model, params, _, curve = _train_and_eval(
+                settings, seed, lr, gate=gate, **model_overrides)
+            rec = {"experiment": "e2", "hypotheses": ["H2a", "H2b", "H2c"],
+                   "gate": gate, "variant": label, "seed": seed, "lr": lr,
                    "params": params, "accuracy_by_length": {},
                    "entropy_by_length": {}, "entropy_norm_by_length": {},
                    "maxprob_by_length": {}, "gate_by_length": {},
+                   **record_extra,
                    **_cost_record(settings, model), **curve,
                    **_run_context(settings)}
             for length in lengths:
@@ -1385,39 +1682,43 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             rec.update({f"err_{k}": v for k, v in errors["summary"].items()})
             for case in errors["cases"]:
                 _write_result(out_dir / "e2_error_cases.jsonl",
-                              {"experiment": "e2", "gate": gate, "seed": seed,
+                              {"experiment": "e2", "gate": gate,
+                               "variant": label, "seed": seed,
                                "length": lengths[-1], "lr": lr, **case})
-            if gate not in examples or \
-                    errors["summary"]["n_errors"] > examples[gate][0]:
+            if label not in examples or \
+                    errors["summary"]["n_errors"] > examples[label][0]:
                 ranked = sorted(errors["cases"],
                                 key=lambda c: -float(c["confidence"]))
-                examples[gate] = (errors["summary"]["n_errors"], ranked[:3])
+                examples[label] = (errors["summary"]["n_errors"], ranked[:3])
             _write_result(out_dir / "e2_runs.jsonl", rec)
             runs.append(rec)
 
-    by_gate = {g: [r for r in runs if r["gate"] == g] for g in GATES}
-    print(f"\n[e2] accuracy by n_pairs (mean +- std over seeds):")
-    line = f"{'gate':>6}" + "".join(f"{L:>12}" for L in lengths) + \
+    by_variant = {label: [r for r in runs if r["variant"] == label]
+                  for label, *_ in _E2_VARIANTS}
+    table = {label: _aggregate_runs(rs) for label, rs in by_variant.items()}
+    print(f"\n[e2] accuracy by n_pairs (mean +- std over seeds; the last two "
+          f"arms are the H2c calibration-term ablations):")
+    line = f"{'arm':>16}" + "".join(f"{L:>12}" for L in lengths) + \
            f"{'drop':>10} {'entropy_drift':>14}"
     print(line)
-    for gate in GATES:
+    for label, *_ in _E2_VARIANTS:
         cells = []
         for length in lengths:
             agg = _mean_std([r["accuracy_by_length"][length]
-                             for r in by_gate[gate]])
+                             for r in by_variant[label]])
             cells.append(f"{agg['mean']:.3f}±{agg['std']:.3f}")
-        drop = _mean_std([r["accuracy_drop"] for r in by_gate[gate]])
-        drift = _mean_std([r["entropy_drift"] for r in by_gate[gate]])
-        print(f"{gate:>6}" + "".join(f"{c:>12}" for c in cells)
+        drop = _mean_std([r["accuracy_drop"] for r in by_variant[label]])
+        drift = _mean_std([r["entropy_drift"] for r in by_variant[label]])
+        print(f"{label:>16}" + "".join(f"{c:>12}" for c in cells)
               + f"{drop['mean']:>10.3f} {drift['mean']:>14.3f}")
 
     print(f"\n[e2] inference cost at the training length (same protocol as "
           f"e1; check whether the length benefit costs latency; curve_ok = "
           f"curve-valid runs / all runs):")
-    print(f"{'gate':>6} {'params':>10} {'flops/M':>9} {'ms/sample':>10} "
+    print(f"{'arm':>16} {'params':>10} {'flops/M':>9} {'ms/sample':>10} "
           f"{'mem/MB':>9} {'curve_ok':>8} {'curve':>10}")
-    for gate in GATES:
-        t = _aggregate_runs(by_gate[gate])
+    for label, *_ in _E2_VARIANTS:
+        t = table[label]
 
         def cell(key, fmt="{:.3f}"):
             m = t.get(key)
@@ -1427,13 +1728,14 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
 
         flops = t.get("flops_per_forward", {}).get("mean", float("nan")) / 1e6
         flops_s = f"{flops:.2f}" if math.isfinite(flops) else "n/a"
-        _, invalid = _curve_health(by_gate[gate])
-        verdicts = sorted({r["curve_verdict"] for r in by_gate[gate]})
-        print(f"{gate:>6} {cell('params_total', '{:.0f}'):>10} "
+        _, invalid = _curve_health(by_variant[label])
+        verdicts = sorted({r["curve_verdict"] for r in by_variant[label]})
+        print(f"{label:>16} {cell('params_total', '{:.0f}'):>10} "
               f"{flops_s:>9} "
               f"{cell('latency_ms_per_sample'):>10} "
               f"{cell('peak_mem_mb', '{:.2f}'):>9} "
-              f"{invalid}/{len(by_gate[gate])} {'/'.join(verdicts):>10}")
+              f"{invalid}/{len(by_variant[label])} "
+              f"{'/'.join(verdicts):>10}")
 
     print(f"\n[e2] bad cases at the longest length (n_pairs={lengths[-1]}; "
           f"stats seed {STATS_SEED}, batch {settings.stats_batch}x"
@@ -1442,10 +1744,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
           f"never found it); readout = key found but the wrong value read "
           f"out - the split that tells apart 'cannot find' from 'cannot "
           f"use':")
-    print(f"{'gate':>6} {'err_rate':>9} {'label':>7} {'struct':>7} "
+    print(f"{'arm':>16} {'err_rate':>9} {'label':>7} {'struct':>7} "
           f"{'retrieval':>10} {'readout':>8} {'key_miss':>9} {'mass_key_err':>13}")
-    for gate in GATES:
-        t = _aggregate_runs(by_gate[gate])
+    for label, *_ in _E2_VARIANTS:
+        t = table[label]
 
         def ecell(key, fmt="{:.3f}"):
             m = t.get(key)
@@ -1453,32 +1755,32 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 return "n/a"
             return fmt.format(m["mean"])
 
-        print(f"{gate:>6} {ecell('err_error_rate'):>9} "
+        print(f"{label:>16} {ecell('err_error_rate'):>9} "
               f"{ecell('err_taxonomy_label_error'):>7} "
               f"{ecell('err_taxonomy_hard_structural'):>7} "
               f"{ecell('err_taxonomy_retrieval_miss'):>10} "
               f"{ecell('err_taxonomy_readout_wrong'):>8} "
               f"{ecell('err_errors_key_missed_share'):>9} "
               f"{ecell('err_attn_mass_on_key_error'):>13}")
-    print("  most confident wrong samples per gate at the longest length:")
-    for gate in GATES:
-        for case in examples.get(gate, (0, []))[1]:
-            print(f"  [{gate}] {_format_case(case)}")
+    print("  most confident wrong samples per arm at the longest length:")
+    for label, *_ in _E2_VARIANTS:
+        for case in examples.get(label, (0, []))[1]:
+            print(f"  [{label}] {_format_case(case)}")
 
     print("\n[e2] pre-registered contrasts:")
     clog = ContrastLog("e2")
-    calib_runs = by_gate["calib"]
+    calib_runs = by_variant["calib"]
     calib_warn = _curve_warn(("calib", calib_runs))
     clog.print("calib - none", "H2a", "accuracy_at_longest",
-               _paired_diff(by_gate["calib"], by_gate["none"],
+               _paired_diff(by_variant["calib"], by_variant["none"],
                             "accuracy_at_longest"),
-               warn=_curve_warn(("calib", by_gate["calib"]),
-                                ("none", by_gate["none"])))
+               warn=_curve_warn(("calib", by_variant["calib"]),
+                                ("none", by_variant["none"])))
     clog.print("calib - none", "H2a", "accuracy_drop",
-               _paired_diff(by_gate["calib"], by_gate["none"],
+               _paired_diff(by_variant["calib"], by_variant["none"],
                             "accuracy_drop"),
-               warn=_curve_warn(("calib", by_gate["calib"]),
-                                ("none", by_gate["none"])))
+               warn=_curve_warn(("calib", by_variant["calib"]),
+                                ("none", by_variant["none"])))
     clog.print("calib raw entropy drift vs 0", "H2b", "entropy_drift",
                paired_bootstrap_ci([r["entropy_drift"] for r in calib_runs]),
                warn=calib_warn)
@@ -1493,11 +1795,26 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                        for r in calib_runs]
         clog.print("calib gate drift vs 0", "H2b", "gate_drift",
                    paired_bootstrap_ci(gate_drifts), warn=calib_warn)
+    print(f"\n[e2] H2c length-term ablation contrasts (the concentration-only "
+          f"arm removes the -a*log T term at identical recipe; only the "
+          f"calib_variant factor varies):")
+    for arm in ("calib_ent_only", "calib_len_only"):
+        rs = by_variant[arm]
+        warn = _curve_warn(("calib", calib_runs), (arm, rs))
+        clog.print(f"calib - {arm}", "H2c", "accuracy_at_longest",
+                   _paired_diff(calib_runs, rs, "accuracy_at_longest"),
+                   warn=warn)
+    clog.print("calib - calib_ent_only", "H2c", "accuracy_drop",
+               _paired_diff(calib_runs, by_variant["calib_ent_only"],
+                            "accuracy_drop"),
+               warn=_curve_warn(("calib", calib_runs),
+                                ("calib_ent_only",
+                                 by_variant["calib_ent_only"])))
     clog.finalize(out_dir, q=settings.fdr_q)
     _write_json(out_dir / "e2_summary.json",
-                {g: {str(L): _mean_std([r["accuracy_by_length"][L]
-                                        for r in by_gate[g]])
-                     for L in lengths} for g in GATES})
+                {label: {str(L): _mean_std([r["accuracy_by_length"][L]
+                                            for r in by_variant[label]])
+                         for L in lengths} for label, *_ in _E2_VARIANTS})
 
 
 def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:

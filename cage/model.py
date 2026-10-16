@@ -14,6 +14,9 @@ Gate variants
                  The gate therefore depends on the query *and* on how
                  concentrated the attention distribution actually is,
                  corrected for sequence length (entropy grows with log T).
+                 ``Cfg.calib_use_len`` / ``Cfg.calib_use_ent`` switch one
+                 term off at a time for the E1/E2 ablation arms; their
+                 defaults (True/True) reproduce the full gate exactly.
 - ``null``     : explicit null-attention / sparse selection baseline
                  (a learnable "null" key-value slot competes with real
                  tokens; choosing null suppresses the attention write).
@@ -91,6 +94,12 @@ class Cfg:
     calib_c: float = 1.0
     calib_scale: float = 1.0
     calib_tau_init: float = 0.9
+    # Ablation switches for the two calibration terms of ``gate="calib"``.
+    # Defaults reproduce the full calibrated gate exactly; the flags exist so
+    # E1/E2 can drop one term at a time (factorising the two claimed
+    # contributions) without changing the implementation of the full gate.
+    calib_use_len: bool = True
+    calib_use_ent: bool = True
     use_gradient_checkpointing: bool = False
 
     def __post_init__(self):
@@ -751,8 +760,10 @@ class Attention(nn.Module):
         else:
             self.gate = None
         if cfg.gate == "calib":
-            self.calib_a = nn.Parameter(torch.tensor(float(cfg.calib_a)))
-            self.calib_c = nn.Parameter(torch.tensor(float(cfg.calib_c)))
+            self.calib_a = (nn.Parameter(torch.tensor(float(cfg.calib_a)))
+                            if cfg.calib_use_len else None)
+            self.calib_c = (nn.Parameter(torch.tensor(float(cfg.calib_c)))
+                            if cfg.calib_use_ent else None)
             tau_init = math.log(math.expm1(cfg.calib_tau_init))
             self.calib_tau = nn.Parameter(torch.tensor(tau_init))
             self.calib_scale = nn.Parameter(torch.tensor(float(cfg.calib_scale)))
@@ -855,6 +866,12 @@ class Attention(nn.Module):
         kind = self.gate_kind
         is_null = kind == "null"
         is_calib = kind == "calib"
+        # Ablation switches: with the defaults both are on, so the full
+        # calibrated gate is unchanged.  The flags only decide whether the
+        # corresponding term is subtracted (and therefore whether the
+        # attention entropy has to be produced at all).
+        calc_len = is_calib and self.calib_a is not None
+        calc_ent = is_calib and self.calib_c is not None
         drop_p = self.cfg.dropout
         dropping = self.training and drop_p > 0.0
         grad_on = torch.is_grad_enabled()
@@ -879,7 +896,7 @@ class Attention(nn.Module):
                                      self.inv_scale, B, grad_on).view(B, h, T, dk)
             else:
                 y, ent = _CalibAttn.apply(packed, self.inv_scale, _EPS,
-                                          is_calib)
+                                          calc_ent)
                 y4 = y.view(B, h, T, dk)
                 ent = None if ent is None else ent.view(B, h, T)
             if need_stats:
@@ -912,11 +929,11 @@ class Attention(nn.Module):
                 att = torch.baddbmm(mask, packed[0], packed[1].transpose(1, 2),
                                     beta=1.0, alpha=self.inv_scale)
                 p = _SoftmaxInPlace.apply(att)
-                if is_calib:
+                if calc_ent:
                     ent = _RowEntropy.apply(p, _EPS).view(B, h, T)
                 if not need_stats:
                     stats = None
-                elif is_calib:
+                elif calc_ent:
                     rows = _pick_rows(p.view(B, h, T, T), stat_pos)
                     stats = (_pick_rows(ent, stat_pos), rows.max(-1).values, None)
                 else:
@@ -931,20 +948,24 @@ class Attention(nn.Module):
             gate_val = self._gate_proj(x, B, T, C, grad_on)
             gate_val = torch.sigmoid(gate_val) if grad_on else gate_val.sigmoid_()
         elif is_calib:
-            log_len = self._log_len_cache.get(T)
-            if log_len is None:
-                log_len = math.log(max(T, 2))
-                self._log_len_cache[T] = log_len
-            calib_cs = self.calib_c * self.calib_scale
-            if grad_on:
-                conc = ent.mean(dim=1)
-            else:
-                conc = _get_scratch(("calib_conc",), x.device, x.dtype,
-                                    B * T)[:B * T].view(B, T)
-                torch.mean(ent, dim=1, out=conc)
-            conc = conc.div_(log_len).mul_(calib_cs).unsqueeze(-1)
             gate_val = self._gate_proj(x, B, T, C, grad_on)
-            gate_val.sub_(self.calib_a * log_len).sub_(conc)
+            if calc_len or calc_ent:
+                log_len = self._log_len_cache.get(T)
+                if log_len is None:
+                    log_len = math.log(max(T, 2))
+                    self._log_len_cache[T] = log_len
+            if calc_len:
+                gate_val.sub_(self.calib_a * log_len)
+            if calc_ent:
+                calib_cs = self.calib_c * self.calib_scale
+                if grad_on:
+                    conc = ent.mean(dim=1)
+                else:
+                    conc = _get_scratch(("calib_conc",), x.device, x.dtype,
+                                        B * T)[:B * T].view(B, T)
+                    torch.mean(ent, dim=1, out=conc)
+                conc = conc.div_(log_len).mul_(calib_cs).unsqueeze(-1)
+                gate_val.sub_(conc)
             tau = F.softplus(self.calib_tau) + 0.1
             gate_val.div_(tau).sigmoid_()
             del ent
