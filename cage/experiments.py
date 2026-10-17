@@ -1951,7 +1951,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     examples = {}
     for label, gate, record_extra, model_overrides in _E2_VARIANTS:
         for seed in settings.seeds:
-            model, params, _, curve = _train_and_eval(
+            model, params, base_metrics, curve = _train_and_eval(
                 settings, seed, lr, gate=gate, **model_overrides)
             rec = {"experiment": "e2", "hypotheses": ["H2a", "H2b", "H2c"],
                    "gate": gate, "variant": label, "seed": seed, "lr": lr,
@@ -1962,10 +1962,12 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                    **_cost_record(settings, model), **curve,
                    **_run_context(settings)}
             for length in lengths:
-                metrics = eval_metrics(model, length, settings.vocab,
-                                       settings.device, batch=settings.eval_batch,
-                                       batches=settings.eval_batches,
-                                       seed=TEST_SEED)
+                metrics = (base_metrics if length == settings.n_pairs else
+                           eval_metrics(model, length, settings.vocab,
+                                        settings.device,
+                                        batch=settings.eval_batch,
+                                        batches=settings.eval_batches,
+                                        seed=TEST_SEED))
                 stats = collect_stats(model, length, settings.vocab,
                                       settings.device, batch=settings.stats_batch,
                                       batches=settings.stats_batches,

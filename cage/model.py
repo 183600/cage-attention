@@ -1024,11 +1024,10 @@ class _GeluLinear(nn.Linear):
             return F.linear(F.gelu(h), self.weight, self.bias)
         shape = h.shape
         rows = h.numel() // shape[-1]
-        g = _get_scratch(("gelu_out",), h.device, h.dtype, h.numel())
-        torch.ops.aten.gelu.out(h, approximate="none", out=g.view(shape))
+        torch.ops.aten.gelu_(h, approximate="none")
         out = _get_scratch(("mlp_down",), h.device, h.dtype,
                            rows * self.out_features)
-        _linear_into(g.view(rows, shape[-1]), self.weight, self.bias,
+        _linear_into(h.view(rows, shape[-1]), self.weight, self.bias,
                      out.view(rows, self.out_features))
         return out.view(*shape[:-1], self.out_features)
 
