@@ -897,9 +897,6 @@ class Attention(nn.Module):
                 ("packed",), x.device, x.dtype, 3 * bh * T * dk).view(3, bh, T, dk)
             pv = packed.view(3, B, h, T, dk)
             x2 = x.reshape(B, T, C)
-            # Chunking only bounds the per-call qkv buffer on CUDA; on CPU the
-            # single-shot projection is measurably faster and the buffer is
-            # reused from the scratch cache.
             step = (max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
                     if x.is_cuda else B)
             for b0 in range(0, B, step):
