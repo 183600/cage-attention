@@ -40,6 +40,7 @@ import torch.nn.functional as F
 
 from .data import check_train_seed, make_batch, validate_batch
 from .metrics import paired_bootstrap_ci, wilson_ci
+from .repro import seed_everything, stream_generator
 from .train import _make_adamw
 
 __all__ = [
@@ -162,8 +163,8 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     ``train_model``).
     """
     check_train_seed(seed)
-    torch.manual_seed(seed)
-    gen = torch.Generator(device=device).manual_seed(seed)
+    seed_everything(seed)
+    gen = stream_generator(seed, device)
     model = LinearBagProbe(vocab).to(device)
     params = list(model.parameters())
     opt = _make_adamw(params, lr)

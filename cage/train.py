@@ -6,6 +6,7 @@ import math
 import time
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from .data import (
@@ -25,6 +26,7 @@ from .metrics import (
     selection_at_fraction,
     wilson_ci,
 )
+from .repro import seed_everything, stream_generator
 
 
 def _make_adamw(params, lr):
@@ -434,9 +436,11 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                 permute_labels=False):
     """Train on the recall task with optional learning-curve monitoring.
 
-    ``seed`` governs *all* run-to-run randomness: the data generator and the
-    global RNG that draws the attention/MLP dropout masks.  Without the
-    latter two runs of the same config would silently differ.
+    ``seed`` governs *all* run-to-run randomness: ``cage.repro.seed_everything``
+    seeds Python/NumPy/PyTorch (CPU + every CUDA device) for the dropout
+    masks, and the data generator is a dedicated ``torch.Generator`` - so two
+    runs of the same config on one machine are stable.  Without this the
+    global RNG (dropout) and/or the data stream would silently differ.
 
     ``permute_labels`` (negative control, default off): after the first
     batch has passed the data-cleaning gate, the supervised labels of every
@@ -485,9 +489,9 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     not abort: clipping already bounds the update.
     """
     check_train_seed(seed)
-    torch.manual_seed(seed)
-    gen = torch.Generator(device=device).manual_seed(seed)
-    val_gen = torch.Generator(device=device).manual_seed(VAL_SEED)
+    seed_everything(seed)
+    gen = stream_generator(seed, device)
+    val_gen = stream_generator(VAL_SEED, device)
     params = list(model.parameters())
     opt = _make_adamw(params, lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps, eta_min=lr * 0.1)
@@ -590,36 +594,105 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     return hist
 
 
+def _gradient_flow(model):
+    """Per-parameter backward-connectivity audit for one backward pass.
+
+    A parameter with ``grad is None`` after ``loss.backward()`` was never
+    reached by the graph - the signature of a detached branch, a
+    mis-wired loss or a kernel whose custom backward forgot an input.
+    Non-finite gradients are the other failure mode.  The caller runs this
+    straight after backward, before clipping/zeroing, on the standard
+    (non-ablated) configuration; parameters deliberately switched off in
+    an ablation arm may legitimately have no gradient there.
+    """
+    total = with_grad = 0
+    missing, nonfinite = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        total += 1
+        if p.grad is None:
+            missing.append(name)
+            continue
+        with_grad += 1
+        if not bool(torch.isfinite(p.grad).all()):
+            nonfinite.append(name)
+    return {
+        "params_total": total,
+        "params_with_grad": with_grad,
+        "params_without_grad": missing[:8],
+        "nonfinite_grad_params": nonfinite[:8],
+        "all_params_connected": not missing,
+        "all_grads_finite": not nonfinite,
+    }
+
+
+def _disable_dropout(model):
+    """Turn every dropout module off after ``model.train()``.
+
+    The sanity check must run without regularisation, whatever the
+    training config says: ``model.train()`` alone would re-activate
+    dropout and hide a broken gradient path behind a moving loss.  Only
+    dropout is switched off (norms stay in training mode as in the real
+    loop), and the settings are returned for the run record.
+    """
+    modules = [m for m in model.modules() if isinstance(m, nn.Dropout)]
+    for m in modules:
+        m.eval()
+    return {
+        "dropout_modules": len(modules),
+        "dropout_probs": sorted({float(m.p) for m in modules}),
+        "active_dropout": any(float(m.p) > 0.0 for m in modules),
+        "augmentation": "none (cage.data is a synthetic generator, no "
+                        "augmentation pipeline is applied)",
+        "weight_decay": 0.01,
+        "optimizer_recipe": "AdamW via train._make_adamw (D5 fixed factory)",
+    }
+
+
 def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
                          target_loss=0.1, target_acc=1.0):
     """Can the training loop fit a single tiny batch? (gradient/loss sanity)
 
     The classic pre-flight check: take one fixed batch, turn dropout off
-    (caller's config), and train the *actual* architecture on it with the
-    *actual* optimizer factory.  A correct training loop drives the loss
-    to ~0 and the batch accuracy to 1.0 because the batch can be
-    memorised; a loop that cannot overfit a handful of samples has broken
-    gradients, a mis-wired loss or a silent dtype/precision problem, and
-    no grid result above it is interpretable.
+    (enforced here, not assumed from the caller's config), and train the
+    *actual* architecture on it with the *actual* optimizer factory.  A
+    correct training loop drives the loss to ~0 and the batch accuracy to
+    1.0 because the batch can be memorised; a loop that cannot overfit a
+    handful of samples has broken gradients, a mis-wired loss or a silent
+    dtype/precision problem, and no grid result above it is interpretable.
+
+    Beyond the loss/accuracy targets the check audits the backward pass
+    itself on the first step (``grad_flow``: every trainable parameter
+    reached, all gradients finite), so "cannot overfit" is triaged into
+    "gradients never connected" vs "optimisation is merely slow".  The
+    effective regularisation is recorded (``regularization``: dropout
+    force-disabled, the fixed AdamW weight decay, no augmentation), so the
+    verdict documents *what* was switched off instead of assuming it.
 
     This is a *necessary, not sufficient* check: passing it does not prove
     the data pipeline, augmentation or label mapping are right (such
     problems survive memorisation); failing it blocks every downstream
-    claim.
+    claim.  ``passed`` requires the targets *and* a connected, finite
+    backward pass.
 
     Trains ``model`` in place (pass a throwaway instance) and returns the
-    sampled loss/accuracy curves plus the ``passed`` verdict.  Uses the
-    sparse (query-position) supervision the experiment contract reports.
+    sampled loss/accuracy curves plus the verdict.  Uses the sparse
+    (query-position) supervision the experiment contract reports.
     """
     model.train()
+    regularization = _disable_dropout(model)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = _make_adamw(params, lr)
     sample_every = max(1, steps // 10)
     curve = []
+    grad_flow = None
     for step in range(steps):
         opt.zero_grad(set_to_none=True)
         logits, loss, _ = model(idx, tgt, sup_pos=meta["query_pos"])
         loss.backward()
+        if grad_flow is None:
+            grad_flow = _gradient_flow(model)
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
         if step % sample_every == 0 or step == steps - 1:
@@ -635,8 +708,12 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
         "loss_last": curve[-1]["loss"],
         "acc_last": curve[-1]["acc"],
         "curve": curve,
+        "regularization": regularization,
+        "grad_flow": grad_flow,
         "passed": bool(curve[-1]["loss"] <= target_loss
-                       and curve[-1]["acc"] >= target_acc),
+                       and curve[-1]["acc"] >= target_acc
+                       and grad_flow["all_params_connected"]
+                       and grad_flow["all_grads_finite"]),
         "target_loss": float(target_loss),
         "target_acc": float(target_acc),
     }
