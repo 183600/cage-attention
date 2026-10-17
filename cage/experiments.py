@@ -95,7 +95,7 @@ import platform
 import random
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 import torch
 
@@ -523,6 +523,78 @@ _AUDIT_RECIPE_KEYS = (
 # match across the two sides.
 _AUDIT_FACTOR_KEYS = ("gate", "norm", "layer_scale", "calib_variant")
 
+# The resolved-``Cfg`` keys a contrast is allowed to vary.  When both sides
+# carry the ``model_cfg`` the model was actually built from, every *other*
+# key must match: a difference there is an undeclared confound no matter
+# what the labels say.
+_AUDIT_MODEL_FACTOR_KEYS = ("gate", "norm", "layer_scale",
+                            "calib_use_len", "calib_use_ent")
+
+# Ground truth of the calib gate's additive terms, keyed by the resolved
+# ``(calib_use_len, calib_use_ent)`` flags of the model that trained: the
+# cell of the 2x2 "length term x concentration term" design a run is in.
+# Cross-checking the declared ``calib_variant`` label against the flags the
+# model was actually built with catches a mislabelled or mis-wired arm.
+_CALIB_FACTORIAL = {
+    (True, True): "full",
+    (True, False): "calib_len_only",
+    (False, True): "calib_ent_only",
+    (False, False): "calib_no_terms",
+}
+
+_CALIB_FACTORIAL_CELLS = ("full", "calib_len_only", "calib_ent_only",
+                          "calib_no_terms")
+
+
+def _calib_cell(run):
+    """The calibration-term cell a run actually trained (None when N/A).
+
+    Uses the resolved ``model_cfg`` when present (ground truth); falls back
+    to the declared label for records that predate the stamp.
+    """
+    cfg = run.get("model_cfg")
+    if cfg is not None:
+        if cfg.get("gate") != "calib":
+            return None
+        return _CALIB_FACTORIAL.get(
+            (bool(cfg.get("calib_use_len", True)),
+             bool(cfg.get("calib_use_ent", True))))
+    label = run.get("calib_variant")
+    return label or None
+
+
+def _report_ablation_coverage(out_dir, tag, runs, cells=_CALIB_FACTORIAL_CELLS):
+    """Verify a declared factorial ablation ran every cell of its design.
+
+    A "each component is doing work" claim over a 2x2 (or leave-one-out)
+    design is only supported if every cell was actually trained; a missing
+    cell silently leaves one effect unmeasured.  The check reads the cell
+    each run trained (resolved flags, not labels), prints a warning listing
+    the missing cells, and stores ``<tag>_ablation_coverage.json`` next to
+    the run records.
+    """
+    present = sorted({c for c in (_calib_cell(r) for r in runs) if c in cells})
+    missing = [c for c in cells if c not in present]
+    payload = {
+        "tag": tag,
+        "design": "calib_use_len x calib_use_ent (2x2)",
+        "expected_cells": list(cells),
+        "present_cells": present,
+        "missing_cells": missing,
+        "complete": not missing,
+        "n_runs": len(runs),
+    }
+    if missing:
+        print(f"[{tag}] WARNING: calibration-term ablation coverage "
+              f"incomplete: {len(present)}/{len(cells)} cells trained "
+              f"(missing {', '.join(missing)}); the corresponding term "
+              f"effects are not measured")
+    else:
+        print(f"[{tag}] ablation coverage: {len(cells)}/{len(cells)} "
+              f"calibration-term cells trained ({', '.join(present)})")
+    _write_json(out_dir / f"{tag}_ablation_coverage.json", payload)
+    return payload
+
 
 def _recipe_view(run):
     """The controlled part of a run's configuration (a flat dict)."""
@@ -548,7 +620,15 @@ def _controlled_audit(runs_a, runs_b):
     3. **Across-side recipe**: the two recipes are identical;
     4. **Varying factor**: at least one declared model factor (gate / norm /
        layer_scale / calibration-ablation arm) actually differs, so the
-       contrast is not degenerate.
+       contrast is not degenerate;
+    5. **Trained-model ground truth**: when both sides carry the resolved
+       ``model_cfg``, every non-factor config key must match across the
+       sides (an undeclared architectural difference is a confound even
+       with matching recipe), and the declared labels must agree with the
+       flags the model was actually built with - in particular a
+       ``calib_variant`` label must name the (calib_use_len, calib_use_ent)
+       cell that trained, so a mis-wired ablation arm cannot pass as the
+       intended condition.
 
     The optimizer factory, cosine schedule, clipping and gradient settings
     are fixed in the single training entry point (``train.train_model``) and
@@ -564,6 +644,7 @@ def _controlled_audit(runs_a, runs_b):
         "seeds_a": sorted(r.get("seed") for r in runs_a),
         "seeds_b": sorted(r.get("seed") for r in runs_b),
         "varying_factors": {},
+        "model_factor_diffs": {},
         "mismatches": [],
     }
     audit["seeds_paired"] = audit["seeds_a"] == audit["seeds_b"]
@@ -600,6 +681,61 @@ def _controlled_audit(runs_a, runs_b):
             if set_a != set_b:
                 audit["varying_factors"][key] = {
                     "a": sorted(set_a), "b": sorted(set_b)}
+        # Ground truth of the trained model: check the resolved configs
+        # directly rather than the hand-attached labels.
+        cfgs_a = [r.get("model_cfg") for r in runs_a]
+        cfgs_b = [r.get("model_cfg") for r in runs_b]
+        if all(c is not None for c in cfgs_a + cfgs_b):
+            for side, cfgs in (("a", cfgs_a), ("b", cfgs_b)):
+                for j, other in enumerate(cfgs[1:], start=1):
+                    if other != cfgs[0]:
+                        audit["mismatches"].append(
+                            f"side {side} model_cfg differs between runs 0 "
+                            f"and {j}: {cfgs[0]} vs {other}")
+            for key in sorted(set(cfgs_a[0]) | set(cfgs_b[0])):
+                va, vb = cfgs_a[0].get(key), cfgs_b[0].get(key)
+                if va == vb:
+                    continue
+                if key in _AUDIT_MODEL_FACTOR_KEYS:
+                    audit["model_factor_diffs"][key] = {"a": va, "b": vb}
+                else:
+                    audit["mismatches"].append(
+                        f"undeclared model-config difference across sides: "
+                        f"{key}={va!r} vs {vb!r}")
+            audit["model_cfg"] = {"a": cfgs_a[0], "b": cfgs_b[0]}
+            for side, side_runs in (("a", runs_a), ("b", runs_b)):
+                for r in side_runs:
+                    label = r.get("calib_variant")
+                    if not label:
+                        continue
+                    if (r.get("model_cfg") or {}).get("gate") != "calib":
+                        audit["mismatches"].append(
+                            f"side {side}: calib_variant={label!r} on a "
+                            f"gate={(r.get('model_cfg') or {}).get('gate')!r} "
+                            f"run")
+                        continue
+                    cell = _calib_cell(r)
+                    if label != cell:
+                        audit["mismatches"].append(
+                            f"side {side}: calib_variant label {label!r} "
+                            f"does not match the trained flags "
+                            f"(cell {cell!r})")
+            labels_a = {r.get("calib_variant") for r in runs_a
+                        if r.get("calib_variant")}
+            labels_b = {r.get("calib_variant") for r in runs_b
+                        if r.get("calib_variant")}
+            cells_a = {c for c in (_calib_cell(r) for r in runs_a) if c}
+            cells_b = {c for c in (_calib_cell(r) for r in runs_b) if c}
+            if (labels_a or labels_b) and labels_a != labels_b \
+                    and cells_a == cells_b:
+                audit["mismatches"].append(
+                    f"declared ablation labels differ "
+                    f"({sorted(labels_a)} vs {sorted(labels_b)}) but the "
+                    f"trained calibration-term cells are identical "
+                    f"({sorted(cells_a)}): the contrast does not actually "
+                    f"vary the mechanism")
+            if audit["model_factor_diffs"]:
+                audit["varying_factors"].update(audit["model_factor_diffs"])
         if not audit["varying_factors"]:
             audit["mismatches"].append(
                 "no declared model factor (gate/norm/layer_scale/"
@@ -1621,6 +1757,15 @@ def _cost_record(settings: Settings, model):
 def _train_and_eval(settings: Settings, seed: int, lr: float,
                     eval_seed: int = TEST_SEED, permute_labels: bool = False,
                     **model_overrides):
+    """Train + score one run through the single shared entry point.
+
+    Returns ``(model, params, metrics, curve, model_cfg)`` where
+    ``model_cfg`` is the exact resolved configuration the model was built
+    from - every ``Cfg`` field including defaults, so an unset ablation flag
+    cannot be mistaken for an off switch.  Run records keep it so the
+    controlled-variable audit can check the *trained* configuration
+    directly (ground truth) instead of trusting the hand-attached labels.
+    """
     if eval_seed in tuple(settings.seeds):
         raise ValueError(
             f"eval_seed={eval_seed} is also a configured training seed; "
@@ -1629,6 +1774,7 @@ def _train_and_eval(settings: Settings, seed: int, lr: float,
         )
     seed_everything(seed, deterministic=settings.deterministic)
     model = build(_model_cfg(settings, **model_overrides), compile=False)
+    model_cfg = asdict(model.cfg)
     params = sum(p.numel() for p in model.parameters())
     eval_every = (max(1, settings.steps // settings.curve_points)
                   if settings.curve_points > 0 else 0)
@@ -1640,7 +1786,7 @@ def _train_and_eval(settings: Settings, seed: int, lr: float,
     metrics = eval_metrics(model, settings.n_pairs, settings.vocab,
                            settings.device, batch=settings.eval_batch,
                            batches=settings.eval_batches, seed=eval_seed)
-    return model, params, metrics, _curve_record(hist)
+    return model, params, metrics, _curve_record(hist), model_cfg
 
 
 def tune_shared_recipe(settings: Settings):
@@ -1662,7 +1808,7 @@ def tune_shared_recipe(settings: Settings):
     for lr in settings.lr_grid:
         accs, verdicts = [], []
         for seed in tune_seeds:
-            _, _, metrics, curve = _train_and_eval(
+            _, _, metrics, curve, _ = _train_and_eval(
                 settings, seed, lr, eval_seed=VAL_SEED, gate="none")
             accs.append(metrics["accuracy"])
             verdicts.append(curve["curve_verdict"])
@@ -1789,7 +1935,7 @@ def _run_shallow_baseline(settings: Settings, out_dir: pathlib.Path,
     for lr in settings.lr_grid:
         accs = []
         for seed in tune_seeds:
-            _, _, metrics, _ = _train_and_eval(
+            _, _, metrics, _, _ = _train_and_eval(
                 settings, seed, lr, eval_seed=VAL_SEED, gate="none",
                 n_layers=1)
             accs.append(metrics["accuracy"])
@@ -1801,7 +1947,7 @@ def _run_shallow_baseline(settings: Settings, out_dir: pathlib.Path,
     best = max(table, key=lambda row: row["val_accuracy_mean"])
     runs = []
     for seed in settings.seeds:
-        _, params, metrics, curve = _train_and_eval(
+        _, params, metrics, curve, _ = _train_and_eval(
             settings, seed, best["lr"], eval_seed=TEST_SEED, gate="none",
             n_layers=1)
         n = int(metrics["n"])
@@ -2107,7 +2253,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     lr_shared = _resolve_lr(settings, out_dir, "baselines")
     ctrl_runs = []
     for seed in settings.seeds:
-        _, _, metrics, curve = _train_and_eval(
+        _, _, metrics, curve, _ = _train_and_eval(
             settings, seed, lr_shared, gate="none", permute_labels=True)
         n = int(metrics["n"])
         ctrl_runs.append({
@@ -2245,9 +2391,12 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
     Every condition goes through the identical entry point (frozen recipe,
     fixed test/stats streams) so the only difference between conditions is
     ``model_overrides``; ``record_extra`` carries the ablation label that
-    the controlled-variable audit compares.  Returns ``(record, errors)``.
+    the controlled-variable audit compares, and the record stamps the
+    *resolved* ``model_cfg`` the model was actually built from so the audit
+    can check the trained configuration instead of the label alone.
+    Returns ``(record, errors)``.
     """
-    model, params, metrics, curve = _train_and_eval(
+    model, params, metrics, curve, model_cfg = _train_and_eval(
         settings, seed, lr, gate=gate, **model_overrides)
     stats = collect_stats(model, settings.n_pairs, settings.vocab,
                           settings.device, batch=settings.stats_batch,
@@ -2263,7 +2412,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
     rec = {
         "experiment": "e1", "hypotheses": ["H1a", "H1b", "H1c", "H1d"],
         "gate": gate, "seed": seed, "lr": lr,
-        "params": params, **metrics, **corr, **fc, **ed,
+        "params": params, "model_cfg": model_cfg, **metrics, **corr, **fc, **ed,
         **{f"err_{k}": v for k, v in errors["summary"].items()},
         **_cost_record(settings, model), **curve, **record_extra,
         **_run_context(settings),
@@ -2324,6 +2473,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             ablation_runs.setdefault(label, []).append(rec)
     by_gate = {g: [r for r in runs if r["gate"] == g] for g in GATES}
     table = {g: _aggregate_runs(rs) for g, rs in by_gate.items()}
+    _report_ablation_coverage(
+        out_dir, "e1",
+        runs + [r for rs in ablation_runs.values() for r in rs])
 
     print(f"\n[e1] test seed {TEST_SEED}, stats seed {STATS_SEED}, "
           f"lr={lr:g}, steps={settings.steps}")
@@ -2693,10 +2845,12 @@ def _null_mass_margin(stats):
     return float(mass[~corr].mean() - mass[corr].mean())
 
 
-# E2 length-generalisation arms: the four gate variants plus the calibration
-# term ablations, so the arm that isolates any H2a/H2b effect (the length
-# term, H2c) is measured on the same frozen recipe and the same length
-# sweep.  The calib arms carry ``calib_variant`` labels next to
+# E2 length-generalisation arms: the four gate variants plus the complete
+# 2x2 over the calib gate's two additive terms (the full cell is the
+# ``calib`` arm itself), so the arm that isolates any H2a/H2b effect (the
+# length term, H2c) is measured on the same frozen recipe and the same
+# length sweep inside a full-factorial design - no term combination is left
+# unmeasured.  The calib arms carry ``calib_variant`` labels next to
 # ``gate="calib"``, so the controlled-variable audit attributes a contrast
 # to the term flag rather than to the gate.
 _E2_VARIANTS = (
@@ -2707,6 +2861,8 @@ _E2_VARIANTS = (
      {"calib_use_len": True, "calib_use_ent": False}),
     ("calib_ent_only", "calib", {"calib_variant": "calib_ent_only"},
      {"calib_use_len": False, "calib_use_ent": True}),
+    ("calib_no_terms", "calib", {"calib_variant": "calib_no_terms"},
+     {"calib_use_len": False, "calib_use_ent": False}),
     ("null", "null", {}, {}),
 )
 
@@ -2725,11 +2881,12 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     examples = {}
     for label, gate, record_extra, model_overrides in _E2_VARIANTS:
         for seed in settings.seeds:
-            model, params, base_metrics, curve = _train_and_eval(
+            model, params, base_metrics, curve, model_cfg = _train_and_eval(
                 settings, seed, lr, gate=gate, **model_overrides)
             rec = {"experiment": "e2", "hypotheses": ["H2a", "H2b", "H2c"],
                    "gate": gate, "variant": label, "seed": seed, "lr": lr,
-                   "params": params, "accuracy_by_length": {},
+                   "params": params, "model_cfg": model_cfg,
+                   "accuracy_by_length": {},
                    "entropy_by_length": {}, "entropy_norm_by_length": {},
                    "maxprob_by_length": {}, "gate_by_length": {},
                    **record_extra,
@@ -2785,8 +2942,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     by_variant = {label: [r for r in runs if r["variant"] == label]
                   for label, *_ in _E2_VARIANTS}
     table = {label: _aggregate_runs(rs) for label, rs in by_variant.items()}
-    print(f"\n[e2] accuracy by n_pairs (mean +- std over seeds; the last two "
-          f"arms are the H2c calibration-term ablations):")
+    _report_ablation_coverage(out_dir, "e2", runs)
+    print(f"\n[e2] accuracy by n_pairs (mean +- std over seeds; the "
+          f"calib_len_only / calib_ent_only / calib_no_terms arms are the "
+          f"H2c calibration-term ablations, completing the 2x2 with calib):")
     line = f"{'arm':>16}" + "".join(f"{L:>12}" for L in lengths) + \
            f"{'drop':>10} {'entropy_drift':>14}"
     print(line)
@@ -2888,21 +3047,21 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                        for r in calib_runs]
         clog.print_equivalence("calib gate drift vs 0", "H2b", "gate_drift",
                                gate_drifts, warn=calib_warn)
-    print(f"\n[e2] H2c length-term ablation contrasts (the concentration-only "
-          f"arm removes the -a*log T term at identical recipe; only the "
-          f"calib_variant factor varies):")
-    for arm in ("calib_ent_only", "calib_len_only"):
+    print(f"\n[e2] H2c length-term ablation contrasts (each ablation arm "
+          f"removes additive terms from the full gate at identical recipe; "
+          f"only the calibration-term flags vary, so the full 2x2 is "
+          f"measured across the length sweep):")
+    for arm in ("calib_ent_only", "calib_len_only", "calib_no_terms"):
         rs = by_variant[arm]
         warn = _curve_warn(("calib", calib_runs), (arm, rs))
         clog.print(f"calib - {arm}", "H2c", "accuracy_at_longest",
                    _paired_diff(calib_runs, rs, "accuracy_at_longest"),
                    warn=warn)
-    clog.print("calib - calib_ent_only", "H2c", "accuracy_drop",
-               _paired_diff(calib_runs, by_variant["calib_ent_only"],
-                            "accuracy_drop"),
-               warn=_curve_warn(("calib", calib_runs),
-                                ("calib_ent_only",
-                                 by_variant["calib_ent_only"])))
+    for arm in ("calib_ent_only", "calib_no_terms"):
+        clog.print(f"calib - {arm}", "H2c", "accuracy_drop",
+                   _paired_diff(calib_runs, by_variant[arm], "accuracy_drop"),
+                   warn=_curve_warn(("calib", calib_runs),
+                                    (arm, by_variant[arm])))
     clog.finalize(out_dir, q=settings.fdr_q)
     _write_json(out_dir / "e2_summary.json",
                 {label: {str(L): _mean_std([r["accuracy_by_length"][L]
@@ -2923,7 +3082,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
         for norm in NORMS:
             for layer_scale in (None, 1e-2):
                 for seed in settings.seeds:
-                    model, params, metrics, curve = _train_and_eval(
+                    model, params, metrics, curve, model_cfg = _train_and_eval(
                         settings, seed, lr, gate=gate, norm=norm,
                         layer_scale=layer_scale)
                     stats = collect_stats(model, settings.n_pairs,
@@ -2936,7 +3095,8 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                         "experiment": "e3", "hypotheses": ["H3a", "H3b"],
                         "gate": gate, "norm": norm,
                         "layer_scale": layer_scale, "seed": seed, "lr": lr,
-                        "params": params, "accuracy": metrics["accuracy"],
+                        "params": params, "model_cfg": model_cfg,
+                        "accuracy": metrics["accuracy"],
                         "f1_macro": metrics["f1_macro"],
                         "gate_depth_ratio": gate_depth_ratio(stats),
                         "resid_norm_by_layer": resid.tolist(),
