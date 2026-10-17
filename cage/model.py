@@ -335,9 +335,11 @@ def _release_scratch(*names: str) -> None:
     been dropped, so the next ``_get_scratch`` for the name builds a fresh
     buffer instead of serving the old entry.
     """
-    for name in names:
-        for key in [k for k in _scratch_cache if k[0] == name]:
-            del _scratch_cache[key]
+    if not names:
+        return
+    drop = set(names)
+    for key in [k for k in _scratch_cache if k[0] in drop]:
+        del _scratch_cache[key]
 
 
 def _linear_into(x: torch.Tensor, weight: torch.Tensor,

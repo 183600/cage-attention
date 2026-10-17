@@ -992,20 +992,31 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
         handles.append(blk.attn.register_forward_pre_hook(
             _make_hook(i, getattr(blk.attn, "null_k", None))))
 
-    n_total = n_err = n_label_err = 0
+    # Device-side accumulators: per-batch reductions are summed on the
+    # device and pulled to Python once after the loop, so a GPU run does
+    # not pay one host-device synchronisation per reduction or per sample.
+    n_total = 0
     case_count = 0
     cases = []
-    flags_summary = {"high": 0, "low": 0, "in_ctx": 0, "naive": 0, "repeat": 0}
-    taxonomy = {"label_error": 0, "hard_structural": 0,
-                "retrieval_miss": 0, "readout_wrong": 0}
-    mass_err = mass_err_n = 0.0
-    mass_corr = mass_corr_n = 0.0
-    tertile_n = [0, 0, 0]
-    tertile_err = [0, 0, 0]
-    key_wrong_total = 0.0
-    key_wrong_n = 0
-    key_right_total = 0.0
-    key_right_n = 0
+    i64 = torch.int64
+    flags_summary = {k: torch.zeros((), dtype=i64, device=device)
+                     for k in ("high", "low", "in_ctx", "naive", "repeat")}
+    taxonomy = {k: torch.zeros((), dtype=i64, device=device)
+                for k in ("label_error", "hard_structural",
+                          "retrieval_miss", "readout_wrong")}
+    n_err = torch.zeros((), dtype=i64, device=device)
+    n_label_err = torch.zeros((), dtype=i64, device=device)
+    mass_err = torch.zeros((), dtype=torch.float64, device=device)
+    mass_err_n = torch.zeros((), dtype=i64, device=device)
+    mass_corr = torch.zeros((), dtype=torch.float64, device=device)
+    mass_corr_n = torch.zeros((), dtype=i64, device=device)
+    tertile_n = torch.zeros(3, dtype=i64, device=device)
+    tertile_err = torch.zeros(3, dtype=i64, device=device)
+    key_wrong_total = torch.zeros((), dtype=torch.float64, device=device)
+    key_wrong_n = torch.zeros((), dtype=i64, device=device)
+    key_right_total = torch.zeros((), dtype=torch.float64, device=device)
+    key_right_n = torch.zeros((), dtype=i64, device=device)
+    tertile_denom = max(1, n_pairs)
     try:
         for _ in range(batches):
             idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
@@ -1024,80 +1035,110 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
             wrong = pred != answer
 
             n_total += idx.size(0)
-            n_err += int(wrong.sum())
+            n_err += wrong.sum()
             label_ok = _label_audit(idx, meta)
-            n_label_err += int((~label_ok).sum())
+            n_label_err += (~label_ok).sum()
             key_pair_idx = (meta["key_pos"] // 2).clamp(max=n_pairs - 1)
-            for b in range(idx.size(0)):
-                third = int(key_pair_idx[b].item() * 3 // max(1, n_pairs))
-                third = min(2, third)
-                tertile_n[third] += 1
-                tertile_err[third] += int(wrong[b])
+            third = (key_pair_idx * 3 // tertile_denom).clamp_(max=2).to(i64)
+            tertile_n += torch.bincount(third, minlength=3)
+            tertile_err += torch.bincount(third[wrong], minlength=3)
             m_e = mass_last[wrong]
             m_c = mass_last[~wrong]
-            mass_err += float(m_e.sum())
-            mass_err_n += int(m_e.numel())
-            mass_corr += float(m_c.sum())
-            mass_corr_n += int(m_c.numel())
+            mass_err += m_e.sum().double()
+            mass_err_n += m_e.numel()
+            mass_corr += m_c.sum().double()
+            mass_corr_n += m_c.numel()
 
             flags = _error_case_flags(idx, meta, pred, n_pairs)
-            flags_summary["high"] += int((wrong & (conf >= 0.9)).sum())
-            flags_summary["low"] += int((wrong & (conf < 0.5)).sum())
-            flags_summary["in_ctx"] += int((wrong & flags["pred_in_context"]).sum())
-            flags_summary["naive"] += int((wrong & flags["naive_confusable"]).sum())
-            flags_summary["repeat"] += int((wrong & flags["value_repeats"]).sum())
+            flags_summary["high"] += (wrong & (conf >= 0.9)).sum()
+            flags_summary["low"] += (wrong & (conf < 0.5)).sum()
+            flags_summary["in_ctx"] += (wrong & flags["pred_in_context"]).sum()
+            flags_summary["naive"] += (wrong & flags["naive_confusable"]).sum()
+            flags_summary["repeat"] += (wrong & flags["value_repeats"]).sum()
             key_right = mass_last >= 0.5
-            key_wrong_total += float(mass_last[wrong & ~key_right].sum())
-            key_wrong_n += int((wrong & ~key_right).sum())
-            key_right_total += float(mass_last[wrong & key_right].sum())
-            key_right_n += int((wrong & key_right).sum())
+            key_wrong_total += mass_last[wrong & ~key_right].sum().double()
+            key_wrong_n += (wrong & ~key_right).sum()
+            key_right_total += mass_last[wrong & key_right].sum().double()
+            key_right_n += (wrong & key_right).sum()
 
             ambiguous = flags["naive_confusable"] | flags["value_repeats"]
             key_missed = ~key_right
-            taxonomy["label_error"] += int((wrong & ~label_ok).sum())
-            taxonomy["hard_structural"] += int(
-                (wrong & label_ok & ambiguous).sum())
-            taxonomy["retrieval_miss"] += int(
-                (wrong & label_ok & ~ambiguous & key_missed).sum())
-            taxonomy["readout_wrong"] += int(
-                (wrong & label_ok & ~ambiguous & ~key_missed).sum())
+            taxonomy["label_error"] += (wrong & ~label_ok).sum()
+            taxonomy["hard_structural"] += (
+                wrong & label_ok & ambiguous).sum()
+            taxonomy["retrieval_miss"] += (
+                wrong & label_ok & ~ambiguous & key_missed).sum()
+            taxonomy["readout_wrong"] += (
+                wrong & label_ok & ~ambiguous & ~key_missed).sum()
 
             if case_count < max_cases:
                 rows = torch.nonzero(wrong, as_tuple=False).flatten().tolist()
-                for b in rows:
-                    if case_count >= max_cases:
-                        break
-                    if not bool(label_ok[b]):
-                        etype = "label_error"
-                    elif bool(ambiguous[b]):
-                        etype = "hard_structural"
-                    elif bool(key_missed[b]):
-                        etype = "retrieval_miss"
-                    else:
-                        etype = "readout_wrong"
-                    cases.append({
-                        "context": [int(t) for t in idx[b].tolist()],
-                        "query_pos": int(meta["query_pos"][b]),
-                        "query_key": int(idx[b, meta["query_pos"][b]]),
-                        "key_pos": int(meta["key_pos"][b]),
-                        "key_pair_idx": int(key_pair_idx[b]),
-                        "answer": int(answer[b]),
-                        "pred": int(pred[b]),
-                        "confidence": float(conf[b]),
-                        "margin": float(margin[b]),
-                        "attn_mass_on_key": float(mass_last[b]),
-                        "attn_mass_on_key_mean_layers": float(mass_mean[b]),
-                        "pred_in_context": bool(flags["pred_in_context"][b]),
-                        "naive_confusable": bool(flags["naive_confusable"][b]),
-                        "value_repeats": bool(flags["value_repeats"][b]),
-                        "label_ok": bool(label_ok[b]),
-                        "error_type": etype,
-                    })
-                    case_count += 1
+                if rows:
+                    # Pull the per-sample vectors to host once per batch so
+                    # the case loop below is pure Python (one sync per
+                    # vector instead of one per scalar).
+                    conf_l = conf.tolist()
+                    margin_l = margin.tolist()
+                    mass_last_l = mass_last.tolist()
+                    mass_mean_l = mass_mean.tolist()
+                    pred_l = pred.tolist()
+                    answer_l = answer.tolist()
+                    kp_l = key_pair_idx.tolist()
+                    label_ok_l = label_ok.tolist()
+                    ambiguous_l = ambiguous.tolist()
+                    key_missed_l = key_missed.tolist()
+                    pic_l = flags["pred_in_context"].tolist()
+                    nc_l = flags["naive_confusable"].tolist()
+                    vr_l = flags["value_repeats"].tolist()
+                    query_pos_l = meta["query_pos"].tolist()
+                    key_pos_l = meta["key_pos"].tolist()
+                    for b in rows:
+                        if case_count >= max_cases:
+                            break
+                        if not label_ok_l[b]:
+                            etype = "label_error"
+                        elif ambiguous_l[b]:
+                            etype = "hard_structural"
+                        elif key_missed_l[b]:
+                            etype = "retrieval_miss"
+                        else:
+                            etype = "readout_wrong"
+                        context = [int(t) for t in idx[b].tolist()]
+                        cases.append({
+                            "context": context,
+                            "query_pos": int(query_pos_l[b]),
+                            "query_key": context[query_pos_l[b]],
+                            "key_pos": int(key_pos_l[b]),
+                            "key_pair_idx": int(kp_l[b]),
+                            "answer": int(answer_l[b]),
+                            "pred": int(pred_l[b]),
+                            "confidence": float(conf_l[b]),
+                            "margin": float(margin_l[b]),
+                            "attn_mass_on_key": float(mass_last_l[b]),
+                            "attn_mass_on_key_mean_layers": float(mass_mean_l[b]),
+                            "pred_in_context": bool(pic_l[b]),
+                            "naive_confusable": bool(nc_l[b]),
+                            "value_repeats": bool(vr_l[b]),
+                            "label_ok": bool(label_ok_l[b]),
+                            "error_type": etype,
+                        })
+                        case_count += 1
     finally:
         for hd in handles:
             hd.remove()
         model.train(was_training)
+
+    # One host-device transfer per accumulator, after every batch.
+    n_err = int(n_err)
+    n_label_err = int(n_label_err)
+    flags_summary = {k: int(v) for k, v in flags_summary.items()}
+    taxonomy = {k: int(v) for k, v in taxonomy.items()}
+    mass_err, mass_err_n = float(mass_err), int(mass_err_n)
+    mass_corr, mass_corr_n = float(mass_corr), int(mass_corr_n)
+    tertile_n = [int(v) for v in tertile_n.tolist()]
+    tertile_err = [int(v) for v in tertile_err.tolist()]
+    key_wrong_total, key_wrong_n = float(key_wrong_total), int(key_wrong_n)
+    key_right_total, key_right_n = float(key_right_total), int(key_right_n)
 
     def _share(count):
         return count / n_err if n_err else float("nan")
