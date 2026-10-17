@@ -78,12 +78,15 @@ Usage
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import math
 import os
 import pathlib
 import platform
+import random
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -105,6 +108,7 @@ from .data import (
     STATS_SEED,
     TEST_SEED,
     VAL_SEED,
+    batch_fingerprint,
     length_sweep_lengths,
     make_batch,
     split_leakage_audit,
@@ -1092,6 +1096,199 @@ def _model_cfg(settings: Settings, **overrides) -> dict:
     return cfg
 
 
+# ---------------------------------------------------------------------------
+# Seed-determinism self-check: the "one seed pins one run" contract
+# ---------------------------------------------------------------------------
+# ``cage.repro`` documents that same-seed runs are stable on one machine,
+# but a claim in a docstring is not a measurement.  The audit below runs the
+# *actual* entry points twice and compares bytes: data streams, weight
+# initialisation and a short training trajectory.  A mismatch means some
+# randomness is not under the seed (or the seed is ignored), in which case
+# every seed-level statistic in a grid is only apparently repeatable.
+_REPRO_AUDIT_BASE_SEED = 4242
+_REPRO_AUDIT_STEPS = 5
+_REPRO_AUDIT_BATCH = 8
+
+_REPRO_AUDIT_KEYS = (
+    ("data_same_seed_identical", "same seed draws byte-identical batches"),
+    ("data_diff_seed_differs", "a different seed draws different data"),
+    ("data_draw_leaves_global_rng_untouched",
+     "data draws do not consume the global RNG (stream-owns-its-state)"),
+    ("init_same_seed_identical", "same seed builds byte-identical parameters"),
+    ("init_diff_seed_differs", "a different seed builds different parameters"),
+    ("trajectory_same_seed_identical",
+     "same seed replays the exact training-loss trajectory"),
+    ("trajectory_after_global_rng_noise_identical",
+     "global-RNG noise before a run does not change the trajectory "
+     "(entry re-seeding covers it)"),
+    ("trajectory_diff_seed_differs", "a different seed changes the trajectory"),
+)
+
+
+class ReproducibilityError(RuntimeError):
+    """The seed-determinism audit failed; run results would not be reproducible."""
+
+
+def _model_state_hash(model) -> str:
+    """Content hash over every parameter tensor (process-order independent)."""
+    h = hashlib.sha256()
+    for name, p in sorted(model.named_parameters()):
+        h.update(name.encode("utf-8"))
+        h.update(repr(p.detach().float().cpu().tolist()).encode("ascii"))
+    return h.hexdigest()[:16]
+
+
+def _probe_seed(settings: Settings, start: int) -> int:
+    """First seed >= ``start`` that is neither reserved nor a grid seed."""
+    seeds = {int(s) for s in settings.seeds}
+    s = int(start)
+    while s in RESERVED_EVAL_SEEDS or s in seeds:
+        s += 1
+    return s
+
+
+def _reproducibility_audit(settings: Settings) -> dict:
+    """Machine-check that one seed pins one run on the current machine.
+
+    Everything is compared through the *real* entry points
+    (``cage.data.make_batch`` via per-stream generators,
+    ``cage.model.build``, ``cage.train.train_model``) on throwaway probe
+    seeds that collide with neither the reserved evaluation streams nor the
+    configured training seeds:
+
+    * **data**: two fresh generators with the same seed produce the same
+      batch fingerprint; a different seed produces a different one;
+    * **RNG isolation**: drawing data leaves the global Python and Torch
+      RNG state untouched (the DataLoader ``generator=`` equivalent);
+    * **initialisation**: building the model twice under the same seed
+      yields byte-identical parameters, a different seed yields different
+      ones;
+    * **trajectory**: a short training run replays the exact loss sequence
+      under the same seed, is unaffected by global-RNG noise left by
+      anything that ran before it (the entry re-seeds), and changes under a
+      different seed.
+
+    Scope follows ``cage.repro``: same machine and PyTorch build, not
+    bit-exact reproduction across hardware/instruction sets.  Cached on
+    ``Settings`` so one process (``--only all``) runs it once.
+    """
+    cached = getattr(settings, "_repro_audit_cache", None)
+    if cached is not None:
+        return cached
+    device = settings.device
+    seed = _probe_seed(settings, _REPRO_AUDIT_BASE_SEED)
+    other = _probe_seed(settings, seed + 1)
+    cfg = _model_cfg(settings, gate="calib", d_model=48, n_layers=2)
+
+    def _draw(s):
+        gen = stream_generator(s, device)
+        return make_batch(settings.overfit_batch, settings.n_pairs,
+                          settings.vocab, device, gen=gen)
+
+    fp_same_a = batch_fingerprint(*_draw(seed))
+    fp_same_b = batch_fingerprint(*_draw(seed))
+    fp_other = batch_fingerprint(*_draw(other))
+
+    torch_state = torch.get_rng_state()
+    py_state = random.getstate()
+    cuda_states = (torch.cuda.get_rng_state_all()
+                   if device.startswith("cuda") and torch.cuda.is_available()
+                   else None)
+    _draw(seed)
+    rng_untouched = bool(torch.equal(torch.get_rng_state(), torch_state))
+    rng_untouched = rng_untouched and random.getstate() == py_state
+    if cuda_states is not None:
+        rng_untouched = rng_untouched and all(
+            torch.equal(a, b) for a, b in
+            zip(torch.cuda.get_rng_state_all(), cuda_states))
+
+    seed_everything(seed)
+    init_same_a = _model_state_hash(build(cfg, compile=False))
+    seed_everything(seed)
+    init_same_b = _model_state_hash(build(cfg, compile=False))
+    seed_everything(other)
+    init_other = _model_state_hash(build(cfg, compile=False))
+
+    def _trajectory(s, rng_noise=False):
+        if rng_noise:
+            torch.manual_seed(s + 777)
+            random.seed(s + 777)
+        with contextlib.redirect_stdout(io.StringIO()):
+            seed_everything(s)
+            model = build(cfg, compile=False)
+            hist = train_model(model, steps=_REPRO_AUDIT_STEPS,
+                               batch=_REPRO_AUDIT_BATCH,
+                               n_pairs=settings.n_pairs, lr=1e-3,
+                               vocab=settings.vocab, device=device,
+                               log_every=1, seed=s)
+        return [float(h["train_loss"]) for h in hist]
+
+    traj_a = _trajectory(seed)
+    traj_replay = _trajectory(seed)
+    traj_noisy = _trajectory(seed, rng_noise=True)
+    traj_other = _trajectory(other)
+
+    audit = {
+        "probe_seed": int(seed),
+        "other_seed": int(other),
+        "device": device,
+        "steps": _REPRO_AUDIT_STEPS,
+        "batch": _REPRO_AUDIT_BATCH,
+        "data_same_seed_sha256": fp_same_a,
+        "data_diff_seed_sha256": fp_other,
+        "init_same_seed_sha256": init_same_a,
+        "trajectory_losses": traj_a,
+        "data_same_seed_identical": bool(fp_same_a == fp_same_b),
+        "data_diff_seed_differs": bool(fp_same_a != fp_other),
+        "data_draw_leaves_global_rng_untouched": rng_untouched,
+        "init_same_seed_identical": bool(init_same_a == init_same_b),
+        "init_diff_seed_differs": bool(init_same_a != init_other),
+        "trajectory_same_seed_identical": bool(traj_a == traj_replay),
+        "trajectory_after_global_rng_noise_identical": bool(traj_a == traj_noisy),
+        "trajectory_diff_seed_differs": bool(traj_a != traj_other),
+        "deterministic_algorithms": bool(getattr(
+            torch, "are_deterministic_algorithms_enabled", lambda: False)()),
+        "scope": ("same machine + same PyTorch build; bit-exact reproduction "
+                  "across different hardware is not claimed"),
+    }
+    audit["passed"] = all(bool(audit[key]) for key, _ in _REPRO_AUDIT_KEYS)
+    settings._repro_audit_cache = audit
+    return audit
+
+
+def _enforce_reproducibility(settings: Settings, out_dir: pathlib.Path,
+                             tag: str) -> dict:
+    """Refuse to run a grid whose same-seed reruns are not repeatable.
+
+    Stores the audit under ``<tag>_repro_audit.json`` and aborts with
+    :class:`ReproducibilityError` when any check fails: a grid whose
+    seed-level statistics are not reproducible cannot underpin any claim,
+    so it is not started (same policy as the HB5 overfit gate).
+    """
+    audit = _reproducibility_audit(settings)
+    _write_json(out_dir / f"{tag}_repro_audit.json",
+                {**audit, **_run_context(settings)})
+    print(f"[{tag}] seed-determinism audit (probe seeds "
+          f"{audit['probe_seed']}/{audit['other_seed']}, "
+          f"{audit['steps']}-step trajectories):")
+    for key, text in _REPRO_AUDIT_KEYS:
+        mark = "ok" if audit[key] else "FAILED"
+        print(f"    {mark:>6}: {text}")
+    if not audit["passed"]:
+        failed = [key for key, _ in _REPRO_AUDIT_KEYS if not audit[key]]
+        _write_json(out_dir / f"{tag}_aborted.json",
+                    {"experiment": tag,
+                     "reason": "seed-determinism audit failed",
+                     "failed_checks": failed,
+                     "repro_audit": audit,
+                     **_run_context(settings)})
+        raise ReproducibilityError(
+            f"{tag}: seed-determinism audit failed for {failed}; same-seed "
+            f"reruns are not stable on this machine, so every seed-level "
+            f"statistic produced by the grid would be unrepeatable")
+    return audit
+
+
 def _curve_record(hist):
     """Per-run learning-curve summary (monitor the curve, not just the end).
 
@@ -1373,15 +1570,35 @@ class OverfitSanityError(RuntimeError):
     """The tiny-batch overfit pre-flight failed; grid training is refused."""
 
 
-def _overfit_sanity_by_gate(settings: Settings) -> dict:
-    """Tiny-batch memorisation check for every gate variant (cached).
+# Tiny-batch overfit configurations of the HB5 pre-flight: every gate
+# variant plus the E3 architecture paths (norm placement, dynamic
+# normalisation, LayerScale).  A backward bug on a normalisation or
+# write-strength path would survive a gate-only check yet make every E3
+# number uninterpretable, so those paths get the same memorisation test.
+_SANITY_CONFIGS = (
+    ("gate=none", {"gate": "none"}),
+    ("gate=query", {"gate": "query"}),
+    ("gate=calib", {"gate": "calib"}),
+    ("gate=null", {"gate": "null"}),
+    ("gate=calib,norm=post", {"gate": "calib", "norm": "post"}),
+    ("gate=calib,norm=mix", {"gate": "calib", "norm": "mix"}),
+    ("gate=calib,norm=seednorm", {"gate": "calib", "norm": "seednorm"}),
+    ("gate=calib,layer_scale=1e-2", {"gate": "calib", "layer_scale": 1e-2}),
+)
+# The plain baseline arm whose row supplies the shared batch/step/lr fields.
+_SANITY_REFERENCE = "gate=none"
+
+
+def _overfit_sanity_by_config(settings: Settings) -> dict:
+    """Tiny-batch memorisation check for every trained path (cached).
 
     One fixed batch from ``SANITY_SEED`` is pushed through the tiny 2-layer
-    model of each gate variant with dropout off and weight decay zeroed, so
-    every custom kernel's backward path is exercised - a passing
-    ``gate=none`` check alone would not prove the calib/null gates backprop.
-    Cached on ``Settings``: E1/E2/E3 in one ``--only all`` run share a
-    single execution.
+    model of each configuration with dropout off and weight decay zeroed, so
+    every custom kernel's backward path *and* every normalisation /
+    LayerScale path the grids train is exercised - a passing ``gate=none``
+    check alone would not prove the calib/null gates or the
+    seednorm/Post-LN/LayerScale paths backprop.  Cached on ``Settings``:
+    E1/E2/E3 in one ``--only all`` run share a single execution.
     """
     cached = getattr(settings, "_overfit_sanity_cache", None)
     if cached is not None:
@@ -1390,16 +1607,16 @@ def _overfit_sanity_by_gate(settings: Settings) -> dict:
     sidx, stgt, smeta = make_batch(settings.overfit_batch, settings.n_pairs,
                                    settings.vocab, settings.device, gen=gen)
     validate_batch(sidx, stgt, smeta, settings.vocab)
-    by_gate = {}
-    for gate in GATES:
+    by_config = {}
+    for label, overrides in _SANITY_CONFIGS:
         seed_everything(SANITY_SEED)
-        tiny = build(_model_cfg(settings, gate=gate, d_model=48, n_layers=2),
+        tiny = build(_model_cfg(settings, d_model=48, n_layers=2, **overrides),
                      compile=False)
-        by_gate[gate] = overfit_sanity_check(
+        by_config[label] = overfit_sanity_check(
             tiny, sidx, stgt, smeta, lr=settings.overfit_lr,
             steps=settings.overfit_steps, seed=SANITY_SEED)
-    settings._overfit_sanity_cache = by_gate
-    return by_gate
+    settings._overfit_sanity_cache = by_config
+    return by_config
 
 
 def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
@@ -1407,23 +1624,23 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
     """Refuse to start a grid when the loop cannot memorise a tiny batch.
 
     Runs the check on the *current* code revision (a stale
-    ``baselines_verdict.json`` cannot satisfy it), stores the per-gate
+    ``baselines_verdict.json`` cannot satisfy it), stores the per-config
     evidence under ``<tag>_overfit_sanity.json`` and aborts with
-    :class:`OverfitSanityError` when any gate variant fails: an invalid
+    :class:`OverfitSanityError` when any configuration fails: an invalid
     training loop would make every number a grid produces unreliable, so
     the grid is not started.
     """
-    by_gate = _overfit_sanity_by_gate(settings)
-    passed = all(row["passed"] for row in by_gate.values())
-    sanity = by_gate["none"]
+    by_config = _overfit_sanity_by_config(settings)
+    passed = all(row["passed"] for row in by_config.values())
+    sanity = by_config[_SANITY_REFERENCE]
     summary = {
         "passed": passed,
         "batch": int(sanity["batch"]),
         "steps": int(sanity["steps"]),
         "lr": float(sanity["lr"]),
         "seed": sanity["seed"],
-        "by_gate": {
-            gate: {
+        "by_config": {
+            label: {
                 "passed": row["passed"],
                 "loss_first": row["loss_first"],
                 "loss_last": row["loss_last"],
@@ -1439,7 +1656,7 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
                 "active_dropout": row["regularization"]["active_dropout"],
                 "weight_decay": row["regularization"]["weight_decay"],
             }
-            for gate, row in by_gate.items()
+            for label, row in by_config.items()
         },
     }
     _write_json(out_dir / f"{tag}_overfit_sanity.json",
@@ -1449,23 +1666,23 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
           f"{summary['lr']:g}, seed {summary['seed']}, data "
           f"{sanity['data_sha256']}; dropout off, weight decay zeroed, no "
           f"augmentation):")
-    for gate, row in summary["by_gate"].items():
+    for label, row in summary["by_config"].items():
         loss_s = (f"{row['loss_first']:.4f} -> {row['loss_last']:.4f}"
                   if _finite(row["loss_first"]) and _finite(row["loss_last"])
                   else "non-finite")
-        print(f"    gate={gate:>5}: loss {loss_s}, batch acc "
+        print(f"    {label:>28}: loss {loss_s}, batch acc "
               f"{row['acc_last']:.3f}, steps to loss/acc target "
               f"{row['steps_to_target_loss']}/{row['steps_to_target_acc']}, "
               f"grads {row['params_connected']} "
               f"finite={row['all_grads_finite']}; "
               f"{'passed' if row['passed'] else 'FAILED'}")
     if not passed:
-        failed = [g for g, row in summary["by_gate"].items()
+        failed = [label for label, row in summary["by_config"].items()
                   if not row["passed"]]
         _write_json(out_dir / f"{tag}_aborted.json",
                     {"experiment": tag,
                      "reason": "HB5 tiny-batch overfit gate failed",
-                     "failed_gates": failed,
+                     "failed_configs": failed,
                      "overfit_sanity": summary,
                      **_run_context(settings)})
         raise OverfitSanityError(
@@ -1479,6 +1696,7 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
 def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("HB1", "HB2", "HB3", "HB4", "HB5", "HB6"))
     _write_manifest(settings, out_dir, "baselines")
+    repro_audit = _enforce_reproducibility(settings, out_dir, "baselines")
     record = {"experiment": "baselines",
               "hypotheses": ["HB1", "HB2", "HB3", "HB4", "HB5", "HB6"],
               "seed": TEST_SEED, **_run_context(settings)}
@@ -1494,36 +1712,38 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
 
     # HB5 first: a broken training loop invalidates every learned number
     # below it (including the negative control).  The tiny batch is run
-    # through *every* gate variant, so each custom kernel's backward path
-    # (the calib/null parameters included) is exercised - a passing
-    # gate=none check alone would not prove the calib gate backprops.
-    # Dropout is forced off inside the check and per-parameter gradient
-    # connectivity/finiteness is audited on the first backward.  The same
-    # shared helper is the hard pre-flight gate of the E1/E2/E3 runners, so
-    # the baseline report and the grids can never disagree about it.
-    sanity_by_gate = _overfit_sanity_by_gate(settings)
-    sanity = sanity_by_gate["none"]
-    hb5_supported = all(row["passed"] for row in sanity_by_gate.values())
+    # through *every* trained path: each gate variant (so the calib/null
+    # parameters' backward paths are exercised - a passing gate=none check
+    # alone would not prove the calib gate backprops) plus the E3
+    # normalisation/LayerScale paths.  Dropout is forced off inside the
+    # check and per-parameter gradient connectivity/finiteness is audited
+    # on the first backward.  The same shared helper is the hard pre-flight
+    # gate of the E1/E2/E3 runners, so the baseline report and the grids
+    # can never disagree about it.
+    sanity_by_config = _overfit_sanity_by_config(settings)
+    sanity = sanity_by_config[_SANITY_REFERENCE]
+    hb5_supported = all(row["passed"] for row in sanity_by_config.values())
     print(f"[baselines] HB5 tiny-batch overfit sanity (batch="
           f"{sanity['batch']}, steps={sanity['steps']}, lr={sanity['lr']:g}; "
           f"dropout forced off, no augmentation, gradient connectivity "
           f"audited):")
-    for gate in GATES:
-        row = sanity_by_gate[gate]
+    for label, row in sanity_by_config.items():
         flow = row["grad_flow"]
-        print(f"    gate={gate:>5}: loss {row['loss_first']:.4f} -> "
+        print(f"    {label:>28}: loss {row['loss_first']:.4f} -> "
               f"{row['loss_last']:.4f}, batch acc={row['acc_last']:.3f}, "
               f"grads connected={flow['params_with_grad']}/"
               f"{flow['params_total']}, finite={flow['all_grads_finite']}; "
               f"{'passed' if row['passed'] else 'FAILED'}")
-    print(f"  {'SUPPORTED (every gate can memorise a tiny batch)' if hb5_supported else 'FAILED - gradients/loss/precision are broken in at least one gate variant, do not trust any grid result'}")
+    print(f"  {'SUPPORTED (every trained path can memorise a tiny batch)' if hb5_supported else 'FAILED - gradients/loss/precision are broken in at least one trained path, do not trust any grid result'}")
     overfit_payload = {**sanity, "passed": hb5_supported,
-                       "by_gate": sanity_by_gate}
+                       "by_config": sanity_by_config}
     _write_json(out_dir / "baselines_overfit_sanity.json", overfit_payload)
-    for gate in GATES:
+    for label, overrides in _SANITY_CONFIGS:
         _write_result(out_dir / "baselines_runs.jsonl",
-                      {**record, "name": f"overfit_sanity_{gate}",
-                       "gate": gate, **sanity_by_gate[gate]})
+                      {**record, "name": f"overfit_sanity_{label}",
+                       "config": label,
+                       "gate": overrides.get("gate"),
+                       **sanity_by_config[label]})
 
     hb1_supported = None
     rule_stats = None
@@ -1560,10 +1780,11 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     print(f"[baselines] linear probe tuned on val seed {VAL_SEED}: lr={best_lr:g}")
     probe_accs = []
     for seed in settings.seeds:
+        probe_curve = []
         probe = train_linear_probe(settings.n_pairs, settings.vocab,
                                    settings.device, steps=settings.probe_steps,
                                    batch=settings.probe_batch, lr=best_lr,
-                                   seed=seed)
+                                   seed=seed, history=probe_curve)
         acc = linear_probe_accuracy(probe, settings.n_pairs, settings.vocab,
                                     settings.device, batch=settings.eval_batch,
                                     batches=settings.eval_batches, seed=TEST_SEED)
@@ -1571,6 +1792,9 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         _write_result(out_dir / "baselines_runs.jsonl",
                       {**record, "name": "linear_bag_probe", "lr": best_lr,
                        "training_seed": seed, "accuracy": acc,
+                       "train_loss_first": probe_curve[0]["loss"],
+                       "train_loss_last": probe_curve[-1]["loss"],
+                       "probe_curve": probe_curve,
                        "n": settings.eval_batch * settings.eval_batches})
     summary = _mean_std(probe_accs)
     chance = 1.0 / (settings.vocab - 2)
@@ -1644,6 +1868,14 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "test_seed": TEST_SEED,
         "val_seed": VAL_SEED,
         "chance": chance,
+        "repro_audit_passed": bool(repro_audit["passed"]),
+        "repro_audit": {
+            "probe_seed": repro_audit["probe_seed"],
+            "other_seed": repro_audit["other_seed"],
+            "steps": repro_audit["steps"],
+            "checks": {key: bool(repro_audit[key])
+                       for key, _ in _REPRO_AUDIT_KEYS},
+        },
         "hb1_supported": bool(hb1_supported),
         "hb2_supported": bool(hb2["hb2_supported"]),
         "hb3_supported": bool(audit.get("hb3_supported")),
@@ -1680,8 +1912,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "acc_last": sanity["acc_last"],
             "steps": sanity["steps"], "lr": sanity["lr"],
             "batch": sanity["batch"],
-            "by_gate": {
-                gate: {
+            "by_config": {
+                label: {
                     "passed": row["passed"],
                     "loss_last": row["loss_last"],
                     "acc_last": row["acc_last"],
@@ -1691,7 +1923,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                     "all_grads_finite": row["grad_flow"]["all_grads_finite"],
                     "active_dropout": row["regularization"]["active_dropout"],
                 }
-                for gate, row in sanity_by_gate.items()
+                for label, row in sanity_by_config.items()
             },
         },
     }
@@ -1770,6 +2002,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
 def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H1a", "H1b", "H1c", "H1d"))
     _write_manifest(settings, out_dir, "e1")
+    _enforce_reproducibility(settings, out_dir, "e1")
     _enforce_overfit_gate(settings, out_dir, "e1")
     lr = _resolve_lr(settings, out_dir, "e1")
     runs = []
@@ -2195,6 +2428,7 @@ _E2_VARIANTS = (
 def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H2a", "H2b", "H2c"))
     _write_manifest(settings, out_dir, "e2")
+    _enforce_reproducibility(settings, out_dir, "e2")
     _enforce_overfit_gate(settings, out_dir, "e2")
     lr = _resolve_lr(settings, out_dir, "e2")
     lengths = length_sweep_lengths(base=settings.n_pairs, factor=2, n=4,
@@ -2389,6 +2623,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
 def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H3a", "H3b"))
     _write_manifest(settings, out_dir, "e3")
+    _enforce_reproducibility(settings, out_dir, "e3")
     _enforce_overfit_gate(settings, out_dir, "e3")
     lr = _resolve_lr(settings, out_dir, "e3")
     print(f"[e3] grid gate x norm x layer_scale at lr={lr:g}, "
@@ -2510,15 +2745,16 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
 
 
 def run_sanity(settings: Settings, out_dir: pathlib.Path) -> None:
-    """Standalone pre-flight: only the HB5 tiny-batch overfit gate.
+    """Standalone pre-flight: seed-determinism audit + HB5 overfit gate.
 
     Takes seconds instead of a full grid, so it can be run in front of a
-    long compute queue (``--only sanity``); the E1/E2/E3 runners invoke
-    the identical gate themselves, so a clean E1/E2/E3 run implies a
-    passed pre-flight.
+    long compute queue (``--only sanity``); the E1/E2/E3 runners invoke the
+    identical gates themselves, so a clean E1/E2/E3 run implies a passed
+    pre-flight.
     """
     _announce(("HB5",))
     _write_manifest(settings, out_dir, "sanity")
+    _enforce_reproducibility(settings, out_dir, "sanity")
     _enforce_overfit_gate(settings, out_dir, "sanity")
 
 
@@ -2599,7 +2835,7 @@ def main(argv=None) -> int:
             run_e3(settings, out_dir)
         else:
             run_all(settings, out_dir)
-    except OverfitSanityError as e:
+    except (OverfitSanityError, ReproducibilityError) as e:
         print(f"[runner] ABORTED before grid training: {e}")
         return 3
     print(f"\n[runner] done; records in {out_dir}/")

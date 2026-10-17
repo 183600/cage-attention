@@ -154,13 +154,16 @@ class LinearBagProbe(torch.nn.Module):
 
 
 def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
-                       lr=3e-4, seed=0):
+                       lr=3e-4, seed=0, history: list | None = None):
     """Fit the probe with the same optimizer/schedule recipe pinned for the
     transformer (``_make_adamw``, cosine schedule, gradient clipping).
 
     ``seed`` must not collide with a held-out evaluation stream; the first
     batch is validated as a data-cleaning gate (same protocol as
-    ``train_model``).
+    ``train_model``).  When ``history`` is given, sampled
+    ``{"step", "loss"}`` points (~20 per run plus the last step) are
+    appended to it: the probe is part of the HB2 negative control, so its
+    training curve must be as auditable as the transformer grids'.
     """
     check_train_seed(seed)
     seed_everything(seed)
@@ -170,6 +173,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     opt = _make_adamw(params, lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=steps, eta_min=lr * 0.1)
+    sample_every = max(1, steps // 20)
     model.train()
     for step in range(steps):
         idx, targets, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
@@ -181,6 +185,10 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
         torch.nn.utils.clip_grad_norm_(params, 1.0)
         opt.step()
         sched.step()
+        if history is not None and (step % sample_every == 0
+                                    or step == steps - 1):
+            history.append({"step": int(step),
+                            "loss": float(loss.detach())})
     model.eval()
     return model
 
@@ -213,17 +221,26 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
     table = []
     for lr in lr_grid:
         accs = []
+        loss_means = []
         for seed in seeds:
+            history = []
             model = train_linear_probe(n_pairs, vocab, device, steps=steps,
-                                       batch=batch, lr=lr, seed=seed)
+                                       batch=batch, lr=lr, seed=seed,
+                                       history=history)
+            losses = [p["loss"] for p in history]
+            if losses:
+                loss_means.append(sum(losses) / len(losses))
             accs.append(linear_probe_accuracy(model, n_pairs, vocab, device,
                                               batch=probe_batch,
                                               batches=val_batches,
                                               seed=val_seed))
         mean = sum(accs) / len(accs)
         var = sum((a - mean) ** 2 for a in accs) / len(accs)
-        table.append({"lr": lr, "val_accuracy_mean": mean,
-                      "val_accuracy_std": var ** 0.5, "n_seeds": len(accs)})
+        row = {"lr": lr, "val_accuracy_mean": mean,
+               "val_accuracy_std": var ** 0.5, "n_seeds": len(accs)}
+        if loss_means:
+            row["train_loss_mean"] = sum(loss_means) / len(loss_means)
+        table.append(row)
     best = max(table, key=lambda row: row["val_accuracy_mean"])
     return best["lr"], table
 
