@@ -1012,8 +1012,7 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
             _make_hook(i, getattr(blk.attn, "null_k", None))))
 
     # Device-side accumulators: per-batch reductions are summed on the
-    # device and pulled to Python once after the loop, so a GPU run does
-    # not pay one host-device synchronisation per reduction or per sample.
+    # device and pulled to Python once after the loop.
     n_total = 0
     case_count = 0
     cases = []
@@ -1093,9 +1092,8 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
             if case_count < max_cases:
                 rows = torch.nonzero(wrong, as_tuple=False).flatten().tolist()
                 if rows:
-                    # Pull the per-sample vectors to host once per batch so
-                    # the case loop below is pure Python (one sync per
-                    # vector instead of one per scalar).
+                    # Pull the per-sample vectors to host so the case loop
+                    # below is pure Python.
                     conf_l = conf.tolist()
                     margin_l = margin.tolist()
                     mass_last_l = mass_last.tolist()
@@ -1147,7 +1145,6 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
             hd.remove()
         model.train(was_training)
 
-    # One host-device transfer per accumulator, after every batch.
     n_err = int(n_err)
     n_label_err = int(n_label_err)
     flags_summary = {k: int(v) for k, v in flags_summary.items()}
