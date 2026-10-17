@@ -6,8 +6,7 @@ What is seeded
 * NumPy ``numpy.random`` (only when NumPy is installed - PyTorch works
   without it, so the helper must not hard-depend on it);
 * PyTorch CPU and CUDA: ``torch.manual_seed`` seeds the default generator
-  and ``torch.cuda.manual_seed_all`` makes the all-device coverage explicit
-  (this is what fixes dropout-mask draws on GPU).
+  and ``torch.cuda.manual_seed_all`` makes the all-device coverage explicit.
 
 Data order is *not* part of the global RNG: ``cage.data.make_batch`` never
 reads global state - every split/stream passes its own ``torch.Generator``
@@ -39,7 +38,7 @@ def seed_everything(seed: int, deterministic: bool = False) -> dict:
 
     Returns a small dict describing what was seeded, so a run record can
     document the seeding state instead of assuming it.  ``deterministic``
-    is opt-in because deterministic kernels can be slower: it calls
+    is opt-in: it calls
     ``torch.use_deterministic_algorithms(True, warn_only=True)`` (an op
     without a deterministic kernel warns instead of aborting a long grid)
     and sets the cuBLAS workspace config when CUDA is available.

@@ -1007,9 +1007,6 @@ class Attention(nn.Module):
             "entropy": stats[0].detach(),
             "maxprob": None if stats[1] is None else stats[1].detach(),
             "gate": gate_stat,
-            # null_mass is a column view of the reusable stats scratch buffer,
-            # so it has to be materialised before it escapes: a later forward
-            # (next layer / next batch) would otherwise overwrite it in place.
             "null_mass": None if stats[2] is None else stats[2].detach().clone(),
         }
 

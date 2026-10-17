@@ -399,8 +399,8 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
             "runtime precision switches)")
     elif stage == "data":
         report["suggestions"].append(
-            "fix the data pipeline first: NaN/Inf or invalid labels poison "
-            "every downstream stage")
+            "address the data pipeline first: NaN/Inf or invalid labels "
+            "poison every downstream stage")
     else:
         idx_stage = order.index(stage)
         if idx_stage >= order.index("activations"):
