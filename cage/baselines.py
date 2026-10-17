@@ -6,7 +6,7 @@ Why these baselines
   even positions are keys, keys are distinct per sequence, so the query
   key pins the value that follows it.  A parameter-free rule therefore
   defines the *ceiling*.  If it does not reach ~1.0, the data
-  construction itself is broken and numbers below it cannot be attributed
+  construction itself is invalid and numbers below it cannot be attributed
   to the model.
 * ``rule_naive_last_match``: the same idea without the pair-structure
   prior (the last occurrence of the query token wins).  Its gap to the

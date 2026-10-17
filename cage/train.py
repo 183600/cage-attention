@@ -222,7 +222,7 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
 def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
                        grad_norm_explode: float = 100.0,
                        dense_lm: bool = False):
-    """Staged triage for a non-finite loss (the standard debugging order).
+    """Staged triage for a non-finite loss.
 
     1. **Data**: NaN/Inf tokens or targets, structural/label violations
        (``validate_batch``);
@@ -633,9 +633,9 @@ def _disable_dropout(model):
 
     The sanity check must run without regularisation, whatever the
     training config says: ``model.train()`` alone would re-activate
-    dropout and hide a broken gradient path behind a moving loss.  Only
-    dropout is switched off (norms stay in training mode as in the real
-    loop), and the settings are returned for the run record.
+    dropout and perturb the loss the check reads.  Only dropout is
+    switched off (norms stay in training mode as in the real loop), and
+    the settings are returned for the run record.
     """
     modules = [m for m in model.modules() if isinstance(m, nn.Dropout)]
     for m in modules:
@@ -661,14 +661,13 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
     for real runs), and train the *actual* architecture on it with the
     *actual* optimizer factory.  A correct training loop drives the loss to
     ~0 and the batch accuracy to 1.0 because the batch can be memorised; a
-    loop that cannot overfit a handful of samples has broken gradients, a
-    mis-wired loss or a silent dtype/precision problem, and no grid result
-    above it is interpretable.
+    loop that cannot overfit a handful of samples is invalid, and no grid
+    result above it is interpretable.
 
     Beyond the loss/accuracy targets the check audits the backward pass
     itself on the first step (``grad_flow``: every trainable parameter
     reached, all gradients finite), so "cannot overfit" is triaged into
-    "gradients never connected" vs "optimisation is merely slow".  The
+    "gradients never connected" vs "the optimiser configuration".  The
     effective regularisation is recorded (``regularization``: dropout
     force-disabled, weight decay zeroed, no augmentation), so the verdict
     documents *what* was switched off instead of assuming it.  How *fast*

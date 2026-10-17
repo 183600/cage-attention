@@ -153,10 +153,6 @@ def make_norm(kind: str, dim: int) -> nn.Module:
 
 _MAX_MASK_CACHE = 64
 
-# Eval-mode qkv projection is chunked over the batch dimension: the
-# transient ``(rows, 3C)`` GEMM output stays small enough to survive in
-# cache until it is copied into the head-major ``packed`` buffer, which
-# both lowers the peak footprint and speeds the permute-copy up.
 _QKV_CHUNK_ROWS = 2048
 
 _causal_mask_cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
