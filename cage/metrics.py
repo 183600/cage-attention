@@ -28,6 +28,18 @@ Metric choices (and why)
   effect at 80% power (``mde80``) and the sign consistency across seeds,
   because a CI that merely *includes* 0 is not evidence of "no effect"
   when the experiment cannot resolve the effect in the first place.
+* The seed-level unit count is small (five by default), which is exactly
+  the regime where the percentile bootstrap is weakest: its coverage is
+  only first-order accurate and one influential seed can carry the mean.
+  Every contrast therefore also reports two small-sample robustness
+  companions, computed in the same call: the **jackknife**
+  (leave-one-seed-out) mean range with a sign-flip / bound-flip flag, and
+  the **bias-corrected accelerated (BCa)** interval, which corrects for
+  median bias and skewness.  The pre-registered decision rule remains the
+  percentile CI - switching it after seeing results would move the
+  goalposts and invalidate the registry hash - but the companions are
+  reported next to it, so a supported claim carried by a single seed, or
+  reversed by the BCa correction, is flagged instead of silently trusted.
 * Some pre-registered predictions are *null/equivalence* claims (a
   quantity is expected to stay within a bound, not to move).  Those are
   tested with ``equivalence_test`` (bootstrap TOST): support requires the
@@ -314,6 +326,80 @@ def _bootstrap_summary(d: torch.Tensor, means: torch.Tensor,
     }
 
 
+def _jackknife_means(d: torch.Tensor) -> torch.Tensor:
+    """Leave-one-out means of ``d`` (one jackknife replication per unit).
+
+    For ``n`` paired differences the replication ``theta_(i)`` is the mean
+    with unit ``i`` removed.  Its spread answers "would the conclusion
+    survive dropping the most influential seed?", which the plain
+    bootstrap cannot: a single outlier seed shifts the resampled
+    distribution but is re-drawn in most resamples.  Returns an empty
+    tensor for ``n < 2``.
+    """
+    n = d.numel()
+    if n < 2:
+        return d.new_empty(0)
+    return (d.sum() - d) / (n - 1)
+
+
+def _bca_bounds(d: torch.Tensor, means: torch.Tensor,
+                alpha: float):
+    """Bias-corrected and accelerated (BCa) bootstrap interval for the mean.
+
+    Efron's BCa end-points correct the percentile interval for median
+    bias (``z0``, read off the bootstrap distribution) and for scale /
+    skewness error (``a``, the jackknife acceleration) - the regime the
+    seed-level contrasts live in: a handful of paired differences with no
+    symmetry guarantee.  BCa is second-order accurate where the
+    percentile interval is first-order, so the two disagreeing is
+    diagnostic; the percentile interval stays the pre-registered primary
+    readout either way.
+
+    Returns ``(lo, hi)`` or ``None`` when the correction is undefined
+    (n < 4: the acceleration from three or fewer jackknife points is not
+    estimable and the correction would only add noise; degenerate bootstrap
+    distribution; or an adjusted percentile outside ``(0, 1)``); callers
+    then record BCa as unavailable rather than fabricating a bound.
+    """
+    n = d.numel()
+    if n < 4:
+        return None
+    nd = NormalDist()
+    obs = float(d.mean())
+    b = int(means.numel())
+    n_less = int((means < obs).sum())
+    if n_less == 0:
+        z0 = -6.0
+    elif n_less == b:
+        z0 = 6.0
+    else:
+        z0 = nd.inv_cdf(n_less / b)
+    loo = _jackknife_means(d)
+    dev = loo.mean() - loo
+    den = 6.0 * float(dev.pow(2).sum()) ** 1.5
+    a = (float(dev.pow(3).sum()) / den) if den > 0.0 else 0.0
+
+    def _adjusted(z: float):
+        denom = 1.0 - a * (z0 + z)
+        if abs(denom) < 1e-9:
+            return None
+        return float(nd.cdf(z0 + (z0 + z) / denom))
+
+    a_lo = _adjusted(nd.inv_cdf(alpha / 2.0))
+    a_hi = _adjusted(nd.inv_cdf(1.0 - alpha / 2.0))
+    if a_lo is None or a_hi is None:
+        return None
+    a_lo = min(max(a_lo, 1e-6), 1.0 - 1e-6)
+    a_hi = min(max(a_hi, 1e-6), 1.0 - 1e-6)
+    if a_lo >= a_hi:
+        return None
+    lo = float(torch.quantile(means, a_lo))
+    hi = float(torch.quantile(means, a_hi))
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return None
+    return (lo, hi)
+
+
 def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                         alpha: float = 0.05) -> dict:
     """Percentile bootstrap CI for the mean of *paired* differences.
@@ -337,7 +423,17 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
       *inconclusive*, not as evidence of absence;
     * ``sign_consistency`` - fraction of non-zero paired differences that
       share the sign of the mean (robustness to a single seed driving the
-      mean).
+      mean);
+    * ``loo_mean_min`` / ``loo_mean_max`` / ``loo_sign_flip`` - jackknife
+      companions: the range of the mean when each seed is left out in
+      turn, and whether removing any one seed flips the direction of the
+      effect.  A supported contrast with ``loo_sign_flip`` is carried by
+      a single influential seed, whatever the CI says;
+    * ``lo_bca`` / ``hi_bca`` / ``bca_agrees`` - the bias-corrected
+      accelerated interval and whether it reaches the same
+      excludes-0 decision as the pre-registered percentile interval
+      (``None`` below n=4, where the jackknife acceleration is not
+      estimable, and for degenerate bootstrap distributions).
     """
     d = _flatten_float(diffs)
     if d.numel() == 0:
@@ -345,7 +441,10 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 "hi": float("nan"), "n": 0, "sd": float("nan"),
                 "half_width": float("nan"), "mde80": float("nan"),
                 "p_value": float("nan"), "sign_consistency": float("nan"),
-                "alpha": float(alpha)}
+                "alpha": float(alpha),
+                "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
+                "loo_sign_flip": False, "lo_bca": float("nan"),
+                "hi_bca": float("nan"), "bca_agrees": None}
     n = d.numel()
     means = _bootstrap_means(d, n_boot, seed)
     out = _bootstrap_summary(d, means, alpha)
@@ -357,6 +456,21 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
     neg = float((d < 0.0).to(torch.float64).mean())
     out["sign_consistency"] = (max(pos, neg) if pos + neg > 0.0
                                else float("nan"))
+    loo = _jackknife_means(d)
+    out["loo_mean_min"] = float(loo.min()) if loo.numel() else float("nan")
+    out["loo_mean_max"] = float(loo.max()) if loo.numel() else float("nan")
+    out["loo_sign_flip"] = bool(
+        loo.numel() > 0 and out["mean"] != 0.0
+        and bool(((loo > 0.0) != (out["mean"] > 0.0)).any()))
+    bca = _bca_bounds(d, means, alpha)
+    if bca is None:
+        out["lo_bca"] = out["hi_bca"] = float("nan")
+        out["bca_agrees"] = None
+    else:
+        out["lo_bca"], out["hi_bca"] = bca
+        percentile_excludes = out["lo"] > 0.0 or out["hi"] < 0.0
+        bca_excludes = out["lo_bca"] > 0.0 or out["hi_bca"] < 0.0
+        out["bca_agrees"] = bool(percentile_excludes == bca_excludes)
     return out
 
 
@@ -387,6 +501,14 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
     ``lo``/``hi``/``sd``/``mde80`` fields so the report can say which.
     Returns NaN fields and ``equivalent=False`` for an empty input or a
     non-positive/non-finite bound.
+
+    The same small-sample robustness companions as in
+    :func:`paired_bootstrap_ci` are attached: ``loo_within_bound`` (every
+    leave-one-out mean still lies inside the bound - a single seed cannot
+    create the apparent stability) and the BCa interval
+    (``lo_bca``/``hi_bca``/``equivalent_bca``/``bca_agrees``), so an
+    equivalence claim that is an artifact of one lucky seed or of
+    percentile-interval bias is flagged at the decision point.
     """
     bound = abs(float(bound))
     d = _flatten_float(diffs)
@@ -396,6 +518,10 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         "mde80": float("nan"), "p_value": float("nan"),
         "sign_consistency": float("nan"), "alpha": float(alpha),
         "test": "equivalence", "bound": bound, "equivalent": False,
+        "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
+        "loo_within_bound": False, "lo_bca": float("nan"),
+        "hi_bca": float("nan"), "equivalent_bca": None,
+        "bca_agrees": None,
     }
     if d.numel() == 0 or not math.isfinite(bound) or bound <= 0.0:
         return out
@@ -406,6 +532,21 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
     out["p_value"] = min(
         1.0, (max(p_below, p_above) * n_boot + 1.0) / (n_boot + 1.0))
     out["equivalent"] = bool(out["lo"] > -bound and out["hi"] < bound)
+    loo = _jackknife_means(d)
+    out["loo_mean_min"] = float(loo.min()) if loo.numel() else float("nan")
+    out["loo_mean_max"] = float(loo.max()) if loo.numel() else float("nan")
+    out["loo_within_bound"] = bool(
+        loo.numel() > 0 and bool(loo.abs().max() < bound))
+    bca = _bca_bounds(d, means, alpha)
+    if bca is None:
+        out["lo_bca"] = out["hi_bca"] = float("nan")
+        out["equivalent_bca"] = None
+        out["bca_agrees"] = None
+    else:
+        out["lo_bca"], out["hi_bca"] = bca
+        out["equivalent_bca"] = bool(
+            out["lo_bca"] > -bound and out["hi_bca"] < bound)
+        out["bca_agrees"] = bool(out["equivalent"] == out["equivalent_bca"])
     return out
 
 
@@ -490,3 +631,87 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
     half = z * math.sqrt(p * (1.0 - p) / total + z2 / (4.0 * total * total)) / denom
     return {"p": p, "lo": max(0.0, center - half),
             "hi": min(1.0, center + half), "n": total}
+
+
+def _self_test() -> int:
+    """Deterministic self-checks of the inference machinery.
+
+    The statistics are the decision layer of every experiment, so their
+    behaviour is pinned here on synthetic inputs with known answers (no
+    SciPy, no dataset needed).  Run with ``python3 -m cage.metrics``.
+    """
+    failures = []
+
+    def check(name: str, cond: bool) -> None:
+        if not cond:
+            failures.append(name)
+
+    # Well-separated positive effects: CI excludes 0, no single seed needed.
+    ci = paired_bootstrap_ci([1.0, 1.1, 0.9, 1.2, 1.0], n_boot=2000, seed=0)
+    check("positive_ci_excludes_0", ci["lo"] > 0.0)
+    check("positive_loo_stable", ci["loo_sign_flip"] is False)
+    check("positive_bca_available", math.isfinite(ci["lo_bca"]))
+    check("positive_bca_agrees", ci["bca_agrees"] is True)
+
+    # BCa needs at least four points: with fewer the jackknife acceleration
+    # is not estimable, so the audit must abstain (not fabricate bounds).
+    tiny = paired_bootstrap_ci([1.0, 0.9, 1.1], n_boot=500, seed=0)
+    check("bca_needs_four_points", tiny["bca_agrees"] is None)
+
+    # Skewed sample: percentile CI includes 0 but BCa excludes it (one
+    # dominant seed pulls the mean).  The audit must detect the gap.
+    skewed = paired_bootstrap_ci([0.343, -0.674, 0.721, 0.929, 3.138],
+                                 n_boot=2000, seed=0)
+    check("bca_disagreement_detected",
+          skewed["lo"] < 0.0 < skewed["lo_bca"]
+          and skewed["bca_agrees"] is False)
+
+    # One dominant seed with opposite-sign remainder: jackknife must flag it.
+    ci2 = paired_bootstrap_ci([5.0, -1.0, -1.0, -1.0, -1.0],
+                              n_boot=2000, seed=0)
+    check("loo_flags_influence", ci2["loo_sign_flip"] is True)
+    check("loo_range_ordered", ci2["loo_mean_min"] <= ci2["loo_mean_max"])
+    check("loo_min_is_negative", ci2["loo_mean_min"] < 0.0)
+
+    # Equivalence: bounded noise inside the bound, a clear shift outside.
+    eq = equivalence_test([0.1, -0.05, 0.02, 0.0, 0.08], 0.5,
+                          n_boot=2000, seed=0)
+    check("equiv_inside", eq["equivalent"] is True)
+    check("equiv_loo_within", eq["loo_within_bound"] is True)
+    # Equivalence claim whose BCa interval pokes out of the bound: the
+    # companion must flag the disagreement with the percentile verdict.
+    eq_dis = equivalence_test([-0.021, 0.0207, -0.0123, -0.0028, 0.0456],
+                              0.03, n_boot=2000, seed=0)
+    check("equiv_bca_disagreement",
+          eq_dis["equivalent"] is True and eq_dis["equivalent_bca"] is False)
+    neq = equivalence_test([2.0, 2.1, 1.9, 2.0, 2.05], 1.0,
+                           n_boot=2000, seed=0)
+    check("equiv_outside", neq["equivalent"] is False)
+    check("equiv_outside_loo", neq["loo_within_bound"] is False)
+
+    # Degenerate inputs must not raise and must not claim anything.
+    empty = paired_bootstrap_ci([])
+    check("empty_no_claim", empty["n"] == 0 and empty["bca_agrees"] is None)
+    bad_bound = equivalence_test([1.0, 2.0], 0.0)
+    check("invalid_bound", bad_bound["equivalent"] is False)
+
+    # FDR: monotone adjusted p, small p-values survive, large ones do not,
+    # NaN stays untestable.
+    adj = benjamini_hochberg([0.001, 0.004, 0.2, 0.8, float("nan")], q=0.05)
+    check("bh_reject_small", adj[0]["reject"] and adj[1]["reject"])
+    check("bh_keep_large", not adj[2]["reject"] and not adj[3]["reject"])
+    check("bh_nan_untestable", adj[4]["p_adj"] != adj[4]["p_adj"])
+
+    # Wilson interval brackets the point estimate.
+    w = wilson_ci(60, 100)
+    check("wilson_brackets", w["lo"] <= w["p"] <= w["hi"])
+
+    if failures:
+        print("metrics self-test FAILED: " + ", ".join(failures))
+        return 1
+    print("metrics self-test: all checks passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_self_test())

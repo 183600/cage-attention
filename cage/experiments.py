@@ -62,7 +62,13 @@ Design principles
    statistically detectable sliver has not earned its complexity.  This
    matters at the 5-seed scale used here: an uncorrected 95% readout over
    ~16 null contrasts would produce about one spurious "supported" claim
-   per experiment.
+   per experiment.  At that same scale the percentile bootstrap is the
+   first-order approximation in the chain, so every contrast additionally
+   carries a jackknife (leave-one-seed-out) diagnostic and a bias-corrected
+   accelerated (BCa) interval, and the report flags any positive verdict
+   whose decision flips when a single seed is dropped or dissents from the
+   BCa readout (see ``cage.metrics``).  The companions audit the
+   pre-registered decision rule; they never replace it.
 
 Outputs land in ``results/`` (git-ignored); nothing is written into the
 tracked tree.
@@ -631,6 +637,42 @@ def _paired_diff(runs_a, runs_b, metric):
     return ci
 
 
+def _std_effect(ci):
+    """Standardized paired effect (mean / paired-difference SD).
+
+    ``rel_effect`` (effect / control-side mean) answers "how large is this
+    against the baseline level"; Cohen's dz answers "how large is this
+    against the seed-to-seed noise", which is the scale the paired design
+    actually resolves.  Both are reported because a gain can be
+    economically tiny but noise-free (large dz, small rel) or vice versa.
+    """
+    sd = ci.get("sd")
+    mean = ci.get("mean")
+    if not (_finite(sd) and _finite(mean)) or float(sd) <= 0.0:
+        return float("nan")
+    return float(mean) / float(sd)
+
+
+def small_n_flags(ci) -> str:
+    """Short flags for the small-sample robustness companions of a contrast.
+
+    Empty when the pre-registered decision and its jackknife / BCa
+    companions agree; otherwise names *which* companion dissents, so the
+    console line shows at a glance that a supported contrast needs a
+    second look.  See ``cage.metrics`` for the definitions.
+    """
+    flags = []
+    n = ci.get("n") or 0
+    if ci.get("test") == "equivalence":
+        if n >= 2 and ci.get("loo_within_bound") is False:
+            flags.append("LOO outside bound")
+    elif ci.get("loo_sign_flip"):
+        flags.append("LOO sign flip")
+    if ci.get("bca_agrees") is False:
+        flags.append("BCa differs")
+    return " ".join(flags)
+
+
 def _fmt_ci(ci) -> str:
     if ci["n"] == 0 or not math.isfinite(ci["mean"]):
         return "n/a"
@@ -745,6 +787,17 @@ class ContrastLog:
     rows citing unknown ids) and records it in the payload, so a
     pre-registered decision that no contrast executes is flagged instead
     of silently missing.
+
+    Small-sample robustness: at the seed counts used here the percentile
+    bootstrap is the first-order approximation in the chain, so every row
+    also stores the jackknife (leave-one-out) mean range, its
+    sign/bound-flip flag and the BCa interval verdict (see
+    ``cage.metrics``).  :meth:`finalize` counts the contrasts whose
+    *decision* flips when any single seed is dropped and those where BCa
+    disagrees with the percentile readout, prints them as warnings, and
+    writes the counts into the payload - the pre-registered decision rule
+    itself is untouched, but a claim carried by one influential seed is
+    no longer invisible.
     """
 
     def __init__(self, tag: str, hypotheses=()):
@@ -761,11 +814,20 @@ class ContrastLog:
             "mean": ci.get("mean"), "lo": ci.get("lo"), "hi": ci.get("hi"),
             "n": ci.get("n"), "p_value": ci.get("p_value"),
             "mde80": ci.get("mde80"), "sd": ci.get("sd"),
+            "dz": _std_effect(ci),
             "sesoi": sesoi,
             "test": "equivalence" if equiv else "difference",
             "equivalence_bound": ci.get("bound") if equiv else None,
             "equivalent": ci.get("equivalent") if equiv else None,
             "sign_consistency": ci.get("sign_consistency"),
+            "loo_mean_min": ci.get("loo_mean_min"),
+            "loo_mean_max": ci.get("loo_mean_max"),
+            "loo_sign_flip": ci.get("loo_sign_flip"),
+            "loo_within_bound": ci.get("loo_within_bound"),
+            "lo_bca": ci.get("lo_bca"),
+            "hi_bca": ci.get("hi_bca"),
+            "equivalent_bca": ci.get("equivalent_bca") if equiv else None,
+            "bca_agrees": ci.get("bca_agrees"),
             "baseline_mean": ci.get("baseline_mean"),
             "controlled": None if audit is None else audit["controlled"],
             "varying_factors": ({} if audit is None
@@ -781,6 +843,9 @@ class ContrastLog:
         if sesoi is not None:
             line += (f"  [equivalence bound={sesoi:g}]" if equiv
                      else f"  [SESOI={sesoi:g}]")
+        flags = small_n_flags(ci)
+        if flags:
+            line += f"  [{flags}]"
         if warn:
             line += f"  [{warn}]"
         print(line)
@@ -838,6 +903,20 @@ class ContrastLog:
                         and abs(mean) >= float(sesoi)))
             row["supports_hypothesis"] = bool(
                 row["fdr_reject"] and row["practically_relevant"])
+            # Small-sample robustness: does the *decision* survive when any
+            # single seed is dropped (jackknife), and does BCa reach the
+            # same decision as the pre-registered percentile interval?
+            # These are annotations, not decision rules: the verdict above
+            # stays exactly as pre-registered, but a supported verdict that
+            # is this fragile is flagged below.
+            claim = row["supports_hypothesis"] and (row.get("n") or 0) >= 2
+            if row["test"] == "equivalence":
+                row["loo_flips_decision"] = bool(
+                    claim and row.get("loo_within_bound") is False)
+            else:
+                row["loo_flips_decision"] = bool(
+                    claim and row.get("loo_sign_flip"))
+            row["bca_disagrees"] = row.get("bca_agrees") is False
             # A-priori power planning for the pre-registered SESOI at the
             # observed paired-difference SD: how many seeds would this
             # contrast need to resolve an effect it cares about?  (Adjust
@@ -850,6 +929,9 @@ class ContrastLog:
         testable = [r for r in self.rows if math.isfinite(r["p_adj"])]
         surviving = [r for r in testable if r["fdr_reject"]]
         supporting = [r for r in testable if r["supports_hypothesis"]]
+        loo_flips = [r for r in testable if r.get("loo_flips_decision")]
+        bca_differs = [r for r in testable if r.get("bca_disagrees")]
+        low_resolution = [r for r in testable if r["n"] <= 5]
         below_sesoi = [r for r in surviving
                        if not r["practically_relevant"]
                        and r["test"] != "equivalence"]
@@ -867,11 +949,15 @@ class ContrastLog:
               f"pre-registered decision "
               f"(uncorrected p -> adjusted p; only 'SURVIVES'/'EQUIVALENT' "
               f"supports a pre-registered decision; rel = effect relative "
-              f"to the control-side mean, read it for practical "
-              f"significance; a statistically significant effect below its "
-              f"SESOI is practically negligible and does NOT support the "
-              f"hypothesis; a null prediction is supported only when the "
-              f"95% CI lies inside its equivalence bound):")
+              f"to the control-side mean, dz = standardized effect (mean / "
+              f"paired SD), loo = jackknife mean range - read rel/dz for "
+              f"practical significance; a statistically significant effect "
+              f"below its SESOI is practically negligible and does NOT "
+              f"support the hypothesis; a null prediction is supported only "
+              f"when the 95% CI lies inside its equivalence bound; a "
+              f"positive verdict that flips when one seed is dropped, or "
+              f"dissents from the BCa interval, is flagged after the "
+              f"table):")
         for r in testable:
             rel_s = (f", rel={r['rel_effect']:+.2%}"
                      if math.isfinite(r["rel_effect"]) else "")
@@ -904,13 +990,19 @@ class ContrastLog:
                 need_s = (f", needs ~{math.ceil(need)} seeds for "
                           f"{'the bound' if equiv else 'SESOI'} at 80% "
                           f"power (has {r['n']})")
+            dz = r.get("dz", float("nan"))
+            dz_s = f", dz={dz:+.2f}" if math.isfinite(dz) else ""
+            loo_lo, loo_hi = r.get("loo_mean_min"), r.get("loo_mean_max")
+            loo_s = (f", loo=[{loo_lo:+.4f}, {loo_hi:+.4f}]"
+                     if _finite(loo_lo) and _finite(loo_hi) else "")
             print(f"  [{r['hypothesis']}] {r['rule']} ({r['metric']}): "
                   f"p={r['p_value']:.4f} -> p_adj={r['p_adj']:.4f} "
                   f"{verdict} "
-                  f"(effect={r['mean']:+.4f}{rel_s}, "
+                  f"(effect={r['mean']:+.4f}{rel_s}{dz_s}, "
                   f"MDE80={r['mde80']:.4f}{', ' if sesoi_s else ''}"
                   f"{sesoi_s}, seeds={r['n']}, "
-                  f"sign-consistency={r['sign_consistency']:.2f}{need_s})")
+                  f"sign-consistency={r['sign_consistency']:.2f}"
+                  f"{loo_s}{need_s})")
         if audited:
             print(f"[{self.tag}] controlled-variable audit: "
                   f"{len(controlled_pass)}/{len(audited)} contrasts pass "
@@ -945,6 +1037,31 @@ class ContrastLog:
                   f"testable contrast(s) rest on fewer than 3 independent "
                   f"seeds; the recommended minimum for a seed-level claim "
                   f"is 3-5, so treat them as provisional")
+        if loo_flips:
+            names = ", ".join(f"{r['hypothesis']}/{r['rule']}"
+                              for r in loo_flips)
+            print(f"[{self.tag}] WARNING: {len(loo_flips)} positive "
+                  f"decision(s) flip when any single seed is dropped "
+                  f"(jackknife): {names}; the effect rests on one "
+                  f"influential seed, so replicate at more seeds before "
+                  f"reading it as a mechanism")
+        if bca_differs:
+            names = ", ".join(f"{r['hypothesis']}/{r['rule']}"
+                              for r in bca_differs)
+            print(f"[{self.tag}] WARNING: {len(bca_differs)} testable "
+                  f"contrast(s) where the bias-corrected (BCa) interval "
+                  f"reaches the opposite decision from the pre-registered "
+                  f"percentile interval: {names}; at these seed counts the "
+                  f"readout is sensitive to the interval construction, so "
+                  f"treat either verdict as provisional until more seeds "
+                  f"settle the disagreement")
+        if low_resolution:
+            print(f"[{self.tag}] note: {len(low_resolution)}/{len(testable)} "
+                  f"testable contrast(s) rest on <=5 seeds; an exact "
+                  f"two-sided sign test cannot reach p<0.05 below n=6, so "
+                  f"direction reads rest on the bootstrap's moment "
+                  f"assumptions - the jackknife/BCa annotations above show "
+                  f"the exposure")
         registered = list(self.hypotheses)
         covered = sorted({r["hypothesis"] for r in self.rows})
         uncovered = [h for h in registered if h not in covered]
@@ -982,6 +1099,15 @@ class ContrastLog:
                    "n_audited": len(audited),
                    "n_control_passed": len(controlled_pass),
                    "n_low_seed": len(low_seed),
+                   "n_loo_flip_decision": len(loo_flips),
+                   "n_bca_disagree": len(bca_differs),
+                   "n_low_resolution": len(low_resolution),
+                   "loo_flip_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in loo_flips],
+                   "bca_disagree_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in bca_differs],
                    "registered_hypotheses": registered,
                    "covered_hypotheses": covered,
                    "uncovered_hypotheses": uncovered,
