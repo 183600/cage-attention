@@ -153,6 +153,12 @@ def make_norm(kind: str, dim: int) -> nn.Module:
 
 _MAX_MASK_CACHE = 64
 
+# Eval-mode qkv projection is chunked over the batch dimension: the
+# transient ``(rows, 3C)`` GEMM output stays small enough to survive in
+# cache until it is copied into the head-major ``packed`` buffer, which
+# both lowers the peak footprint and speeds the permute-copy up.
+_QKV_CHUNK_ROWS = 2048
+
 _causal_mask_cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
 
 
@@ -907,13 +913,20 @@ class Attention(nn.Module):
         if grad_on:
             packed = self._pack(F.linear(x, self.qkv.weight), B, h, T, dk)
         else:
-            qkv_buf = _get_scratch(("qkv_out",), x.device, x.dtype, B * T * 3 * C)
-            _linear_into(x.reshape(B * T, C), self.qkv.weight, None,
-                         qkv_buf.view(B * T, 3 * C))
             packed = _get_scratch(
                 ("packed",), x.device, x.dtype, 3 * bh * T * dk).view(3, bh, T, dk)
-            packed.view(3, B, h, T, dk).copy_(
-                qkv_buf.view(B, T, 3, h, dk).permute(2, 0, 3, 1, 4))
+            pv = packed.view(3, B, h, T, dk)
+            x2 = x.reshape(B, T, C)
+            step = max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
+            for b0 in range(0, B, step):
+                b1 = min(B, b0 + step)
+                rows = (b1 - b0) * T
+                qkv_buf = _get_scratch(("qkv_out",), x.device, x.dtype,
+                                       rows * 3 * C).view(rows, 3 * C)
+                _linear_into(x2[b0:b1].reshape(rows, C), self.qkv.weight,
+                             None, qkv_buf)
+                pv[:, b0:b1].copy_(
+                    qkv_buf.view(b1 - b0, T, 3, h, dk).permute(2, 0, 3, 1, 4))
 
         ent = None
         y4 = None
