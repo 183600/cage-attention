@@ -297,20 +297,28 @@ def _total_variation(p, q):
     return float(0.5 * (p - q).abs().sum())
 
 
-def _noise_floor(stream_values, vocab, reference):
+def _noise_floor(stream_values, vocab):
     """Same-size sampling-noise scale of one audit field.
 
     With at least two training streams the floor is the mean distance of
-    each stream to the pooled training distribution - exactly the operation
-    the held-out comparison performs, at the same sample size.  With a
-    single training stream the stream is split in half instead and the
-    half-size distance is rescaled by ``sqrt(2)`` (the TV between two
-    independent ``n/2`` draws is ``sqrt(2)`` times the TV between two
-    ``n`` draws).  All inputs are fitted on training data only.
+    each stream to the pooled distribution of the *other* streams
+    (leave-one-out) - exactly the operation the held-out comparison
+    performs, at the same sample size.  Including the stream in its own
+    reference would understate the floor by ``(m-1)/m``, which would make
+    the tolerance tighter than the advertised margin.  With a single
+    training stream the stream is split in half instead and the half-size
+    distance is rescaled by ``sqrt(2)`` (the TV between two independent
+    ``n/2`` draws is ``sqrt(2)`` times the TV between two ``n`` draws).
+    All inputs are fitted on training data only.
     """
     if len(stream_values) >= 2:
-        return sum(_total_variation(_distribution(v, vocab), reference)
-                   for v in stream_values) / len(stream_values)
+        floors = []
+        for j, values in enumerate(stream_values):
+            others = [v for i, v in enumerate(stream_values) if i != j]
+            reference = _distribution(torch.cat(others), vocab)
+            floors.append(
+                _total_variation(_distribution(values, vocab), reference))
+        return sum(floors) / len(floors)
     values = stream_values[0]
     if values.numel() < 2:
         return float("nan")
@@ -386,7 +394,7 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
                  for field in _AUDIT_FIELDS}
     floors = {
         field: _noise_floor([_field_values(splits[name], n_pairs, field)
-                             for name in train_names], vocab, reference[field])
+                             for name in train_names], vocab)
         for field in _AUDIT_FIELDS
     }
 
