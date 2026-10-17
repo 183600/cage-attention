@@ -136,8 +136,8 @@ class SeeDNorm(nn.Module):
 
     def forward(self, x):
         if torch.is_grad_enabled():
-            s = torch.sigmoid(self.scale(x))
-            return self.ln(x).mul(s).mul_(2.0)
+            s = self.scale(x).sigmoid_()
+            return self.ln(x).mul_(s).mul_(2.0)
         shape = x.shape
         n = x.numel() // shape[-1]
         s = _get_scratch(("seed_scale",), x.device, x.dtype, x.numel())
@@ -261,7 +261,11 @@ class _SoftmaxInPlace(torch.autograd.Function):
         if grad_out is None:
             return None
         gy = grad_out.mul(y)
-        return gy.addcmul_(y, gy.sum(-1, keepdim=True), value=-1.0)
+        n0, n1 = gy.size(0), gy.size(1)
+        rowsum = _get_scratch(("softmax_rowsum",), gy.device, gy.dtype,
+                              n0 * n1)[:n0 * n1].view(n0, n1, 1)
+        torch.sum(gy, dim=-1, keepdim=True, out=rowsum)
+        return gy.addcmul_(y, rowsum, value=-1.0)
 
 
 class _RowEntropy(torch.autograd.Function):
@@ -823,6 +827,28 @@ class Attention(nn.Module):
         return qkv.view(B, T, 3, h, dk).permute(2, 0, 3, 1, 4).contiguous().view(
             3, B * h, T, dk)
 
+    def _pack_qkv_grad(self, x: torch.Tensor, B: int, h: int, T: int,
+                       dk: int) -> torch.Tensor:
+        """Gradient-tracking twin of ``_pack`` in bounded memory chunks.
+
+        ``(B, T, d_model) -> (3, B*h, T, dk)`` with the projection applied
+        per batch chunk straight into the target buffer, so the peak stays at
+        one output plus one chunk-sized projection instead of two full
+        ``(B, T, 3*h*dk)`` tensors.
+        """
+        step = (max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
+                if x.is_cuda else B)
+        if step >= B:
+            return self._pack(F.linear(x, self.qkv.weight), B, h, T, dk)
+        packed = x.new_empty(3, B * h, T, dk)
+        pv = packed.view(3, B, h, T, dk)
+        for b0 in range(0, B, step):
+            b1 = min(B, b0 + step)
+            qkv = F.linear(x[b0:b1], self.qkv.weight)
+            pv[:, b0:b1].copy_(
+                qkv.view(b1 - b0, T, 3, h, dk).permute(2, 0, 3, 1, 4))
+        return packed
+
     def _gate_proj(self, x: torch.Tensor, B: int, T: int, C: int,
                    grad_on: bool) -> torch.Tensor:
         if grad_on:
@@ -913,7 +939,7 @@ class Attention(nn.Module):
         grad_on = torch.is_grad_enabled()
 
         if grad_on:
-            packed = self._pack(F.linear(x, self.qkv.weight), B, h, T, dk)
+            packed = self._pack_qkv_grad(x, B, h, T, dk)
         else:
             packed = _get_scratch(
                 ("packed",), x.device, x.dtype, 3 * bh * T * dk).view(3, bh, T, dk)
@@ -1043,8 +1069,8 @@ class Attention(nn.Module):
                          out.view(B * T, C))
         if x.is_cuda and not grad_on:
             _release_scratch(
-                "qkv_out", "packed", "calib_y", "calib_s", "calib_f",
-                "calib_ent", "calib_conc", "null_y", "null_s", "null_s0",
+                "qkv_out", "packed", "calib_y", "calib_yblk", "calib_s",
+                "calib_f", "calib_ent", "calib_conc", "null_y", "null_s", "null_s0",
                 "null_m", "rowstats_att", "rowstats_att_null", "rowstats_sum",
                 "rowent", "mask_rows", "mask_rows_b", "gate_out", "attn_y")
         if not need_stats:
