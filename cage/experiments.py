@@ -115,6 +115,7 @@ from .data import (
     TEST_SEED,
     VAL_SEED,
     batch_fingerprint,
+    check_eval_seed,
     length_sweep_lengths,
     make_batch,
     split_leakage_audit,
@@ -1754,10 +1755,16 @@ def _cost_record(settings: Settings, model):
         runs=settings.cost_runs)
 
 
-def _train_and_eval(settings: Settings, seed: int, lr: float,
-                    eval_seed: int = TEST_SEED, permute_labels: bool = False,
+def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
+                    permute_labels: bool = False, selection: bool = False,
                     **model_overrides):
     """Train + score one run through the single shared entry point.
+
+    ``eval_seed`` is mandatory so every call site states which stream it
+    reads; a defaulted sealed test stream would let a future tuning call
+    silently fit decisions to the final numbers.  ``selection=True`` marks
+    a call whose metrics inform a choice (recipe/baseline tuning) and is
+    refused on the sealed test stream by ``check_eval_seed``.
 
     Returns ``(model, params, metrics, curve, model_cfg)`` where
     ``model_cfg`` is the exact resolved configuration the model was built
@@ -1766,6 +1773,7 @@ def _train_and_eval(settings: Settings, seed: int, lr: float,
     controlled-variable audit can check the *trained* configuration
     directly (ground truth) instead of trusting the hand-attached labels.
     """
+    check_eval_seed(eval_seed, selection=selection)
     if eval_seed in tuple(settings.seeds):
         raise ValueError(
             f"eval_seed={eval_seed} is also a configured training seed; "
@@ -1809,7 +1817,8 @@ def tune_shared_recipe(settings: Settings):
         accs, verdicts = [], []
         for seed in tune_seeds:
             _, _, metrics, curve, _ = _train_and_eval(
-                settings, seed, lr, eval_seed=VAL_SEED, gate="none")
+                settings, seed, lr, eval_seed=VAL_SEED, selection=True,
+                gate="none")
             accs.append(metrics["accuracy"])
             verdicts.append(curve["curve_verdict"])
         mean = sum(accs) / len(accs)
@@ -1877,35 +1886,47 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seed=VAL_SEED):
 
 
 def _audit_data_splits(settings: Settings, out_dir: pathlib.Path) -> dict:
-    """HB3: verify the train/val/test streams are disjoint and IID before
+    """HB3: verify every stream pair is disjoint and field-wise IID before
     any model is trained.
 
-    The audit only reads data (it selects nothing), but a shared sample or
-    a distribution gap between train and the held-out splits invalidates
-    every number reported afterwards, so the outcome is printed and stored
-    next to the baselines.  Distribution shift is judged against the
-    same-stream sampling-noise floor instead of an arbitrary constant.
+    The audit only reads data (it selects nothing), but a shared sample
+    between *any* two streams - validation vs test included - or a
+    distribution gap between the training set and a held-out split
+    invalidates every number reported afterwards, so the outcome is printed
+    and stored next to the baselines.  Every configured training seed
+    enters the audit as its own stream, the exact-overlap check covers all
+    stream pairs, and each audit field's shift is judged against the
+    same-size sampling-noise floor measured between disjoint training
+    streams (see ``cage.data.split_leakage_audit``) instead of an arbitrary
+    constant.
     """
-    train_seed = settings.seeds[0] if settings.seeds else 0
+    train_seeds = tuple(settings.seeds) or (0,)
     audit = split_leakage_audit(
         settings.n_pairs, settings.vocab, settings.device,
         batch=settings.eval_batch, batches=settings.eval_batches,
-        train_seed=train_seed)
-    floor = audit["token_tv_noise_floor"]
-    tol = max(3.0 * floor, 0.02) if math.isfinite(floor) else float("inf")
-    overlaps = {name: audit[f"duplicate_overlap_train_{name}"]
-                for name in ("val", "test", "stats")}
-    tvs = {name: audit[f"token_tv_train_{name}"]
-           for name in ("val", "test", "stats")}
-    overlap_ok = all(v == 0 for v in overlaps.values())
-    shift_ok = all(v <= tol for v in tvs.values())
+        train_seeds=train_seeds)
+    fields = audit["audit_fields"]
+    floors = audit["tv_noise_floor"]
+    tol = {field: (max(3.0 * floors[field], 0.02)
+                   if math.isfinite(floors[field]) else float("inf"))
+           for field in fields}
+    overlap_ok = audit["max_pairwise_duplicate_overlap"] == 0
+    shift_ok = all(
+        audit[f"{field}_tv_train_{name}"] <= tol[field]
+        for field in fields for name in ("val", "test", "stats"))
     audit["tv_tolerance"] = tol
     audit["hb3_supported"] = bool(overlap_ok and shift_ok)
     detail = "; ".join(
-        f"{name}: overlap={overlaps[name]} tv={tvs[name]:.5f}"
+        f"{name}: tv_max={max(audit[f'{field}_tv_train_{name}']
+                              for field in fields):.5f}"
         for name in ("val", "test", "stats"))
-    print(f"[baselines] split audit (HB3, train seed {audit['train_seed']}): "
-          f"{detail} (same-stream noise floor {floor:.5f}, tol {tol:.5f}); "
+    floor_txt = ", ".join(f"{field}={floors[field]:.5f}" for field in fields)
+    tol_txt = ", ".join(f"{field}={tol[field]:.5f}" for field in fields)
+    print(f"[baselines] split audit (HB3, train seeds {list(train_seeds)}): "
+          f"{detail}; pairwise overlap max="
+          f"{audit['max_pairwise_duplicate_overlap']} over "
+          f"{len(audit['pairwise_duplicate_overlap'])} stream pairs; "
+          f"noise floor [{floor_txt}], tol [{tol_txt}]; "
           f"unique_key_rate={audit['unique_key_rate']:.4f}")
     if not audit["hb3_supported"]:
         print("[baselines] WARNING: HB3 split/disjointness audit failed; "
@@ -1936,8 +1957,8 @@ def _run_shallow_baseline(settings: Settings, out_dir: pathlib.Path,
         accs = []
         for seed in tune_seeds:
             _, _, metrics, _, _ = _train_and_eval(
-                settings, seed, lr, eval_seed=VAL_SEED, gate="none",
-                n_layers=1)
+                settings, seed, lr, eval_seed=VAL_SEED, selection=True,
+                gate="none", n_layers=1)
             accs.append(metrics["accuracy"])
         mean = sum(accs) / len(accs)
         std = ((sum((a - mean) ** 2 for a in accs) / (len(accs) - 1)) ** 0.5
@@ -2254,7 +2275,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     ctrl_runs = []
     for seed in settings.seeds:
         _, _, metrics, curve, _ = _train_and_eval(
-            settings, seed, lr_shared, gate="none", permute_labels=True)
+            settings, seed, lr_shared, eval_seed=TEST_SEED, gate="none",
+            permute_labels=True)
         n = int(metrics["n"])
         ctrl_runs.append({
             "seed": seed, "accuracy": metrics["accuracy"],
@@ -2397,7 +2419,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
     Returns ``(record, errors)``.
     """
     model, params, metrics, curve, model_cfg = _train_and_eval(
-        settings, seed, lr, gate=gate, **model_overrides)
+        settings, seed, lr, eval_seed=TEST_SEED, gate=gate, **model_overrides)
     stats = collect_stats(model, settings.n_pairs, settings.vocab,
                           settings.device, batch=settings.stats_batch,
                           batches=settings.stats_batches, seed=STATS_SEED)
@@ -2882,7 +2904,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     for label, gate, record_extra, model_overrides in _E2_VARIANTS:
         for seed in settings.seeds:
             model, params, base_metrics, curve, model_cfg = _train_and_eval(
-                settings, seed, lr, gate=gate, **model_overrides)
+                settings, seed, lr, eval_seed=TEST_SEED, gate=gate,
+                **model_overrides)
             rec = {"experiment": "e2", "hypotheses": ["H2a", "H2b", "H2c"],
                    "gate": gate, "variant": label, "seed": seed, "lr": lr,
                    "params": params, "model_cfg": model_cfg,
@@ -3083,8 +3106,8 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
             for layer_scale in (None, 1e-2):
                 for seed in settings.seeds:
                     model, params, metrics, curve, model_cfg = _train_and_eval(
-                        settings, seed, lr, gate=gate, norm=norm,
-                        layer_scale=layer_scale)
+                        settings, seed, lr, eval_seed=TEST_SEED, gate=gate,
+                        norm=norm, layer_scale=layer_scale)
                     stats = collect_stats(model, settings.n_pairs,
                                           settings.vocab, settings.device,
                                           batch=settings.stats_batch,

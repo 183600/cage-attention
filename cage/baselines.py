@@ -38,7 +38,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from .data import check_train_seed, make_batch, validate_batch
+from .data import check_eval_seed, check_train_seed, make_batch, validate_batch
 from .metrics import paired_bootstrap_ci, wilson_ci
 from .repro import seed_everything, stream_generator
 from .train import _make_adamw
@@ -213,6 +213,7 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
     """Pick the probe learning rate by *mean validation accuracy* over the
     probe seeds.  Model selection happens on ``val_seed`` only; the chosen
     rate is then reported on a disjoint test seed by the caller."""
+    check_eval_seed(val_seed, selection=True)
     if val_seed in tuple(seeds):
         raise ValueError(
             f"validation seed {val_seed} is also a probe training seed; "
