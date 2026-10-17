@@ -574,17 +574,20 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     ``mbuf`` one for the ``p <= _EPS`` drop selector.
 
     The surviving term is ``log(p) + 1`` on ``p > _EPS`` and ``0`` elsewhere;
-    the sub-eps entries are dropped by the trailing select, so no clamp in
-    front of the ``log`` is needed (the ``-inf`` at ``p == 0`` is overwritten
-    before anything multiplies it).
+    the sub-eps entries are dropped by the trailing select, so the value taken
+    there is irrelevant.  ``log`` is still fed ``p.clamp_min(_EPS)`` rather
+    than raw ``p``: masked-out entries (``p == 0``) make ATen's CPU ``log``
+    kernel take a several-times-slower path, and the clamp removes them
+    without changing any surviving value (bit-for-bit identical results).
     """
     if grad_ent is not None:
         if buf is None:
-            logterm = torch.log(p)
+            logterm = torch.clamp_min(p, _EPS).log()
             mask = p <= _EPS
         else:
             logterm = buf[:p.numel()].view_as(p)
-            torch.log(p, out=logterm)
+            torch.clamp_min(p, _EPS, out=logterm)
+            logterm.log_()
             if mbuf is None:
                 mask = p <= _EPS
             else:
