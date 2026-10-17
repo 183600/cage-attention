@@ -260,7 +260,7 @@ class _SoftmaxInPlace(torch.autograd.Function):
         (y,) = saved
         if grad_out is None:
             return None
-        gy = grad_out.mul(y)
+        gy = grad_out.mul_(y)
         n0, n1 = gy.size(0), gy.size(1)
         rowsum = _get_scratch(("softmax_rowsum",), gy.device, gy.dtype,
                               n0 * n1)[:n0 * n1].view(n0, n1, 1)
@@ -295,7 +295,11 @@ class _RowEntropy(torch.autograd.Function):
         d.log_()
         d.add_(1.0)
         d.masked_fill_(mask, 0.0)
-        d.mul_(grad_out.unsqueeze(-1)).neg_()
+        gn = _get_scratch(("rowent_bwd_g",), grad_out.device,
+                          grad_out.dtype, grad_out.numel())
+        gn = gn[:grad_out.numel()].view_as(grad_out)
+        torch.neg(grad_out, out=gn)
+        d.mul_(gn.unsqueeze(-1))
         return d, None
 
 
@@ -1093,7 +1097,8 @@ class _GeluLinear(nn.Linear):
 
     def forward(self, h):
         if torch.is_grad_enabled():
-            return F.linear(F.gelu(h), self.weight, self.bias)
+            torch.ops.aten.gelu_(h, approximate="none")
+            return F.linear(h, self.weight, self.bias)
         shape = h.shape
         rows = h.numel() // shape[-1]
         torch.ops.aten.gelu_(h, approximate="none")
