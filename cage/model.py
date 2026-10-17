@@ -1097,8 +1097,7 @@ class _GeluLinear(nn.Linear):
 
     def forward(self, h):
         if torch.is_grad_enabled():
-            torch.ops.aten.gelu_(h, approximate="none")
-            return F.linear(h, self.weight, self.bias)
+            return F.linear(F.gelu(h), self.weight, self.bias)
         shape = h.shape
         rows = h.numel() // shape[-1]
         torch.ops.aten.gelu_(h, approximate="none")
