@@ -137,7 +137,7 @@ class SeeDNorm(nn.Module):
     def forward(self, x):
         if torch.is_grad_enabled():
             s = torch.sigmoid(self.scale(x))
-            return self.ln(x).mul_(s).mul_(2.0)
+            return self.ln(x).mul(s).mul_(2.0)
         shape = x.shape
         n = x.numel() // shape[-1]
         s = _get_scratch(("seed_scale",), x.device, x.dtype, x.numel())
@@ -964,7 +964,7 @@ class Attention(nn.Module):
         gate_val = None
         if kind == "query":
             gate_val = self._gate_proj(x, B, T, C, grad_on)
-            gate_val = torch.sigmoid(gate_val) if grad_on else gate_val.sigmoid_()
+            gate_val.sigmoid_()
         elif is_calib:
             gate_val = self._gate_proj(x, B, T, C, grad_on)
             if calc_len or calc_ent:
@@ -985,7 +985,7 @@ class Attention(nn.Module):
                 conc = conc.div_(log_len).mul_(calib_cs).unsqueeze(-1)
                 gate_val.sub_(conc)
             tau = F.softplus(self.calib_tau) + 0.1
-            gate_val.div_(tau).sigmoid_()
+            gate_val = gate_val.div(tau).sigmoid_()
             del ent
             ent = None
 
