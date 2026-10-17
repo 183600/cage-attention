@@ -455,13 +455,21 @@ class _CalibAttn(torch.autograd.Function):
                    _get_scratch(("calib_ent",), q.device, q.dtype,
                                 bh * T).view(bh, T)) if need_ent else None
             ebuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
+            # ``y[:, i0:i1]`` is a strided view; a bmm straight into it falls
+            # back to a per-batch copy loop on CPU.  Writing one contiguous
+            # block and copying it over is several times faster and keeps the
+            # block footprint bounded by ``max_rows``.
+            yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
+                                bh * max_rows * dv)
             for i0, i1 in blocks:
                 r = i1 - i0
                 p = _softmax_inplace(torch.baddbmm(
                     mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
                     beta=1.0, alpha=scale,
                     out=s[:bh * r * i1].view(bh, r, i1)))
-                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
+                yb = yblk[:bh * r * dv].view(bh, r, dv)
+                torch.bmm(p, v[:, :i1], out=yb)
+                y[:, i0:i1].copy_(yb)
                 if need_ent:
                     _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
         if any(ctx.needs_input_grad):
@@ -518,6 +526,8 @@ class _CalibAttn(torch.autograd.Function):
         mbuf = _get_scratch(("calib_bwd_mbuf",), q.device, torch.bool, bh * max_rows * max_i1) if grad_ent is not None else None
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
         tmpb = _get_scratch(("calib_bwd_tmp",), q.device, q.dtype, bh * T * dk)
+        dqb = _get_scratch(("calib_bwd_dqb",), q.device, q.dtype,
+                           bh * max_rows * dk)
         zero = _zero_scalar(q.device, q.dtype)
         first = True
         for i0, i1 in reversed(blocks):
@@ -546,8 +556,10 @@ class _CalibAttn(torch.autograd.Function):
                 first = False
             else:
                 d_k[:, :i1].add_(tmp)
+            dqblk = dqb[:bh * r * dk].view(bh, r, dk)
             torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
-                          out=d_q[:, i0:i1])
+                          out=dqblk)
+            d_q[:, i0:i1].copy_(dqblk)
         return d_qkv, None, None, None
 
 
@@ -653,11 +665,15 @@ class _NullAttn(torch.autograd.Function):
             torch.bmm(p, v, out=y)
             y4.addcmul_(p0.view(B, h, T, 1), nv4)
         else:
+            yblk = _get_scratch(("null_yblk",), q.device, q.dtype,
+                                bh * max_rows * dv)
             for i0, i1 in blocks:
                 r = i1 - i0
                 p, p0 = _null_probs(q[:, i0:i1], kt[:, :, :i1], i0, i1, mask[i0:i1, :i1], null_k, B, h,
                                     scale, sbuf)
-                torch.bmm(p, v[:, :i1], out=y[:, i0:i1])
+                yb = yblk[:bh * r * dv].view(bh, r, dv)
+                torch.bmm(p, v[:, :i1], out=yb)
+                y[:, i0:i1].copy_(yb)
                 y4[:, :, i0:i1].addcmul_(p0.view(B, h, r, 1), nv4)
         if need_grad:
             ctx.save_for_backward(qkv, null_k, null_v)
@@ -701,6 +717,8 @@ class _NullAttn(torch.autograd.Function):
         tmp_rows = T if multi else 1
         tmpb = _get_scratch(("null_bwd_tmp",), q.device, q.dtype,
                             bh * tmp_rows * dk)
+        dqb = (_get_scratch(("null_bwd_dqb",), q.device, q.dtype,
+                            bh * max_rows * dk) if multi else None)
         acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         first = True
@@ -736,7 +754,9 @@ class _NullAttn(torch.autograd.Function):
                     first = False
                 else:
                     d_k[:, :i1].add_(tmp)
-                torch.bmm(d_s, k[:, :i1], out=d_q[:, i0:i1])
+                dqblk = dqb[:bh * r * dk].view(bh, r, dk)
+                torch.bmm(d_s, k[:, :i1], out=dqblk)
+                d_q[:, i0:i1].copy_(dqblk)
             else:
                 torch.bmm(p.transpose(1, 2), g, out=d_qkv[2])
                 torch.bmm(d_s.transpose(1, 2), q_blk, out=d_qkv[1])
