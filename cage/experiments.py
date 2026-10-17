@@ -69,6 +69,7 @@ tracked tree.
 
 Usage
 -----
+    python3 -m cage.experiments --only sanity               # seconds: HB5 gate
     python3 -m cage.experiments --only baselines
     python3 -m cage.experiments --only e1 --seeds 5
     python3 -m cage.experiments --only all --quick          # pipeline check only
@@ -80,6 +81,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import pathlib
 import platform
 import subprocess
@@ -876,6 +878,14 @@ def _announce(hyp_ids):
 
 
 def _write_result(path: pathlib.Path, record: dict) -> None:
+    """Append one JSONL run record, stamped with its creation time.
+
+    The timestamp is injected here rather than by each runner, so every
+    record on disk carries "when" next to the ``git_sha`` / ``setup_sha256``
+    provenance it already stores inline.
+    """
+    record.setdefault("created_utc",
+                      time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
@@ -923,15 +933,41 @@ def _hypotheses_sha() -> str:
 
 
 def _environment_record(settings: Settings) -> dict:
-    """Software/hardware provenance for reproducibility."""
+    """Software/hardware provenance for reproducibility.
+
+    Beyond versions the record pins the numerical-behaviour switches a
+    rerun must match: CPU thread count (parallel reductions change the
+    summation order), cuDNN determinism/benchmark, whether deterministic
+    algorithms are on, the cuBLAS workspace config and the NumPy version
+    when installed.
+    """
     env = {
         "python": platform.python_version(),
         "torch": torch.__version__,
         "platform": platform.platform(),
         "device": settings.device,
         "cuda_available": bool(torch.cuda.is_available()),
+        "cuda_runtime": torch.version.cuda,
+        "torch_num_threads": int(torch.get_num_threads()),
+        "deterministic_algorithms": bool(getattr(
+            torch, "are_deterministic_algorithms_enabled", lambda: False)()),
+        "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+        "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
         "git_dirty": _git_dirty(),
     }
+    cudnn = getattr(torch.backends, "cudnn", None)
+    if cudnn is not None:
+        env["cudnn_deterministic"] = bool(cudnn.deterministic)
+        env["cudnn_benchmark"] = bool(cudnn.benchmark)
+        try:
+            env["cudnn_version"] = cudnn.version()
+        except Exception:  # noqa: BLE001 - probe must not fail a record
+            env["cudnn_version"] = None
+    try:
+        import numpy as np
+        env["numpy"] = np.__version__
+    except ImportError:
+        env["numpy"] = None
     if settings.device.startswith("cuda") and torch.cuda.is_available():
         env["cuda_device"] = torch.cuda.get_device_name(0)
     return env
@@ -1333,6 +1369,113 @@ def _run_shallow_baseline(settings: Settings, out_dir: pathlib.Path,
     return payload
 
 
+class OverfitSanityError(RuntimeError):
+    """The tiny-batch overfit pre-flight failed; grid training is refused."""
+
+
+def _overfit_sanity_by_gate(settings: Settings) -> dict:
+    """Tiny-batch memorisation check for every gate variant (cached).
+
+    One fixed batch from ``SANITY_SEED`` is pushed through the tiny 2-layer
+    model of each gate variant with dropout off and weight decay zeroed, so
+    every custom kernel's backward path is exercised - a passing
+    ``gate=none`` check alone would not prove the calib/null gates backprop.
+    Cached on ``Settings``: E1/E2/E3 in one ``--only all`` run share a
+    single execution.
+    """
+    cached = getattr(settings, "_overfit_sanity_cache", None)
+    if cached is not None:
+        return cached
+    gen = stream_generator(SANITY_SEED, settings.device)
+    sidx, stgt, smeta = make_batch(settings.overfit_batch, settings.n_pairs,
+                                   settings.vocab, settings.device, gen=gen)
+    validate_batch(sidx, stgt, smeta, settings.vocab)
+    by_gate = {}
+    for gate in GATES:
+        seed_everything(SANITY_SEED)
+        tiny = build(_model_cfg(settings, gate=gate, d_model=48, n_layers=2),
+                     compile=False)
+        by_gate[gate] = overfit_sanity_check(
+            tiny, sidx, stgt, smeta, lr=settings.overfit_lr,
+            steps=settings.overfit_steps, seed=SANITY_SEED)
+    settings._overfit_sanity_cache = by_gate
+    return by_gate
+
+
+def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
+                          tag: str) -> dict:
+    """Refuse to start a grid when the loop cannot memorise a tiny batch.
+
+    Runs the check on the *current* code revision (a stale
+    ``baselines_verdict.json`` cannot satisfy it), stores the per-gate
+    evidence under ``<tag>_overfit_sanity.json`` and aborts with
+    :class:`OverfitSanityError` when any gate variant fails: broken
+    gradients, a mis-wired loss or a precision problem invalidate every
+    number a grid would produce, so the compute must not be spent.
+    """
+    by_gate = _overfit_sanity_by_gate(settings)
+    passed = all(row["passed"] for row in by_gate.values())
+    sanity = by_gate["none"]
+    summary = {
+        "passed": passed,
+        "batch": int(sanity["batch"]),
+        "steps": int(sanity["steps"]),
+        "lr": float(sanity["lr"]),
+        "seed": sanity["seed"],
+        "by_gate": {
+            gate: {
+                "passed": row["passed"],
+                "loss_first": row["loss_first"],
+                "loss_last": row["loss_last"],
+                "acc_first": row["acc_first"],
+                "acc_last": row["acc_last"],
+                "steps_to_target_loss": row["steps_to_target_loss"],
+                "steps_to_target_acc": row["steps_to_target_acc"],
+                "data_sha256": row["data_sha256"],
+                "params_connected": (
+                    f"{row['grad_flow']['params_with_grad']}/"
+                    f"{row['grad_flow']['params_total']}"),
+                "all_grads_finite": row["grad_flow"]["all_grads_finite"],
+                "active_dropout": row["regularization"]["active_dropout"],
+                "weight_decay": row["regularization"]["weight_decay"],
+            }
+            for gate, row in by_gate.items()
+        },
+    }
+    _write_json(out_dir / f"{tag}_overfit_sanity.json",
+                {**summary, **_run_context(settings)})
+    print(f"[{tag}] overfit sanity gate (HB5; tiny batch of "
+          f"{summary['batch']} samples, {summary['steps']} steps, lr="
+          f"{summary['lr']:g}, seed {summary['seed']}, data "
+          f"{sanity['data_sha256']}; dropout off, weight decay zeroed, no "
+          f"augmentation):")
+    for gate, row in summary["by_gate"].items():
+        loss_s = (f"{row['loss_first']:.4f} -> {row['loss_last']:.4f}"
+                  if _finite(row["loss_first"]) and _finite(row["loss_last"])
+                  else "non-finite")
+        print(f"    gate={gate:>5}: loss {loss_s}, batch acc "
+              f"{row['acc_last']:.3f}, steps to loss/acc target "
+              f"{row['steps_to_target_loss']}/{row['steps_to_target_acc']}, "
+              f"grads {row['params_connected']} "
+              f"finite={row['all_grads_finite']}; "
+              f"{'passed' if row['passed'] else 'FAILED'}")
+    if not passed:
+        failed = [g for g, row in summary["by_gate"].items()
+                  if not row["passed"]]
+        _write_json(out_dir / f"{tag}_aborted.json",
+                    {"experiment": tag,
+                     "reason": "HB5 tiny-batch overfit gate failed",
+                     "failed_gates": failed,
+                     "overfit_sanity": summary,
+                     **_run_context(settings)})
+        raise OverfitSanityError(
+            f"{tag}: tiny-batch overfit sanity failed for {failed}; "
+            f"gradients/loss/precision are broken, fix the training loop "
+            f"before running the grid (this check is necessary, not "
+            f"sufficient: data/label bugs can still survive memorisation)")
+    return summary
+
+
 def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("HB1", "HB2", "HB3", "HB4", "HB5", "HB6"))
     _write_manifest(settings, out_dir, "baselines")
@@ -1355,19 +1498,10 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     # (the calib/null parameters included) is exercised - a passing
     # gate=none check alone would not prove the calib gate backprops.
     # Dropout is forced off inside the check and per-parameter gradient
-    # connectivity/finiteness is audited on the first backward.
-    gen = stream_generator(SANITY_SEED, settings.device)
-    sidx, stgt, smeta = make_batch(settings.overfit_batch, settings.n_pairs,
-                                   settings.vocab, settings.device, gen=gen)
-    validate_batch(sidx, stgt, smeta, settings.vocab)
-    sanity_by_gate = {}
-    for gate in GATES:
-        seed_everything(SANITY_SEED)
-        tiny = build(_model_cfg(settings, gate=gate, d_model=48, n_layers=2),
-                     compile=False)
-        sanity_by_gate[gate] = overfit_sanity_check(
-            tiny, sidx, stgt, smeta, lr=settings.overfit_lr,
-            steps=settings.overfit_steps)
+    # connectivity/finiteness is audited on the first backward.  The same
+    # shared helper is the hard pre-flight gate of the E1/E2/E3 runners, so
+    # the baseline report and the grids can never disagree about it.
+    sanity_by_gate = _overfit_sanity_by_gate(settings)
     sanity = sanity_by_gate["none"]
     hb5_supported = all(row["passed"] for row in sanity_by_gate.values())
     print(f"[baselines] HB5 tiny-batch overfit sanity (batch="
@@ -1636,6 +1770,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
 def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H1a", "H1b", "H1c", "H1d"))
     _write_manifest(settings, out_dir, "e1")
+    _enforce_overfit_gate(settings, out_dir, "e1")
     lr = _resolve_lr(settings, out_dir, "e1")
     runs = []
     examples = {}
@@ -2060,6 +2195,7 @@ _E2_VARIANTS = (
 def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H2a", "H2b", "H2c"))
     _write_manifest(settings, out_dir, "e2")
+    _enforce_overfit_gate(settings, out_dir, "e2")
     lr = _resolve_lr(settings, out_dir, "e2")
     lengths = length_sweep_lengths(base=settings.n_pairs, factor=2, n=4,
                                    max_len=settings.max_len)
@@ -2253,6 +2389,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
 def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H3a", "H3b"))
     _write_manifest(settings, out_dir, "e3")
+    _enforce_overfit_gate(settings, out_dir, "e3")
     lr = _resolve_lr(settings, out_dir, "e3")
     print(f"[e3] grid gate x norm x layer_scale at lr={lr:g}, "
           f"test seed {TEST_SEED}, stats seed {STATS_SEED}")
@@ -2372,6 +2509,19 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                  for (g, n, ls), rs in index.items()})
 
 
+def run_sanity(settings: Settings, out_dir: pathlib.Path) -> None:
+    """Standalone pre-flight: only the HB5 tiny-batch overfit gate.
+
+    Takes seconds instead of a full grid, so it can be run in front of a
+    long compute queue (``--only sanity``); the E1/E2/E3 runners invoke
+    the identical gate themselves, so a clean E1/E2/E3 run implies a
+    passed pre-flight.
+    """
+    _announce(("HB5",))
+    _write_manifest(settings, out_dir, "sanity")
+    _enforce_overfit_gate(settings, out_dir, "sanity")
+
+
 def run_all(settings: Settings, out_dir: pathlib.Path) -> None:
     run_baselines(settings, out_dir)
     run_e1(settings, out_dir)
@@ -2384,7 +2534,7 @@ def main(argv=None) -> int:
         description="Hypothesis-driven runners for E1/E2/E3 "
                     "(see cage/experiments.py for the registry).")
     parser.add_argument("--only", default="baselines",
-                        choices=["baselines", "e1", "e2", "e3", "all"])
+                        choices=["baselines", "sanity", "e1", "e2", "e3", "all"])
     parser.add_argument("--quick", action="store_true",
                         help="tiny pipeline-check configuration")
     parser.add_argument("--device", default="cpu")
@@ -2436,16 +2586,22 @@ def main(argv=None) -> int:
           f"lr={settings.lr if settings.lr is not None else 'tuned'} "
           f"fdr_q={settings.fdr_q:g} "
           f"device={settings.device} out={out_dir}")
-    if args.only == "baselines":
-        run_baselines(settings, out_dir)
-    elif args.only == "e1":
-        run_e1(settings, out_dir)
-    elif args.only == "e2":
-        run_e2(settings, out_dir)
-    elif args.only == "e3":
-        run_e3(settings, out_dir)
-    else:
-        run_all(settings, out_dir)
+    try:
+        if args.only == "baselines":
+            run_baselines(settings, out_dir)
+        elif args.only == "sanity":
+            run_sanity(settings, out_dir)
+        elif args.only == "e1":
+            run_e1(settings, out_dir)
+        elif args.only == "e2":
+            run_e2(settings, out_dir)
+        elif args.only == "e3":
+            run_e3(settings, out_dir)
+        else:
+            run_all(settings, out_dir)
+    except OverfitSanityError as e:
+        print(f"[runner] ABORTED before grid training: {e}")
+        return 3
     print(f"\n[runner] done; records in {out_dir}/")
     return 0
 

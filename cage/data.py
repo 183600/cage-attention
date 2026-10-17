@@ -188,6 +188,19 @@ def validate_batch(idx, targets, meta, vocab) -> dict:
             "n_duplicate_rows": int(len(rows) - n_unique)}
 
 
+def batch_fingerprint(idx, tgt, meta) -> str:
+    """Content hash of one batch (context, targets, answers).
+
+    One hashing convention shared by ``stream_fingerprint`` and the
+    tiny-batch overfit sanity check, so "which data did this run draw or
+    memorise" always reduces to the same digest.
+    """
+    h = hashlib.sha256()
+    for tensor in (idx, tgt, meta["answer"]):
+        h.update(repr(tensor.detach().cpu().tolist()).encode("ascii"))
+    return h.hexdigest()[:16]
+
+
 def stream_fingerprint(n_pairs, vocab, device="cpu", batch=8, seed=TEST_SEED):
     """Content hash of the first batch of a data stream (dataset versioning).
 
@@ -200,11 +213,8 @@ def stream_fingerprint(n_pairs, vocab, device="cpu", batch=8, seed=TEST_SEED):
     """
     gen = torch.Generator(device=device).manual_seed(seed)
     idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-    h = hashlib.sha256()
-    for tensor in (idx, tgt, meta["answer"]):
-        h.update(repr(tensor.detach().cpu().tolist()).encode("ascii"))
     return {"seed": int(seed), "batch": int(batch), "n_pairs": int(n_pairs),
-            "vocab": int(vocab), "sha256": h.hexdigest()[:16]}
+            "vocab": int(vocab), "sha256": batch_fingerprint(idx, tgt, meta)}
 
 
 def _draw_split(n_pairs, vocab, device, batch, batches, seed):

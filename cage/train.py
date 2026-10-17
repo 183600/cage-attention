@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from .data import (
     STATS_SEED,
     VAL_SEED,
+    batch_fingerprint,
     check_train_seed,
     make_batch,
     validate_batch,
@@ -645,30 +646,41 @@ def _disable_dropout(model):
         "active_dropout": any(float(m.p) > 0.0 for m in modules),
         "augmentation": "none (cage.data is a synthetic generator, no "
                         "augmentation pipeline is applied)",
-        "weight_decay": 0.01,
         "optimizer_recipe": "AdamW via train._make_adamw (D5 fixed factory)",
     }
 
 
 def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
-                         target_loss=0.1, target_acc=1.0):
+                         target_loss=0.1, target_acc=1.0, seed=None):
     """Can the training loop fit a single tiny batch? (gradient/loss sanity)
 
-    The classic pre-flight check: take one fixed batch, turn dropout off
-    (enforced here, not assumed from the caller's config), and train the
-    *actual* architecture on it with the *actual* optimizer factory.  A
-    correct training loop drives the loss to ~0 and the batch accuracy to
-    1.0 because the batch can be memorised; a loop that cannot overfit a
-    handful of samples has broken gradients, a mis-wired loss or a silent
-    dtype/precision problem, and no grid result above it is interpretable.
+    The classic pre-flight check: take one fixed batch, turn regularisation
+    off (dropout is force-disabled here, not assumed from the caller's
+    config, and the optimizer's weight decay is zeroed on the check's
+    optimizer only - the D5 factory and its hyperparameters stay unchanged
+    for real runs), and train the *actual* architecture on it with the
+    *actual* optimizer factory.  A correct training loop drives the loss to
+    ~0 and the batch accuracy to 1.0 because the batch can be memorised; a
+    loop that cannot overfit a handful of samples has broken gradients, a
+    mis-wired loss or a silent dtype/precision problem, and no grid result
+    above it is interpretable.
 
     Beyond the loss/accuracy targets the check audits the backward pass
     itself on the first step (``grad_flow``: every trainable parameter
     reached, all gradients finite), so "cannot overfit" is triaged into
     "gradients never connected" vs "optimisation is merely slow".  The
     effective regularisation is recorded (``regularization``: dropout
-    force-disabled, the fixed AdamW weight decay, no augmentation), so the
-    verdict documents *what* was switched off instead of assuming it.
+    force-disabled, weight decay zeroed, no augmentation), so the verdict
+    documents *what* was switched off instead of assuming it.  How *fast*
+    the batch is memorised is recorded too (``steps_to_target_loss`` /
+    ``steps_to_target_acc``: first sampled step meeting each target), and
+    the exact batch is pinned by content hash (``data_sha256``), so the
+    record says which data was memorised.
+
+    ``seed`` (optional) is recorded and, when given, re-seeds Python /
+    NumPy / Torch through :func:`cage.repro.seed_everything`; the caller
+    must still seed *before* building the model, because weight
+    initialisation happens before this function runs.
 
     This is a *necessary, not sufficient* check: passing it does not prove
     the data pipeline, augmentation or label mapping are right (such
@@ -680,10 +692,18 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
     sampled loss/accuracy curves plus the verdict.  Uses the sparse
     (query-position) supervision the experiment contract reports.
     """
+    if seed is not None:
+        seed_everything(int(seed))
     model.train()
     regularization = _disable_dropout(model)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = _make_adamw(params, lr)
+    for group in opt.param_groups:
+        group["weight_decay"] = 0.0
+    regularization["weight_decay"] = 0.0
+    regularization["weight_decay_source"] = (
+        "zeroed on the sanity-check optimizer only; the D5 AdamW factory "
+        "hyperparameters are unchanged for real runs")
     sample_every = max(1, steps // 10)
     curve = []
     grad_flow = None
@@ -700,13 +720,27 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
                 acc = float((logits.detach().argmax(-1)
                              == meta["answer"]).to(torch.float64).mean())
             curve.append({"step": step, "loss": float(loss.detach()), "acc": acc})
+
+    def _first_sampled_at(key, threshold, better):
+        for point in curve:
+            if better(point[key], threshold):
+                return int(point["step"])
+        return None
+
     return {
         "steps": int(steps),
         "lr": float(lr),
         "batch": int(idx.size(0)),
+        "seed": None if seed is None else int(seed),
+        "data_sha256": batch_fingerprint(idx, tgt, meta),
         "loss_first": curve[0]["loss"],
         "loss_last": curve[-1]["loss"],
+        "acc_first": curve[0]["acc"],
         "acc_last": curve[-1]["acc"],
+        "steps_to_target_loss": _first_sampled_at(
+            "loss", float(target_loss), lambda v, t: v <= t),
+        "steps_to_target_acc": _first_sampled_at(
+            "acc", float(target_acc), lambda v, t: v >= t),
         "curve": curve,
         "regularization": regularization,
         "grad_flow": grad_flow,

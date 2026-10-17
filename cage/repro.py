@@ -40,8 +40,14 @@ def seed_everything(seed: int, deterministic: bool = False) -> dict:
     document the seeding state instead of assuming it.  ``deterministic``
     is opt-in: it calls
     ``torch.use_deterministic_algorithms(True, warn_only=True)`` (an op
-    without a deterministic kernel warns instead of aborting a long grid)
-    and sets the cuBLAS workspace config when CUDA is available.
+    without a deterministic kernel warns instead of aborting a long grid),
+    pins cuDNN to deterministic kernels with benchmark autotuning off, and
+    sets the cuBLAS workspace config *before* any CUDA call - cuBLAS reads
+    that variable when it initialises, so setting it afterwards is a no-op.
+
+    ``PYTHONHASHSEED`` is exported for child processes and recorded.  The
+    hash seed of the *running* interpreter is fixed at launch, so a run
+    that depends on set/dict iteration order must start with it exported.
     """
     seed = int(seed)
     random.seed(seed)
@@ -53,6 +59,11 @@ def seed_everything(seed: int, deterministic: bool = False) -> dict:
         "cuda_devices": 0,
         "deterministic": bool(deterministic),
     }
+    os.environ.setdefault("PYTHONHASHSEED", str(seed))
+    info["pythonhashseed"] = os.environ.get("PYTHONHASHSEED")
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    info["cublas_workspace_config"] = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
     try:
         import numpy as np
     except ImportError:
@@ -69,8 +80,15 @@ def seed_everything(seed: int, deterministic: bool = False) -> dict:
             torch.use_deterministic_algorithms(True, warn_only=True)
         except (AttributeError, TypeError):
             pass
-        if torch.cuda.is_available():
-            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        cudnn = getattr(torch.backends, "cudnn", None)
+        if cudnn is not None:
+            cudnn.deterministic = True
+            cudnn.benchmark = False
+    cudnn = getattr(torch.backends, "cudnn", None)
+    info["cudnn"] = None if cudnn is None else {
+        "deterministic": bool(cudnn.deterministic),
+        "benchmark": bool(cudnn.benchmark),
+    }
     return info
 
 
