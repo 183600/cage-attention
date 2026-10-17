@@ -69,7 +69,7 @@ tracked tree.
 
 Usage
 -----
-    python3 -m cage.experiments --only sanity               # seconds: HB5 gate
+    python3 -m cage.experiments --only sanity               # HB5 gate
     python3 -m cage.experiments --only baselines
     python3 -m cage.experiments --only e1 --seeds 5
     python3 -m cage.experiments --only all --quick          # pipeline check only
@@ -1572,7 +1572,7 @@ class OverfitSanityError(RuntimeError):
 
 # Tiny-batch overfit configurations of the HB5 pre-flight: every gate
 # variant plus the E3 architecture paths (norm placement, dynamic
-# normalisation, LayerScale).  A backward bug on a normalisation or
+# normalisation, LayerScale).  A broken backward on a normalisation or
 # write-strength path would survive a gate-only check yet make every E3
 # number uninterpretable, so those paths get the same memorisation test.
 _SANITY_CONFIGS = (
@@ -2747,10 +2747,8 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
 def run_sanity(settings: Settings, out_dir: pathlib.Path) -> None:
     """Standalone pre-flight: seed-determinism audit + HB5 overfit gate.
 
-    Takes seconds instead of a full grid, so it can be run in front of a
-    long compute queue (``--only sanity``); the E1/E2/E3 runners invoke the
-    identical gates themselves, so a clean E1/E2/E3 run implies a passed
-    pre-flight.
+    The E1/E2/E3 runners invoke the identical gates themselves, so a clean
+    E1/E2/E3 run implies a passed pre-flight (``--only sanity``).
     """
     _announce(("HB5",))
     _write_manifest(settings, out_dir, "sanity")
