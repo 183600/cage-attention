@@ -829,12 +829,10 @@ class Attention(nn.Module):
 
     def _pack_qkv_grad(self, x: torch.Tensor, B: int, h: int, T: int,
                        dk: int) -> torch.Tensor:
-        """Gradient-tracking twin of ``_pack`` in bounded memory chunks.
+        """Gradient-tracking twin of ``_pack``.
 
         ``(B, T, d_model) -> (3, B*h, T, dk)`` with the projection applied
-        per batch chunk straight into the target buffer, so the peak stays at
-        one output plus one chunk-sized projection instead of two full
-        ``(B, T, 3*h*dk)`` tensors.
+        per batch chunk straight into the target buffer.
         """
         step = (max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
                 if x.is_cuda else B)
