@@ -322,6 +322,24 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
     return buf[:numel]
 
 
+def _release_scratch(*names: str) -> None:
+    """Drop cached buffers whose contents are dead.
+
+    Called at phase boundaries where every live reference to the named
+    buffers has been dropped, so the allocator can hand their blocks to the
+    next allocation; the next ``_get_scratch`` for the name simply creates a
+    fresh buffer.  Only used on CUDA, where the caching allocator makes the
+    re-creation free: retaining one buffer per name for the whole run would
+    otherwise keep the attention and MLP working sets resident at the same
+    time and inflate the peak.  On CPU the buffers are kept as-is, because
+    repeated malloc/munmap of large blocks costs more than the memory it
+    returns.
+    """
+    for name in names:
+        for key in [k for k in _scratch_cache if k[0] == name]:
+            del _scratch_cache[key]
+
+
 def _linear_into(x: torch.Tensor, weight: torch.Tensor,
                  bias: torch.Tensor | None, out: torch.Tensor) -> torch.Tensor:
     """``F.linear(x, weight, bias)`` written into ``out``."""
@@ -997,6 +1015,16 @@ class Attention(nn.Module):
                                B * T * C).view(B, T, C)
             _linear_into(y.view(B * T, C), self.proj.weight, None,
                          out.view(B * T, C))
+        if x.is_cuda and not grad_on:
+            # The attention phase is over and every buffer below is dead; the
+            # returned ``proj_out`` (and the residual ``embed_out``) stay
+            # cached.  Freeing the phase lets the MLP allocations reuse these
+            # blocks instead of summing both phases into the peak.
+            _release_scratch(
+                "qkv_out", "packed", "calib_y", "calib_s", "calib_f",
+                "calib_ent", "calib_conc", "null_y", "null_s", "null_s0",
+                "null_m", "rowstats_att", "rowstats_att_null", "rowstats_sum",
+                "rowent", "mask_rows", "mask_rows_b", "gate_out", "attn_y")
         if not need_stats:
             return out, None
 
@@ -1059,7 +1087,12 @@ class Block(nn.Module):
         up = _get_scratch(("mlp_up",), h.device, h.dtype, 4 * n * c)
         _linear_into(h.reshape(n, c), self.mlp[0].weight, self.mlp[0].bias,
                      up.view(n, 4 * c))
-        return self.mlp[2](self.mlp[1](up.view(n, 4 * c))).view_as(h)
+        m = self.mlp[2](self.mlp[1](up.view(n, 4 * c))).view_as(h)
+        if h.is_cuda:
+            # ``up`` is consumed by now; dropping the cache entry lets the
+            # next layer's attention allocate on top of it.
+            _release_scratch("mlp_up")
+        return m
 
     def forward(self, x, stat_pos=None):
         ls1, ls2 = self.ls1, self.ls2
