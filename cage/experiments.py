@@ -12,10 +12,16 @@ Design principles
    system (exact ceiling), the trivial floor, a learning-rate-tuned
    linear probe, and a learning-rate-tuned **single-layer standard
    transformer** (HB6, the simplest learned model) all run before any
-   deep grid.  A shared training recipe is tuned on the plain ``none``
-   baseline (validation seed), then frozen for all gate variants so the
-   E1/E3 comparisons stay controlled (each side of every pre-registered
-   contrast carries a machine-checked controlled-variable audit).  The
+    deep grid.  A shared training recipe is tuned on the plain ``none``
+    baseline (validation seed), then frozen for all gate variants so the
+    E1/E3 comparisons stay controlled (each side of every pre-registered
+    contrast carries a machine-checked controlled-variable audit).  Every
+    run record stamps the full optimisation recipe it trained under
+    (optimizer family, weight decay, betas, schedule, eta_min, gradient
+    clipping, augmentation - from the single source of truth in
+    ``cage.train.training_recipe``, beside the already-audited learning
+    rate and step count), so "the gain is just a different optimizer or
+    schedule" is refused by the audit instead of being reported.  The
    baselines are checked *statistically* before the grids run: HB1/HB2/
    HB3 verdicts are written to ``baselines_verdict.json`` (rule ceiling
    with a Wilson CI, a bootstrap near-chance test for the tuned probe,
@@ -67,8 +73,16 @@ Design principles
    carries a jackknife (leave-one-seed-out) diagnostic and a bias-corrected
    accelerated (BCa) interval, and the report flags any positive verdict
    whose decision flips when a single seed is dropped or dissents from the
-   BCa readout (see ``cage.metrics``).  The companions audit the
-   pre-registered decision rule; they never replace it.
+    BCa readout (see ``cage.metrics``).  The companions audit the
+    pre-registered decision rule; they never replace it.  A contrast also
+    needs at least ``min_seeds_for_claim`` independent paired seeds
+    (default 3, pre-registered in ``Settings``) before any verdict may
+    count as a claim; rows below the floor are marked INELIGIBLE, and the
+    seeds that actually entered each paired difference are recorded
+    (``seeds_used``/``seeds_dropped``) so a sample that silently shrank is
+    visible.  Every factorial design (E1's four gate arms, E2's seven
+    arms, E3's 2x4x2 grid) is additionally checked for cell coverage, so
+    an incomplete ablation cannot silently leave an effect unmeasured.
 
 Outputs land in ``results/`` (git-ignored); nothing is written into the
 tracked tree.
@@ -144,6 +158,7 @@ from .train import (
     overfit_sanity_check,
     train_model,
     training_curve_verdict,
+    training_recipe,
 )
 
 # Seeds with fixed roles (independent of every training seed) are defined in
@@ -153,7 +168,7 @@ from .train import (
 #   STATS_SEED - mechanism statistics (matches the collect_stats default)
 
 HYPO_IDS = ("HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "H1a", "H1b", "H1c",
-            "H1d", "H2a", "H2b", "H2c", "H3a", "H3b")
+            "H1d", "H2a", "H2b", "H2c", "H3a", "H3b", "H3c")
 
 # Every hypothesis entry may carry ``"sesoi"``: the smallest effect size of
 # interest per metric (same metric keys as the pre-registered contrasts).
@@ -436,6 +451,28 @@ HYPOTHESES = {
         "sesoi": {"resid_norm_last_over_first": 0.05,
                   "gate_depth_ratio": 0.05},
     },
+    "H3c": {
+        "experiment": "e3",
+        "question": "Is the calibrated gate's benefit specific to the "
+                    "dynamic (seednorm) normalisation - a co-design "
+                    "interaction - rather than uniform across norms?",
+        "hypothesis": "The calib-over-query accuracy advantage is larger "
+                      "under seednorm than under pre-LN (positive "
+                      "interaction), because the learned calibration terms "
+                      "read the same per-token dynamic scale; the "
+                      "deep/early gate ratio shows the same interaction.",
+        "prediction": "difference-in-differences "
+                      "[acc(calib|seednorm) - acc(query|seednorm)] - "
+                      "[acc(calib|pre) - acc(query|pre)] > 0 at LayerScale "
+                      "off, with the same sign for gate_depth_ratio - and "
+                      "the marginal calib-vs-query contrasts must remain "
+                      "controlled for the interaction to be attributable",
+        "decision": "paired bootstrap 95% CI of the per-seed "
+                    "difference-in-differences excludes 0 after "
+                    "Benjamini-Hochberg FDR control across the E3 contrasts "
+                    "(q=0.05)",
+        "sesoi": {"accuracy": 0.01, "gate_depth_ratio": 0.05},
+    },
 }
 
 
@@ -467,6 +504,10 @@ class Settings:
     cost_runs: int = 7
     max_error_cases: int = 64   # per gate x seed, dumped to disk
     fdr_q: float = 0.05         # BH false-discovery rate for contrast families
+    # Pre-registered floor on the number of independent training seeds a
+    # contrast needs before it may support a claim: a 0.2% effect next to a
+    # 0.5% seed-level std is not evidence, and a two-seed "win" is noise.
+    min_seeds_for_claim: int = 3
     overfit_steps: int = 300    # HB5 tiny-batch overfit check
     overfit_batch: int = 8
     overfit_lr: float = 3e-3
@@ -597,12 +638,66 @@ def _report_ablation_coverage(out_dir, tag, runs, cells=_CALIB_FACTORIAL_CELLS):
     return payload
 
 
+def _report_design_coverage(out_dir, tag, runs, design, extract, expected):
+    """Verify a declared factorial design trained every declared cell.
+
+    Generalises the ablation-coverage check to whole experiment grids
+    (E1's four gate arms, E2's seven arms, E3's 2x4x2 grid): an effect is
+    only attributable if every cell it contrasts was actually trained, and
+    a missing arm leaves that effect unmeasured - or worse, invites a
+    claim from the cells that happen to have run.  The extractor reads the
+    resolved per-run factors (not labels); missing cells are printed as a
+    warning and stored in ``<tag>_<design>_coverage.json``.
+    """
+    observed = {extract(r) for r in runs if extract(r) is not None}
+    present = [c for c in expected if any(c == o for o in observed)]
+    missing = [c for c in expected if not any(c == p for p in present)]
+    payload = {
+        "tag": tag,
+        "design": design,
+        "expected_cells": [list(c) if isinstance(c, tuple) else c
+                           for c in expected],
+        "present_cells": [list(c) if isinstance(c, tuple) else c
+                          for c in present],
+        "missing_cells": [list(c) if isinstance(c, tuple) else c
+                          for c in missing],
+        "complete": not missing,
+        "n_runs": len(runs),
+    }
+    if missing:
+        print(f"[{tag}] WARNING: {design} coverage incomplete: "
+              f"{len(present)}/{len(expected)} cells trained "
+              f"(missing {missing}); those effects are not measured")
+    else:
+        print(f"[{tag}] design coverage: {len(expected)}/{len(expected)} "
+              f"{design} cells trained")
+    _write_json(out_dir / f"{tag}_{design}_coverage.json", payload)
+    return payload
+
+
 def _recipe_view(run):
-    """The controlled part of a run's configuration (a flat dict)."""
+    """The controlled part of a run's configuration (a flat dict).
+
+    Besides the resolved ``Settings`` snapshot this includes the stamped
+    ``training_recipe`` block (optimizer family, weight decay, betas,
+    schedule, eta_min, gradient clipping, augmentation) when the record
+    carries it, so a contrast checks the *actual* optimisation and
+    augmentation recipe - not only the learning rate - for equality across
+    the two sides.
+    """
     cfg = run.get("config") or {}
     view = {k: cfg.get(k) for k in _AUDIT_RECIPE_KEYS}
     view["lr"] = run.get("lr")
+    recipe = run.get("training_recipe")
+    if isinstance(recipe, dict):
+        for key, val in recipe.items():
+            view[f"training_recipe.{key}"] = val
     return view
+
+
+def _training_record(settings: Settings, lr: float) -> dict:
+    """The shared optimisation recipe block stamped into every run record."""
+    return {"training_recipe": training_recipe(lr, settings.steps)}
 
 
 def _controlled_audit(runs_a, runs_b):
@@ -617,8 +712,13 @@ def _controlled_audit(runs_a, runs_b):
        seeds silently shrink the sample and break the pairing);
     2. **Within-side recipe**: every run on a side used the same learning
        rate, step count, batch geometry, data size and evaluation-stream
-       size (no per-variant optimizer or schedule drift);
-    3. **Across-side recipe**: the two recipes are identical;
+       size, and - when the record carries the stamped
+       ``training_recipe`` - the same optimizer, weight decay, betas,
+       schedule, eta_min, gradient clipping and augmentation pipeline (no
+       per-variant optimizer or schedule drift);
+    3. **Across-side recipe**: the two recipes are identical (the same
+       fields as above), so a "gain" that is really a changed optimizer or
+       learning-rate schedule is refused instead of reported as a win;
     4. **Varying factor**: at least one declared model factor (gate / norm /
        layer_scale / calibration-ablation arm) actually differs, so the
        contrast is not degenerate;
@@ -758,19 +858,110 @@ def _paired_diff(runs_a, runs_b, metric):
     ``controlled``: a difference between recipes (optimizer settings, step
     count, data geometry, unpaired seeds) would confound the contrast, so
     the claim is refused downstream instead of being reported as a win.
+
+    Seed accounting: only seeds where both sides carry a finite value for
+    this metric enter the paired difference.  ``seeds_used`` records them;
+    ``seeds_dropped`` records the rest, split into ``seeds_unpaired``
+    (value present on only one side - a pairing failure) and
+    ``seeds_undefined`` (metric undefined on both sides, e.g. no
+    false-concentration cases), so a shrunken sample is never silently
+    read as if it were the full seed set.
     """
     by_seed = {r["seed"]: r for r in runs_b}
     diffs = []
+    used, dropped, unpaired, undefined = [], [], [], []
     for ra in runs_a:
         rb = by_seed.get(ra["seed"])
-        if rb is None or metric not in ra or metric not in rb:
-            continue
-        if _finite(ra[metric]) and _finite(rb[metric]):
-            diffs.append(float(ra[metric]) - float(rb[metric]))
+        va = ra.get(metric)
+        vb = None if rb is None else rb.get(metric)
+        finite_a, finite_b = _finite(va), _finite(vb)
+        if rb is not None and finite_a and finite_b:
+            used.append(ra["seed"])
+            diffs.append(float(va) - float(vb))
+        elif rb is None or finite_a != finite_b:
+            dropped.append(ra["seed"])
+            unpaired.append(ra["seed"])
+        else:
+            # Metric undefined on both sides (e.g. no false-concentration
+            # cases at this scale): not a pairing failure, but it still
+            # shrinks the effective sample and must be visible.
+            dropped.append(ra["seed"])
+            undefined.append(ra["seed"])
     ci = paired_bootstrap_ci(diffs)
     base = _mean_std([r[metric] for r in runs_b if metric in r])
     ci["baseline_mean"] = base["mean"]
+    # The paired sample is only the seeds where *both* sides carry a
+    # finite value for this metric: recording which seeds actually entered
+    # makes a silently shrunken sample visible (and the finalize layer
+    # refuses claims below the pre-registered minimum seed floor).
+    ci["seeds_used"] = sorted(used)
+    ci["seeds_dropped"] = sorted(dropped)
+    ci["seeds_unpaired"] = sorted(unpaired)
+    ci["seeds_undefined"] = sorted(undefined)
     ci["controlled"] = _controlled_audit(runs_a, runs_b)
+    return ci
+
+
+def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
+    """Paired difference-in-differences ``(a1 - b1) - (a2 - b2)``.
+
+    Tests an *interaction* claim - e.g. "the calibrated gate's advantage
+    over the query-only gate is specific to the dynamic-normalisation arm"
+    - rather than a marginal effect.  Both differences are taken on the
+    same training seed, so between-seed variance (the dominant term at
+    small seed counts) cancels exactly as in a paired contrast.
+
+    The controlled audit is the conjunction of the four marginal audits:
+    within each arm the recipe is fixed and only the intended factor
+    varies, and all four cells share one recipe and one seed set.  A
+    contrast whose audit fails is refused downstream exactly like a
+    marginal one, and the effective paired seed set is recorded.
+    """
+    def _by_seed(rs):
+        return {r["seed"]: r for r in rs}
+
+    m1a, m1b, m2a, m2b = (_by_seed(rs)
+                          for rs in (runs_a1, runs_b1, runs_a2, runs_b2))
+    planned = sorted(set(m1a) | set(m1b) | set(m2a) | set(m2b))
+    diffs, used, dropped, unpaired, undefined = [], [], [], [], []
+    for seed in planned:
+        cells = [m.get(seed) for m in (m1a, m1b, m2a, m2b)]
+        if any(c is None for c in cells):
+            dropped.append(seed)
+            unpaired.append(seed)
+            continue
+        vals = [c.get(metric) for c in cells]
+        finite = [_finite(v) for v in vals]
+        if all(finite):
+            used.append(seed)
+            diffs.append((float(vals[0]) - float(vals[1]))
+                         - (float(vals[2]) - float(vals[3])))
+        elif not any(finite):
+            dropped.append(seed)
+            undefined.append(seed)
+        else:
+            dropped.append(seed)
+            unpaired.append(seed)
+    ci = paired_bootstrap_ci(diffs)
+    base1 = _mean_std([r[metric] for r in runs_b1 if metric in r])
+    base2 = _mean_std([r[metric] for r in runs_b2 if metric in r])
+    ci["baseline_mean"] = base1["mean"] - base2["mean"]
+    ci["seeds_used"] = sorted(used)
+    ci["seeds_dropped"] = sorted(dropped)
+    ci["seeds_unpaired"] = sorted(unpaired)
+    ci["seeds_undefined"] = sorted(undefined)
+    audits = [_controlled_audit(runs_a1, runs_b1),
+              _controlled_audit(runs_a2, runs_b2),
+              _controlled_audit(runs_a1, runs_a2),
+              _controlled_audit(runs_b1, runs_b2)]
+    mismatches = [msg for audit in audits
+                  for msg in audit.get("mismatches", [])]
+    factors = {}
+    for audit in audits:
+        factors.update(audit.get("varying_factors", {}))
+    ci["controlled"] = {"controlled": not mismatches,
+                        "mismatches": mismatches,
+                        "varying_factors": factors}
     return ci
 
 
@@ -935,11 +1126,23 @@ class ContrastLog:
     writes the counts into the payload - the pre-registered decision rule
     itself is untouched, but a claim carried by one influential seed is
     no longer invisible.
+
+    Seed floor: a contrast may only support a claim when at least
+    ``min_seeds`` (default 3, pre-registered in ``Settings``) independent
+    training seeds actually entered the paired difference.  A 0.2% effect
+    next to a 0.5% seed-level std - or a two-seed "win" - is not evidence,
+    so such rows are marked ``claim_eligible=False`` at the decision
+    point and read as INELIGIBLE regardless of their p-value.  Rows also
+    record ``seeds_used``/``seeds_dropped`` (split into ``seeds_unpaired``
+    and ``seeds_undefined``) so a sample that silently shrank - a value
+    present on one side only, or a metric undefined for a seed - is
+    visible instead of feeding an unpaired comparison.
     """
 
-    def __init__(self, tag: str, hypotheses=()):
+    def __init__(self, tag: str, hypotheses=(), min_seeds: int = 3):
         self.tag = tag
         self.hypotheses = tuple(hypotheses)
+        self.min_seeds = int(min_seeds)
         self.rows: list[dict] = []
 
     def print(self, rule, hyp, metric, ci, warn="") -> None:
@@ -971,6 +1174,10 @@ class ContrastLog:
                                 else audit.get("varying_factors")),
             "control_mismatches": ([] if audit is None
                                    else audit.get("mismatches", [])),
+            "seeds_used": ci.get("seeds_used"),
+            "seeds_dropped": ci.get("seeds_dropped"),
+            "seeds_unpaired": ci.get("seeds_unpaired"),
+            "seeds_undefined": ci.get("seeds_undefined"),
         })
         line = f"  [{hyp}] {rule} ({metric}): {_fmt_ci(ci)}"
         if audit is not None:
@@ -980,6 +1187,17 @@ class ContrastLog:
         if sesoi is not None:
             line += (f"  [equivalence bound={sesoi:g}]" if equiv
                      else f"  [SESOI={sesoi:g}]")
+        dropped = ci.get("seeds_dropped") or []
+        if dropped:
+            why = []
+            if ci.get("seeds_unpaired"):
+                why.append(f"{len(ci['seeds_unpaired'])} unpaired")
+            if ci.get("seeds_undefined"):
+                why.append(f"{len(ci['seeds_undefined'])} metric-undefined")
+            line += (f"  [seed coverage: {len(dropped)} of "
+                     f"{len(dropped) + len(ci.get('seeds_used') or [])} "
+                     f"planned seed(s) dropped ({', '.join(why) or 'n/a'}); "
+                     f"effective n={ci.get('n')}]")
         flags = small_n_flags(ci)
         if flags:
             line += f"  [{flags}]"
@@ -1038,8 +1256,15 @@ class ContrastLog:
                     sesoi is None
                     or (finite_effect and math.isfinite(float(sesoi))
                         and abs(mean) >= float(sesoi)))
+            # Pre-registered seed floor: below ``min_seeds`` independent
+            # paired seeds a "supported" verdict would be noise dressed as
+            # evidence; such rows cannot support a claim at the decision
+            # point whatever their p-value.
+            row["claim_eligible"] = bool(
+                (row.get("n") or 0) >= self.min_seeds)
             row["supports_hypothesis"] = bool(
-                row["fdr_reject"] and row["practically_relevant"])
+                row["fdr_reject"] and row["practically_relevant"]
+                and row["claim_eligible"])
             # Small-sample robustness: does the *decision* survive when any
             # single seed is dropped (jackknife), and does BCa reach the
             # same decision as the pre-registered percentile interval?
@@ -1104,6 +1329,10 @@ class ContrastLog:
                        if sesoi is not None else "")
             if r.get("confounded"):
                 verdict = "REFUSED (confounded contrast)"
+            elif not r.get("claim_eligible", True):
+                verdict = (f"INELIGIBLE (n={r['n']} < pre-registered "
+                           f"minimum {self.min_seeds} seeds: too few "
+                           f"independent runs for a claim)")
             elif equiv and r.get("equivalent") and r["fdr_reject"]:
                 verdict = "EQUIVALENT (CI inside bound, null prediction holds)"
             elif equiv and sesoi is not None and (
@@ -1168,12 +1397,35 @@ class ContrastLog:
                   f"equivalence contrast(s) pass the TOST FDR gate but their "
                   f"CI is not fully inside the bound (borderline); they do "
                   f"NOT count as confirming the null prediction")
-        low_seed = [r for r in testable if r["n"] < 3]
+        low_seed = [r for r in testable if not r.get("claim_eligible", True)]
         if low_seed:
             print(f"[{self.tag}] WARNING: {len(low_seed)}/{len(testable)} "
-                  f"testable contrast(s) rest on fewer than 3 independent "
-                  f"seeds; the recommended minimum for a seed-level claim "
-                  f"is 3-5, so treat them as provisional")
+                  f"testable contrast(s) rest on fewer than "
+                  f"{self.min_seeds} independent seeds and are marked "
+                  f"claim-ineligible: the pre-registered minimum for a "
+                  f"seed-level claim is {self.min_seeds} seeds, so their "
+                  f"p-values cannot support a decision (replicated runs "
+                  f"with >=3 seeds needed)")
+        coverage_loss = [r for r in self.rows if r.get("seeds_dropped")]
+        unpaired_rows = [r for r in coverage_loss if r.get("seeds_unpaired")]
+        undefined_rows = [r for r in coverage_loss if r.get("seeds_undefined")]
+        if coverage_loss:
+            weakened = [r for r in coverage_loss
+                        if (r.get("n") or 0) < self.min_seeds]
+            parts = []
+            if unpaired_rows:
+                parts.append(f"{len(unpaired_rows)} with a value present on "
+                             f"only one side (pairing failure)")
+            if undefined_rows:
+                parts.append(f"{len(undefined_rows)} where the metric is "
+                             f"undefined on both sides (e.g. no "
+                             f"false-concentration cases)")
+            print(f"[{self.tag}] WARNING: {len(coverage_loss)} contrast(s) "
+                  f"could not use the full planned seed set: "
+                  f"{'; '.join(parts) or 'seed coverage loss'}; "
+                  f"{len(weakened)} fell below the {self.min_seeds}-seed "
+                  f"claim floor; seeds_used/seeds_dropped are recorded per "
+                  f"row for the audit")
         if loo_flips:
             names = ", ".join(f"{r['hypothesis']}/{r['rule']}"
                               for r in loo_flips)
@@ -1236,9 +1488,17 @@ class ContrastLog:
                    "n_audited": len(audited),
                    "n_control_passed": len(controlled_pass),
                    "n_low_seed": len(low_seed),
+                   "n_claim_ineligible": len(low_seed),
+                   "n_seed_coverage_loss": len(coverage_loss),
+                   "n_seed_unpaired": len(unpaired_rows),
+                   "n_seed_undefined": len(undefined_rows),
+                   "min_seeds_for_claim": self.min_seeds,
                    "n_loo_flip_decision": len(loo_flips),
                    "n_bca_disagree": len(bca_differs),
                    "n_low_resolution": len(low_resolution),
+                   "seed_coverage_loss_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in coverage_loss],
                    "loo_flip_contrasts": [
                        f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                        for r in loo_flips],
@@ -1985,6 +2245,7 @@ def _run_shallow_baseline(settings: Settings, out_dir: pathlib.Path,
                        "training_seed": seed, "accuracy": metrics["accuracy"],
                        "accuracy_lo": metrics["accuracy_lo"],
                        "accuracy_hi": metrics["accuracy_hi"], "n": n,
+                       **_training_record(settings, best["lr"]),
                        **_run_context(settings), **curve})
     pooled = wilson_ci(sum(r["correct"] for r in runs),
                        sum(r["n"] for r in runs))
@@ -2292,6 +2553,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                        "accuracy": metrics["accuracy"],
                        "accuracy_lo": metrics["accuracy_lo"],
                        "accuracy_hi": metrics["accuracy_hi"], "n": n,
+                       **_training_record(settings, lr_shared),
                        **curve})
     margins = [r["accuracy"] - chance for r in ctrl_runs]
     hb4 = paired_bootstrap_ci(margins)
@@ -2436,6 +2698,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
         "gate": gate, "seed": seed, "lr": lr,
         "params": params, "model_cfg": model_cfg, **metrics, **corr, **fc, **ed,
         **{f"err_{k}": v for k, v in errors["summary"].items()},
+        **_training_record(settings, lr),
         **_cost_record(settings, model), **curve, **record_extra,
         **_run_context(settings),
     }
@@ -2498,6 +2761,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     _report_ablation_coverage(
         out_dir, "e1",
         runs + [r for rs in ablation_runs.values() for r in rs])
+    _report_design_coverage(
+        out_dir, "e1", runs, "gate",
+        lambda r: r.get("gate"), tuple(GATES))
 
     print(f"\n[e1] test seed {TEST_SEED}, stats seed {STATS_SEED}, "
           f"lr={lr:g}, steps={settings.steps}")
@@ -2689,7 +2955,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         print(f"{gate:>6}" + "".join(f"{c:>12}" for c in cells))
 
     print("\n[e1] pre-registered contrasts (calib vs query/none):")
-    clog = ContrastLog("e1", hypotheses=("H1a", "H1b", "H1c", "H1d"))
+    clog = ContrastLog("e1", hypotheses=("H1a", "H1b", "H1c", "H1d"),
+                       min_seeds=settings.min_seeds_for_claim)
     clog.print("calib - none", "H1a", "accuracy",
                _paired_diff(by_gate["calib"], by_gate["none"], "accuracy"),
                warn=_curve_warn(("calib", by_gate["calib"]),
@@ -2913,6 +3180,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                    "entropy_by_length": {}, "entropy_norm_by_length": {},
                    "maxprob_by_length": {}, "gate_by_length": {},
                    **record_extra,
+                   **_training_record(settings, lr),
                    **_cost_record(settings, model), **curve,
                    **_run_context(settings)}
             for length in lengths:
@@ -2966,6 +3234,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                   for label, *_ in _E2_VARIANTS}
     table = {label: _aggregate_runs(rs) for label, rs in by_variant.items()}
     _report_ablation_coverage(out_dir, "e2", runs)
+    _report_design_coverage(
+        out_dir, "e2", runs, "variant",
+        lambda r: r.get("variant"),
+        tuple(label for label, *_ in _E2_VARIANTS))
     print(f"\n[e2] accuracy by n_pairs (mean +- std over seeds; the "
           f"calib_len_only / calib_ent_only / calib_no_terms arms are the "
           f"H2c calibration-term ablations, completing the 2x2 with calib):")
@@ -3039,7 +3311,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             print(f"  [{label}] {_format_case(case)}")
 
     print("\n[e2] pre-registered contrasts:")
-    clog = ContrastLog("e2", hypotheses=("H2a", "H2b", "H2c"))
+    clog = ContrastLog("e2", hypotheses=("H2a", "H2b", "H2c"),
+                       min_seeds=settings.min_seeds_for_claim)
     calib_runs = by_variant["calib"]
     calib_warn = _curve_warn(("calib", calib_runs))
     clog.print("calib - none", "H2a", "accuracy_at_longest",
@@ -3093,7 +3366,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
 
 
 def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("H3a", "H3b"))
+    _announce(("H3a", "H3b", "H3c"))
     _write_manifest(settings, out_dir, "e3")
     _enforce_reproducibility(settings, out_dir, "e3")
     _enforce_overfit_gate(settings, out_dir, "e3")
@@ -3115,7 +3388,8 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                                           seed=STATS_SEED)
                     resid = stats["resid_norm"].mean(dim=0)
                     rec = {
-                        "experiment": "e3", "hypotheses": ["H3a", "H3b"],
+                        "experiment": "e3",
+                        "hypotheses": ["H3a", "H3b", "H3c"],
                         "gate": gate, "norm": norm,
                         "layer_scale": layer_scale, "seed": seed, "lr": lr,
                         "params": params, "model_cfg": model_cfg,
@@ -3125,6 +3399,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                         "resid_norm_by_layer": resid.tolist(),
                         "resid_norm_last_over_first": float(
                             resid[-1] / resid[0].clamp_min(1e-12)),
+                        **_training_record(settings, lr),
                         **_cost_record(settings, model), **curve,
                         **_run_context(settings),
                     }
@@ -3182,10 +3457,21 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
         print(f"  [{gate}] {_fmt_ci(acc_ci)} | {'  '.join(ratios)}"
               + (f"  [{warn}]" if warn else ""))
 
+    _report_design_coverage(
+        out_dir, "e3", runs, "grid",
+        lambda r: (r.get("gate"), r.get("norm"), r.get("layer_scale")),
+        tuple((gate, norm, ls)
+              for gate in ("query", "calib")
+              for norm in NORMS
+              for ls in (None, 1e-2)))
+
     print("\n[e3] pre-registered contrasts (H3b: "
           "resid_norm_last_over_first is the primary readout; "
-          "gate_depth_ratio is secondary):")
-    clog = ContrastLog("e3", hypotheses=("H3a", "H3b"))
+          "gate_depth_ratio is secondary; H3c: "
+          "calib-vs-query interaction with the dynamic-normalisation "
+          "arm):")
+    clog = ContrastLog("e3", hypotheses=("H3a", "H3b", "H3c"),
+                       min_seeds=settings.min_seeds_for_claim)
     for gate in ("query", "calib"):
         for layer_scale in (None, 1e-2):
             a = index[(gate, "seednorm", layer_scale)]
@@ -3211,6 +3497,25 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                    _paired_diff(a, b, "accuracy"),
                    warn=_curve_warn((f"calib/{norm}", a),
                                     (f"query/{norm}", b)))
+    # H3c: the co-design interaction.  The marginal calib-vs-query
+    # differences under seednorm and under pre-LN are differenced on the
+    # same training seed, so the (large) between-seed variance cancels and
+    # only the interaction remains; a positive DiD says the calibration
+    # benefit is specific to the dynamic-normalisation arm, i.e. the two
+    # components work together rather than additively.
+    for metric in ("accuracy", "gate_depth_ratio"):
+        cells = (index[("calib", "seednorm", None)],
+                 index[("query", "seednorm", None)],
+                 index[("calib", "pre", None)],
+                 index[("query", "pre", None)])
+        clog.print(
+            "seednorm x (calib - query) - pre x (calib - query)",
+            "H3c", metric,
+            _paired_did(*cells, metric),
+            warn=_curve_warn(("calib/seednorm", cells[0]),
+                             ("query/seednorm", cells[1]),
+                             ("calib/pre", cells[2]),
+                             ("query/pre", cells[3])))
     clog.finalize(out_dir, q=settings.fdr_q)
     _write_json(out_dir / "e3_summary.json",
                 {f"{g}|{n}|{ls}": _aggregate_runs(rs)

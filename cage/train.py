@@ -30,10 +30,20 @@ from .metrics import (
 from .repro import seed_everything, stream_generator
 
 
+# Fixed optimisation recipe (design pin D5): a single source of truth for
+# the hyperparameters the factory uses *and* for the ``training_recipe``
+# block every run record stamps, so the controlled-comparison audit can
+# verify optimizer equality from the records instead of assuming it.
+_ADAMW_WEIGHT_DECAY = 0.01
+_ADAMW_BETAS = (0.9, 0.95)
+_GRAD_CLIP_MAX_NORM = 1.0
+_ETA_MIN_FACTOR = 0.1
+
+
 def _make_adamw(params, lr):
     """AdamW on the current device."""
     params = list(params)
-    kw = dict(lr=lr, weight_decay=0.01, betas=(0.9, 0.95))
+    kw = dict(lr=lr, weight_decay=_ADAMW_WEIGHT_DECAY, betas=_ADAMW_BETAS)
     if any(p.is_cuda for p in params):
         try:
             return torch.optim.AdamW(params, foreach=False, fused=True, **kw)
@@ -44,6 +54,33 @@ def _make_adamw(params, lr):
     except (TypeError, RuntimeError, ValueError):
         pass
     return torch.optim.AdamW(params, **kw)
+
+
+def training_recipe(lr, steps=None) -> dict:
+    """The complete optimisation recipe of one training run.
+
+    Comparing method A with method B only attributes a difference to the
+    module under test if *everything else* - optimizer family, weight
+    decay, betas, learning-rate schedule, eta_min, gradient clipping and
+    the (absent) augmentation pipeline - is held fixed.  The recipe is
+    fixed centrally in ``_make_adamw`` / ``train_model``; this block is
+    stamped into every run record so the controlled-variable audit can
+    check that equality *from the records* rather than trusting that no
+    call site silently passed a different optimizer setting.
+    """
+    out = {
+        "optimizer": "AdamW",
+        "weight_decay": _ADAMW_WEIGHT_DECAY,
+        "betas": list(_ADAMW_BETAS),
+        "schedule": "CosineAnnealingLR",
+        "eta_min_factor": _ETA_MIN_FACTOR,
+        "grad_clip_max_norm": _GRAD_CLIP_MAX_NORM,
+        "augmentation": "none (synthetic generator; fixed protocol)",
+        "lr": float(lr),
+    }
+    if steps is not None:
+        out["steps"] = int(steps)
+    return out
 
 
 def training_curve_verdict(hist, rel_tol: float = 0.05,
@@ -495,7 +532,8 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     val_gen = stream_generator(VAL_SEED, device)
     params = list(model.parameters())
     opt = _make_adamw(params, lr)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps, eta_min=lr * 0.1)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=steps, eta_min=lr * _ETA_MIN_FACTOR)
     hist = []
     best_val = float("inf")
     best_val_step = None
@@ -530,7 +568,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                     f"triage first_bad_stage={diag['first_bad_stage']!r}, "
                     f"suggestions={diag['suggestions']}")
             continue
-        grad_norm = torch.nn.utils.clip_grad_norm_(params, 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(params, _GRAD_CLIP_MAX_NORM)
         gn = float(grad_norm)
         entry["grad_norm"] = gn
         if not math.isfinite(gn):
@@ -712,7 +750,7 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
         loss.backward()
         if grad_flow is None:
             grad_flow = _gradient_flow(model)
-        torch.nn.utils.clip_grad_norm_(params, 1.0)
+        torch.nn.utils.clip_grad_norm_(params, _GRAD_CLIP_MAX_NORM)
         opt.step()
         if step % sample_every == 0 or step == steps - 1:
             with torch.no_grad():
