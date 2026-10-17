@@ -28,6 +28,14 @@ Metric choices (and why)
   effect at 80% power (``mde80``) and the sign consistency across seeds,
   because a CI that merely *includes* 0 is not evidence of "no effect"
   when the experiment cannot resolve the effect in the first place.
+* Some pre-registered predictions are *null/equivalence* claims (a
+  quantity is expected to stay within a bound, not to move).  Those are
+  tested with ``equivalence_test`` (bootstrap TOST): support requires the
+  95% CI of the effect to lie **inside** ``+-bound``, and the TOST
+  p-value (H0: ``|effect| >= bound``) enters the same FDR family as the
+  directional p-values - "not significant" on a difference test is not
+  the same as "equivalent within the bound" and must never be read as
+  confirmation of a null prediction.
 * Each experiment interprets a family of contrasts, so
   ``benjamini_hochberg`` controls the false-discovery rate across that
   family; an uncorrected per-contrast 95% readout would be expected to
@@ -63,6 +71,7 @@ __all__ = [
     "expected_calibration_error",
     "brier_score",
     "paired_bootstrap_ci",
+    "equivalence_test",
     "selection_at_fraction",
     "seeds_for_power",
     "wilson_ci",
@@ -277,6 +286,34 @@ def brier_score(probs, correct) -> float:
     return float(((p - c) ** 2).mean())
 
 
+def _bootstrap_means(d: torch.Tensor, n_boot: int,
+                     seed: int) -> torch.Tensor:
+    """Bootstrap distribution of the mean of the paired values ``d``."""
+    n = d.numel()
+    gen = torch.Generator(device=d.device).manual_seed(seed)
+    idx = torch.randint(0, n, (n_boot, n), generator=gen, device=d.device)
+    return d[idx].mean(dim=1)
+
+
+def _bootstrap_summary(d: torch.Tensor, means: torch.Tensor,
+                       alpha: float) -> dict:
+    """Percentile CI and dispersion of a bootstrap-mean distribution."""
+    lo = float(torch.quantile(means, alpha / 2.0))
+    hi = float(torch.quantile(means, 1.0 - alpha / 2.0))
+    n = d.numel()
+    sd = float(d.std(unbiased=True)) if n > 1 else 0.0
+    return {
+        "mean": float(d.mean()),
+        "lo": lo,
+        "hi": hi,
+        "n": int(n),
+        "sd": sd,
+        "half_width": (hi - lo) / 2.0,
+        "mde80": 2.8015852 * sd / math.sqrt(n) if n else float("nan"),
+        "alpha": float(alpha),
+    }
+
+
 def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                         alpha: float = 0.05) -> dict:
     """Percentile bootstrap CI for the mean of *paired* differences.
@@ -303,37 +340,73 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
       mean).
     """
     d = _flatten_float(diffs)
-    n = d.numel()
-    if n == 0:
+    if d.numel() == 0:
         return {"mean": float("nan"), "lo": float("nan"),
                 "hi": float("nan"), "n": 0, "sd": float("nan"),
                 "half_width": float("nan"), "mde80": float("nan"),
                 "p_value": float("nan"), "sign_consistency": float("nan"),
                 "alpha": float(alpha)}
-    gen = torch.Generator(device=d.device).manual_seed(seed)
-    idx = torch.randint(0, n, (n_boot, n), generator=gen, device=d.device)
-    means = d[idx].mean(dim=1)
-    lo = float(torch.quantile(means, alpha / 2.0))
-    hi = float(torch.quantile(means, 1.0 - alpha / 2.0))
+    n = d.numel()
+    means = _bootstrap_means(d, n_boot, seed)
+    out = _bootstrap_summary(d, means, alpha)
     p_lo = float((means <= 0.0).to(torch.float64).mean())
     p_hi = float((means >= 0.0).to(torch.float64).mean())
-    p_two = min(1.0, 2.0 * (min(p_lo, p_hi) * n_boot + 1.0) / (n_boot + 1.0))
-    sd = float(d.std(unbiased=True)) if n > 1 else 0.0
+    out["p_value"] = min(
+        1.0, 2.0 * (min(p_lo, p_hi) * n_boot + 1.0) / (n_boot + 1.0))
     pos = float((d > 0.0).to(torch.float64).mean())
     neg = float((d < 0.0).to(torch.float64).mean())
-    sign_consistency = max(pos, neg) if pos + neg > 0.0 else float("nan")
-    return {
-        "mean": float(d.mean()),
-        "lo": lo,
-        "hi": hi,
-        "n": int(n),
-        "sd": sd,
-        "half_width": (hi - lo) / 2.0,
-        "mde80": 2.8015852 * sd / math.sqrt(n),
-        "p_value": p_two,
-        "sign_consistency": sign_consistency,
-        "alpha": float(alpha),
+    out["sign_consistency"] = (max(pos, neg) if pos + neg > 0.0
+                               else float("nan"))
+    return out
+
+
+def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
+                     alpha: float = 0.05) -> dict:
+    """Bootstrap equivalence (TOST) test for a *null prediction*.
+
+    For hypotheses that predict a quantity stays put ("the H/log(T)-
+    normalised entropy drift is length-stable"), the interesting result is
+    not "the effect differs from 0" (which a sufficiently powered design
+    always shows for any nonzero drift) but "the effect is small enough to
+    be physically irrelevant": the pre-registered bound ``bound`` is the
+    smallest effect that would refute the prediction.  ``diffs`` holds the
+    paired per-seed values as in :func:`paired_bootstrap_ci`.
+
+    Two one-sided bootstrap tests are combined (TOST): H0 is
+    ``|mean| >= bound`` and ``p_value`` is
+    ``max(P(mean* <= -bound), P(mean* >= +bound))`` with ``+1`` smoothing.
+    ``equivalent`` is the CI-based decision rule (the 95% percentile CI of
+    the mean lies strictly inside ``(-bound, +bound)``), which is the
+    quantity pre-registered in the hypothesis registry; the TOST p-value
+    feeds the same Benjamini-Hochberg family as the directional p-values,
+    so null predictions and difference claims are controlled together.
+
+    A CI that merely *includes* 0 does not establish equivalence: with
+    seed-level noise wider than the bound, "not significant" is
+    inconclusive, and the returned dict carries the usual
+    ``lo``/``hi``/``sd``/``mde80`` fields so the report can say which.
+    Returns NaN fields and ``equivalent=False`` for an empty input or a
+    non-positive/non-finite bound.
+    """
+    bound = abs(float(bound))
+    d = _flatten_float(diffs)
+    out = {
+        "mean": float("nan"), "lo": float("nan"), "hi": float("nan"),
+        "n": 0, "sd": float("nan"), "half_width": float("nan"),
+        "mde80": float("nan"), "p_value": float("nan"),
+        "sign_consistency": float("nan"), "alpha": float(alpha),
+        "test": "equivalence", "bound": bound, "equivalent": False,
     }
+    if d.numel() == 0 or not math.isfinite(bound) or bound <= 0.0:
+        return out
+    means = _bootstrap_means(d, n_boot, seed)
+    out.update(_bootstrap_summary(d, means, alpha))
+    p_below = float((means <= -bound).to(torch.float64).mean())
+    p_above = float((means >= bound).to(torch.float64).mean())
+    out["p_value"] = min(
+        1.0, (max(p_below, p_above) * n_boot + 1.0) / (n_boot + 1.0))
+    out["equivalent"] = bool(out["lo"] > -bound and out["hi"] < bound)
+    return out
 
 
 def seeds_for_power(sd, effect, alpha: float = 0.05,

@@ -117,6 +117,7 @@ from .data import (
 )
 from .metrics import (
     benjamini_hochberg,
+    equivalence_test,
     paired_bootstrap_ci,
     seeds_for_power,
     wilson_ci,
@@ -157,6 +158,15 @@ HYPO_IDS = ("HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "H1a", "H1b", "H1c",
 # and error-margin shares in probability points, correlations/ratios in
 # their own scale (see each entry).  The registry is content-hashed into
 # every result record, so the SESOI is part of the pre-registration.
+#
+# A hypothesis whose prediction is a *null/equivalence* claim (a quantity is
+# expected to stay inside a bound, e.g. H2b's length-stable H/log(T)) lists
+# the metric under ``"sesoi_test"`` with value ``"equivalence"``: the SESOI
+# then acts as the equivalence bound and the contrast is supported only when
+# the 95% CI of the effect lies inside +-bound (bootstrap TOST,
+# ``cage.metrics.equivalence_test``).  "Not significant" on a difference
+# test is *not* evidence for a null prediction, so the two decision rules
+# must not be conflated.
 HYPOTHESES = {
     "HB1": {
         "experiment": "baselines",
@@ -349,15 +359,26 @@ HYPOTHESES = {
                     "calibration assumes?",
         "hypothesis": "Raw entropy grows with log(T), while the quantity the "
                       "gate normalises by, H/log(T), is length-stable.",
-        "prediction": "raw entropy drift (longest - base) > 0 and "
-                      "normalised entropy drift H/log(T) ~ 0, with the "
-                      "calibrated gate drift small",
+        "prediction": "raw entropy drift (longest - base) > 0 (directional) "
+                      "and the normalised entropy drift H/log(T) lies inside "
+                      "the pre-registered equivalence bound, with the "
+                      "calibrated gate drift inside its bound too",
         "decision": "paired bootstrap 95% CIs, FDR-controlled across the E2 "
-                    "contrasts (q=0.05): raw entropy drift CI excludes 0 "
-                    "with a positive mean, and the H/log(T) drift CI "
-                    "includes 0",
+                    "contrasts (q=0.05): the raw entropy drift CI excludes 0 "
+                    "with a positive mean (difference test); the H/log(T) "
+                    "drift and the gate drift are *equivalence* (TOST) tests "
+                    "- each is supported only when its CI lies inside "
+                    "+-SESOI, so a CI that merely includes 0 while spanning "
+                    "a drift larger than the bound is 'not established', "
+                    "not length-stability evidence",
         "sesoi": {"entropy_drift": 0.1, "entropy_norm_drift": 0.05,
                   "gate_drift": 0.02},
+        # Metrics whose pre-registered prediction is a *null/equivalence*
+        # claim: the SESOI above is then the bound the 95% CI must lie
+        # inside (metrics.equivalence_test), not a minimum meaningful
+        # effect.
+        "sesoi_test": {"entropy_norm_drift": "equivalence",
+                       "gate_drift": "equivalence"},
     },
     "H2c": {
         "experiment": "e2",
@@ -613,6 +634,21 @@ def _paired_diff(runs_a, runs_b, metric):
 def _fmt_ci(ci) -> str:
     if ci["n"] == 0 or not math.isfinite(ci["mean"]):
         return "n/a"
+    p = ci.get("p_value", float("nan"))
+    p_s = f"p={p:.3f} " if math.isfinite(p) else ""
+    if ci.get("test") == "equivalence":
+        # Null-prediction contrast: a *small* TOST p and a CI inside the
+        # bound both support the prediction, so the verdict wording is the
+        # mirror image of the difference tests below.
+        bound = ci.get("bound", float("nan"))
+        if ci.get("equivalent"):
+            verdict = f"CI inside +-{bound:g} (prediction holds)"
+        elif ci["lo"] > bound or ci["hi"] < -bound:
+            verdict = f"CI outside +-{bound:g} (prediction refuted)"
+        else:
+            verdict = f"CI not inside +-{bound:g} (inconclusive)"
+        return (f"{ci['mean']:+.4f} [{ci['lo']:+.4f}, {ci['hi']:+.4f}] "
+                f"n={ci['n']} {p_s}{verdict}")
     supported = (ci["lo"] > 0.0) or (ci["hi"] < 0.0)
     mde = ci.get("mde80", float("nan"))
     if supported:
@@ -622,8 +658,6 @@ def _fmt_ci(ci) -> str:
                    f"(design cannot resolve it)")
     else:
         verdict = "CI includes 0"
-    p = ci.get("p_value", float("nan"))
-    p_s = f"p={p:.3f} " if math.isfinite(p) else ""
     return (f"{ci['mean']:+.4f} [{ci['lo']:+.4f}, {ci['hi']:+.4f}] "
             f"n={ci['n']} {p_s}{verdict}")
 
@@ -698,13 +732,28 @@ class ContrastLog:
     SESOI would need at the observed variance, and an FDR-significant
     effect below its SESOI is reported as practically negligible instead
     of "supported".
+
+    Contrasts whose pre-registered prediction is *null/equivalence*
+    ("this quantity stays inside +-bound") must be added through
+    :meth:`print_equivalence`, which runs the bootstrap TOST from
+    ``cage.metrics`` with the bound registered under ``sesoi_test`` and
+    reads support as CI-within-bound - never as "CI includes 0".  Its
+    TOST p-value joins the same BH family as the directional p-values.
+
+    ``hypotheses`` lists the pre-registered ids this family is supposed to
+    evaluate; :meth:`finalize` audits coverage (registered but absent, or
+    rows citing unknown ids) and records it in the payload, so a
+    pre-registered decision that no contrast executes is flagged instead
+    of silently missing.
     """
 
-    def __init__(self, tag: str):
+    def __init__(self, tag: str, hypotheses=()):
         self.tag = tag
+        self.hypotheses = tuple(hypotheses)
         self.rows: list[dict] = []
 
     def print(self, rule, hyp, metric, ci, warn="") -> None:
+        equiv = ci.get("test") == "equivalence"
         audit = ci.get("controlled")
         sesoi = (HYPOTHESES.get(hyp, {}).get("sesoi") or {}).get(metric)
         self.rows.append({
@@ -713,6 +762,9 @@ class ContrastLog:
             "n": ci.get("n"), "p_value": ci.get("p_value"),
             "mde80": ci.get("mde80"), "sd": ci.get("sd"),
             "sesoi": sesoi,
+            "test": "equivalence" if equiv else "difference",
+            "equivalence_bound": ci.get("bound") if equiv else None,
+            "equivalent": ci.get("equivalent") if equiv else None,
             "sign_consistency": ci.get("sign_consistency"),
             "baseline_mean": ci.get("baseline_mean"),
             "controlled": None if audit is None else audit["controlled"],
@@ -727,7 +779,8 @@ class ContrastLog:
             line += (f"  [control: {'ok' if audit['controlled'] else 'FAILED'}"
                      f", varies={factors}]")
         if sesoi is not None:
-            line += f"  [SESOI={sesoi:g}]"
+            line += (f"  [equivalence bound={sesoi:g}]" if equiv
+                     else f"  [SESOI={sesoi:g}]")
         if warn:
             line += f"  [{warn}]"
         print(line)
@@ -735,7 +788,29 @@ class ContrastLog:
             for mismatch in audit["mismatches"]:
                 print(f"      CONTROL WARNING: {mismatch}")
 
+    def print_equivalence(self, rule, hyp, metric, diffs, warn="") -> None:
+        """Add a pre-registered *null-prediction* contrast (bootstrap TOST).
+
+        ``bound`` is read from the hypothesis's registered SESOI and the
+        metric must be declared as an equivalence test under
+        ``sesoi_test``; otherwise the call raises, because running a null
+        prediction through the difference machinery would misread "CI
+        includes 0" (which may merely mean "underpowered") as support.
+        """
+        entry = HYPOTHESES.get(hyp, {})
+        bound = (entry.get("sesoi") or {}).get(metric)
+        if (entry.get("sesoi_test") or {}).get(metric) != "equivalence" \
+                or bound is None:
+            raise ValueError(
+                f"{hyp}/{metric} has no pre-registered equivalence bound "
+                f"in HYPOTHESES; register it under 'sesoi_test' first")
+        self.print(rule, hyp, metric, equivalence_test(diffs, bound),
+                   warn=warn)
+
     def finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
+        # TOST p-values of equivalence rows enter the same BH family as the
+        # directional p-values: both answer "is this contrast worth a claim
+        # at FDR q?" and splitting the family would loosen the control.
         adj = benjamini_hochberg([r["p_value"] for r in self.rows], q=q)
         for row, a in zip(self.rows, adj):
             row["p_adj"] = a["p_adj"]
@@ -751,44 +826,73 @@ class ContrastLog:
             sesoi = row.get("sesoi")
             mean = row.get("mean")
             finite_effect = mean is not None and math.isfinite(mean)
-            row["practically_relevant"] = bool(
-                sesoi is None
-                or (finite_effect and math.isfinite(float(sesoi))
-                    and abs(mean) >= float(sesoi)))
+            if row["test"] == "equivalence":
+                # Null prediction: the practical gate is the CI-within-
+                # bound rule, *not* |effect| >= SESOI (which would reward
+                # exactly the drift the prediction says should not occur).
+                row["practically_relevant"] = bool(row.get("equivalent"))
+            else:
+                row["practically_relevant"] = bool(
+                    sesoi is None
+                    or (finite_effect and math.isfinite(float(sesoi))
+                        and abs(mean) >= float(sesoi)))
             row["supports_hypothesis"] = bool(
                 row["fdr_reject"] and row["practically_relevant"])
             # A-priori power planning for the pre-registered SESOI at the
             # observed paired-difference SD: how many seeds would this
             # contrast need to resolve an effect it cares about?  (Adjust
-            # the design *before* the next run, not after.)
+            # the design *before* the next run, not after.)  For an
+            # equivalence row the target is the bound: how many seeds
+            # until a CI of this width could fit inside +-SESOI.
             row["n_seeds_for_sesoi"] = (
                 float("inf") if sesoi is None
                 else seeds_for_power(row.get("sd"), sesoi))
         testable = [r for r in self.rows if math.isfinite(r["p_adj"])]
         surviving = [r for r in testable if r["fdr_reject"]]
         supporting = [r for r in testable if r["supports_hypothesis"]]
-        below_sesoi = [r for r in surviving if not r["practically_relevant"]]
+        below_sesoi = [r for r in surviving
+                       if not r["practically_relevant"]
+                       and r["test"] != "equivalence"]
+        equiv_rows = [r for r in testable if r["test"] == "equivalence"]
+        equivalent = [r for r in equiv_rows if r.get("equivalent")]
+        equiv_borderline = [r for r in surviving
+                            if r["test"] == "equivalence"
+                            and not r.get("equivalent")]
         confounded = [r for r in testable if r.get("confounded")]
         controlled_pass = [r for r in self.rows if r.get("controlled") is True]
         audited = [r for r in self.rows if r.get("controlled") is not None]
         print(f"\n[{self.tag}] multiplicity control (Benjamini-Hochberg FDR, "
               f"q={q:g}): {len(surviving)}/{len(testable)} testable "
-              f"contrasts survive, {len(supporting)} pass the SESOI gate too "
-              f"(uncorrected p -> adjusted p; only 'SURVIVES' supports a "
-              f"pre-registered decision; rel = effect relative to the "
-              f"control-side mean, read it for practical significance; a "
-              f"statistically significant effect below its SESOI is "
-              f"practically negligible and does NOT support the "
-              f"hypothesis):")
+              f"contrasts survive, {len(supporting)} support a "
+              f"pre-registered decision "
+              f"(uncorrected p -> adjusted p; only 'SURVIVES'/'EQUIVALENT' "
+              f"supports a pre-registered decision; rel = effect relative "
+              f"to the control-side mean, read it for practical "
+              f"significance; a statistically significant effect below its "
+              f"SESOI is practically negligible and does NOT support the "
+              f"hypothesis; a null prediction is supported only when the "
+              f"95% CI lies inside its equivalence bound):")
         for r in testable:
             rel_s = (f", rel={r['rel_effect']:+.2%}"
                      if math.isfinite(r["rel_effect"]) else "")
             sesoi = r.get("sesoi")
-            sesoi_s = f", SESOI={sesoi:g}" if sesoi is not None else ""
+            equiv = r["test"] == "equivalence"
+            sesoi_s = (f"{'bound' if equiv else 'SESOI'}={sesoi:g}"
+                       if sesoi is not None else "")
             if r.get("confounded"):
                 verdict = "REFUSED (confounded contrast)"
+            elif equiv and r.get("equivalent") and r["fdr_reject"]:
+                verdict = "EQUIVALENT (CI inside bound, null prediction holds)"
+            elif equiv and sesoi is not None and (
+                    r["lo"] > float(sesoi) or r["hi"] < -float(sesoi)):
+                verdict = ("REFUTED (CI entirely beyond the equivalence "
+                           "bound, null prediction fails)")
             elif not r["fdr_reject"]:
-                verdict = "not significant"
+                verdict = ("not significant (TOST)" if equiv
+                           else "not significant")
+            elif equiv:
+                verdict = ("TOST-significant but CI not fully inside bound "
+                           "(borderline, not read as support)")
             elif not r["practically_relevant"]:
                 verdict = ("FDR-significant but |effect| < SESOI "
                            "(practically negligible)")
@@ -797,13 +901,15 @@ class ContrastLog:
             need = r.get("n_seeds_for_sesoi", float("inf"))
             need_s = ""
             if math.isfinite(need) and r["n"] > 0 and need > r["n"]:
-                need_s = (f", needs ~{math.ceil(need)} seeds for SESOI at "
-                          f"80% power (has {r['n']})")
+                need_s = (f", needs ~{math.ceil(need)} seeds for "
+                          f"{'the bound' if equiv else 'SESOI'} at 80% "
+                          f"power (has {r['n']})")
             print(f"  [{r['hypothesis']}] {r['rule']} ({r['metric']}): "
                   f"p={r['p_value']:.4f} -> p_adj={r['p_adj']:.4f} "
                   f"{verdict} "
                   f"(effect={r['mean']:+.4f}{rel_s}, "
-                  f"MDE80={r['mde80']:.4f}{sesoi_s}, seeds={r['n']}, "
+                  f"MDE80={r['mde80']:.4f}{', ' if sesoi_s else ''}"
+                  f"{sesoi_s}, seeds={r['n']}, "
                   f"sign-consistency={r['sign_consistency']:.2f}{need_s})")
         if audited:
             print(f"[{self.tag}] controlled-variable audit: "
@@ -824,21 +930,64 @@ class ContrastLog:
                   f"{len(underpowered)} of them would need more seeds "
                   f"(listed per row above) to resolve the SESOI - do not "
                   f"read them as supporting the mechanism")
+        if equiv_rows:
+            print(f"[{self.tag}] equivalence (null-prediction) tests: "
+                  f"{len(equivalent)}/{len(equiv_rows)} have their 95% CI "
+                  f"inside the pre-registered bound")
+        if equiv_borderline:
+            print(f"[{self.tag}] WARNING: {len(equiv_borderline)} "
+                  f"equivalence contrast(s) pass the TOST FDR gate but their "
+                  f"CI is not fully inside the bound (borderline); they do "
+                  f"NOT count as confirming the null prediction")
         low_seed = [r for r in testable if r["n"] < 3]
         if low_seed:
             print(f"[{self.tag}] WARNING: {len(low_seed)}/{len(testable)} "
                   f"testable contrast(s) rest on fewer than 3 independent "
                   f"seeds; the recommended minimum for a seed-level claim "
                   f"is 3-5, so treat them as provisional")
+        registered = list(self.hypotheses)
+        covered = sorted({r["hypothesis"] for r in self.rows})
+        uncovered = [h for h in registered if h not in covered]
+        unknown = [h for h in covered if h not in HYPOTHESES]
+        misplaced = [h for h in covered
+                     if h in HYPOTHESES
+                     and HYPOTHESES[h].get("experiment") != self.tag]
+        if registered:
+            hit = len([h for h in registered if h in covered])
+            print(f"[{self.tag}] pre-registration coverage: {hit}/"
+                  f"{len(registered)} registered hypotheses have at least "
+                  f"one contrast in this family")
+        if uncovered:
+            print(f"[{self.tag}] WARNING: pre-registered hypothesis(es) "
+                  f"{', '.join(uncovered)} have NO contrast in this family; "
+                  f"their pre-registered decision cannot be evaluated")
+        if unknown:
+            print(f"[{self.tag}] WARNING: contrast row(s) cite unknown "
+                  f"hypothesis id(s) {', '.join(unknown)} (not in the "
+                  f"hashed registry)")
+        if misplaced:
+            for h in misplaced:
+                print(f"[{self.tag}] WARNING: hypothesis {h} is registered "
+                      f"to experiment {HYPOTHESES[h].get('experiment')!r}, "
+                      f"not {self.tag!r}; check the mapping")
         payload = {"tag": self.tag, "q": q, "n_contrasts": len(self.rows),
                    "n_testable": len(testable),
                    "n_surviving": len(surviving),
                    "n_supporting": len(supporting),
                    "n_below_sesoi": len(below_sesoi),
+                   "n_equivalence": len(equiv_rows),
+                   "n_equivalent": len(equivalent),
+                   "n_equiv_borderline": len(equiv_borderline),
                    "n_confounded": len(confounded),
                    "n_audited": len(audited),
                    "n_control_passed": len(controlled_pass),
-                   "n_low_seed": len(low_seed), "rows": self.rows}
+                   "n_low_seed": len(low_seed),
+                   "registered_hypotheses": registered,
+                   "covered_hypotheses": covered,
+                   "uncovered_hypotheses": uncovered,
+                   "unknown_hypotheses": unknown,
+                   "misplaced_hypotheses": misplaced,
+                   "rows": self.rows}
         _write_json(out_dir / f"{self.tag}_contrasts.json", payload)
         return payload
 
@@ -874,11 +1023,22 @@ def _announce(hyp_ids):
         print(f"    prediction: {h['prediction']}")
         print(f"    decision:   {h['decision']}")
         sesoi = h.get("sesoi") or {}
-        if sesoi:
-            detail = ", ".join(f"{k}>={v:g}" for k, v in sorted(sesoi.items()))
+        equiv = h.get("sesoi_test") or {}
+        directional = {k: v for k, v in sorted(sesoi.items())
+                       if k not in equiv}
+        if directional:
+            detail = ", ".join(f"{k}>={v:g}"
+                               for k, v in directional.items())
             print(f"    SESOI (smallest effect size of interest): {detail} "
                   f"- statistical significance below this is reported as "
                   f"practically negligible, not as support")
+        for k in sorted(equiv):
+            if k not in sesoi:
+                continue
+            print(f"    equivalence bound (null prediction, bootstrap TOST): "
+                  f"|{k}| <= {sesoi[k]:g} - supported only when the 95% CI "
+                  f"of the effect lies inside this bound; a CI that merely "
+                  f"includes 0 is not enough")
 
 
 def _write_result(path: pathlib.Path, record: dict) -> None:
@@ -2229,7 +2389,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         print(f"{gate:>6}" + "".join(f"{c:>12}" for c in cells))
 
     print("\n[e1] pre-registered contrasts (calib vs query/none):")
-    clog = ContrastLog("e1")
+    clog = ContrastLog("e1", hypotheses=("H1a", "H1b", "H1c", "H1d"))
     clog.print("calib - none", "H1a", "accuracy",
                _paired_diff(by_gate["calib"], by_gate["none"], "accuracy"),
                warn=_curve_warn(("calib", by_gate["calib"]),
@@ -2571,7 +2731,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             print(f"  [{label}] {_format_case(case)}")
 
     print("\n[e2] pre-registered contrasts:")
-    clog = ContrastLog("e2")
+    clog = ContrastLog("e2", hypotheses=("H2a", "H2b", "H2c"))
     calib_runs = by_variant["calib"]
     calib_warn = _curve_warn(("calib", calib_runs))
     clog.print("calib - none", "H2a", "accuracy_at_longest",
@@ -2587,17 +2747,21 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     clog.print("calib raw entropy drift vs 0", "H2b", "entropy_drift",
                paired_bootstrap_ci([r["entropy_drift"] for r in calib_runs]),
                warn=calib_warn)
-    clog.print("calib normalised entropy drift vs 0", "H2b",
-               "entropy_norm_drift",
-               paired_bootstrap_ci([r["entropy_norm_drift"]
-                                    for r in calib_runs]),
-               warn=calib_warn)
+    # The H/log(T) drift and the gate drift are *null predictions*: the
+    # decision rule is CI-within-bound (bootstrap TOST), not "CI excludes
+    # 0" - support means "indistinguishable from length-stable within the
+    # pre-registered bound", and a large drift must refute, not support,
+    # the prediction.
+    clog.print_equivalence("calib normalised entropy drift vs 0", "H2b",
+                           "entropy_norm_drift",
+                           [r["entropy_norm_drift"] for r in calib_runs],
+                           warn=calib_warn)
     if calib_runs[0]["gate_by_length"]:
         gate_drifts = [r["gate_by_length"][lengths[-1]]
                        - r["gate_by_length"][settings.n_pairs]
                        for r in calib_runs]
-        clog.print("calib gate drift vs 0", "H2b", "gate_drift",
-                   paired_bootstrap_ci(gate_drifts), warn=calib_warn)
+        clog.print_equivalence("calib gate drift vs 0", "H2b", "gate_drift",
+                               gate_drifts, warn=calib_warn)
     print(f"\n[e2] H2c length-term ablation contrasts (the concentration-only "
           f"arm removes the -a*log T term at identical recipe; only the "
           f"calib_variant factor varies):")
@@ -2712,7 +2876,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     print("\n[e3] pre-registered contrasts (H3b: "
           "resid_norm_last_over_first is the primary readout; "
           "gate_depth_ratio is secondary):")
-    clog = ContrastLog("e3")
+    clog = ContrastLog("e3", hypotheses=("H3a", "H3b"))
     for gate in ("query", "calib"):
         for layer_scale in (None, 1e-2):
             a = index[(gate, "seednorm", layer_scale)]
