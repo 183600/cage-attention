@@ -1008,7 +1008,7 @@ class Attention(nn.Module):
                 conc = conc.div_(log_len).mul_(calib_cs).unsqueeze(-1)
                 gate_val.sub_(conc)
             tau = F.softplus(self.calib_tau) + 0.1
-            gate_val = gate_val.div(tau).sigmoid_()
+            gate_val.div_(tau).sigmoid_()
             del ent
             ent = None
 
