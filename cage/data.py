@@ -41,12 +41,13 @@ PAD_ID = 0
 # axis or with per-entity samples, the same rule applies at a higher level:
 # split contiguous time blocks (past -> train, latest -> test, no shuffling
 # before the split) and partition whole entity ids before drawing, so no
-# entity ever appears in two splits.  The audit below covers the exact-
-# overlap half of that contract (all stream pairs), and any fitted
-# preprocessing must be fit on the training stream(s) only and applied
-# transform-only to val/test; :func:`split_leakage_audit` follows that rule
-# itself: every reference distribution and noise floor it uses is fitted on
-# the training streams and only *scored* against held-out data.
+# entity ever appears in two splits.  The audit below covers both halves of
+# that contract: exact overlap for every stream pair, and a calibrated
+# same-distribution test per audit field; any fitted preprocessing must be
+# fit on the training stream(s) only and applied transform-only to
+# val/test; :func:`split_leakage_audit` follows that rule itself: every
+# reference distribution and noise floor it uses is fitted on the training
+# streams and only *scored* against held-out data.
 VAL_SEED = 123      # model/recipe selection only (never reported)
 TEST_SEED = 2024    # sealed: final numbers only, never used for a decision
 STATS_SEED = 7      # held-out mechanism statistics (collect_stats default)
@@ -273,6 +274,17 @@ def _draw_split(n_pairs, vocab, device, batch, batches, seed):
 # shift shows up directly as a total-variation distance.
 _AUDIT_FIELDS = ("token", "answer", "key", "value")
 
+# Calibration of the distribution-shift check.  ``_AUDIT_SIM`` Monte Carlo
+# replicates set the p-value resolution to ``1 / (_AUDIT_SIM + 1)`` (500
+# replicates resolve the 0.0042 rank-one threshold of a 12-test
+# Benjamini-Hochberg family at q=0.05); the fixed seed keeps the audit
+# deterministic; ``_AUDIT_SMOOTH`` is the Haldane-Anscombe add-half count
+# that keeps unobserved classes testable instead of producing an infinite
+# statistic.
+_AUDIT_SIM = 500
+_AUDIT_SIM_SEED = 90210
+_AUDIT_SMOOTH = 0.5
+
 
 def _field_values(split, n_pairs, field):
     idx, answer = split["idx"], split["answer"]
@@ -287,9 +299,13 @@ def _field_values(split, n_pairs, field):
     raise ValueError(f"unknown audit field {field!r}")
 
 
+def _counts(values, vocab):
+    return torch.bincount(values.reshape(-1).to(torch.long).cpu(),
+                          minlength=vocab).to(torch.int64)
+
+
 def _distribution(values, vocab):
-    counts = torch.bincount(values.reshape(-1).to(torch.long).cpu(),
-                            minlength=vocab).to(torch.float64)
+    counts = _counts(values, vocab).to(torch.float64)
     return counts / counts.sum().clamp_min(1.0)
 
 
@@ -328,6 +344,69 @@ def _noise_floor(stream_values, vocab):
     return floor / math.sqrt(2.0)
 
 
+def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
+                          seed=_AUDIT_SIM_SEED):
+    """Monte Carlo p-value for "held-out and training share a distribution".
+
+    ``observed`` / ``reference`` are categorical count vectors at the
+    held-out and pooled-training sample sizes, fitted on training data
+    only.  The statistic is the Pearson chi-square of the observed counts
+    against their expectation under the reference distribution,
+
+    ``X^2 = sum_i (o_i - n_h * p_i)^2 / (n_h * p_i),  p_i = (r_i + c) /
+    (N_r + c * K)``
+
+    with the Haldane-Anscombe correction ``c = _AUDIT_SMOOTH`` so classes
+    unseen in the reference stay testable (a class with ``r_i = 0`` that
+    nevertheless appears held-out then contributes a large finite term
+    instead of an infinite one).  The null distribution of ``X^2`` is not
+    read off a chi-square table - the reference itself is a finite sample -
+    but re-derived by a parametric bootstrap that redraws **both** count
+    vectors from the smoothed reference probabilities, reference at
+    training size and held-out at held-out size, and recomputes the
+    statistic with the simulated reference (Poisson draws are a standard
+    stand-in for multinomial counts whose conditioning correction is
+    ``O(1/N)`` and negligible against the statistic's sampling variation
+    at these sizes).  The returned p-value is
+    ``(1 + #{X^2_sim >= X^2_obs}) / (n_sim + 1)``, deterministic in the
+    audit seed.
+
+    This replaces a "total variation <= 3 x noise floor" tolerance because
+    that point rule goes blind exactly where the audit matters most: the
+    supervised answer spreads ~1e3 samples over ``vocab - 2`` classes, so
+    even two *same-source* draws already have TV ~ 0.3, three times the
+    floor approaches the maximum TV of 1.0, and a held-out split drawn
+    from half the class range (TV ~ 0.5) passes unnoticed.  The chi-square
+    statistic senses mass moving between classes at the same sample sizes
+    and the bootstrap quantiles it against the real null (verified in
+    ``python3 -m cage.data``: same-source draws are not flagged, a
+    half-range split is).  Returns ``(nan, nan)`` for empty inputs.
+    """
+    obs = observed.detach().cpu().to(torch.float64)
+    ref = reference.detach().cpu().to(torch.float64)
+    n_ref = float(ref.sum())
+    n_h = float(obs.sum())
+    if n_ref <= 0.0 or n_h <= 0.0:
+        return float("nan"), float("nan")
+    k = ref.numel()
+    probs = (ref + _AUDIT_SMOOTH) / (n_ref + _AUDIT_SMOOTH * k)
+    expected = n_h * probs
+    chi2 = float((((obs - expected) ** 2) / expected).sum())
+
+    gen = torch.Generator().manual_seed(seed)
+    ref_sim = torch.poisson((n_ref * probs).expand(n_sim, k).contiguous(),
+                            generator=gen)
+    h_sim = torch.poisson((n_h * probs).expand(n_sim, k).contiguous(),
+                          generator=gen)
+    probs_sim = (ref_sim + _AUDIT_SMOOTH) / (
+        ref_sim.sum(1, keepdim=True) + _AUDIT_SMOOTH * k)
+    expected_sim = h_sim.sum(1, keepdim=True) * probs_sim
+    chi2_sim = (((h_sim - expected_sim) ** 2) / expected_sim).sum(1)
+    p_value = float((1.0 + (chi2_sim >= chi2).to(torch.float64).sum())
+                    / (n_sim + 1.0))
+    return p_value, chi2
+
+
 def _fingerprints(idx):
     return {tuple(int(t) for t in row) for row in idx.tolist()}
 
@@ -349,13 +428,17 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
       even though both splits are nominally "held out".  The full
       pairwise matrix is checked, not only train-vs-held-out, because the
       protocol's claim is pairwise disjointness.
-    * **per-field distribution shift**: total-variation distance between
-      each held-out split and the pooled training distribution of pooled
-      tokens, supervised answers and key / value sub-populations, each
-      judged against a same-size noise floor measured between disjoint
-      training streams (:func:`_noise_floor`), so uniform sampling noise is
-      not mistaken for a shift and the calibration is not an arbitrary
-      constant.
+    * **per-field distribution shift**: for pooled tokens, supervised
+      answers and key / value sub-populations, the total-variation distance
+      between each held-out split and the pooled training distribution is
+      reported against a same-size noise floor measured between disjoint
+      training streams (:func:`_noise_floor`), *and* the same-distribution
+      null is tested with a Monte Carlo-calibrated Pearson chi-square
+      (:func:`_distribution_shift_p`) whose null redraws both count vectors
+      at their audit sizes - the TV/floor pair is descriptive, the
+      calibrated p-value is what keeps a sparse field (a few hundred
+      answer classes at ~1e3 samples) from hiding a real shift behind an
+      unattainable tolerance.
     * **cleaning diagnostics** from :func:`validate_batch`, run on every
       batch of every split: NaN/Inf, out-of-range ids, structural
       violations and ambiguous label noise raise; the per-split
@@ -390,6 +473,8 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
     pooled = {field: torch.cat([_field_values(splits[name], n_pairs, field)
                                 for name in train_names])
               for field in _AUDIT_FIELDS}
+    pooled_counts = {field: _counts(pooled[field], vocab)
+                     for field in _AUDIT_FIELDS}
     reference = {field: _distribution(pooled[field], vocab)
                  for field in _AUDIT_FIELDS}
     floors = {
@@ -397,6 +482,15 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
                              for name in train_names], vocab)
         for field in _AUDIT_FIELDS
     }
+    shift_p = {field: {} for field in _AUDIT_FIELDS}
+    shift_chi2 = {field: {} for field in _AUDIT_FIELDS}
+    for field in _AUDIT_FIELDS:
+        for name in ("val", "test", "stats"):
+            p_value, chi2 = _distribution_shift_p(
+                _counts(_field_values(splits[name], n_pairs, field), vocab),
+                pooled_counts[field])
+            shift_p[field][name] = p_value
+            shift_chi2[field][name] = chi2
 
     out = {
         "train_seeds": list(train_seeds),
@@ -407,6 +501,10 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
         "audit_fields": list(_AUDIT_FIELDS),
         "tv_noise_floor": floors,
         "token_tv_noise_floor": floors["token"],
+        "shift_p_value": shift_p,
+        "shift_chi2": shift_chi2,
+        "shift_test": {"n_sim": _AUDIT_SIM, "seed": _AUDIT_SIM_SEED,
+                       "smoothing": _AUDIT_SMOOTH},
         "pairwise_duplicate_overlap": pairwise,
         "max_pairwise_duplicate_overlap": max(pairwise.values(), default=0),
     }
@@ -445,3 +543,62 @@ def length_sweep_lengths(base: int = 16, factor: int = 2, n: int = 4,
             f"positions for base={base}"
         )
     return fits
+
+
+def _self_test() -> int:
+    """Deterministic self-checks of the split-audit machinery.
+
+    Pins the two properties the distribution-shift decision rests on:
+    a same-source held-out draw must not be flagged (calibration), and a
+    held-out split drawn from half the class range must be (power) even
+    though its total-variation gap stays below the historical
+    ``3 x noise floor`` tolerance - the blindness that motivated the
+    Monte Carlo-calibrated chi-square.  Run with ``python3 -m cage.data``.
+    """
+    failures = []
+
+    def check(name: str, cond: bool) -> None:
+        if not cond:
+            failures.append(name)
+
+    vocab, classes = 512, 510
+    n_h, n_ref = 1024, 5120
+
+    def draw_counts(k, n, seed):
+        gen = torch.Generator().manual_seed(seed)
+        return torch.bincount(torch.randint(0, k, (n,), generator=gen),
+                              minlength=vocab).to(torch.int64)
+
+    def _tv_between_counts(a, b):
+        pa = a.to(torch.float64) / a.sum()
+        pb = b.to(torch.float64) / b.sum()
+        return 0.5 * float((pa - pb).abs().sum())
+
+    reference = draw_counts(classes, n_ref, 11)
+    same_source = draw_counts(classes, n_h, 12)
+    p_same, _ = _distribution_shift_p(same_source, reference, n_sim=400,
+                                      seed=90210)
+    check("same_source_not_flagged", p_same > 0.05)
+
+    half_range = draw_counts(classes // 2, n_h, 13)
+    p_shift, chi2_shift = _distribution_shift_p(half_range, reference,
+                                                n_sim=400, seed=90210)
+    check("half_range_shift_detected", p_shift <= 1.0 / 401.0)
+    check("shift_chi2_large", chi2_shift > 900.0)
+
+    floor = _tv_between_counts(same_source, draw_counts(classes, n_h, 14))
+    tv_shift = _tv_between_counts(half_range, reference)
+    check("old_tv_tolerance_would_pass", tv_shift < 3.0 * floor)
+
+    if failures:
+        print("data self-test FAILED: " + ", ".join(failures))
+        return 1
+    print(f"data self-test: all checks passed "
+          f"(same-source p={p_same:.3f}, half-range p={p_shift:.4f}, "
+          f"chi2={chi2_shift:.1f}, tv={tv_shift:.3f} vs 3x floor="
+          f"{3.0 * floor:.3f})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_self_test())

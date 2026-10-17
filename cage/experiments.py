@@ -229,10 +229,13 @@ HYPOTHESES = {
                       "between splits and no fitted statistic is computed on "
                       "held-out data.",
         "prediction": "exact-duplicate overlap between the training stream "
-                      "and each held-out stream is 0; token total-variation "
-                      "distance stays within the same-stream noise floor",
-        "decision": "a shared sample, or a distribution gap above the noise "
-                    "floor, invalidates every reported number",
+                      "and each held-out stream is 0; no audit field shows a "
+                      "distribution gap beyond same-stream sampling noise "
+                      "(Monte Carlo-calibrated chi-square, Benjamini-"
+                      "Hochberg-adjusted over the field x split family)",
+        "decision": "a shared sample, or an adjusted distribution-shift "
+                    "p-value below the pre-registered FDR, invalidates every "
+                    "reported number",
     },
     "HB4": {
         "experiment": "baselines",
@@ -2217,11 +2220,16 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path) -> dict:
     distribution gap between the training set and a held-out split
     invalidates every number reported afterwards, so the outcome is printed
     and stored next to the baselines.  Every configured training seed
-    enters the audit as its own stream, the exact-overlap check covers all
-    stream pairs, and each audit field's shift is judged against the
-    same-size sampling-noise floor measured between disjoint training
-    streams (see ``cage.data.split_leakage_audit``) instead of an arbitrary
-    constant.
+    enters the audit as its own stream and the exact-overlap check covers
+    all stream pairs.  Each audit field's shift is decided by a Monte
+    Carlo-calibrated Pearson chi-square against the pooled training
+    distribution (see ``cage.data.split_leakage_audit``), Benjamini-
+    Hochberg-adjusted over the field x split family at ``settings.fdr_q``:
+    a total-variation readout against ``3 x noise floor`` cannot fail for
+    sparse fields (a few hundred answer classes at ~1e3 samples) because
+    the tolerance approaches the maximum possible TV, so the calibrated
+    test - not an arbitrary constant - carries the decision.  The
+    TV/floor pair stays in the report as a descriptive companion.
     """
     train_seeds = tuple(settings.seeds) or (0,)
     audit = split_leakage_audit(
@@ -2230,27 +2238,43 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path) -> dict:
         train_seeds=train_seeds)
     fields = audit["audit_fields"]
     floors = audit["tv_noise_floor"]
-    tol = {field: (max(3.0 * floors[field], 0.02)
-                   if math.isfinite(floors[field]) else float("inf"))
-           for field in fields}
     overlap_ok = audit["max_pairwise_duplicate_overlap"] == 0
-    shift_ok = all(
-        audit[f"{field}_tv_train_{name}"] <= tol[field]
-        for field in fields for name in ("val", "test", "stats"))
-    audit["tv_tolerance"] = tol
+    family = [(field, name) for field in fields
+              for name in ("val", "test", "stats")]
+    bh = benjamini_hochberg(
+        [audit["shift_p_value"][field][name] for field, name in family],
+        q=settings.fdr_q)
+    shift_tests = {
+        f"{field}_train_{name}": {
+            "p": item["p"], "p_adj": item["p_adj"],
+            "reject": item["reject"], "chi2": audit["shift_chi2"][field][name],
+        }
+        for (field, name), item in zip(family, bh)
+    }
+    audit["shift_p_value_bh"] = shift_tests
+    shift_ok = not any(item["reject"] for item in shift_tests.values())
     audit["hb3_supported"] = bool(overlap_ok and shift_ok)
+    rejected = [key for key, item in shift_tests.items() if item["reject"]]
     detail = "; ".join(
         f"{name}: tv_max={max(audit[f'{field}_tv_train_{name}']
                               for field in fields):.5f}"
         for name in ("val", "test", "stats"))
     floor_txt = ", ".join(f"{field}={floors[field]:.5f}" for field in fields)
-    tol_txt = ", ".join(f"{field}={tol[field]:.5f}" for field in fields)
+    adj_txt = ", ".join(
+        f"{field}_train_{name}={shift_tests[f'{field}_train_{name}']['p_adj']:.3f}"
+        for field in fields for name in ("val", "test", "stats"))
     print(f"[baselines] split audit (HB3, train seeds {list(train_seeds)}): "
           f"{detail}; pairwise overlap max="
           f"{audit['max_pairwise_duplicate_overlap']} over "
           f"{len(audit['pairwise_duplicate_overlap'])} stream pairs; "
-          f"noise floor [{floor_txt}], tol [{tol_txt}]; "
+          f"TV noise floor [{floor_txt}]; calibrated shift test "
+          f"(BH q={settings.fdr_q:g}) adjusted p: [{adj_txt}]; "
           f"unique_key_rate={audit['unique_key_rate']:.4f}")
+    if rejected:
+        print(f"[baselines] WARNING: calibrated shift test rejects "
+              f"{', '.join(rejected)}: held-out counts differ from the "
+              f"pooled training distribution beyond same-stream sampling "
+              f"noise")
     if not audit["hb3_supported"]:
         print("[baselines] WARNING: HB3 split/disjointness audit failed; "
               "all reported numbers are suspect")
