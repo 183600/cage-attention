@@ -455,10 +455,9 @@ class _CalibAttn(torch.autograd.Function):
                    _get_scratch(("calib_ent",), q.device, q.dtype,
                                 bh * T).view(bh, T)) if need_ent else None
             ebuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
-            # ``y[:, i0:i1]`` is a strided view; a bmm straight into it falls
-            # back to a per-batch copy loop on CPU.  Writing one contiguous
-            # block and copying it over is several times faster and keeps the
-            # block footprint bounded by ``max_rows``.
+            # ``y[:, i0:i1]`` is a strided view, so each block's result is
+            # written to a contiguous scratch buffer first and copied over
+            # in one piece; that buffer is bounded by ``max_rows``.
             yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
                                 bh * max_rows * dv)
             for i0, i1 in blocks:
@@ -576,9 +575,9 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     The surviving term is ``log(p) + 1`` on ``p > _EPS`` and ``0`` elsewhere;
     the sub-eps entries are dropped by the trailing select, so the value taken
     there is irrelevant.  ``log`` is still fed ``p.clamp_min(_EPS)`` rather
-    than raw ``p``: masked-out entries (``p == 0``) make ATen's CPU ``log``
-    kernel take a several-times-slower path, and the clamp removes them
-    without changing any surviving value (bit-for-bit identical results).
+    than raw ``p``: masked-out entries (``p == 0``) would otherwise take the
+    log of zero, and the clamp removes them without changing any surviving
+    value (bit-for-bit identical results).
     """
     if grad_ent is not None:
         if buf is None:
