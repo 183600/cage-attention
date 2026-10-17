@@ -452,10 +452,13 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
     p_hi = float((means >= 0.0).to(torch.float64).mean())
     out["p_value"] = min(
         1.0, 2.0 * (min(p_lo, p_hi) * n_boot + 1.0) / (n_boot + 1.0))
-    pos = float((d > 0.0).to(torch.float64).mean())
-    neg = float((d < 0.0).to(torch.float64).mean())
-    out["sign_consistency"] = (max(pos, neg) if pos + neg > 0.0
-                               else float("nan"))
+    nonzero = d != 0.0
+    if int(nonzero.sum()) == 0 or out["mean"] == 0.0:
+        out["sign_consistency"] = float("nan")
+    else:
+        direction = 1.0 if out["mean"] > 0.0 else -1.0
+        out["sign_consistency"] = float(
+            (d[nonzero] * direction > 0.0).to(torch.float64).mean())
     loo = _jackknife_means(d)
     out["loo_mean_min"] = float(loo.min()) if loo.numel() else float("nan")
     out["loo_mean_max"] = float(loo.max()) if loo.numel() else float("nan")
@@ -672,6 +675,17 @@ def _self_test() -> int:
     check("loo_flags_influence", ci2["loo_sign_flip"] is True)
     check("loo_range_ordered", ci2["loo_mean_min"] <= ci2["loo_mean_max"])
     check("loo_min_is_negative", ci2["loo_mean_min"] < 0.0)
+    # Sign consistency is the share of non-zero differences agreeing with
+    # the mean's direction, not the size of the larger vote: here a single
+    # dominant seed carries the positive mean against the majority.
+    check("sign_consistency_ignores_vote_share",
+          abs(ci2["sign_consistency"] - 0.2) < 1e-12)
+    zeros = paired_bootstrap_ci([2.0, 1.0, -0.5, 0.0, 0.0], n_boot=200)
+    check("sign_consistency_excludes_zeros",
+          abs(zeros["sign_consistency"] - 2.0 / 3.0) < 1e-12)
+    tie = paired_bootstrap_ci([1.0, -1.0], n_boot=200)
+    check("sign_consistency_undefined_at_zero_mean",
+          tie["sign_consistency"] != tie["sign_consistency"])
 
     # Equivalence: bounded noise inside the bound, a clear shift outside.
     eq = equivalence_test([0.1, -0.05, 0.02, 0.0, 0.08], 0.5,
