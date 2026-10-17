@@ -323,17 +323,11 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
 
 
 def _release_scratch(*names: str) -> None:
-    """Drop cached buffers whose contents are dead.
+    """Drop the cached buffers with the given names.
 
-    Called at phase boundaries where every live reference to the named
-    buffers has been dropped, so the allocator can hand their blocks to the
-    next allocation; the next ``_get_scratch`` for the name simply creates a
-    fresh buffer.  Only used on CUDA, where the caching allocator makes the
-    re-creation free: retaining one buffer per name for the whole run would
-    otherwise keep the attention and MLP working sets resident at the same
-    time and inflate the peak.  On CPU the buffers are kept as-is, because
-    repeated malloc/munmap of large blocks costs more than the memory it
-    returns.
+    Called at points where every live reference to the named buffers has
+    been dropped, so the next ``_get_scratch`` for the name builds a fresh
+    buffer instead of serving the old entry.
     """
     for name in names:
         for key in [k for k in _scratch_cache if k[0] == name]:
@@ -1016,10 +1010,6 @@ class Attention(nn.Module):
             _linear_into(y.view(B * T, C), self.proj.weight, None,
                          out.view(B * T, C))
         if x.is_cuda and not grad_on:
-            # The attention phase is over and every buffer below is dead; the
-            # returned ``proj_out`` (and the residual ``embed_out``) stay
-            # cached.  Freeing the phase lets the MLP allocations reuse these
-            # blocks instead of summing both phases into the peak.
             _release_scratch(
                 "qkv_out", "packed", "calib_y", "calib_s", "calib_f",
                 "calib_ent", "calib_conc", "null_y", "null_s", "null_s0",
@@ -1089,8 +1079,6 @@ class Block(nn.Module):
                      up.view(n, 4 * c))
         m = self.mlp[2](self.mlp[1](up.view(n, 4 * c))).view_as(h)
         if h.is_cuda:
-            # ``up`` is consumed by now; dropping the cache entry lets the
-            # next layer's attention allocate on top of it.
             _release_scratch("mlp_up")
         return m
 

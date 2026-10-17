@@ -1409,9 +1409,9 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
     Runs the check on the *current* code revision (a stale
     ``baselines_verdict.json`` cannot satisfy it), stores the per-gate
     evidence under ``<tag>_overfit_sanity.json`` and aborts with
-    :class:`OverfitSanityError` when any gate variant fails: broken
-    gradients, a mis-wired loss or a precision problem invalidate every
-    number a grid would produce, so the compute must not be spent.
+    :class:`OverfitSanityError` when any gate variant fails: an invalid
+    training loop would make every number a grid produces unreliable, so
+    the grid is not started.
     """
     by_gate = _overfit_sanity_by_gate(settings)
     passed = all(row["passed"] for row in by_gate.values())
@@ -1470,9 +1470,9 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
                      **_run_context(settings)})
         raise OverfitSanityError(
             f"{tag}: tiny-batch overfit sanity failed for {failed}; "
-            f"gradients/loss/precision are broken, fix the training loop "
-            f"before running the grid (this check is necessary, not "
-            f"sufficient: data/label bugs can still survive memorisation)")
+            f"address the training loop before running the grid (this "
+            f"check is necessary, not sufficient: data/label problems can "
+            f"still survive memorisation)")
     return summary
 
 
