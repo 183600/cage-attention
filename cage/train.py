@@ -714,6 +714,16 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
     the exact batch is pinned by content hash (``data_sha256``), so the
     record says which data was memorised.
 
+    ``loss_first``/``loss_last`` and ``acc_first``/``acc_last`` are the
+    first and last points of ``curve``.  The last point is evaluated on
+    the *final* weights after the training loop, not on the pre-update
+    forward of the final step: the verdict must score the model the loop
+    actually produced (``step == steps`` marks that post-training point).
+    ``passed`` additionally requires the loss to have fallen from the
+    first sample (``learned``), so a model that merely *starts* at the
+    target - which would itself signal a pipeline problem - cannot pass
+    without training having done anything.
+
     ``seed`` (optional) is recorded and, when given, re-seeds Python /
     NumPy / Torch through :func:`cage.repro.seed_everything`; the caller
     must still seed *before* building the model, because weight
@@ -758,6 +768,13 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
                              == meta["answer"]).to(torch.float64).mean())
             curve.append({"step": step, "loss": float(loss.detach()), "acc": acc})
 
+    with torch.no_grad():
+        final_logits, final_loss, _ = model(idx, tgt, sup_pos=meta["query_pos"])
+        final_acc = float((final_logits.argmax(-1)
+                           == meta["answer"]).to(torch.float64).mean())
+    curve.append({"step": int(steps), "loss": float(final_loss.detach()),
+                  "acc": final_acc})
+
     def _first_sampled_at(key, threshold, better):
         for point in curve:
             if better(point[key], threshold):
@@ -781,8 +798,10 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
         "curve": curve,
         "regularization": regularization,
         "grad_flow": grad_flow,
+        "learned": bool(curve[-1]["loss"] < curve[0]["loss"]),
         "passed": bool(curve[-1]["loss"] <= target_loss
                        and curve[-1]["acc"] >= target_acc
+                       and curve[-1]["loss"] < curve[0]["loss"]
                        and grad_flow["all_params_connected"]
                        and grad_flow["all_grads_finite"]),
         "target_loss": float(target_loss),

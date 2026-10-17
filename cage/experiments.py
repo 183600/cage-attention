@@ -108,6 +108,7 @@ import pathlib
 import platform
 import random
 import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 
@@ -1630,9 +1631,11 @@ def _environment_record(settings: Settings) -> dict:
     """
     env = {
         "python": platform.python_version(),
+        "python_executable": sys.executable,
         "torch": torch.__version__,
         "platform": platform.platform(),
         "device": settings.device,
+        "cpu_count": os.cpu_count(),
         "cuda_available": bool(torch.cuda.is_available()),
         "cuda_runtime": torch.version.cuda,
         "torch_num_threads": int(torch.get_num_threads()),
@@ -1640,6 +1643,7 @@ def _environment_record(settings: Settings) -> dict:
             torch, "are_deterministic_algorithms_enabled", lambda: False)()),
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
         "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
+        "hash_randomization": bool(sys.flags.hash_randomization),
         "git_dirty": _git_dirty(),
     }
     cudnn = getattr(torch.backends, "cudnn", None)
@@ -1797,6 +1801,10 @@ _REPRO_AUDIT_KEYS = (
     ("data_diff_seed_differs", "a different seed draws different data"),
     ("data_draw_leaves_global_rng_untouched",
      "data draws do not consume the global RNG (stream-owns-its-state)"),
+    ("rng_same_seed_identical",
+     "every RNG seed_everything pins (Python, Torch CPU[, NumPy][, CUDA]) "
+     "replays exactly from the same seed"),
+    ("rng_diff_seed_differs", "each seeded RNG responds to a different seed"),
     ("init_same_seed_identical", "same seed builds byte-identical parameters"),
     ("init_diff_seed_differs", "a different seed builds different parameters"),
     ("trajectory_same_seed_identical",
@@ -1805,6 +1813,11 @@ _REPRO_AUDIT_KEYS = (
      "global-RNG noise before a run does not change the trajectory "
      "(entry re-seeding covers it)"),
     ("trajectory_diff_seed_differs", "a different seed changes the trajectory"),
+    ("trajectory_dropout_same_seed_identical",
+     "same seed replays the dropout trajectory (the global-RNG-consuming "
+     "training path, which a dropout=0 run never exercises)"),
+    ("trajectory_dropout_diff_seed_differs",
+     "a different seed changes the dropout trajectory"),
 )
 
 
@@ -1843,13 +1856,21 @@ def _reproducibility_audit(settings: Settings) -> dict:
       batch fingerprint; a different seed produces a different one;
     * **RNG isolation**: drawing data leaves the global Python and Torch
       RNG state untouched (the DataLoader ``generator=`` equivalent);
+    * **RNG pinning**: one draw from every generator ``seed_everything``
+      claims to seed - Python ``random``, Torch CPU, NumPy (when installed)
+      and CUDA (when active) - replays under the same seed and changes under
+      a different one.  This is measured directly because a dropout=0
+      trajectory never reads the global Torch RNG, so it cannot catch a
+      forgotten ``torch.manual_seed`` on its own;
     * **initialisation**: building the model twice under the same seed
       yields byte-identical parameters, a different seed yields different
       ones;
     * **trajectory**: a short training run replays the exact loss sequence
       under the same seed, is unaffected by global-RNG noise left by
       anything that ran before it (the entry re-seeds), and changes under a
-      different seed.
+      different seed.  The same replay check is repeated with dropout on,
+      which *does* consume the global RNG: only that run verifies the
+      dropout-mask stream is seeded and not shared with the data stream.
 
     Scope follows ``cage.repro``: same machine and PyTorch build, not
     bit-exact reproduction across hardware/instruction sets.  Cached on
@@ -1862,6 +1883,30 @@ def _reproducibility_audit(settings: Settings) -> dict:
     seed = _probe_seed(settings, _REPRO_AUDIT_BASE_SEED)
     other = _probe_seed(settings, seed + 1)
     cfg = _model_cfg(settings, gate="calib", d_model=48, n_layers=2)
+    cfg_drop = _model_cfg(settings, gate="calib", d_model=48, n_layers=2,
+                          dropout=0.1)
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+
+    def _rng_draws(s):
+        """One draw from each RNG ``seed_everything`` claims to pin.
+
+        The trajectory checks below run with dropout=0, which never reads
+        the global Torch RNG, so they cannot fail if ``torch.manual_seed``
+        were forgotten.  Drawing directly from every seeded generator
+        turns "Python/NumPy/Torch/CUDA are seeded" from a docstring claim
+        into a measured one.
+        """
+        seed_everything(s)
+        draws = {"python_random": random.random(),
+                 "torch_cpu": float(torch.rand(()))}
+        if np is not None:
+            draws["numpy"] = float(np.random.random())
+        if device.startswith("cuda") and torch.cuda.is_available():
+            draws["torch_cuda"] = float(torch.rand((), device=device))
+        return draws
 
     def _draw(s):
         gen = stream_generator(s, device)
@@ -1885,6 +1930,10 @@ def _reproducibility_audit(settings: Settings) -> dict:
             torch.equal(a, b) for a, b in
             zip(torch.cuda.get_rng_state_all(), cuda_states))
 
+    rng_a = _rng_draws(seed)
+    rng_b = _rng_draws(seed)
+    rng_other = _rng_draws(other)
+
     seed_everything(seed)
     init_same_a = _model_state_hash(build(cfg, compile=False))
     seed_everything(seed)
@@ -1892,13 +1941,14 @@ def _reproducibility_audit(settings: Settings) -> dict:
     seed_everything(other)
     init_other = _model_state_hash(build(cfg, compile=False))
 
-    def _trajectory(s, rng_noise=False):
+    def _trajectory(s, rng_noise=False, model_cfg=None):
         if rng_noise:
             torch.manual_seed(s + 777)
             random.seed(s + 777)
         with contextlib.redirect_stdout(io.StringIO()):
             seed_everything(s)
-            model = build(cfg, compile=False)
+            model = build(model_cfg if model_cfg is not None else cfg,
+                          compile=False)
             hist = train_model(model, steps=_REPRO_AUDIT_STEPS,
                                batch=_REPRO_AUDIT_BATCH,
                                n_pairs=settings.n_pairs, lr=1e-3,
@@ -1910,6 +1960,9 @@ def _reproducibility_audit(settings: Settings) -> dict:
     traj_replay = _trajectory(seed)
     traj_noisy = _trajectory(seed, rng_noise=True)
     traj_other = _trajectory(other)
+    traj_drop_a = _trajectory(seed, model_cfg=cfg_drop)
+    traj_drop_replay = _trajectory(seed, model_cfg=cfg_drop)
+    traj_drop_other = _trajectory(other, model_cfg=cfg_drop)
 
     audit = {
         "probe_seed": int(seed),
@@ -1921,14 +1974,24 @@ def _reproducibility_audit(settings: Settings) -> dict:
         "data_diff_seed_sha256": fp_other,
         "init_same_seed_sha256": init_same_a,
         "trajectory_losses": traj_a,
+        "rngs_probed": sorted(rng_a),
+        "rng_draws_same_seed": rng_a,
+        "dropout": float(cfg_drop["dropout"]),
+        "trajectory_dropout_losses": traj_drop_a,
         "data_same_seed_identical": bool(fp_same_a == fp_same_b),
         "data_diff_seed_differs": bool(fp_same_a != fp_other),
         "data_draw_leaves_global_rng_untouched": rng_untouched,
+        "rng_same_seed_identical": bool(rng_a == rng_b),
+        "rng_diff_seed_differs": bool(rng_a != rng_other),
         "init_same_seed_identical": bool(init_same_a == init_same_b),
         "init_diff_seed_differs": bool(init_same_a != init_other),
         "trajectory_same_seed_identical": bool(traj_a == traj_replay),
         "trajectory_after_global_rng_noise_identical": bool(traj_a == traj_noisy),
         "trajectory_diff_seed_differs": bool(traj_a != traj_other),
+        "trajectory_dropout_same_seed_identical": bool(
+            traj_drop_a == traj_drop_replay),
+        "trajectory_dropout_diff_seed_differs": bool(
+            traj_drop_a != traj_drop_other),
         "deterministic_algorithms": bool(getattr(
             torch, "are_deterministic_algorithms_enabled", lambda: False)()),
         "scope": ("same machine + same PyTorch build; bit-exact reproduction "
@@ -2356,6 +2419,7 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
         "by_config": {
             label: {
                 "passed": row["passed"],
+                "learned": row["learned"],
                 "loss_first": row["loss_first"],
                 "loss_last": row["loss_last"],
                 "acc_first": row["acc_first"],
@@ -2631,6 +2695,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "by_config": {
                 label: {
                     "passed": row["passed"],
+                    "learned": row["learned"],
                     "loss_last": row["loss_last"],
                     "acc_last": row["acc_last"],
                     "params_connected": (
