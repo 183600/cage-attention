@@ -553,7 +553,7 @@ class _CalibAttn(torch.autograd.Function):
                                        mbuf=None if mbuf is None else mbuf[:n])
             # The reversed block order writes the widest block first, so
             # the later (narrower) blocks accumulate into a prefix slice
-            # of ``d_v`` / ``d_k`` in place: no temporary, no extra pass.
+            # of ``d_v`` / ``d_k`` in place.
             if first:
                 torch.bmm(p.transpose(1, 2), g, out=d_v)
                 torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1],
@@ -1017,10 +1017,6 @@ class Attention(nn.Module):
         if kind == "query":
             gate_val = self._gate_proj(x, B, T, C, grad_on)
             if grad_on:
-                # Out-of-place under autograd: in-place elementwise ops on
-                # the gate projection make autograd materialize full-size
-                # copies of the output during backward (shallow-copy
-                # versioning), which out-of-place avoids.
                 gate_val = torch.sigmoid(gate_val)
             else:
                 gate_val.sigmoid_()
