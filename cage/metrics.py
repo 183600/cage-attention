@@ -84,6 +84,7 @@ __all__ = [
     "brier_score",
     "paired_bootstrap_ci",
     "equivalence_test",
+    "bootstrap_upper_p",
     "selection_at_fraction",
     "seeds_for_power",
     "wilson_ci",
@@ -551,6 +552,27 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
             out["lo_bca"] > -bound and out["hi_bca"] < bound)
         out["bca_agrees"] = bool(out["equivalent"] == out["equivalent_bca"])
     return out
+
+
+def bootstrap_upper_p(diffs, bound, n_boot: int = 10000, seed: int = 0) -> float:
+    """One-sided bootstrap p-value for ``H0: mean(diffs) >= bound``.
+
+    The decision companion of the pre-registered "certified below a bound"
+    rules (e.g. HB2's near-chance gate): a small p means the resampled
+    means sit clearly below the bound, so the bound is rejected as an upper
+    limit on the effect.  The same ``+1`` smoothing as the two-sided
+    :func:`paired_bootstrap_ci` p-value is used, so the two readouts are
+    on the same scale.  Returns NaN for an empty sample or a non-finite
+    bound; ``p >= 0.5`` is expected whenever the point estimate does not
+    even fall below the bound (no amount of resampling certifies it).
+    """
+    d = _flatten_float(diffs)
+    bound = float(bound)
+    if d.numel() == 0 or not math.isfinite(bound):
+        return float("nan")
+    means = _bootstrap_means(d, n_boot, seed)
+    p = float((means >= bound).to(torch.float64).mean())
+    return min(1.0, (p * n_boot + 1.0) / (n_boot + 1.0))
 
 
 def seeds_for_power(sd, effect, alpha: float = 0.05,

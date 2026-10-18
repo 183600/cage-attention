@@ -1536,8 +1536,12 @@ def error_detection_aucs(stats):
     Errors are the rare class after convergence, so the metric *regime*
     is measured, not assumed: ``imbalance_ratio`` (negatives per
     positive), ``error_rate`` = prevalence, and ``metric_regime``
-    (``extreme`` at 1:1000 or worse, ``high`` at 1:10 or worse, else
-    ``balanced``).  Under ``extreme`` imbalance ROC-AUC grows with the
+    (``no_errors``, ``extreme`` at 1:1000 or worse, ``high`` at 1:10 or
+    worse, else ``balanced``).  A stream with **no negatives** (every
+    answer wrong, prevalence 1.0) is not "balanced": the ranking metrics
+    are undefined there, so it gets its own ``all_errors`` regime instead
+    of being confusable with a genuinely usable balance in the report.
+    Under ``extreme`` imbalance ROC-AUC grows with the
     huge negative population while precision can still collapse, so the
     headline is **PR-AUC, read against its chance level** - for a random
     ranker average precision equals prevalence, so ``prauc_lift_*``
@@ -1558,8 +1562,15 @@ def error_detection_aucs(stats):
     n_neg = n - n_err
     prevalence = (n_err / n) if n else float("nan")
     ratio = (n_neg / n_err) if n_err else float("inf")
-    if n_err == 0:
+    if n == 0:
+        regime = "no_samples (empty stream; all metrics undefined)"
+    elif n_err == 0:
         regime = "no_errors"
+    elif n_neg == 0:
+        # Degenerate all-wrong stream: ROC/PR-AUC are NaN (no negatives to
+        # rank against) and must not be presented as a usable "balanced"
+        # error-detection readout.
+        regime = "all_errors (no negatives; ranking metrics undefined)"
     elif ratio >= 1000.0:
         regime = "extreme (>=1:1000; PR-AUC is the headline, ROC-AUC is optimistic)"
     elif ratio >= 10.0:

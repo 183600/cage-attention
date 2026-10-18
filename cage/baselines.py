@@ -47,7 +47,7 @@ import torch
 import torch.nn.functional as F
 
 from .data import check_eval_seed, check_train_seed, make_batch, validate_batch
-from .metrics import paired_bootstrap_ci, wilson_ci
+from .metrics import bootstrap_upper_p, paired_bootstrap_ci, seeds_for_power, wilson_ci
 from .repro import seed_everything, stream_generator
 from .train import _make_adamw
 
@@ -324,18 +324,53 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     for the mean of ``accuracy - chance``, and ``hb2_supported`` is the
     pre-registered decision: the probe counts as "near chance" only when
     the 95% CI upper bound is *below* ``chance`` itself (i.e. the probe is
-    confidently below 2x chance).  A probe whose CI reaches above 2x chance
-    means either answer information leaks into bag-of-token features or
-    the probe is exploiting some shortcut, and the simple-baseline
-    comparison must be re-examined before crediting the transformer.
+    confidently below 2x chance).  This is a one-sided non-inferiority
+    reading of the difference test: ``p_above_chance`` is the bootstrap
+    p-value for ``H0: mean margin >= +chance``, so a small p certifies the
+    probe below the 2x-chance bound while ``p >= 0.5`` says the point
+    estimate does not even fall below it.
+
+    The three states are explicit, because "not certified" is *not* the
+    same as "leakage shown":
+
+    * ``certified`` - CI upper bound below ``chance``;
+    * ``violated`` - CI lower bound at or above ``chance`` (the probe is
+      confidently at/above 2x chance: answer information leaks into the
+      bag-of-token features, or a shortcut exists; the simple-baseline
+      comparison must be re-examined before crediting the transformer);
+    * ``inconclusive`` - the CI straddles the bound.  This is the state a
+      low-power run lands in (few seeds, small probe evaluation stream),
+      so the result also carries ``seeds_for_certification``: how many
+      independent seeds the observed paired SD would need at 80% power to
+      certify the bound (``inf`` when the observed mean is not below the
+      bound, since more seeds alone cannot rescue such a point estimate).
 
     Returns the bootstrap CI dict for ``accuracy - chance`` plus the
-    ``chance`` level, the decision flag ``hb2_supported``, and the p-value
-    of the one-sample bootstrap test against the chance baseline.
+    ``chance`` level, ``hb2_supported`` (certified), ``hb2_violated``,
+    ``hb2_state``, ``p_above_chance`` and ``seeds_for_certification``.
     """
     margins = [float(a) - float(chance) for a in accuracies]
     ci = paired_bootstrap_ci(margins, n_boot=n_boot, seed=seed)
-    ci["chance"] = float(chance)
-    ci["hb2_supported"] = bool(ci["n"] > 0 and
-                               ci["hi"] < float(chance))
+    chance = float(chance)
+    ci["chance"] = chance
+    certified = bool(ci["n"] > 0 and ci["hi"] < chance)
+    violated = bool(ci["n"] > 0 and ci["lo"] >= chance)
+    ci["hb2_supported"] = certified
+    ci["hb2_violated"] = violated
+    if ci["n"] <= 0:
+        state = "untestable"
+    elif certified:
+        state = "certified"
+    elif violated:
+        state = "violated"
+    else:
+        state = "inconclusive"
+    ci["hb2_state"] = state
+    ci["p_above_chance"] = bootstrap_upper_p(
+        margins, chance, n_boot=n_boot, seed=seed)
+    margin = chance - float(ci["mean"])
+    ci["seeds_for_certification"] = (
+        float(seeds_for_power(ci.get("sd"), margin))
+        if ci["n"] > 0 and math.isfinite(margin) and margin > 0.0
+        else float("inf"))
     return ci

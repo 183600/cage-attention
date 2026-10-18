@@ -177,7 +177,8 @@ from .train import (
 #   TEST_SEED  - the reported numbers; never used for any decision
 #   STATS_SEED - mechanism statistics (matches the collect_stats default)
 
-HYPO_IDS = ("HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7", "H1a", "H1b",
+HYPO_IDS = ("HB0", "HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7",
+            "H1a", "H1b",
             "H1c", "H1d", "H1e", "H1f", "H2a", "H2b", "H2c", "H3a", "H3b",
             "H3c")
 
@@ -201,6 +202,26 @@ HYPO_IDS = ("HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7", "H1a", "H1b",
 # test is *not* evidence for a null prediction, so the two decision rules
 # must not be conflated.
 HYPOTHESES = {
+    "HB0": {
+        "experiment": "all",
+        "question": "Is a mechanism claim readable at all - did the models "
+                    "under test actually learn the task at this budget?",
+        "hypothesis": "The depth/mechanism contrasts are only informative "
+                      "about the mechanism when the trained arms are in a "
+                      "competent regime; an underfit grid produces "
+                      "'no difference' or 'depth needed' readings for "
+                      "reasons unrelated to the mechanism.",
+        "prediction": "at least one trained arm (a ladder rung in "
+                      "baselines, or a grid arm in E1/E2/E3) has a pooled "
+                      "Wilson 95% lower bound above chance "
+                      "1/(vocab - 2) on the sealed test stream",
+        "decision": "the competence prerequisite is a precondition, not a "
+                    "mechanism test: when no arm clears chance, every "
+                    "mechanism contrast in that family is marked "
+                    "claim-ineligible (no claim may be read from an "
+                    "underfit grid) and the depth requirement (HB7) is "
+                    "'not determinable' rather than 'required'",
+    },
     "HB1": {
         "experiment": "baselines",
         "question": "Is the recall task well posed with a known solution?",
@@ -222,13 +243,21 @@ HYPOTHESES = {
                       "1/(vocab-2) even after tuning.",
         "prediction": "the 95% bootstrap CI of (tuned probe accuracy - chance) "
                       "stays below +chance, i.e. the probe is confidently "
-                      "below 2x chance",
+                      "below 2x chance; the one-sided bootstrap p-value for "
+                      "H0: margin >= +chance certifies this at adequate "
+                      "power (the probe evaluation stream is sized so the "
+                      "binomial noise does not dominate the bound)",
         "decision": "The quantitative near-chance test "
-                    "(cage.baselines.probe_vs_chance_test) must be supported; "
-                    "a probe whose CI reaches above 2x chance would mean "
+                    "(cage.baselines.probe_vs_chance_test) must be "
+                    "*certified* (CI upper bound < +chance); a CI that "
+                    "merely straddles the bound is 'inconclusive' - not "
+                    "certified, possibly underpowered - and the reported "
+                    "seeds_for_certification says whether more seeds/the "
+                    "probe stream can settle it; only a CI entirely at or "
+                    "above +chance (state 'violated') is evidence that "
                     "answer information leaks into the bag-of-tokens "
-                    "features (or a shortcut exists) and invalidates the "
-                    "simple-baseline comparison",
+                    "features (or a shortcut exists), which invalidates "
+                    "the simple-baseline comparison",
     },
     "HB3": {
         "experiment": "baselines",
@@ -291,15 +320,20 @@ HYPOTHESES = {
                       "single attention layer cannot express, so the tuned "
                       "1-layer transformer should stay clearly below the "
                       "parameter-free rule ceiling.",
-        "prediction": "the Wilson 95% upper bound of the tuned 1-layer "
-                      "standard-transformer accuracy on the test stream "
-                      "lies below the rule-ceiling point estimate",
+        "prediction": "the tuned 1-layer standard transformer is competent "
+                      "(pooled Wilson 95% lower bound above chance) and its "
+                      "Wilson 95% upper bound on the test stream lies below "
+                      "the rule-ceiling point estimate",
         "decision": "the baseline is a complexity control, not a pipeline "
                     "validity gate: if the shallow upper bound reaches the "
                     "ceiling, every depth-based motivation (E3) must be "
                     "annotated that a 1-layer model suffices at this scale; "
-                    "if it stays below, depth is measurably required and "
-                    "E1's 8-layer gate contrasts are informative for it",
+                    "if it stays below *while being competent* (above "
+                    "chance), depth is measurably required and E1's 8-layer "
+                    "gate contrasts are informative for it; a rung at "
+                    "chance (HB0 competence prerequisite failed) shows only "
+                    "that this budget did not solve the task - it is not "
+                    "evidence that depth is required",
         "sesoi": {"accuracy": 0.01},
     },
     "HB7": {
@@ -317,13 +351,21 @@ HYPOTHESES = {
                       "whose pooled Wilson 95% interval reaches the "
                       "rule-ceiling point estimate - is reported (None when "
                       "no ladder rung reaches it); adjacent-depth paired "
-                      "bootstrap CIs show where the gain stops",
+                      "bootstrap CIs show where the gain stops; the depth "
+                      "demand is only readable when at least one rung is "
+                      "competent (HB0: pooled Wilson 95% lower bound above "
+                      "chance)",
         "decision": "pre-registered readout: depth beyond two layers is "
-                    "'measurably required' only when d* is None or d* > 2; "
-                    "for d* <= 2 every depth-based motivation (E3's "
-                    "deep-contribution premise, the 8-layer E1 setting) must "
-                    "carry the annotation that a 2-layer standard "
-                    "transformer already saturates the task at this scale",
+                    "'measurably required' only when d* is None or d* > 2 "
+                    "*and* at least one rung is above chance; for d* <= 2 "
+                    "every depth-based motivation (E3's deep-contribution "
+                    "premise, the 8-layer E1 setting) must carry the "
+                    "annotation that a 2-layer standard transformer already "
+                    "saturates the task at this scale; when no rung clears "
+                    "chance the ladder did not solve the task at this "
+                    "budget, so the depth demand is 'not determinable' "
+                    "(never 'required') and E3's depth framing is "
+                    "unverified",
         "sesoi": {"accuracy": 0.01},
     },
     "H1a": {
@@ -335,12 +377,17 @@ HYPOTHESES = {
                       "for calib than for query.",
         "prediction": "|gate_vs_entropy|(calib) - |gate_vs_entropy|(query) > 0; "
                       "the same direction holds for the rank (Spearman) "
-                      "correlation as a robustness check",
+                      "correlation as a robustness check.  The registered "
+                      "accuracy companion (calib - none and calib - query) "
+                      "is one-sided: the calibrated gate must not lose "
+                      "accuracy to its controls - a significant accuracy "
+                      "*loss* refutes the mechanism rather than supporting "
+                      "it, so the companion carries a registered direction",
         "decision": "paired bootstrap 95% CI of the seed differences "
                     "excludes 0 after Benjamini-Hochberg FDR control across "
                     "the E1 contrasts (q=0.05)",
         "sesoi": {"accuracy": 0.01, "abs_gate_vs_entropy": 0.05},
-        "direction": {"abs_gate_vs_entropy": "+"},
+        "direction": {"abs_gate_vs_entropy": "+", "accuracy": "+"},
     },
     "H1b": {
         "experiment": "e1",
@@ -546,12 +593,18 @@ HYPOTHESES = {
         "hypothesis": "seednorm (per-token dynamic scale) raises the "
                       "deep/early gate ratio relative to pre-LN.",
         "prediction": "gate_depth_ratio(seednorm) > gate_depth_ratio(pre) "
-                      "and deep residual norms grow more",
+                      "and deep residual norms grow more; the registered "
+                      "accuracy companion (calib - query within each norm) "
+                      "is one-sided: the calibrated gate must not lose "
+                      "accuracy to the query-only gate - a significant "
+                      "accuracy loss refutes the co-design story rather "
+                      "than supporting it, so the companion carries a "
+                      "registered direction",
         "decision": "paired bootstrap 95% CI excludes 0 after "
                     "Benjamini-Hochberg FDR control across the E3 contrasts "
                     "(q=0.05)",
         "sesoi": {"gate_depth_ratio": 0.05, "accuracy": 0.01},
-        "direction": {"gate_depth_ratio": "+"},
+        "direction": {"gate_depth_ratio": "+", "accuracy": "+"},
     },
     "H3b": {
         "experiment": "e3",
@@ -619,6 +672,17 @@ class Settings:
     # spans 30x (a diverged high-lr point is recorded and excluded, not
     # read as "cannot do better"); the depth ladder re-tunes the learning
     # rate per depth so the shallow rungs are not handicapped.
+    #
+    # The probe evaluation stream is deliberately wider than the grid
+    # evaluation stream: HB2 certifies "the tuned probe stays below
+    # 2x chance", and with a narrow stream the per-seed binomial noise
+    # (sd ~ sqrt(p(1-p)/n)) can exceed the chance-level margin, making the
+    # certificate fail for power reasons on a clean pipeline.  512x16
+    # samples shrink that noise well below the margin; the one-sided
+    # p-value and the seeds_for_certification power plan are reported next
+    # to the decision so residual underpower is visible either way.
+    probe_eval_batch: int = 512
+    probe_eval_batches: int = 16
     probe_lr_grid: tuple = (1e-2, 3e-3, 1e-3, 3e-4)
     depth_ladder: tuple = (1, 2, 4)
     dropout: float = 0.0        # model regularisation (recorded in the recipe)
@@ -648,7 +712,8 @@ class Settings:
             device=device, d_model=48, n_heads=4, n_layers=4, max_len=64,
             vocab=64, batch=16, n_pairs=6, steps=12, seeds=(0, 1),
             eval_batch=64, eval_batches=2, stats_batch=32, stats_batches=2,
-            probe_steps=40, probe_batch=16, overfit_steps=100,
+            probe_steps=40, probe_batch=16, probe_eval_batch=64,
+            probe_eval_batches=2, overfit_steps=100,
         )
 
 
@@ -1518,11 +1583,17 @@ class ContrastLog:
     visible instead of feeding an unpaired comparison.
     """
 
-    def __init__(self, tag: str, hypotheses=(), min_seeds: int = 3):
+    def __init__(self, tag: str, hypotheses=(), min_seeds: int = 3,
+                 competence: dict | None = None):
         self.tag = tag
         self.hypotheses = tuple(hypotheses)
         self.min_seeds = int(min_seeds)
         self.rows: list[dict] = []
+        # HB0: the family's competence prerequisite (at least one arm above
+        # chance).  When it fails, no contrast in the family may support a
+        # claim - an underfit grid's differences describe the budget, not
+        # the mechanism.  ``None`` means "not assessed" and does not gate.
+        self.competence = competence
 
     def print(self, rule, hyp, metric, ci, warn="") -> None:
         equiv = ci.get("test") == "equivalence"
@@ -1670,9 +1741,14 @@ class ContrastLog:
             # Pre-registered seed floor: below ``min_seeds`` independent
             # paired seeds a "supported" verdict would be noise dressed as
             # evidence; such rows cannot support a claim at the decision
-            # point whatever their p-value.
+            # point whatever their p-value.  HB0's competence prerequisite
+            # gates the same way: no claim from an underfit grid.
+            row["competence_passed"] = (
+                None if self.competence is None
+                else bool(self.competence.get("passed")))
             row["claim_eligible"] = bool(
-                (row.get("n") or 0) >= self.min_seeds)
+                (row.get("n") or 0) >= self.min_seeds
+                and row["competence_passed"] is not False)
             row["supports_hypothesis"] = bool(
                 row["fdr_reject"] and row["practically_relevant"]
                 and row["claim_eligible"])
@@ -1749,6 +1825,10 @@ class ContrastLog:
                        if sesoi is not None else "")
             if r.get("confounded"):
                 verdict = "REFUSED (confounded contrast)"
+            elif r.get("competence_passed") is False:
+                verdict = ("INELIGIBLE (HB0 competence prerequisite failed: "
+                           "no arm above chance, so the contrast cannot be "
+                           "read as a mechanism statement)")
             elif not r.get("claim_eligible", True):
                 verdict = (f"INELIGIBLE (n={r['n']} < pre-registered "
                            f"minimum {self.min_seeds} seeds: too few "
@@ -1851,7 +1931,21 @@ class ContrastLog:
                   f"equivalence contrast(s) pass the TOST FDR gate but their "
                   f"CI is not fully inside the bound (borderline); they do "
                   f"NOT count as confirming the null prediction")
-        low_seed = [r for r in testable if not r.get("claim_eligible", True)]
+        competence_failed = [r for r in testable
+                             if r.get("competence_passed") is False]
+        if self.competence is not None and not self.competence.get("passed"):
+            print(f"[{self.tag}] WARNING: HB0 competence prerequisite "
+                  f"FAILED: no trained arm has a pooled Wilson 95% lower "
+                  f"bound above chance {self.competence.get('chance', float('nan')):.4g} "
+                  f"(best: {self.competence.get('best_arm') or 'none'}), so "
+                  f"the grid did not demonstrably solve the task at this "
+                  f"budget: all {len(competence_failed)} contrast(s) are "
+                  f"marked claim-ineligible and may not be read as mechanism "
+                  f"statements; raise the training budget/step count and "
+                  f"re-run before interpreting any contrast")
+        low_seed = [r for r in testable
+                    if not r.get("claim_eligible", True)
+                    and r.get("competence_passed") is not False]
         if low_seed:
             print(f"[{self.tag}] WARNING: {len(low_seed)}/{len(testable)} "
                   f"testable contrast(s) rest on fewer than "
@@ -1943,7 +2037,9 @@ class ContrastLog:
                    "n_audited": len(audited),
                    "n_control_passed": len(controlled_pass),
                    "n_low_seed": len(low_seed),
-                   "n_claim_ineligible": len(low_seed),
+                   "n_claim_ineligible_competence": len(competence_failed),
+                   "n_claim_ineligible": len(low_seed) + len(competence_failed),
+                   "competence": self.competence,
                    "n_seed_coverage_loss": len(coverage_loss),
                    "n_seed_unpaired": len(unpaired_rows),
                    "n_seed_undefined": len(undefined_rows),
@@ -2193,6 +2289,12 @@ def _run_context(settings: Settings) -> dict:
         "config": config,
         "seeding": dict(_SEEDING_POLICY),
         "data_fingerprints": fingerprints,
+        # Validity-gate summary stamped by ``_enforce_baseline_verdict``
+        # (None for the baselines runner itself, which is the producer).
+        # Deliberately excluded from the setup hash above: the verdict
+        # describes whether this protocol passed its gates, not which
+        # protocol it is.
+        "baseline_validity": getattr(settings, "_baseline_validity", None),
     }
     settings._run_context_cache = ctx
     return ctx
@@ -2273,6 +2375,191 @@ def _load_baseline_verdict(out_dir: pathlib.Path):
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+class BaselineVerdictError(RuntimeError):
+    """A baseline validity gate failed (or its verdict is missing/stale).
+
+    HB1 (task construction), HB3 (split disjointness), HB4 (label-leak
+    negative control) and HB5 (training loop) pre-register that their
+    failure invalidates every result above them.  The E1/E2/E3 runners
+    enforce that semantics by refusing to train on a protocol whose
+    verdict is absent, stale, or failed - the same hard-gate policy as
+    the reproducibility and overfit pre-flights.
+    """
+
+
+# Validity gates whose failure invalidates every grid result (the
+# pre-registered "invalidate everything above it" semantics of HB1/HB4,
+# plus the split and loop gates).  HB2 is deliberately not in this set:
+# its registered semantics invalidate the *simple-baseline comparison*,
+# so its state is stamped and displayed (certified/inconclusive/violated)
+# instead of blocking the grid.
+_BLOCKING_VERDICT_GATES = ("hb1_supported", "hb3_supported",
+                           "hb4_supported", "hb5_supported")
+
+
+def _verdict_seed_floor(verdict: dict, settings: Settings) -> dict:
+    """The pre-registered seed floor as applied to the verdict's marks.
+
+    ``min_seeds_for_claim`` (Settings, hashed) says a seed-level claim
+    needs at least that many independent training seeds.  The baselines
+    verdict applies the same floor to HB2/HB4/HB6/HB7: a supported mark
+    resting on fewer seeds is *provisional* (displayed and stamped as
+    such, never silently certified), matching the decision layer of the
+    contrast families where a 2-seed "win" is marked INELIGIBLE.
+    """
+    floor = int(settings.min_seeds_for_claim)
+    stored = verdict.get("seed_floor") or {}
+    n_seeds = stored.get("n_seeds")
+    if n_seeds is None:
+        n_seeds = len(settings.seeds)
+
+    def eligible(key: str, n) -> bool:
+        if f"{key}_claim_eligible" in stored:
+            return bool(stored[f"{key}_claim_eligible"])
+        return bool(int(n) >= floor)
+
+    out = {"min_seeds_for_claim": floor, "n_seeds": int(n_seeds)}
+    for key, n in (("hb2", stored.get("hb2_n_seeds", n_seeds)),
+                   ("hb4", stored.get("hb4_n_seeds", n_seeds)),
+                   ("hb6", n_seeds), ("hb7", n_seeds)):
+        out[f"{key}_n_seeds"] = int(n)
+        out[f"{key}_claim_eligible"] = eligible(key, n)
+    return out
+
+
+def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
+                              tag: str) -> dict:
+    """Read and enforce ``baselines_verdict.json`` before a grid trains.
+
+    The pre-registered semantics of HB1/HB3/HB4/HB5 are "failure
+    invalidates everything above it", so the E1/E2/E3 runners must not
+    keep training and writing result files when those gates fail.  This
+    gate:
+
+    * refuses a missing verdict (``--only baselines`` has to be certified
+      first) and a stale one (protocol hash mismatch: the marks were
+      measured on a different config/data protocol);
+    * refuses when any blocking gate failed;
+    * stamps the verdict's marks (HB1..HB7 + seed-floor eligibility) into
+      ``settings._baseline_validity`` so every subsequent manifest and
+      run record carries the validity status inline and a reader of the
+      JSON alone can see which gates certified the numbers;
+    * warns (without blocking) when a supported mark is only
+      *provisional* because it rests on fewer than ``min_seeds_for_claim``
+      seeds - the same floor the contrast families enforce.
+
+    Returns the loaded verdict for downstream annotations (E1's marks,
+    E3's HB7 context).
+    """
+    verdict = _load_baseline_verdict(out_dir)
+    if verdict is None:
+        raise BaselineVerdictError(
+            f"{tag}: no baselines_verdict.json in {out_dir}; the HB1/HB3/"
+            f"HB4/HB5 validity gates have not been certified for this "
+            f"protocol, so no mechanism claim may be produced - run "
+            f"`--only baselines` first")
+    stale = _verdict_provenance_note(verdict, settings)
+    if stale:
+        raise BaselineVerdictError(
+            f"{tag}: {stale}; refusing to train on an uncertified protocol")
+    failed = [key for key in _BLOCKING_VERDICT_GATES
+              if not verdict.get(key)]
+    if failed:
+        raise BaselineVerdictError(
+            f"{tag}: baseline validity gate(s) {', '.join(failed)} failed "
+            f"in baselines_verdict.json; their pre-registered semantics "
+            f"invalidate every grid result above them, so the grid is not "
+            f"started (fix the task/data/loop and re-run `--only "
+            f"baselines`)")
+    floor = _verdict_seed_floor(verdict, settings)
+    marks = {
+        "source": "baselines_verdict.json",
+        "protocol_sha256": verdict.get("protocol_sha256"),
+        "hb1_supported": verdict.get("hb1_supported"),
+        "hb2_supported": verdict.get("hb2_supported"),
+        "hb2_state": verdict.get("hb2_state"),
+        "hb3_supported": verdict.get("hb3_supported"),
+        "hb4_supported": verdict.get("hb4_supported"),
+        "hb5_supported": verdict.get("hb5_supported"),
+        "hb6_supported": verdict.get("hb6_supported"),
+        "hb7_depth_required": verdict.get("hb7_depth_required"),
+        "saturation_depth": verdict.get("saturation_depth"),
+        "ladder_competent": verdict.get("ladder_competent"),
+        "seed_floor": floor,
+    }
+    settings._baseline_validity = marks
+    # Force the cached provenance block to be rebuilt so every manifest and
+    # run record written from here on carries the marks inline.
+    settings._run_context_cache = None
+    _run_context(settings)
+    provisional = [key for key in ("hb2", "hb4", "hb6", "hb7")
+                   if verdict.get(f"{key}_supported"
+                                  if key != "hb7" else "hb7_depth_required")
+                   and not floor.get(f"{key}_claim_eligible", True)]
+    if provisional:
+        print(f"[{tag}] WARNING: baseline mark(s) "
+              f"{', '.join(provisional)} are supported only provisionally: "
+              f"they rest on {floor['n_seeds']} seed(s), below the "
+              f"pre-registered claim floor {floor['min_seeds_for_claim']} "
+              f"(Settings.min_seeds_for_claim); they are stamped and "
+              f"displayed as provisional, and no seed-level claim may be "
+              f"based on them")
+    return verdict
+
+
+def _competence_check(named_runs, correct_and_n, chance, what="arm"):
+    """HB0 pre-registered competence prerequisite for a contrast family.
+
+    A mechanism contrast (does the gate read entropy? does depth help?)
+    is only interpretable when at least one trained condition demonstrably
+    learned the task: an all-at-chance grid turns "no difference" into a
+    statement about the budget, not the mechanism, and makes HB7 read
+    "depth required" from pure underfit.  This is the one premise the
+    registry lacked (HB0), so it is checked *before* any claim: every
+    condition pools its runs' correct counts on the sealed test stream
+    through the Wilson interval, and the family passes only when the best
+    pooled lower bound clears chance ``1/(vocab - 2)``.
+
+    ``named_runs`` is an iterable of ``(name, runs)``; ``correct_and_n``
+    maps one run to ``(n_correct, n_total)``.  Returns the payload written
+    to ``<tag>_competence.json`` and handed to :class:`ContrastLog`, which
+    marks every contrast ``claim_eligible=False`` when it fails.
+    """
+    arms = {}
+    best = None
+    for name, runs in named_runs:
+        correct = 0
+        total = 0
+        for run in runs:
+            pair = correct_and_n(run)
+            if pair is None:
+                continue
+            n_correct, n_total = pair
+            if n_correct is None or n_total is None or not int(n_total):
+                continue
+            correct += int(n_correct)
+            total += int(n_total)
+        pooled = wilson_ci(correct, total)
+        above = bool(total > 0 and _finite(pooled["lo"])
+                     and pooled["lo"] > float(chance))
+        arms[str(name)] = {
+            "correct": correct, "n": total,
+            "accuracy": pooled["p"], "wilson_lo": pooled["lo"],
+            "wilson_hi": pooled["hi"], "above_chance": above,
+        }
+        if above and (best is None
+                      or pooled["p"] > arms[best]["accuracy"]):
+            best = str(name)
+    return {
+        "check": (f"at least one {what} has pooled Wilson 95% lower bound "
+                  f"above chance"),
+        "chance": float(chance),
+        "passed": best is not None,
+        "best_arm": best,
+        "arms": arms,
+    }
 
 
 def _model_cfg(settings: Settings, **overrides) -> dict:
@@ -2886,11 +3173,16 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     E1's ``none`` arm, so:
 
     * each rung's gap to the parameter-free rule ceiling measures how much
-      depth the recall readout actually requires;
-    * the saturation depth ``d*`` (smallest rung whose pooled Wilson 95%
-      interval reaches the ceiling estimate) is the reference the
-      deep grids must justify themselves against (HB7): a gain a 2-layer
-      standard transformer already matches is not evidence about depth;
+      depth the recall readout actually requires - but only rungs whose
+      pooled Wilson 95% *lower* bound clears chance count as evidence:
+      the HB0 competence premise separates "needs more depth" from "this
+      budget did not learn the task", and with no competent rung the depth
+      demand is reported as *not determinable* instead of "required";
+    * the saturation depth ``d*`` (smallest competent rung whose pooled
+      Wilson 95% interval reaches the ceiling estimate) is the reference
+      the deep grids must justify themselves against (HB7): a gain a
+      2-layer standard transformer already matches is not evidence about
+      depth;
     * a complex model is only credited for what it does beyond the tuned
       shallow baseline.
 
@@ -2915,6 +3207,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     tune_seeds = settings.seeds[:max(1, min(2, len(settings.seeds)))]
     ceiling_acc = float(ceiling["accuracy"]) if ceiling else float("nan")
     ceiling_known = math.isfinite(ceiling_acc)
+    chance = 1.0 / (settings.vocab - 2)
     depths: dict[int, dict] = {}
     tuning_tables: dict[int, list] = {}
     for depth in ladder:
@@ -2967,11 +3260,18 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         pooled = wilson_ci(sum(r["correct"] for r in runs),
                            sum(r["n"] for r in runs))
         summary = _mean_std([r["accuracy"] for r in runs])
+        # HB0 competence premise for HB6/HB7: "below the ceiling" is only
+        # evidence that depth is required when the rung demonstrably
+        # learned the task.  A rung at chance is an underfit/budget
+        # statement, not a depth statement, so it can neither support HB6
+        # ("depth measurably required") nor feed the saturation depth.
+        above_chance = bool(math.isfinite(pooled["lo"])
+                            and pooled["lo"] > chance)
         reaches_ceiling = bool(
-            ceiling_known and math.isfinite(pooled["hi"])
+            ceiling_known and above_chance and math.isfinite(pooled["hi"])
             and pooled["hi"] >= ceiling_acc)
         hb6_supported = bool(
-            ceiling_known and math.isfinite(pooled["hi"])
+            ceiling_known and above_chance and math.isfinite(pooled["hi"])
             and pooled["hi"] < ceiling_acc)
         payload = {
             "name": f"shallow_none_d{depth}", "n_layers": depth,
@@ -2982,6 +3282,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             "accuracy_by_seed": {str(r["seed"]): r["accuracy"]
                                  for r in runs},
             "pooled_wilson": pooled, "ceiling": ceiling_acc,
+            "chance": chance, "above_chance": above_chance,
             "ceiling_gap": (ceiling_acc - summary["mean"]
                             if ceiling_known else float("nan")),
             "reaches_ceiling": reaches_ceiling,
@@ -2990,22 +3291,36 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         }
         depths[depth] = payload
         tuning_tables[depth] = table
-        status = ("reaches the ceiling (saturated here)" if reaches_ceiling
-                  else "below the ceiling")
+        if reaches_ceiling:
+            status = "reaches the ceiling (saturated here)"
+        elif not above_chance:
+            status = (f"at chance (pooled Wilson lower bound "
+                      f"{pooled['lo']:.4f} <= chance {chance:.4f}): this "
+                      f"rung did not learn the task at this budget, so it "
+                      f"is not depth evidence")
+        else:
+            status = "below the ceiling"
         print(f"[baselines] HB6/HB7 depth={depth} tuned standard "
               f"transformer (lr={best['lr']:g} on val seed {VAL_SEED}, test "
               f"seed {TEST_SEED}): accuracy={summary['mean']:.4f} +- "
               f"{summary['std']:.4f} (pooled Wilson "
               f"[{pooled['lo']:.4f}, {pooled['hi']:.4f}], n={pooled['n']}); "
-              f"rule ceiling={ceiling_acc:.4f}, gap="
+              f"chance={chance:.4f}; rule ceiling={ceiling_acc:.4f}, gap="
               f"{payload['ceiling_gap']:.4f}; {status}")
         _write_json(out_dir / f"baselines_depth{depth}.json", payload)
 
+    ladder_competent = any(depths[d]["above_chance"] for d in ladder)
     saturation_depth = next((d for d in ladder if depths[d]["reaches_ceiling"]),
                             None)
-    hb7_depth_required = (None if not ceiling_known
-                          else bool(saturation_depth is None
-                                    or saturation_depth > 2))
+    # HB7's competence premise: when no rung clears chance the ladder did
+    # not solve the task at this budget, so the depth demand is "not
+    # determinable" - never "required" (the pre-#HB0 reading of a None
+    # saturation depth conflated underfit with "needs more depth").
+    if not ceiling_known or not ladder_competent:
+        hb7_depth_required = None
+    else:
+        hb7_depth_required = bool(saturation_depth is None
+                                  or saturation_depth > 2)
     adjacent = {}
     for a, b in zip(ladder, ladder[1:]):
         by_seed_b = {r["seed"]: r for r in depths[b]["runs"]}
@@ -3025,11 +3340,24 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         "adjacent_contrasts": adjacent,
         "saturation_depth": saturation_depth,
         "hb7_depth_required": hb7_depth_required,
+        "chance": chance,
+        "competence": {
+            "criterion": ("at least one rung's pooled Wilson 95% lower "
+                          "bound above chance"),
+            "chance": chance,
+            "ladder_competent": ladder_competent,
+            "above_chance_by_depth": {str(d): depths[d]["above_chance"]
+                                      for d in ladder},
+        },
     }
     sat_txt = (saturation_depth if saturation_depth is not None
                else "none (no rung reaches the ceiling)")
     if hb7_depth_required is None:
-        depth_txt = "n/a (rule ceiling unavailable)"
+        depth_txt = ("not determinable - no rung is above chance, so the "
+                     "ladder did not solve the task at this budget "
+                     "(raise the budget before reading depth)"
+                     if not ladder_competent
+                     else "n/a (rule ceiling unavailable)")
     elif hb7_depth_required:
         depth_txt = "measurably required"
     else:
@@ -3178,7 +3506,7 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
 
 
 def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7"))
+    _announce(("HB0", "HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7"))
     _write_manifest(settings, out_dir, "baselines")
     audit = _audit_data_splits(settings, out_dir, "baselines", enforce=True)
     repro_audit = _enforce_reproducibility(settings, out_dir, "baselines")
@@ -3269,8 +3597,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         lr_grid=settings.probe_lr_grid,
         seeds=settings.seeds[:max(1, len(settings.seeds))],
         steps=settings.probe_steps, batch=settings.probe_batch,
-        val_seed=VAL_SEED, val_batches=settings.eval_batches,
-        probe_batch=settings.eval_batch)
+        val_seed=VAL_SEED, val_batches=settings.probe_eval_batches,
+        probe_batch=settings.probe_eval_batch)
     probe_selection = _selection_reliability(table,
                                              grid=settings.probe_lr_grid)
     _write_json(out_dir / "baselines_probe_tuning.json",
@@ -3294,9 +3622,10 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                                    settings.device, steps=settings.probe_steps,
                                    batch=settings.probe_batch, lr=best_lr,
                                    seed=seed, history=probe_curve)
-        acc = linear_probe_accuracy(probe, settings.n_pairs, settings.vocab,
-                                    settings.device, batch=settings.eval_batch,
-                                    batches=settings.eval_batches, seed=TEST_SEED)
+        acc = linear_probe_accuracy(
+            probe, settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.probe_eval_batch,
+            batches=settings.probe_eval_batches, seed=TEST_SEED)
         probe_accs.append(acc)
         _write_result(out_dir / "baselines_runs.jsonl",
                       {**record, "name": "linear_bag_probe", "lr": best_lr,
@@ -3307,18 +3636,51 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                        "train_loss_first": probe_curve[0]["loss"],
                        "train_loss_last": probe_curve[-1]["loss"],
                        "probe_curve": probe_curve,
-                       "n": settings.eval_batch * settings.eval_batches})
+                       "n": settings.probe_eval_batch
+                            * settings.probe_eval_batches})
     summary = _mean_std(probe_accs)
     chance = 1.0 / (settings.vocab - 2)
     hb2 = probe_vs_chance_test(probe_accs, chance,
                                seed=settings.seeds[0] if settings.seeds else 0)
+    n_seeds = len(settings.seeds)
+    floor = int(settings.min_seeds_for_claim)
     print(f"[baselines] tuned linear probe (test seed {TEST_SEED}): "
           f"accuracy={summary['mean']:.4f} +- {summary['std']:.4f} "
-          f"(chance={chance:.4f}, n_seeds={summary['n']})")
+          f"(chance={chance:.4f}, n_seeds={summary['n']}, eval n="
+          f"{settings.probe_eval_batch * settings.probe_eval_batches} per "
+          f"seed)")
     print(f"[baselines] HB2 near-chance test: accuracy - chance = "
           f"{hb2['mean']:+.4f} [{hb2['lo']:+.4f}, {hb2['hi']:+.4f}] "
-          f"(p={hb2['p_value']:.3f}, MDE80={hb2['mde80']:.4f}); "
-          f"{'SUPPORTED (probe confidently <2x chance)' if hb2['hb2_supported'] else 'NOT SUPPORTED - inspect the simple-baseline comparison'}")
+          f"(one-sided p(H0: margin >= +chance)="
+          f"{hb2['p_above_chance']:.3f}, MDE80={hb2['mde80']:.4f})")
+    if hb2["hb2_state"] == "certified":
+        print("  state: CERTIFIED - the tuned probe stays confidently below "
+              "the 2x-chance bound")
+    elif hb2["hb2_state"] == "violated":
+        print("  state: VIOLATED - the probe is confidently at/above 2x "
+              "chance: answer information leaks into the bag-of-tokens "
+              "features (or a shortcut exists), so the simple-baseline "
+              "comparison cannot be credited before re-examining the "
+              "pipeline")
+    else:
+        if math.isfinite(hb2["seeds_for_certification"]):
+            need_s = (f"needs ~"
+                      f"{math.ceil(hb2['seeds_for_certification'])} "
+                      f"independent seeds at the observed paired SD for 80% "
+                      f"power at this margin")
+        else:
+            need_s = ("the point estimate is not below the bound, so more "
+                      "seeds alone cannot certify it; 'not certified' is an "
+                      "open question about the probe, not evidence about "
+                      "the transformer")
+        print("  state: INCONCLUSIVE - near-chance NOT certified (the CI "
+              "straddles the +chance bound); this is not evidence of "
+              f"leakage: {need_s}; or widen the probe evaluation stream "
+              "(Settings.probe_eval_batch/probe_eval_batches) and re-run")
+    if hb2["hb2_supported"] and n_seeds < floor:
+        print(f"  NOTE: HB2 is provisional: certified on {n_seeds} seed(s) "
+              f"< the pre-registered claim floor {floor} "
+              f"(Settings.min_seeds_for_claim)")
 
     # HB6/HB7 complexity ladder: the simplest learned model must be tried --
     # and tuned -- before the deep grids can claim that depth/gating is
@@ -3363,6 +3725,9 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     ctrl_summary = _mean_std([r["accuracy"] for r in ctrl_runs])
     hb4_supported = bool(hb4["n"] > 0
                          and hb4["hi"] < settings.negative_control_tol)
+    hb4_claim_eligible = bool(hb4["n"] >= floor)
+    hb4_note = ("" if not hb4_supported or hb4_claim_eligible else
+                f" [provisional: {hb4['n']} seed(s) < claim floor {floor}]")
     print(f"[baselines] HB4 negative control (labels permuted in training, "
           f"shared recipe lr={lr_shared:g}, test seed {TEST_SEED}): "
           f"accuracy={ctrl_summary['mean']:.4f} +- {ctrl_summary['std']:.4f} "
@@ -3370,7 +3735,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
           f"{hb4['mean']:+.4f} [{hb4['lo']:+.4f}, {hb4['hi']:+.4f}] "
           f"(pooled Wilson [{pooled['lo']:.4f}, {pooled['hi']:.4f}], "
           f"tol={settings.negative_control_tol:g}); "
-          f"{'SUPPORTED (no label leakage detected)' if hb4_supported else 'FAILED - the control beats chance: answer information leaks into the pipeline'}")
+          f"{'SUPPORTED (no label leakage detected)' if hb4_supported else 'FAILED - the control beats chance: answer information leaks into the pipeline'}"
+          f"{hb4_note}")
     _write_json(out_dir / "baselines_negative_control.json", {
         "lr": lr_shared, "chance": chance,
         "tolerance": settings.negative_control_tol,
@@ -3395,19 +3761,41 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "checks": {key: bool(repro_audit[key])
                        for key, _ in _REPRO_AUDIT_KEYS},
         },
+        "min_seeds_for_claim": floor,
+        "n_seeds": n_seeds,
         "hb1_supported": bool(hb1_supported),
         "hb2_supported": bool(hb2["hb2_supported"]),
+        "hb2_state": hb2["hb2_state"],
         "hb3_supported": bool(audit.get("hb3_supported")),
         "hb4_supported": hb4_supported,
         "hb5_supported": bool(hb5_supported),
         "hb6_supported": bool(shallow["hb6_supported"]),
+        "hb6_competent": bool(shallow["above_chance"]),
         "hb7_depth_required": ladder["hb7_depth_required"],
+        "ladder_competent": bool(ladder["competence"]["ladder_competent"]),
         "saturation_depth": ladder["saturation_depth"],
+        # Pre-registered seed floor (Settings.min_seeds_for_claim) applied
+        # to the seed-level marks: a supported HB2/HB4/HB6/HB7 resting on
+        # fewer seeds is provisional and must be displayed/stamped as such.
+        "seed_floor": {
+            "min_seeds_for_claim": floor,
+            "n_seeds": n_seeds,
+            "hb2_n_seeds": int(hb2["n"]),
+            "hb2_claim_eligible": bool(hb2["n"] >= floor),
+            "hb4_n_seeds": int(hb4["n"]),
+            "hb4_claim_eligible": hb4_claim_eligible,
+            "hb6_n_seeds": n_seeds,
+            "hb6_claim_eligible": bool(n_seeds >= floor),
+            "hb7_n_seeds": n_seeds,
+            "hb7_claim_eligible": bool(n_seeds >= floor),
+        },
         "answer_balance": balance,
         "depth_ladder": {
             "ladder": ladder["ladder"],
             "val_seed": VAL_SEED,
             "test_seed": TEST_SEED,
+            "chance": chance,
+            "competence": ladder["competence"],
             "by_depth": {
                 str(d): {
                     "lr": payload["chosen_lr"],
@@ -3417,6 +3805,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                     "accuracy_std": payload["accuracy_std"],
                     "accuracy_by_seed": payload["accuracy_by_seed"],
                     "pooled_wilson": payload["pooled_wilson"],
+                    "above_chance": payload["above_chance"],
                     "ceiling_gap": payload["ceiling_gap"],
                     "reaches_ceiling": payload["reaches_ceiling"],
                 }
@@ -3440,14 +3829,20 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "accuracy_std": shallow["accuracy_std"],
             "accuracy_by_seed": shallow["accuracy_by_seed"],
             "pooled_wilson": shallow["pooled_wilson"],
+            "chance": chance,
+            "above_chance": shallow["above_chance"],
             "ceiling": shallow["ceiling"],
             "ceiling_gap": shallow["ceiling_gap"],
             "reaches_ceiling": shallow["reaches_ceiling"],
         },
         "hb2_accuracy_minus_chance": {
             "mean": hb2["mean"], "lo": hb2["lo"], "hi": hb2["hi"],
-            "p_value": hb2["p_value"], "mde80": hb2["mde80"],
+            "p_value": hb2["p_value"],
+            "p_above_chance": hb2["p_above_chance"],
+            "mde80": hb2["mde80"], "sd": hb2["sd"],
             "n": hb2["n"],
+            "state": hb2["hb2_state"],
+            "seeds_for_certification": hb2["seeds_for_certification"],
         },
         "hb4_negative_control": {
             "lr": lr_shared, "tolerance": settings.negative_control_tol,
@@ -3479,17 +3874,39 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         },
     }
     _write_json(out_dir / "baselines_verdict.json", verdict)
-    hb7_txt = ("n/a" if verdict["hb7_depth_required"] is None else
-               ("required" if verdict["hb7_depth_required"]
-                else f"NOT required (saturated at depth "
-                     f"{verdict['saturation_depth']})"))
-    print(f"[baselines] verdict: HB1={'ok' if verdict['hb1_supported'] else 'FAILED'}"
-          f" HB2={'ok' if verdict['hb2_supported'] else 'FAILED'}"
+    hb2_txt = {
+        "certified": "ok (certified)",
+        "violated": "VIOLATED - probe at/above 2x chance",
+        "inconclusive": "INCONCLUSIVE (near-chance not certified)",
+        "untestable": "untestable",
+    }[verdict["hb2_state"]]
+    if verdict["hb7_depth_required"] is None:
+        hb7_txt = ("not determinable (no competent rung)"
+                   if not verdict["ladder_competent"] else "n/a")
+    elif verdict["hb7_depth_required"]:
+        hb7_txt = "required"
+    else:
+        hb7_txt = (f"NOT required (saturated at depth "
+                   f"{verdict['saturation_depth']})")
+    provisional = [k for k in ("hb2", "hb4", "hb6")
+                   if verdict[f"{k}_supported"] is True
+                   and not verdict["seed_floor"][f"{k}_claim_eligible"]]
+    if (verdict["hb7_depth_required"] is True
+            and not verdict["seed_floor"]["hb7_claim_eligible"]):
+        provisional.append("hb7")
+    provisional_txt = (
+        f"; PROVISIONAL: {' '.join(provisional).upper()} rest on fewer than "
+        f"{floor} seeds - raise Settings.seeds or downgrade the claim"
+        if provisional else "")
+    print(f"[baselines] verdict: "
+          f"HB1={'ok' if verdict['hb1_supported'] else 'FAILED'}"
+          f" HB2={hb2_txt}"
           f" HB3={'ok' if verdict['hb3_supported'] else 'FAILED'}"
           f" HB4={'ok' if verdict['hb4_supported'] else 'FAILED'}"
           f" HB5={'ok' if verdict['hb5_supported'] else 'FAILED'}"
           f" HB6={'ok' if verdict['hb6_supported'] else 'FLAG'}"
-          f" HB7={hb7_txt} "
+          f" HB7={hb7_txt}"
+          f"{provisional_txt} "
           f"(stored in baselines_verdict.json; a failed baseline check "
           f"invalidates the corresponding claims above it, HB6/HB7 only flag "
           f"depth-based motivations)")
@@ -3583,6 +4000,11 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
 
 def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H1a", "H1b", "H1c", "H1d", "H1e", "H1f"))
+    # HB1/HB3/HB4/HB5 hard gate: the baselines verdict must exist, be
+    # current for this exact protocol and pass, before any grid trains
+    # (their pre-registered semantics invalidate everything above them;
+    # the marks are stamped into every record via _run_context).
+    verdict = _enforce_baseline_verdict(settings, out_dir, "e1")
     _write_manifest(settings, out_dir, "e1")
     _audit_data_splits(settings, out_dir, "e1", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e1")
@@ -3680,8 +4102,16 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
 
         err_rate = t.get("error_rate", {}).get("mean", float("nan"))
         ratio = t.get("imbalance_ratio", {}).get("mean", float("nan"))
+        # Degenerate streams get their own labels (mirroring
+        # train.error_detection_aucs' metric_regime): an all-wrong stream
+        # has no negatives, so the ranking metrics are undefined and the
+        # regime must not read as a usable "balanced".
         if not math.isfinite(err_rate) or err_rate <= 0.0:
             regime = "no_errors"
+        elif err_rate >= 1.0:
+            regime = "all_errors"
+        elif not math.isfinite(ratio):
+            regime = "n/a"
         elif ratio >= 1000.0:
             regime = "extreme"
         elif ratio >= 10.0:
@@ -3766,88 +4196,115 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         acc = agg.get("mean", float("nan"))
         gap = (ceiling["accuracy"] - acc) if math.isfinite(acc) else float("nan")
         print(f"{gate:>6} {acc:>10.4f} {gap:>12.4f}")
-    verdict = _load_baseline_verdict(out_dir)
-    if verdict is None:
-        print("[e1] note: no baselines_verdict.json in the output dir - run "
-              "`--only baselines` first so the learned models can be read "
-              "against the tuned simple baselines (probe, rules, shallow "
-              "transformer) before crediting any gate variant")
+    probe = verdict.get("probe_accuracy_mean", float("nan"))
+    floor = verdict.get("seed_floor") or {}
+
+    def _mark(key, claim_key=None):
+        value = verdict.get(key)
+        if value is None:
+            return "n/a"
+        if not value:
+            return "FAILED"
+        if claim_key and not floor.get(f"{claim_key}_claim_eligible", True):
+            return "ok (provisional: below seed floor)"
+        return "ok"
+
+    marks = "/".join(
+        _mark(k, c) for k, c in (("hb1_supported", None),
+                                 ("hb2_supported", "hb2"),
+                                 ("hb3_supported", None),
+                                 ("hb4_supported", "hb4"),
+                                 ("hb5_supported", None),
+                                 ("hb6_supported", "hb6")))
+    hb2_state = verdict.get("hb2_state")
+    if hb2_state in (None, "certified"):
+        hb2_note = ""
+    elif hb2_state == "violated":
+        hb2_note = (f"; HB2 VIOLATED - the probe is at/above 2x chance: the "
+                    f"simple-baseline comparison must be re-examined before "
+                    f"crediting any gate variant")
     else:
-        stale = _verdict_provenance_note(verdict, settings)
-        if stale:
-            print(f"[e1] WARNING: {stale}")
-        probe = verdict.get("probe_accuracy_mean", float("nan"))
-
-        def _mark(key):
-            value = verdict.get(key)
-            return "n/a" if value is None else ("ok" if value else "FAILED")
-
-        marks = "/".join(_mark(k) for k in ("hb1_supported", "hb2_supported",
-                                            "hb3_supported", "hb4_supported",
-                                            "hb5_supported", "hb6_supported"))
-        print(f"[e1] simple-baseline check (from --only baselines): "
-              f"HB1/HB2/HB3/HB4/HB5/HB6={marks}, tuned linear probe test "
-              f"accuracy={probe:.4f} vs chance "
-              f"{verdict.get('chance', float('nan')):.4f} - the transformer is "
-              f"only credited for what it does beyond this tuned baseline and "
-              f"the rule ceiling (HB4 = no label leakage, HB5 = loop can "
-              f"memorise a tiny batch, HB6 = the shallowest ladder rung is "
-              f"below the ceiling)")
-        shallow = verdict.get("shallow_none") or {}
-        shallow_by_seed = {}
-        for key, value in (shallow.get("accuracy_by_seed") or {}).items():
-            try:
-                shallow_by_seed[int(key)] = float(value)
-            except (TypeError, ValueError):
-                continue
-        if shallow_by_seed:
-            shallow_depth = int(shallow.get("n_layers", 1))
-            print(f"[e1] complexity control (HB6): tuned {shallow_depth}-layer "
-                  f"standard transformer "
-                  f"(lr={shallow.get('lr', float('nan')):g}) test "
-                  f"accuracy={shallow.get('accuracy_mean', float('nan')):.4f}, "
-                  f"rule ceiling={shallow.get('ceiling', float('nan')):.4f}, "
-                  f"gap={shallow.get('ceiling_gap', float('nan')):.4f}")
-            # Paired complexity reference: same seeds, same test stream,
-            # each side optimised with its own val-tuned learning rate
-            # (that is the point of a tuned-baseline comparison), so the
-            # strict controlled-recipe audit does not apply and this line
-            # is deliberately kept outside the FDR family.
-            diffs = [r["accuracy"] - shallow_by_seed[r["seed"]]
-                     for r in by_gate["none"] if r["seed"] in shallow_by_seed]
-            if len(diffs) >= 2:
-                ci = paired_bootstrap_ci(diffs)
-                deep_layers = int(
-                    (by_gate["none"][0].get("model_cfg") or {})
-                    .get("n_layers", settings.n_layers))
-                print(f"      paired deep(none, "
-                      f"{deep_layers} layers) - "
-                      f"shallow({shallow_depth} layer) "
-                      f"accuracy: {_fmt_ci(ci)} (each side val-tuned; a "
-                      f"supported gap means the depth of the E1/E3 grids is "
-                      f"measurably required, a gap including 0 means a gate "
-                      f"gain must be beyond what one layer already reaches)")
-        ladder = verdict.get("depth_ladder") or {}
-        by_depth = ladder.get("by_depth") or {}
-        if by_depth:
-            rungs = "/".join(
-                f"{d}L {float(row.get('accuracy_mean', float('nan'))):.4f}"
-                for d, row in sorted(by_depth.items(), key=lambda kv: int(kv[0])))
-            sat = verdict.get("saturation_depth")
-            req = verdict.get("hb7_depth_required")
-            if req is None:
-                sat_txt = "unavailable (rule ceiling unknown)"
-            elif req:
-                sat_txt = ("no rung up to "
-                           f"{max(int(d) for d in by_depth)} layers reaches "
-                           "the ceiling: depth is measurably required")
+        hb2_note = (f"; HB2 state={hb2_state} - near-chance not certified "
+                    f"(underpower/wide CI, not evidence of leakage)")
+    print(f"[e1] simple-baseline check (from --only baselines, enforced "
+          f"before training): HB1/HB2/HB3/HB4/HB5/HB6={marks}, tuned linear "
+          f"probe test accuracy={probe:.4f} vs chance "
+          f"{verdict.get('chance', float('nan')):.4f}{hb2_note} - the "
+          f"transformer is only credited for what it does beyond this tuned "
+          f"baseline and the rule ceiling (HB4 = no label leakage, HB5 = "
+          f"loop can memorise a tiny batch, HB6 = the shallowest ladder rung "
+          f"is below the ceiling)")
+    shallow = verdict.get("shallow_none") or {}
+    shallow_by_seed = {}
+    for key, value in (shallow.get("accuracy_by_seed") or {}).items():
+        try:
+            shallow_by_seed[int(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    if shallow_by_seed:
+        shallow_depth = int(shallow.get("n_layers", 1))
+        hb6_prov = ("" if not verdict.get("hb6_supported")
+                    or floor.get("hb6_claim_eligible", True)
+                    else " [provisional: below the pre-registered seed floor]")
+        if not shallow.get("above_chance", True):
+            hb6_prov += (" [HB6 not read as depth evidence: the rung is not "
+                         "above chance, so this budget did not learn the "
+                         "task]")
+        print(f"[e1] complexity control (HB6): tuned {shallow_depth}-layer "
+              f"standard transformer "
+              f"(lr={shallow.get('lr', float('nan')):g}) test "
+              f"accuracy={shallow.get('accuracy_mean', float('nan')):.4f}, "
+              f"rule ceiling={shallow.get('ceiling', float('nan')):.4f}, "
+              f"gap={shallow.get('ceiling_gap', float('nan')):.4f}"
+              f"{hb6_prov}")
+        # Paired complexity reference: same seeds, same test stream,
+        # each side optimised with its own val-tuned learning rate
+        # (that is the point of a tuned-baseline comparison), so the
+        # strict controlled-recipe audit does not apply and this line
+        # is deliberately kept outside the FDR family.
+        diffs = [r["accuracy"] - shallow_by_seed[r["seed"]]
+                 for r in by_gate["none"] if r["seed"] in shallow_by_seed]
+        if len(diffs) >= 2:
+            ci = paired_bootstrap_ci(diffs)
+            deep_layers = int(
+                (by_gate["none"][0].get("model_cfg") or {})
+                .get("n_layers", settings.n_layers))
+            print(f"      paired deep(none, "
+                  f"{deep_layers} layers) - "
+                  f"shallow({shallow_depth} layer) "
+                  f"accuracy: {_fmt_ci(ci)} (each side val-tuned; a "
+                  f"supported gap means the depth of the E1/E3 grids is "
+                  f"measurably required, a gap including 0 means a gate "
+                  f"gain must be beyond what one layer already reaches)")
+    ladder = verdict.get("depth_ladder") or {}
+    by_depth = ladder.get("by_depth") or {}
+    if by_depth:
+        rungs = "/".join(
+            f"{d}L {float(row.get('accuracy_mean', float('nan'))):.4f}"
+            for d, row in sorted(by_depth.items(), key=lambda kv: int(kv[0])))
+        sat = verdict.get("saturation_depth")
+        req = verdict.get("hb7_depth_required")
+        if req is None:
+            if verdict.get("ladder_competent") is False:
+                sat_txt = ("not determinable: no ladder rung is above "
+                           "chance, so the ladder did not solve the task at "
+                           "this budget - depth is unverified either way "
+                           "(raise the budget and re-run `--only baselines`)")
             else:
-                sat_txt = (f"saturated at {sat} layers: depth beyond that is "
-                           f"not measurably required here")
-            print(f"[e1] complexity ladder (HB7, each rung val-tuned, "
-                  f"test accuracy): {rungs}; {sat_txt}")
-            for pair, ci in (ladder.get("adjacent_contrasts") or {}).items():
-                print(f"      adjacent-depth {pair} accuracy: {_fmt_ci(ci)}")
+                sat_txt = "unavailable (rule ceiling unknown)"
+        elif req:
+            sat_txt = ("no rung up to "
+                       f"{max(int(d) for d in by_depth)} layers reaches "
+                       "the ceiling: depth is measurably required")
+        else:
+            sat_txt = (f"saturated at {sat} layers: depth beyond that is "
+                       f"not measurably required here")
+        if req is True and not floor.get("hb7_claim_eligible", True):
+            sat_txt += " [provisional: below the pre-registered seed floor]"
+        print(f"[e1] complexity ladder (HB7, each rung val-tuned, "
+              f"test accuracy): {rungs}; {sat_txt}")
+        for pair, ci in (ladder.get("adjacent_contrasts") or {}).items():
+            print(f"      adjacent-depth {pair} accuracy: {_fmt_ci(ci)}")
 
     print("\n[e1] H1a robustness: rank (Spearman) gate-entropy correlation "
           "alongside Pearson (a monotone effect must survive the change of "
@@ -3881,10 +4338,33 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             cells.append("n/a" if not math.isfinite(m) else f"{m:+.4f}")
         print(f"{gate:>6}" + "".join(f"{c:>12}" for c in cells))
 
+    # HB0 competence prerequisite: "does the gate read entropy?" is only a
+    # mechanism question when at least one trained condition demonstrably
+    # learned the task at this budget (pooled Wilson lower bound above
+    # chance).  Written to e1_competence.json and handed to the ContrastLog,
+    # which then marks every contrast claim-ineligible if it fails.
+    competence = _competence_check(
+        [(f"gate:{g}", by_gate[g]) for g in GATES]
+        + [(f"ablation:{label}", rs)
+           for label, rs in ablation_runs.items()],
+        lambda r: (int(round(r["accuracy"] * r["n"])), int(r["n"])),
+        1.0 / (settings.vocab - 2), what="E1 condition")
+    _write_json(out_dir / "e1_competence.json",
+                {**competence, **_run_context(settings)})
+    if competence["passed"]:
+        print(f"[e1] HB0 competence: ok (best arm {competence['best_arm']} "
+              f"has pooled Wilson 95% lower bound above chance "
+              f"{competence['chance']:.4f})")
+    else:
+        print(f"[e1] HB0 competence: FAILED - no condition's pooled Wilson "
+              f"95% lower bound is above chance {competence['chance']:.4f}; "
+              f"the grid did not demonstrably learn the task at this budget, "
+              f"so no contrast below may be read as a mechanism statement")
     print("\n[e1] pre-registered contrasts (calib vs query/none):")
     clog = ContrastLog("e1",
                        hypotheses=("H1a", "H1b", "H1c", "H1d", "H1e", "H1f"),
-                       min_seeds=settings.min_seeds_for_claim)
+                       min_seeds=settings.min_seeds_for_claim,
+                       competence=competence)
     clog.print("calib - none", "H1a", "accuracy",
                _paired_diff(by_gate["calib"], by_gate["none"], "accuracy"),
                warn=_curve_warn(("calib", by_gate["calib"]),
@@ -4124,6 +4604,8 @@ _E2_VARIANTS = (
 
 def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H2a", "H2b", "H2c"))
+    # HB1/HB3/HB4/HB5 hard gate (see run_e1).
+    _enforce_baseline_verdict(settings, out_dir, "e2")
     _write_manifest(settings, out_dir, "e2")
     _audit_data_splits(settings, out_dir, "e2", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e2")
@@ -4168,7 +4650,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                    "gate": gate, "variant": label, "seed": seed, "lr": lr,
                    "eval_seed": eval_seed, "stats_seed": stats_seed,
                    "params": params, "model_cfg": model_cfg,
-                   "accuracy_by_length": {},
+                   "eval_n": int(base_metrics["n"]),
+                   "accuracy_by_length": {}, "eval_n_by_length": {},
                    "entropy_by_length": {}, "entropy_norm_by_length": {},
                    "maxprob_by_length": {}, "gate_by_length": {},
                    **record_extra,
@@ -4187,6 +4670,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                                       batches=settings.stats_batches,
                                       seed=stats_seed)
                 rec["accuracy_by_length"][length] = metrics["accuracy"]
+                rec["eval_n_by_length"][length] = int(metrics["n"])
                 rec["entropy_by_length"][length] = float(stats["entropy"].mean())
                 rec["entropy_norm_by_length"][length] = (
                     rec["entropy_by_length"][length]
@@ -4322,9 +4806,30 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         for case in examples.get(label, (0, []))[1]:
             print(f"  [{label}] {_format_case(case)}")
 
+    # HB0 competence prerequisite: a length-generalisation contrast is only
+    # readable as a mechanism statement when at least one arm demonstrably
+    # learned the task at the training length.
+    competence = _competence_check(
+        [(label, rs) for label, rs in by_variant.items()],
+        lambda r: (int(round(r["accuracy_at_base"] * r["eval_n"])),
+                   int(r["eval_n"])),
+        1.0 / (settings.vocab - 2), what="E2 arm (training length)")
+    _write_json(out_dir / "e2_competence.json",
+                {**competence, **_run_context(settings)})
+    if competence["passed"]:
+        print(f"[e2] HB0 competence: ok (best arm {competence['best_arm']} "
+              f"has pooled Wilson 95% lower bound above chance "
+              f"{competence['chance']:.4f} at the training length)")
+    else:
+        print(f"[e2] HB0 competence: FAILED - no arm's pooled Wilson 95% "
+              f"lower bound is above chance {competence['chance']:.4f} at "
+              f"the training length; the grid did not demonstrably learn the "
+              f"task at this budget, so no contrast below may be read as a "
+              f"mechanism statement")
     print("\n[e2] pre-registered contrasts:")
     clog = ContrastLog("e2", hypotheses=("H2a", "H2b", "H2c"),
-                       min_seeds=settings.min_seeds_for_claim)
+                       min_seeds=settings.min_seeds_for_claim,
+                       competence=competence)
     calib_runs = by_variant["calib"]
     calib_warn = _curve_warn(("calib", calib_runs))
     clog.print("calib - none", "H2a", "accuracy_at_longest",
@@ -4379,6 +4884,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
 
 def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H3a", "H3b", "H3c"))
+    # HB1/HB3/HB4/HB5 hard gate (see run_e1).
+    verdict = _enforce_baseline_verdict(settings, out_dir, "e3")
     _write_manifest(settings, out_dir, "e3")
     _audit_data_splits(settings, out_dir, "e3", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e3")
@@ -4387,30 +4894,32 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     # HB7 pre-registers an annotation on every depth-based motivation: the
     # deep-write readouts of H3a/H3b are only informative about depth if the
     # task actually needs the grid's depth.  The baselines verdict carries
-    # the tuned ladder's saturation point, so the annotation is automatic
-    # rather than left to the reader.
-    verdict = _load_baseline_verdict(out_dir)
-    if verdict is None:
-        print("[e3] note: no baselines_verdict.json in the output dir - run "
-              "`--only baselines` first to check whether the 8-layer grid "
-              "depth is measurably required (HB7)")
-    else:
-        stale = _verdict_provenance_note(verdict, settings)
-        if stale:
-            print(f"[e3] WARNING: {stale}")
-        required = verdict.get("hb7_depth_required")
-        saturation = verdict.get("saturation_depth")
-        if required is None:
+    # the tuned ladder's saturation point and its HB0 competence premise, so
+    # the annotation is automatic rather than left to the reader.
+    required = verdict.get("hb7_depth_required")
+    saturation = verdict.get("saturation_depth")
+    if required is None:
+        if verdict.get("ladder_competent") is False:
+            print("[e3] HB7 NOT DETERMINABLE: no ladder rung (1/2/4 layers) "
+                  "had a pooled Wilson lower bound above chance, so the "
+                  "ladder did not solve the task at this budget - the "
+                  "depth-based framing of H3a/H3b is unverified (raise the "
+                  "budget and re-run `--only baselines`)")
+        else:
             print("[e3] HB7 depth context unavailable (rule ceiling unknown): "
                   "the depth-based framing of H3a/H3b is unverified")
-        elif not required:
-            print(f"[e3] HB7 FLAG: a tuned standard transformer already "
-                  f"saturates at depth {saturation}, so the deep-write "
-                  f"readouts (H3a/H3b) must not be presented as evidence "
-                  f"that depth is needed at this scale")
-        else:
-            print("[e3] HB7: depth beyond two layers is measurably required, "
-                  "so the deep-write readouts are informative about depth")
+    elif not required:
+        print(f"[e3] HB7 FLAG: a tuned standard transformer already "
+              f"saturates at depth {saturation}, so the deep-write "
+              f"readouts (H3a/H3b) must not be presented as evidence "
+              f"that depth is needed at this scale")
+    else:
+        hb7_prov = (" [provisional: below the pre-registered seed floor]"
+                    if not (verdict.get("seed_floor") or {}).get(
+                        "hb7_claim_eligible", True) else "")
+        print("[e3] HB7: depth beyond two layers is measurably required"
+              f"{hb7_prov}, so the deep-write readouts are informative about "
+              "depth")
     print(f"[e3] grid gate x norm x layer_scale at lr={lr:g}, "
           f"test seed {TEST_SEED}, stats seed {STATS_SEED}")
     runs = []
@@ -4436,6 +4945,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                         "eval_seed": eval_seed, "stats_seed": stats_seed,
                         "params": params, "model_cfg": model_cfg,
                         "accuracy": metrics["accuracy"],
+                        "eval_n": int(metrics["n"]),
                         "f1_macro": metrics["f1_macro"],
                         "gate_depth_ratio": gate_depth_ratio(stats),
                         "resid_norm_by_layer": resid.tolist(),
@@ -4508,13 +5018,34 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
               for ls in (None, 1e-2)),
         planned_seeds=settings.seeds)
 
+    # HB0 competence prerequisite: the deep-write readouts under test are
+    # only interpretable when at least one grid cell demonstrably learned
+    # the task at this budget.
+    competence = _competence_check(
+        [(f"{g}/{n}/{('off' if ls is None else f'{ls:g}')}", rs)
+         for (g, n, ls), rs in index.items()],
+        lambda r: (int(round(r["accuracy"] * r["eval_n"])),
+                   int(r["eval_n"])),
+        1.0 / (settings.vocab - 2), what="E3 grid cell")
+    _write_json(out_dir / "e3_competence.json",
+                {**competence, **_run_context(settings)})
+    if competence["passed"]:
+        print(f"[e3] HB0 competence: ok (best cell "
+              f"{competence['best_arm']} has pooled Wilson 95% lower bound "
+              f"above chance {competence['chance']:.4f})")
+    else:
+        print(f"[e3] HB0 competence: FAILED - no grid cell's pooled Wilson "
+              f"95% lower bound is above chance {competence['chance']:.4f}; "
+              f"the grid did not demonstrably learn the task at this budget, "
+              f"so no contrast below may be read as a mechanism statement")
     print("\n[e3] pre-registered contrasts (H3b: "
           "resid_norm_last_over_first is the primary readout; "
           "gate_depth_ratio is secondary; H3c: "
           "calib-vs-query interaction with the dynamic-normalisation "
           "arm):")
     clog = ContrastLog("e3", hypotheses=("H3a", "H3b", "H3c"),
-                       min_seeds=settings.min_seeds_for_claim)
+                       min_seeds=settings.min_seeds_for_claim,
+                       competence=competence)
     for gate in ("query", "calib"):
         for layer_scale in (None, 1e-2):
             a = index[(gate, "seednorm", layer_scale)]
@@ -4656,7 +5187,7 @@ def main(argv=None) -> int:
         else:
             run_all(settings, out_dir)
     except (OverfitSanityError, ReproducibilityError,
-            SplitAuditError) as e:
+            SplitAuditError, BaselineVerdictError) as e:
         print(f"[runner] ABORTED before grid training: {e}")
         return 3
     print(f"\n[runner] done; records in {out_dir}/")
