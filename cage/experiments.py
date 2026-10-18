@@ -134,6 +134,7 @@ from .data import (
     VAL_SEED,
     batch_fingerprint,
     check_eval_seed,
+    check_train_seed,
     length_sweep_lengths,
     make_batch,
     split_leakage_audit,
@@ -2429,16 +2430,40 @@ def _resolve_lr(settings: Settings, out_dir: pathlib.Path, tag: str):
     return lr
 
 
-def _answer_balance(settings: Settings, batch=256, batches=4, seed=VAL_SEED):
-    gen = torch.Generator(device=settings.device).manual_seed(seed)
+def _answer_balance(settings: Settings, batch=256, batches=4, seeds=None):
+    """Class-balance diagnostic for the answer values, fitted on the
+    training streams only.
+
+    Method contract: every fitted statistic is computed on the data the
+    model is trained on, never on a held-out split.  The held-out answer
+    distributions are instead *scored against* this training reference by
+    the HB3 split audit (per-field chi-square shift tests), so
+    validation/test/stats data is transform-only here.  ``seeds`` defaults
+    to the configured training seeds (``(0,)`` when none are configured,
+    matching the training convention elsewhere); each seed is refused if
+    it is a reserved evaluation seed.
+    """
+    if seeds is None:
+        seeds = tuple(settings.seeds) if settings.seeds else (0,)
     counts = torch.zeros(settings.vocab, dtype=torch.float64)
-    for _ in range(batches):
-        _, _, meta = make_batch(batch, settings.n_pairs, settings.vocab,
-                                settings.device, gen=gen)
-        counts += torch.bincount(meta["answer"].cpu(), minlength=settings.vocab)
+    per_seed = {}
+    for seed in seeds:
+        check_train_seed(seed)
+        gen = stream_generator(seed, settings.device)
+        n_seed = 0
+        for _ in range(batches):
+            _, _, meta = make_batch(batch, settings.n_pairs, settings.vocab,
+                                    settings.device, gen=gen)
+            counts += torch.bincount(meta["answer"].cpu(),
+                                     minlength=settings.vocab)
+            n_seed += meta["answer"].numel()
+        per_seed[int(seed)] = int(n_seed)
     present = counts > 0
     shares = counts[present] / counts.sum()
     return {
+        "train_seeds": [int(s) for s in seeds],
+        "batches_per_seed": int(batches),
+        "samples_per_seed": per_seed,
         "n_samples": int(counts.sum()),
         "n_classes_possible": settings.vocab - 2,
         "n_classes_present": int(present.sum()),
@@ -2869,7 +2894,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
 
     balance = _answer_balance(settings)
     print(f"[baselines] answer-value balance over {balance['n_samples']} "
-          f"samples: {balance['n_classes_present']} classes present, share "
+          f"samples from training streams {balance['train_seeds']}: "
+          f"{balance['n_classes_present']} classes present, share "
           f"min={balance['min_class_share']:.5f} max={balance['max_class_share']:.5f} "
           f"(uniform={balance['expected_uniform_share']:.5f})")
     _write_json(out_dir / "baselines_balance.json", balance)
