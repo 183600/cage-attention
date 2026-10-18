@@ -463,8 +463,8 @@ class _CalibAttn(torch.autograd.Function):
                    _get_scratch(("calib_ent",), q.device, q.dtype,
                                 bh * T).view(bh, T)) if need_ent else None
             ebuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
-            # ``y[:, i0:i1]`` is a strided view: each block's result is built
-            # in a contiguous scratch buffer and copied over in one piece.
+            # Each block's result is built in a contiguous scratch buffer
+            # and copied into ``y[:, i0:i1]``.
             yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
                                 bh * max_rows * dv)
             for i0, i1 in blocks:

@@ -1011,8 +1011,7 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
         handles.append(blk.attn.register_forward_pre_hook(
             _make_hook(i, getattr(blk.attn, "null_k", None))))
 
-    # Device-side accumulators: per-batch reductions are summed on the
-    # device and pulled to Python once after the loop.
+    # Device-side accumulators for the per-batch reductions.
     n_total = 0
     case_count = 0
     cases = []
@@ -1092,8 +1091,8 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
             if case_count < max_cases:
                 rows = torch.nonzero(wrong, as_tuple=False).flatten().tolist()
                 if rows:
-                    # Pull the per-sample vectors to host so the case loop
-                    # below is pure Python.
+                    # Pull the per-sample vectors to host for the case
+                    # loop below.
                     conf_l = conf.tolist()
                     margin_l = margin.tolist()
                     mass_last_l = mass_last.tolist()
