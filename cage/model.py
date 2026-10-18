@@ -160,6 +160,8 @@ class SeeDNorm(nn.Module):
         self.scale = nn.Linear(dim, dim)
         nn.init.zeros_(self.scale.bias)
         nn.init.normal_(self.scale.weight, std=0.02)
+        # Explicitly initialised above; skip the module-wide re-init.
+        self.scale._preinitialized = True
 
     def forward(self, x):
         if torch.is_grad_enabled():
@@ -178,10 +180,27 @@ def make_norm(kind: str, dim: int) -> nn.Module:
     return SeeDNorm(dim) if kind == "seednorm" else Norm(dim)
 
 
+def _norm_out(norm: nn.Module, x: torch.Tensor, key: str) -> torch.Tensor:
+    """Eval-path normalization written into the named scratch buffer.
+
+    Mirrors ``Norm.forward`` / ``SeeDNorm.forward`` without gradients, but
+    with a caller-chosen output key so the final normalization can never
+    alias the block-level ``"ln_out"`` buffer its input may be a view of.
+    """
+    if isinstance(norm, SeeDNorm):
+        shape = x.shape
+        n = x.numel() // shape[-1]
+        s = _get_scratch(("seed_scale",), x.device, x.dtype, x.numel())
+        _linear_into(x.reshape(n, shape[-1]), norm.scale.weight,
+                     norm.scale.bias, s.view(n, shape[-1]))
+        s.sigmoid_()
+        return _layer_norm_into(norm.ln, x, key).mul_(s.view(shape)).mul_(2.0)
+    return _layer_norm_into(norm.ln, x, key)
+
+
 _MAX_MASK_CACHE = 64
 
 _QKV_CHUNK_ROWS = 2048
-_QKV_CHUNK_BYTES = 32 * 1024 * 1024
 
 _MLP_CHUNK_ROWS = 2048
 
@@ -357,6 +376,13 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
     ckey = (name, device, dtype)
     entry = _scratch_cache.get(ckey)
     if entry is not None and entry.numel() >= numel and _servable(entry):
+        if entry.numel() > 4 * numel:
+            # A much smaller request would otherwise pin the old
+            # high-water buffer for the rest of the process.
+            with torch.inference_mode(False):
+                buf = torch.empty(numel, device=device, dtype=dtype)
+            _scratch_cache[ckey] = buf
+            return buf
         # Exact-size requests hand out the cached tensor itself; the slice
         # view is only built for the (few) undersized requests.
         return entry if entry.numel() == numel else entry[:numel]
@@ -380,6 +406,21 @@ def _release_scratch(*names: str) -> None:
         del _scratch_cache[key]
 
 
+# Every buffer the dropout-free, gradient-free forward can hold at its end.
+# Releasing the cache entries when the forward returns keeps the retained
+# high-water mark of a long-sequence / large-batch evaluation from being
+# carried into every later call (the CUDA no-grad path additionally drops
+# its per-layer buffers inside ``Attention.forward``).
+_NOGRAD_SCRATCH = (
+    "embed_out", "packed", "qkv_out", "ln_out", "ln_f_out", "ln_mean",
+    "ln_rstd", "seed_scale", "mlp_up", "mlp_down", "mlp_down_big",
+    "proj_out", "attn_y", "gate_out", "calib_s", "calib_y", "calib_yblk",
+    "calib_ent", "calib_ent_shuf", "calib_f", "calib_conc", "null_s",
+    "null_s0", "null_y", "null_yblk", "null_m", "rowent", "rowstats_att",
+    "rowstats_att_null", "rowstats_sum", "mask_rows", "mask_rows_b",
+)
+
+
 def _linear_into(x: torch.Tensor, weight: torch.Tensor,
                  bias: torch.Tensor | None, out: torch.Tensor) -> torch.Tensor:
     """``F.linear(x, weight, bias)`` written into ``out``."""
@@ -390,11 +431,18 @@ def _linear_into(x: torch.Tensor, weight: torch.Tensor,
     return out
 
 
-def _layer_norm_into(ln: nn.LayerNorm, x: torch.Tensor) -> torch.Tensor:
-    """``ln(x)`` written into reusable buffers."""
+def _layer_norm_into(ln: nn.LayerNorm, x: torch.Tensor,
+                     key: str = "ln_out") -> torch.Tensor:
+    """``ln(x)`` written into reusable buffers.
+
+    ``key`` names a *disjoint* output buffer: callers whose input may be a
+    view of the block-level ``"ln_out"`` scratch (the final normalization)
+    pass their own key so the layer-norm input and output never share
+    storage at different coordinates.
+    """
     shape = x.shape
     rows = x.numel() // shape[-1]
-    out = _get_scratch(("ln_out",), x.device, x.dtype, x.numel())
+    out = _get_scratch((key,), x.device, x.dtype, x.numel())
     mean = _get_scratch(("ln_mean",), x.device, x.dtype, rows)
     rstd = _get_scratch(("ln_rstd",), x.device, x.dtype, rows)
     torch.ops.aten.native_layer_norm.out(
@@ -946,13 +994,7 @@ class Attention(nn.Module):
         ``(B, T, d_model) -> (3, B*h, T, dk)`` with the projection applied
         per batch chunk straight into the target buffer.
         """
-        row_bytes = T * 3 * x.size(-1) * x.element_size()
-        if x.is_cuda:
-            step = max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
-        elif B * row_bytes > _QKV_CHUNK_BYTES:
-            step = max(1, min(B, _QKV_CHUNK_BYTES // row_bytes))
-        else:
-            step = B
+        step = max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
         if step >= B:
             return self._pack(F.linear(x, self.qkv.weight), B, h, T, dk)
         packed = x.new_empty(3, B * h, T, dk)
@@ -1088,11 +1130,10 @@ class Attention(nn.Module):
                 ("packed",), x.device, x.dtype, 3 * bh * T * dk).view(3, bh, T, dk)
             pv = packed.view(3, B, h, T, dk)
             x2 = x.reshape(B, T, C)
-            if (x.is_cuda or
-                    B * T * 3 * C * x.element_size() > _QKV_CHUNK_BYTES):
-                step = max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
-            else:
-                step = B
+            # Cap the staging buffer by rows, not by the total size: the
+            # staging only exists to feed the permute-copy, so a full-size
+            # second ``(B, T, 3C)`` buffer is pure overhead.
+            step = max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
             qkv_buf = _get_scratch(("qkv_out",), x.device, x.dtype,
                                    step * T * 3 * C).view(step * T, 3 * C)
             for b0 in range(0, B, step):
@@ -1194,8 +1235,14 @@ class Attention(nn.Module):
                 # still reads the real entropy.
                 ent_gate = ent
                 if self._ent_perm_cache is not None:
-                    ent_gate = ent.index_select(
-                        2, self._ent_perm(T, x.device))
+                    perm = self._ent_perm(T, x.device)
+                    if grad_on:
+                        ent_gate = ent.index_select(2, perm)
+                    else:
+                        ent_gate = _get_scratch(
+                            ("calib_ent_shuf",), x.device, x.dtype,
+                            B * h * T).view(B, h, T)
+                        torch.index_select(ent, 2, perm, out=ent_gate)
                 calib_cs = self.calib_c * self.calib_scale
                 if grad_on:
                     shift = ent_gate.mean(dim=1).div_(log_len).mul(calib_cs)
@@ -1250,7 +1297,8 @@ class Attention(nn.Module):
         if x.is_cuda and not grad_on:
             _release_scratch(
                 "qkv_out", "packed", "calib_y", "calib_yblk", "calib_s",
-                "calib_f", "calib_ent", "calib_conc", "null_y", "null_s", "null_s0",
+                "calib_f", "calib_ent", "calib_ent_shuf", "calib_conc",
+                "null_y", "null_s", "null_s0",
                 "null_m", "rowstats_att", "rowstats_att_null", "rowstats_sum",
                 "rowent", "mask_rows", "mask_rows_b", "gate_out", "attn_y")
         if not need_stats:
@@ -1388,10 +1436,13 @@ class CAGE(nn.Module):
         self.head.weight = self.tok.weight
         self.apply(self._init)
 
-    @staticmethod
-    def _init(m):
+    def _init(self, m):
         if isinstance(m, nn.Linear):
-            if hasattr(m, "_is_gate") and m._is_gate:
+            if getattr(m, "_is_gate", False) or \
+                    getattr(m, "_preinitialized", False):
+                return
+            if m.weight is self.tok.weight:
+                # Already initialised through the shared embedding weight.
                 return
             nn.init.normal_(m.weight, std=0.02)
             if m.bias is not None:
@@ -1453,13 +1504,22 @@ class CAGE(nn.Module):
             if sup is not None:
                 flat_t = flat_t.index_select(0, sup)
                 h = self.ln_f(x.reshape(-1, self.cfg.d_model).index_select(0, sup))
-            else:
+            elif torch.is_grad_enabled():
                 h = self.ln_f(x).reshape(-1, self.cfg.d_model)
+            else:
+                h = _norm_out(self.ln_f, x, "ln_f_out").reshape(
+                    -1, self.cfg.d_model)
             logits = self.head(h)
             loss = F.cross_entropy(logits, flat_t, ignore_index=-1)
         else:
-            logits = self.head(self.ln_f(x[:, -1:]))
+            last = x[:, -1:]
+            if torch.is_grad_enabled():
+                logits = self.head(self.ln_f(last))
+            else:
+                logits = self.head(_norm_out(self.ln_f, last, "ln_f_out"))
             loss = None
+        if not torch.is_grad_enabled():
+            _release_scratch(*_NOGRAD_SCRATCH)
         return logits, loss, layer_stats
 
 

@@ -156,8 +156,8 @@ from .metrics import (
 from .model import GATES, NORMS, build
 from .repro import seed_everything, stream_generator
 from .train import (
-    collect_error_cases,
     collect_stats,
+    collect_stats_and_errors,
     error_detection_aucs,
     eval_metrics,
     false_concentration_analysis,
@@ -2864,10 +2864,14 @@ def _curve_record(hist):
 
 
 def _cost_record(settings: Settings, model):
+    # The CPU memory figure needs the allocation-event profiler, whose
+    # instrumentation cost dwarfs the forward it measures; the CUDA peak is
+    # a cheap allocator counter, so only CPU skips the profiler.
     return measure_inference_cost(
         model, settings.n_pairs, settings.vocab, settings.device,
         batch=min(settings.eval_batch, 128), warmup=settings.cost_warmup,
-        runs=settings.cost_runs)
+        runs=settings.cost_runs,
+        measure_memory=torch.device(settings.device).type != "cpu")
 
 
 def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
@@ -3955,17 +3959,17 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
     eval_seed, stats_seed = TEST_SEED, STATS_SEED
     model, params, metrics, curve, model_cfg = _train_and_eval(
         settings, seed, lr, eval_seed=eval_seed, gate=gate, **model_overrides)
-    stats = collect_stats(model, settings.n_pairs, settings.vocab,
-                          settings.device, batch=settings.stats_batch,
-                          batches=settings.stats_batches, seed=stats_seed)
+    # One diagnostic pass feeds both the layer statistics and the error
+    # mining (same seed and stream as the two separate passes used before,
+    # so every derived number is unchanged).
+    stats, errors = collect_stats_and_errors(
+        model, settings.n_pairs, settings.vocab, settings.device,
+        batch=settings.stats_batch, batches=settings.stats_batches,
+        seed=stats_seed, max_cases=settings.max_error_cases)
     corr = gate_stat_correlations(stats)
     fc = false_concentration_analysis(stats)
     fc_sweep = false_concentration_sweep(stats)
     ed = error_detection_aucs(stats)
-    errors = collect_error_cases(
-        model, settings.n_pairs, settings.vocab, settings.device,
-        batch=settings.stats_batch, batches=settings.stats_batches,
-        seed=stats_seed, max_cases=settings.max_error_cases)
     rec = {
         "experiment": "e1",
         "hypotheses": ["H1a", "H1b", "H1c", "H1d", "H1e", "H1f"],
@@ -4478,8 +4482,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
 
     print(f"\n[e1] inference cost (batch="
           f"{min(settings.eval_batch, 128)}, seq_len={by_gate['none'][0]['seq_len']};"
-          f" latency = median of {settings.cost_runs} runs; cpu memory is a"
-          f" profiler-tracked live-tensor peak, not peak RSS):")
+          f" latency = median of {settings.cost_runs} runs; memory peak is the"
+          f" CUDA allocator peak, n/a on CPU):")
     print(f"{'gate':>6} {'params':>10} {'flops/M':>9} {'ms/sample':>10} "
           f"{'mem/MB':>9}")
     for gate in GATES:
@@ -4516,11 +4520,13 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             continue
         acc_ci = _paired_diff(by_gate[gate], by_gate["none"], "accuracy")
         warn = _curve_warn((gate, by_gate[gate]), ("none", by_gate["none"]))
+        mem_ratio = _ratio(gate, "none", "peak_mem_mb")
+        mem_s = f"x{mem_ratio:.3f}" if math.isfinite(mem_ratio) else "n/a"
         print(f"  {gate:>6}: {_fmt_ci(acc_ci)} | "
               f"params x{_ratio(gate, 'none', 'params_total'):.3f}"
               f"  flops x{_ratio(gate, 'none', 'flops_per_forward'):.3f}"
               f"  latency x{_ratio(gate, 'none', 'latency_ms_per_sample'):.3f}"
-              f"  mem x{_ratio(gate, 'none', 'peak_mem_mb'):.3f}"
+              f"  mem {mem_s}"
               + (f"  [{warn}]" if warn else ""))
 
     print(f"\n[e1] bad cases (stats seed {STATS_SEED}; train batch: "
@@ -4658,6 +4664,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                    **_training_record(settings, lr),
                    **_cost_record(settings, model), **curve,
                    **_run_context(settings)}
+            errors = None
             for length in lengths:
                 metrics = (base_metrics if length == settings.n_pairs else
                            eval_metrics(model, length, settings.vocab,
@@ -4665,10 +4672,17 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                                         batch=settings.eval_batch,
                                         batches=settings.eval_batches,
                                         seed=eval_seed))
-                stats = collect_stats(model, length, settings.vocab,
-                                      settings.device, batch=settings.stats_batch,
-                                      batches=settings.stats_batches,
-                                      seed=stats_seed)
+                want_errors = length == lengths[-1]
+                # Last length: one merged pass instead of the previous
+                # stats pass + error-mining pass over the same stream.
+                stats, last_errors = collect_stats_and_errors(
+                    model, length, settings.vocab, settings.device,
+                    batch=settings.stats_batch,
+                    batches=settings.stats_batches, seed=stats_seed,
+                    max_cases=(settings.max_error_cases if want_errors
+                               else None))
+                if want_errors:
+                    errors = last_errors
                 rec["accuracy_by_length"][length] = metrics["accuracy"]
                 rec["eval_n_by_length"][length] = int(metrics["n"])
                 rec["entropy_by_length"][length] = float(stats["entropy"].mean())
@@ -4697,10 +4711,6 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             rec["entropy_norm_drift"] = (
                 rec["entropy_norm_by_length"][lengths[-1]]
                 - rec["entropy_norm_by_length"][settings.n_pairs])
-            errors = collect_error_cases(
-                model, lengths[-1], settings.vocab, settings.device,
-                batch=settings.stats_batch, batches=settings.stats_batches,
-                seed=stats_seed, max_cases=settings.max_error_cases)
             rec.update({f"err_{k}": v for k, v in errors["summary"].items()})
             for case in errors["cases"]:
                 _write_result(out_dir / "e2_error_cases.jsonl",

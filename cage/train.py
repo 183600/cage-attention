@@ -877,7 +877,7 @@ def estimate_forward_flops(model, seq_len: int) -> int:
 
 
 def measure_inference_cost(model, n_pairs, vocab, device, batch=64, warmup=3,
-                           runs=10, seed=STATS_SEED):
+                           runs=10, seed=STATS_SEED, measure_memory=True):
     """Parameters / FLOPs / latency / memory of one eval-mode forward pass.
 
     Latency is the median of ``runs`` passes after ``warmup`` (batch
@@ -886,7 +886,10 @@ def measure_inference_cost(model, n_pairs, vocab, device, batch=64, warmup=3,
     ``torch.cuda.synchronize()`` so async kernel enqueueing is not timed.
     Memory is the CUDA allocation peak on GPU; on CPU it is the peak of the
     profiler-tracked live tensor bytes during one pass (derived from the
-    allocation/free events, not RSS).
+    allocation/free events, not RSS).  The CPU profiler records every
+    allocation event, so its instrumentation cost far exceeds the forward
+    it measures; pass ``measure_memory=False`` to skip it (the reported
+    memory is then ``nan`` / ``"unavailable"``).
     """
     gen = torch.Generator(device=device).manual_seed(seed)
     idx, _, _ = make_batch(batch, n_pairs, vocab, device, gen=gen)
@@ -916,7 +919,7 @@ def measure_inference_cost(model, n_pairs, vocab, device, batch=64, warmup=3,
                 torch.cuda.synchronize()
                 mem_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
                 mem_method = "cuda_peak"
-            else:
+            elif measure_memory:
                 try:
                     from torch.profiler import ProfilerActivity, profile
                     with profile(activities=[ProfilerActivity.CPU],
@@ -975,12 +978,28 @@ def _label_audit(idx, meta):
 
 
 @torch.inference_mode()
-def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
-                        seed=STATS_SEED, max_cases=64):
-    """Bad-case mining: dump and taxonomise the samples the model gets wrong.
+def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
+                             batches=4, seed=STATS_SEED, max_cases=None):
+    """One pass over the diagnostic stream producing both the per-layer
+    mechanism statistics and the bad-case mining record.
 
-    Error analysis is the main source of new hypotheses, so each error is
-    recorded with the evidence needed to classify *why* it failed:
+    ``collect_stats`` and ``collect_error_cases`` used to replay the exact
+    same seeded stream in two separate full model forwards (and the mining
+    hooks re-projected q/k per layer each time).  The merged pass reads the
+    layer statistics off the same forward that feeds the mining hooks, so
+    both outputs are bit-identical to the two-pass version while one model
+    forward per call disappears.  ``max_cases=None`` collects statistics
+    only (no hooks, no case taxonomy) and returns ``None`` for the error
+    record.
+
+    Statistics: per-layer gate / entropy / maxprob / null-mass at query
+    positions, plus false-concentration labels (high max-prob but wrong
+    answer).  The first batch passes the ``validate_batch`` cleaning gate,
+    so the mechanism statistics are computed on the same validated data
+    contract as training and the reported accuracy metrics.
+
+    Error mining: each error is recorded with the evidence needed to
+    classify *why* it failed:
 
     * ``confidence`` / ``margin``   - confidently wrong (systematic blind
       spot) vs low-confidence (ambiguous for the model);
@@ -1010,8 +1029,9 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
     structurally invalid batch aborts the analysis instead of being
     taxonomised as a model error.
 
-    Returns ``{"cases": [...], "summary": {...}}``; cases are capped at
-    ``max_cases`` but the summary aggregates every evaluated sample.
+    Returns ``(stats, errors)``; cases are capped at ``max_cases`` but the
+    summary aggregates every evaluated sample.  ``stats`` matches the
+    ``collect_stats`` return value exactly.
     """
     cfg = model.cfg
     C, H = cfg.d_model, cfg.n_heads
@@ -1020,6 +1040,12 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
     gen = torch.Generator(device=device).manual_seed(seed)
     was_training = model.training
     model.eval()
+
+    with_errors = max_cases is not None
+
+    # Per-batch mechanism statistics (``collect_stats``).
+    stats_out = {"gate": [], "entropy": [], "maxprob": [], "null_mass": [],
+                 "correct": [], "resid_norm": []}
 
     per_layer_mass: dict[int, torch.Tensor] = {}
     state: dict = {"meta": None}
@@ -1033,9 +1059,10 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
                     inputs[0], module.qkv.weight, meta, H, inv_scale, null_k)
         return _hook
 
-    for i, blk in enumerate(model.blocks):
-        handles.append(blk.attn.register_forward_pre_hook(
-            _make_hook(i, getattr(blk.attn, "null_k", None))))
+    if with_errors:
+        for i, blk in enumerate(model.blocks):
+            handles.append(blk.attn.register_forward_pre_hook(
+                _make_hook(i, getattr(blk.attn, "null_k", None))))
 
     # Device-side accumulators for the per-batch reductions.
     n_total = 0
@@ -1067,8 +1094,30 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
                 validate_batch(idx, tgt, meta, vocab)
             per_layer_mass.clear()
             state["meta"] = meta
-            logits, _, _ = model(idx)
+            logits, _, layer_stats = model(idx, stat_pos=meta["query_pos"])
             state["meta"] = None
+
+            pred_stats = logits.squeeze(1).argmax(-1)
+            stats_out["correct"].append((pred_stats == meta["answer"]).float())
+            ents, maxps, nulls, gates, rns = [], [], [], [], []
+            for s in layer_stats:
+                ents.append(s["entropy"].mean(1))
+                maxps.append(s["maxprob"].max(1)[0])
+                rns.append(s["resid_norm"])
+                if s["gate"] is not None:
+                    gates.append(s["gate"].mean(-1))
+                if s["null_mass"] is not None:
+                    nulls.append(s["null_mass"].mean(1))
+            stats_out["entropy"].append(torch.stack(ents, 1))
+            stats_out["maxprob"].append(torch.stack(maxps, 1))
+            stats_out["resid_norm"].append(torch.stack(rns, 1))
+            if gates:
+                stats_out["gate"].append(torch.stack(gates, 1))
+            if nulls:
+                stats_out["null_mass"].append(torch.stack(nulls, 1))
+            if not with_errors:
+                continue
+
             layered = torch.stack(
                 [per_layer_mass[i] for i in sorted(per_layer_mass)], dim=0)
             mass_last, mass_mean = layered[-1], layered.mean(0)
@@ -1172,6 +1221,10 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
             hd.remove()
         model.train(was_training)
 
+    stats = {k: torch.cat(v).cpu() for k, v in stats_out.items() if v}
+    if not with_errors:
+        return stats, None
+
     n_err = int(n_err)
     n_label_err = int(n_label_err)
     flags_summary = {k: int(v) for k, v in flags_summary.items()}
@@ -1214,7 +1267,22 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
     }
     summary["attn_mass_gap"] = summary["attn_mass_on_key_correct"] - \
         summary["attn_mass_on_key_error"]
-    return {"cases": cases, "summary": summary}
+    return stats, {"cases": cases, "summary": summary}
+
+
+@torch.inference_mode()
+def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
+                        seed=STATS_SEED, max_cases=64):
+    """Bad-case mining: dump and taxonomise the samples the model gets wrong.
+
+    Single-purpose wrapper around ``collect_stats_and_errors``; returns
+    ``{"cases": [...], "summary": {...}}`` with cases capped at
+    ``max_cases`` while the summary aggregates every evaluated sample.
+    """
+    _, errors = collect_stats_and_errors(
+        model, n_pairs, vocab, device, batch=batch, batches=batches, seed=seed,
+        max_cases=max_cases)
+    return errors
 
 
 def _attention_mass_on_key(x, weight, meta, n_heads, inv_scale, null_k):
@@ -1356,38 +1424,11 @@ def collect_stats(model, n_pairs, vocab, device, batch=128, batches=4,
 
     The first batch passes the ``validate_batch`` cleaning gate, so the
     mechanism statistics are computed on the same validated data contract
-    as training and the reported accuracy metrics.
+    as training and the reported accuracy metrics.  Single-purpose wrapper
+    around ``collect_stats_and_errors`` (statistics-only mode).
     """
-    gen = torch.Generator(device=device).manual_seed(seed)
-    was_training = model.training
-    model.eval()
-    out = {"gate": [], "entropy": [], "maxprob": [], "null_mass": [],
-           "correct": [], "resid_norm": []}
-    for i in range(batches):
-        idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        if i == 0:
-            validate_batch(idx, tgt, meta, vocab)
-        logits, _, layer_stats = model(idx, stat_pos=meta["query_pos"])
-        pred = logits.squeeze(1).argmax(-1)
-        out["correct"].append((pred == meta["answer"]).float())
-        ents, maxps, nulls, gates, rns = [], [], [], [], []
-        for s in layer_stats:
-            ents.append(s["entropy"].mean(1))
-            maxps.append(s["maxprob"].max(1)[0])
-            rns.append(s["resid_norm"])
-            if s["gate"] is not None:
-                gates.append(s["gate"].mean(-1))
-            if s["null_mass"] is not None:
-                nulls.append(s["null_mass"].mean(1))
-        out["entropy"].append(torch.stack(ents, 1))
-        out["maxprob"].append(torch.stack(maxps, 1))
-        out["resid_norm"].append(torch.stack(rns, 1))
-        if gates:
-            out["gate"].append(torch.stack(gates, 1))
-        if nulls:
-            out["null_mass"].append(torch.stack(nulls, 1))
-    stats = {k: torch.cat(v).cpu() for k, v in out.items() if v}
-    model.train(was_training)
+    stats, _ = collect_stats_and_errors(
+        model, n_pairs, vocab, device, batch=batch, batches=batches, seed=seed)
     return stats
 
 
