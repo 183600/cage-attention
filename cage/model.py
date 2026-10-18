@@ -880,11 +880,8 @@ class Attention(nn.Module):
                    grad_on: bool) -> torch.Tensor:
         """Project the gate.
 
-        With grad on the projection runs on the flattened ``(B*T, C)`` rows
-        and the result owns its storage; a 3-D ``F.linear`` returns a *view*
-        of the 2-D result, and each in-place gate op on that view would make
-        autograd materialize a full ``(B, T, C)`` copy (``CopySlices``).
-        Without grad the caller consumes the plain ``(B, T, C)`` layout.
+        With grad on the projection runs on the flattened ``(B*T, C)`` rows;
+        without grad the caller consumes the plain ``(B, T, C)`` layout.
         """
         if grad_on:
             return F.linear(x.reshape(B * T, C), self.gate.weight,
