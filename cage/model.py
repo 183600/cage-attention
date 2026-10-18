@@ -1061,21 +1061,23 @@ class Attention(nn.Module):
                 if log_len is None:
                     log_len = math.log(max(T, 2))
                     self._log_len_cache[T] = log_len
-            if calc_len:
-                gate_val.sub_(self.calib_a * log_len)
             if calc_ent:
                 calib_cs = self.calib_c * self.calib_scale
                 if grad_on:
-                    conc = ent.mean(dim=1).div_(log_len).mul(
-                        calib_cs).reshape(B * T, 1)
+                    shift = ent.mean(dim=1).div_(log_len).mul(calib_cs)
                 else:
-                    conc = _get_scratch(("calib_conc",), x.device, x.dtype,
-                                        B * T)[:B * T].view(B, T)
-                    torch.mean(ent, dim=1, out=conc)
-                    conc = conc.div_(log_len).mul_(calib_cs).unsqueeze(-1)
-                gate_val.sub_(conc)
+                    shift = _get_scratch(("calib_conc",), x.device,
+                                         x.dtype, B * T)[:B * T].view(B, T)
+                    torch.mean(ent, dim=1, out=shift)
+                    shift.div_(log_len).mul_(calib_cs)
+                if calc_len:
+                    shift.add_(self.calib_a * log_len)
+                gate_val.sub_(shift.reshape(B * T, 1) if grad_on
+                              else shift.unsqueeze(-1))
+            elif calc_len:
+                gate_val.sub_(self.calib_a * log_len)
             tau = F.softplus(self.calib_tau) + 0.1
-            gate_val.div_(tau).sigmoid_()
+            gate_val.mul_(1.0 / tau).sigmoid_()
             del ent
             ent = None
 
