@@ -574,8 +574,10 @@ class _CalibAttn(torch.autograd.Function):
                    _get_scratch(("calib_ent",), q.device, q.dtype,
                                 bh * T).view(bh, T)) if need_ent else None
             ebuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
-            # Each block's result is built in a contiguous scratch buffer
-            # and copied into ``y[:, i0:i1]``.
+            # The block result is produced in a contiguous one-block-wide
+            # staging buffer and copied into its disjoint row slice of
+            # ``y``: unlike a GEMM straight into a strided ``y`` slice,
+            # both passes stay contiguous.
             yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
                                 bh * max_rows * dv)
             for i0, i1 in blocks:
@@ -637,13 +639,17 @@ class _CalibAttn(torch.autograd.Function):
         d_v = d_qkv[2].view_as(v)
         max_rows = rows0
         max_i1 = T
-        dk = q.size(-1)
         s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
         gbuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if grad_ent is not None else None
         mbuf = _get_scratch(("calib_bwd_mbuf",), q.device, torch.bool, bh * max_rows * max_i1) if grad_ent is not None else None
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
-        dqb = _get_scratch(("calib_bwd_dqb",), q.device, q.dtype,
-                           bh * max_rows * dk)
+        # One contiguous scratch serves both uses below: the block's
+        # ``d_v`` / ``d_k`` contribution (a full-height ``i1``-wide GEMM, so
+        # the accumulations stay contiguous) and the narrow ``d_q`` block
+        # copy.  It replaces the former one-block-wide ``dqb`` buffer whose
+        # transposed-input chunk loop made the GEMMs stride-bound.
+        dk = q.size(-1)
+        stg = _get_scratch(("calib_bwd_stg",), q.device, q.dtype, bh * max_i1 * dk)
         zero = _zero_scalar(q.device, q.dtype)
         first = True
         for i0, i1 in reversed(blocks):
@@ -662,28 +668,21 @@ class _CalibAttn(torch.autograd.Function):
                                        mbuf=None if mbuf is None else mbuf[:n])
             # The reversed block order writes the widest block first, so
             # the later (narrower) blocks accumulate into a prefix slice
-            # of ``d_v`` / ``d_k`` in place.
+            # of ``d_v`` / ``d_k``: build the ``(i1, dk)`` contribution in
+            # the contiguous scratch, then one strided ``add_``.
             if first:
                 torch.bmm(p.transpose(1, 2), g, out=d_v)
                 torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1],
                               beta=0.0, alpha=scale, out=d_k)
                 first = False
             else:
-                # The contribution is built in the one-block-wide
-                # ``dqb`` scratch in column chunks and added into the
-                # leading ``i1`` columns of ``d_v`` / ``d_k``.
-                pT = p.transpose(1, 2)
-                dsT = d_s.transpose(1, 2)
-                q_blk = q[:, i0:i1]
-                for c0 in range(0, i1, max_rows):
-                    c1 = min(i1, c0 + max_rows)
-                    t = dqb[:bh * (c1 - c0) * dk].view(bh, c1 - c0, dk)
-                    torch.bmm(pT[:, c0:c1, :], g, out=t)
-                    d_v[:, c0:c1].add_(t)
-                    torch.baddbmm(zero, dsT[:, c0:c1, :], q_blk,
-                                  beta=0.0, alpha=scale, out=t)
-                    d_k[:, c0:c1].add_(t)
-            dqblk = dqb[:bh * r * dk].view(bh, r, dk)
+                sv = stg[:bh * i1 * dk].view(bh, i1, dk)
+                torch.bmm(p.transpose(1, 2), g, out=sv)
+                d_v[:, :i1].add_(sv)
+                torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1],
+                              beta=0.0, alpha=scale, out=sv)
+                d_k[:, :i1].add_(sv)
+            dqblk = stg[:bh * r * dk].view(bh, r, dk)
             torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
                           out=dqblk)
             d_q[:, i0:i1].copy_(dqblk)
@@ -867,11 +866,10 @@ class _NullAttn(torch.autograd.Function):
         eb = _get_scratch(("null_bwd_e",), q.device, q.dtype, bh * max_rows * max_i1)
         gub = _get_scratch(("null_bwd_gu",), q.device, q.dtype, bh * max_rows)
         dotb = _get_scratch(("null_bwd_dot",), q.device, q.dtype, bh * max_rows)
-        tmpb = _get_scratch(("null_bwd_tmp",), q.device, q.dtype, bh * dk)
-        dqb = (_get_scratch(("null_bwd_dqb",), q.device, q.dtype,
-                            bh * max_rows * dk) if multi else None)
         acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
         acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
+        stg = (_get_scratch(("null_bwd_stg",), q.device, q.dtype,
+                            bh * max_i1 * dk) if multi else None)
         first = True
         for i0, i1 in reversed(blocks):
             q_blk = q[:, i0:i1]
@@ -894,26 +892,21 @@ class _NullAttn(torch.autograd.Function):
             d_s0 = gu0.mul_(p0).mul_(scale)
             if multi:
                 # Reversed order: the widest block writes ``d_v`` / ``d_k``
-                # outright, the narrower ones add their contribution into
-                # the leading ``i1`` columns.
+                # outright; the narrower ones build their ``(i1, dk)``
+                # contribution contiguously in the scratch and add it into
+                # the leading ``i1`` columns (the former transposed-input
+                # chunk loop was stride-bound).
                 if first:
                     torch.bmm(p.transpose(1, 2), g, out=d_v)
                     torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
                     first = False
                 else:
-                    # The contribution is built in the one-block-wide
-                    # ``dqb`` scratch in column chunks and added into the
-                    # leading ``i1`` columns of ``d_v`` / ``d_k``.
-                    pT = p.transpose(1, 2)
-                    dsT = d_s.transpose(1, 2)
-                    for c0 in range(0, i1, max_rows):
-                        c1 = min(i1, c0 + max_rows)
-                        t = dqb[:bh * (c1 - c0) * dk].view(bh, c1 - c0, dk)
-                        torch.bmm(pT[:, c0:c1, :], g, out=t)
-                        d_v[:, c0:c1].add_(t)
-                        torch.bmm(dsT[:, c0:c1, :], q_blk, out=t)
-                        d_k[:, c0:c1].add_(t)
-                dqblk = dqb[:bh * r * dk].view(bh, r, dk)
+                    sv = stg[:bh * i1 * dk].view(bh, i1, dk)
+                    torch.bmm(p.transpose(1, 2), g, out=sv)
+                    d_v[:, :i1].add_(sv)
+                    torch.bmm(d_s.transpose(1, 2), q_blk, out=sv)
+                    d_k[:, :i1].add_(sv)
+                dqblk = stg[:bh * r * dk].view(bh, r, dk)
                 torch.bmm(d_s, k[:, :i1], out=dqblk)
                 d_q[:, i0:i1].copy_(dqblk)
             else:
@@ -921,11 +914,10 @@ class _NullAttn(torch.autograd.Function):
                 torch.bmm(d_s.transpose(1, 2), q_blk, out=d_qkv[1])
                 torch.bmm(d_s, k[:, :i1], out=d_qkv[0])
             d_q4[:, :, i0:i1].addcmul_(d_s0.view(B, h, r, 1), nk4)
-            acc_blk = tmpb[:bh * dk].view(bh, 1, dk)
-            torch.bmm(d_s0.transpose(-2, -1), q_blk, out=acc_blk)
-            acc_k.add_(acc_blk)
-            torch.bmm(p0.transpose(-2, -1), g, out=acc_blk)
-            acc_v.add_(acc_blk)
+            torch.baddbmm(acc_k, d_s0.transpose(-2, -1), q_blk, beta=1.0,
+                          alpha=1.0, out=acc_k)
+            torch.baddbmm(acc_v, p0.transpose(-2, -1), g, beta=1.0,
+                          alpha=1.0, out=acc_v)
         d_null_k = acc_k.view(B, h, dk).sum(0)
         d_null_v = acc_v.view(B, h, dk).sum(0)
         return d_qkv, d_null_k, d_null_v, None, None, None, None
