@@ -263,7 +263,7 @@ class _SoftmaxInPlace(torch.autograd.Function):
         (y,) = saved
         if grad_out is None:
             return None
-        gy = grad_out.mul_(y)
+        gy = grad_out.mul(y)
         n0, n1 = gy.size(0), gy.size(1)
         rowsum = _get_scratch(("softmax_rowsum",), gy.device, gy.dtype,
                               n0 * n1)[:n0 * n1].view(n0, n1, 1)
