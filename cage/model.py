@@ -391,13 +391,7 @@ def _linear_into(x: torch.Tensor, weight: torch.Tensor,
 
 
 def _layer_norm_into(ln: nn.LayerNorm, x: torch.Tensor) -> torch.Tensor:
-    """``ln(x)`` written into reusable buffers.
-
-    The ``out=`` scratch is deliberately kept over the functionally-equivalent
-    result allocation: in the model the reused (cache-warm) destination is
-    measurably faster end to end than a freshly allocated one, even though
-    the standalone op is not.
-    """
+    """``ln(x)`` written into reusable buffers."""
     shape = x.shape
     rows = x.numel() // shape[-1]
     out = _get_scratch(("ln_out",), x.device, x.dtype, x.numel())
@@ -466,9 +460,7 @@ class _CalibAttn(torch.autograd.Function):
 
     ``ybt`` optionally supplies a ``(B, T, H, dk)`` buffer used by the
     no-grad eval path: each block is written straight into it (transposing
-    the block once on the way) and returned in that layout, which removes
-    the separate ``(B*H, T, dk)`` output buffer and the full transpose copy
-    that the caller would otherwise need.
+    the block once on the way) and returned in that layout.
     """
 
     @staticmethod
@@ -1127,11 +1119,9 @@ class Attention(nn.Module):
                 ent = None if ent is None else ent.view(B, h, T)
             else:
                 # No-grad: every variant has the kernel write its blocks
-                # straight into the ``(B, T, H, dk)`` projection input, which
-                # removes the separate ``(B*H, T, dk)`` output buffer and the
-                # full transpose copy the gated variants would otherwise
-                # need.  Gated variants multiply the gate into the buffer in
-                # place below.
+                # straight into the ``(B, T, H, dk)`` projection input.
+                # Gated variants multiply the gate into the buffer in place
+                # below.
                 ybt = _get_scratch(("attn_y",), x.device, x.dtype,
                                    B * T * C).view(B, T, h, dk)
                 if is_null:
@@ -1322,9 +1312,7 @@ class Block(nn.Module):
             return self.mlp(h)
         c = self.cfg.d_model
         n = h.numel() // c
-        # Row-chunked on every device: the up projection scratch drops from
-        # ``4*n*c`` to ``4*_MLP_CHUNK_ROWS*c`` elements, while the per-chunk
-        # GEMMs stay well above the size where launch overhead matters.
+        # Row-chunked up projection.
         if n > _MLP_CHUNK_ROWS:
             up = _get_scratch(("mlp_up",), h.device, h.dtype,
                               4 * _MLP_CHUNK_ROWS * c)
