@@ -20,8 +20,9 @@ Design principles
     (optimizer family, weight decay, betas, schedule, eta_min, gradient
     clipping, augmentation - from the single source of truth in
     ``cage.train.training_recipe``, beside the already-audited learning
-    rate and step count), so "the gain is just a different optimizer or
-    schedule" is refused by the audit instead of being reported.  The
+    rate and step count), so "the gain is just a different optimizer,
+    schedule or evaluation stream" is refused by the audit instead of
+    being reported.  The
    baselines are checked *statistically* before the grids run: HB1/HB2/
    HB3 verdicts are written to ``baselines_verdict.json`` (rule ceiling
    with a Wilson CI, a bootstrap near-chance test for the tuned probe,
@@ -546,7 +547,8 @@ def _mean_std(values):
     return {"mean": mean, "std": std, "n": len(vals)}
 
 
-def _aggregate_runs(runs, skip=("seed", "lr", "params")):
+def _aggregate_runs(runs, skip=("seed", "lr", "params", "eval_seed",
+                                "stats_seed")):
     keys = sorted({k for r in runs for k, v in r.items()
                    if _finite(v) and k not in skip})
     return {k: _mean_std([r[k] for r in runs if k in r]) for k in keys}
@@ -556,7 +558,10 @@ def _aggregate_runs(runs, skip=("seed", "lr", "params")):
 # *identical* on both sides of every contrast (see ``_controlled_audit``):
 # optimizer-relevant learning rate, schedule length, batch geometry, data
 # sizes and every evaluation-stream size.  ``config`` is the resolved
-# Settings snapshot stored with each run record.
+# Settings snapshot stored with each run record.  The per-run evaluation
+# stream *seeds* are not Settings fields; the run records stamp them and
+# ``_recipe_view`` adds them to the audited view, so "same stream size on
+# a different stream" is caught too.
 _AUDIT_RECIPE_KEYS = (
     "device", "d_model", "n_heads", "n_layers", "max_len", "vocab", "batch",
     "n_pairs", "steps", "eval_batch", "eval_batches", "stats_batch",
@@ -609,18 +614,61 @@ def _calib_cell(run):
     return label or None
 
 
-def _report_ablation_coverage(out_dir, tag, runs, cells=_CALIB_FACTORIAL_CELLS):
+def _coverage_cell_key(cell) -> str:
+    """JSON-safe key for a design cell (tuples become ``a|b|c``)."""
+    if isinstance(cell, tuple):
+        return "|".join(str(part) for part in cell)
+    return str(cell)
+
+
+def _cell_seed_balance(runs, cell_of, expected, planned_seeds):
+    """Seeds per design cell vs the planned training-seed set.
+
+    Presence-only coverage can call a factorial complete while one cell
+    silently lost seeds: cell membership would then correlate with seed
+    availability, so that cell's mean is read on a different sample than
+    its neighbours' - a confound no per-contrast recipe audit sees if the
+    affected contrast is not pre-registered (e.g. an E3 cell that only
+    enters exploratory reads).  Returns the per-cell seed payload and the
+    list of unbalanced cell keys.
+    """
+    planned = sorted({int(s) for s in planned_seeds}) if planned_seeds else []
+    seen: dict[str, set] = {}
+    for run in runs:
+        cell = cell_of(run)
+        seed = run.get("seed")
+        if cell is None or seed is None:
+            continue
+        seen.setdefault(_coverage_cell_key(cell), set()).add(int(seed))
+    balance = {}
+    unbalanced = []
+    for cell in expected:
+        key = _coverage_cell_key(cell)
+        seeds = sorted(seen.get(key, set()))
+        ok = bool(planned) and seeds == planned
+        balance[key] = {"seeds": seeds, "planned": planned, "balanced": ok}
+        if not ok:
+            unbalanced.append(key)
+    return balance, unbalanced
+
+
+def _report_ablation_coverage(out_dir, tag, runs, cells=_CALIB_FACTORIAL_CELLS,
+                              planned_seeds=None):
     """Verify a declared factorial ablation ran every cell of its design.
 
     A "each component is doing work" claim over a 2x2 (or leave-one-out)
     design is only supported if every cell was actually trained; a missing
-    cell silently leaves one effect unmeasured.  The check reads the cell
-    each run trained (resolved flags, not labels), prints a warning listing
-    the missing cells, and stores ``<tag>_ablation_coverage.json`` next to
-    the run records.
+    cell silently leaves one effect unmeasured, and a cell that trained
+    only part of the planned seed set is read on a different sample than
+    the others (see ``_cell_seed_balance``).  The check reads the cell each
+    run trained (resolved flags, not labels), prints a warning listing the
+    missing or unbalanced cells, and stores
+    ``<tag>_ablation_coverage.json`` next to the run records.
     """
     present = sorted({c for c in (_calib_cell(r) for r in runs) if c in cells})
     missing = [c for c in cells if c not in present]
+    balance, unbalanced = _cell_seed_balance(runs, _calib_cell, cells,
+                                             planned_seeds)
     payload = {
         "tag": tag,
         "design": "calib_use_len x calib_use_ent (2x2)",
@@ -628,6 +676,9 @@ def _report_ablation_coverage(out_dir, tag, runs, cells=_CALIB_FACTORIAL_CELLS):
         "present_cells": present,
         "missing_cells": missing,
         "complete": not missing,
+        "cell_seed_balance": balance,
+        "unbalanced_cells": unbalanced,
+        "seed_balanced": not unbalanced,
         "n_runs": len(runs),
     }
     if missing:
@@ -638,11 +689,19 @@ def _report_ablation_coverage(out_dir, tag, runs, cells=_CALIB_FACTORIAL_CELLS):
     else:
         print(f"[{tag}] ablation coverage: {len(cells)}/{len(cells)} "
               f"calibration-term cells trained ({', '.join(present)})")
+    if unbalanced:
+        print(f"[{tag}] WARNING: ablation cell(s) {', '.join(unbalanced)} "
+              f"did not train the full planned seed set "
+              f"{list(planned_seeds or ())}: their means are read on a "
+              f"different sample than the other cells'; the factorial is "
+              f"unbalanced and those cell effects are confounded with seed "
+              f"availability")
     _write_json(out_dir / f"{tag}_ablation_coverage.json", payload)
     return payload
 
 
-def _report_design_coverage(out_dir, tag, runs, design, extract, expected):
+def _report_design_coverage(out_dir, tag, runs, design, extract, expected,
+                            planned_seeds=None):
     """Verify a declared factorial design trained every declared cell.
 
     Generalises the ablation-coverage check to whole experiment grids
@@ -650,12 +709,15 @@ def _report_design_coverage(out_dir, tag, runs, design, extract, expected):
     only attributable if every cell it contrasts was actually trained, and
     a missing arm leaves that effect unmeasured - or worse, invites a
     claim from the cells that happen to have run.  The extractor reads the
-    resolved per-run factors (not labels); missing cells are printed as a
-    warning and stored in ``<tag>_<design>_coverage.json``.
+    resolved per-run factors (not labels); missing cells and cells that
+    trained only part of the planned seed set are printed as warnings and
+    stored in ``<tag>_<design>_coverage.json``.
     """
     observed = {extract(r) for r in runs if extract(r) is not None}
     present = [c for c in expected if any(c == o for o in observed)]
     missing = [c for c in expected if not any(c == p for p in present)]
+    balance, unbalanced = _cell_seed_balance(runs, extract, expected,
+                                             planned_seeds)
     payload = {
         "tag": tag,
         "design": design,
@@ -666,6 +728,9 @@ def _report_design_coverage(out_dir, tag, runs, design, extract, expected):
         "missing_cells": [list(c) if isinstance(c, tuple) else c
                           for c in missing],
         "complete": not missing,
+        "cell_seed_balance": balance,
+        "unbalanced_cells": unbalanced,
+        "seed_balanced": not unbalanced,
         "n_runs": len(runs),
     }
     if missing:
@@ -675,6 +740,12 @@ def _report_design_coverage(out_dir, tag, runs, design, extract, expected):
     else:
         print(f"[{tag}] design coverage: {len(expected)}/{len(expected)} "
               f"{design} cells trained")
+    if unbalanced:
+        print(f"[{tag}] WARNING: {design} cell(s) {', '.join(unbalanced)} "
+              f"did not train the full planned seed set "
+              f"{list(planned_seeds or ())}: the factorial is unbalanced "
+              f"and those cell effects are confounded with seed "
+              f"availability")
     _write_json(out_dir / f"{tag}_{design}_coverage.json", payload)
     return payload
 
@@ -687,11 +758,16 @@ def _recipe_view(run):
     schedule, eta_min, gradient clipping, augmentation) when the record
     carries it, so a contrast checks the *actual* optimisation and
     augmentation recipe - not only the learning rate - for equality across
-    the two sides.
+    the two sides.  The stamped evaluation-stream seeds enter the view as
+    well: equal stream *sizes* do not prove equal streams, and a metric
+    read from a different stream is an evaluation-protocol difference the
+    audit must refuse exactly like a recipe difference.
     """
     cfg = run.get("config") or {}
     view = {k: cfg.get(k) for k in _AUDIT_RECIPE_KEYS}
     view["lr"] = run.get("lr")
+    view["eval_seed"] = run.get("eval_seed")
+    view["stats_seed"] = run.get("stats_seed")
     recipe = run.get("training_recipe")
     if isinstance(recipe, dict):
         for key, val in recipe.items():
@@ -716,7 +792,7 @@ def _controlled_audit(runs_a, runs_b):
        seeds silently shrink the sample and break the pairing);
     2. **Within-side recipe**: every run on a side used the same learning
        rate, step count, batch geometry, data size and evaluation-stream
-       size, and - when the record carries the stamped
+       size and seed, and - when the record carries the stamped
        ``training_recipe`` - the same optimizer, weight decay, betas,
        schedule, eta_min, gradient clipping and augmentation pipeline (no
        per-variant optimizer or schedule drift);
@@ -851,17 +927,23 @@ def _controlled_audit(runs_a, runs_b):
 
 
 def _paired_diff(runs_a, runs_b, metric):
-    """Paired contrast ``a - b`` plus the control-side level.
+    """Paired contrast ``a - b`` plus both arms' levels.
 
     ``baseline_mean`` (the mean of ``metric`` on side ``b``) is attached so
     the report can print the effect as a relative change: a contrast can be
     statistically significant with zero variance yet practically
-    negligible, and the relative effect is what exposes that.
+    negligible, and the relative effect is what exposes that.  The full
+    per-arm mean +- std (and the seed count each mean is read on) travel
+    with the contrast too, so the decision table answers the pre-registered
+    "did the effect exceed the seed-to-seed spread?" question directly
+    instead of only through ``dz``/MDE80 - both arms are reported on the
+    same stream, and an arm mean resting on a shrunken seed set is visible.
 
     The controlled-variable audit (``_controlled_audit``) is attached as
     ``controlled``: a difference between recipes (optimizer settings, step
-    count, data geometry, unpaired seeds) would confound the contrast, so
-    the claim is refused downstream instead of being reported as a win.
+    count, data geometry, evaluation streams, unpaired seeds) would
+    confound the contrast, so the claim is refused downstream instead of
+    being reported as a win.
 
     Seed accounting: only seeds where both sides carry a finite value for
     this metric enter the paired difference.  ``seeds_used`` records them;
@@ -892,7 +974,9 @@ def _paired_diff(runs_a, runs_b, metric):
             dropped.append(ra["seed"])
             undefined.append(ra["seed"])
     ci = paired_bootstrap_ci(diffs)
+    side_a = _mean_std([r[metric] for r in runs_a if metric in r])
     base = _mean_std([r[metric] for r in runs_b if metric in r])
+    ci["arms"] = {"a": side_a, "b": base}
     ci["baseline_mean"] = base["mean"]
     # The paired sample is only the seeds where *both* sides carry a
     # finite value for this metric: recording which seeds actually entered
@@ -919,7 +1003,9 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     within each arm the recipe is fixed and only the intended factor
     varies, and all four cells share one recipe and one seed set.  A
     contrast whose audit fails is refused downstream exactly like a
-    marginal one, and the effective paired seed set is recorded.
+    marginal one, and the effective paired seed set is recorded.  ``arms``
+    carries each marginal difference (a = a1-b1, b = a2-b2) with its mean
+    +- std, so the interaction row shows the levels it differences.
     """
     def _by_seed(rs):
         return {r["seed"]: r for r in rs}
@@ -950,6 +1036,19 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     base1 = _mean_std([r[metric] for r in runs_b1 if metric in r])
     base2 = _mean_std([r[metric] for r in runs_b2 if metric in r])
     ci["baseline_mean"] = base1["mean"] - base2["mean"]
+    # The two arms of an interaction are the two *marginal differences*
+    # (a1-b1 and a2-b2), each summarised with mean +- std over the same
+    # paired seeds, so the decision table shows the levels the interaction
+    # is computed from next to the DiD effect itself.
+    arms = {}
+    for name, (ra, rb) in (("a", (runs_a1, runs_b1)), ("b", (runs_a2, runs_b2))):
+        ma, mb = _by_seed(ra), _by_seed(rb)
+        ds = [float(ma[s][metric]) - float(mb[s][metric]) for s in planned
+              if s in ma and s in mb
+              and _finite(ma[s].get(metric)) and _finite(mb[s].get(metric))]
+        arms[name] = _mean_std(ds)
+    ci["arms"] = arms
+    ci["arms_note"] = "marginal differences (a1-b1 vs a2-b2)"
     ci["seeds_used"] = sorted(used)
     ci["seeds_dropped"] = sorted(dropped)
     ci["seeds_unpaired"] = sorted(unpaired)
@@ -1094,10 +1193,15 @@ class ContrastLog:
 
     Every contrast built by ``_paired_diff`` also carries its
     controlled-variable audit: a contrast whose two sides differ in
-    optimizer/recipe settings, whose seeds are not paired, or that does not
-    vary a declared model factor is *not* read as supported, whatever its
+    optimizer/recipe settings, whose evaluation streams differ (size *or*
+    seed), whose seeds are not paired, or that does not vary a declared
+    model factor is *not* read as supported, whatever its
     p-value - the difference would not be attributable to the module under
-    test.  The audit verdict is printed inline and stored per row.
+    test.  The audit verdict is printed inline and stored per row, and so
+    is each arm's mean +- std and seed count, so the decision table itself
+    answers "did the effect exceed the seed-to-seed spread?" for every
+    metric - including the E3 mechanism readouts that have no per-arm
+    table of their own.
 
     The decision layer also separates statistical from *practical*
     significance: the hypothesis's pre-registered SESOI (looked up in
@@ -1153,12 +1257,19 @@ class ContrastLog:
         equiv = ci.get("test") == "equivalence"
         audit = ci.get("controlled")
         sesoi = (HYPOTHESES.get(hyp, {}).get("sesoi") or {}).get(metric)
+        arms = ci.get("arms") or {}
+        arm_a, arm_b = arms.get("a") or {}, arms.get("b") or {}
         self.rows.append({
             "rule": rule, "hypothesis": hyp, "metric": metric,
             "mean": ci.get("mean"), "lo": ci.get("lo"), "hi": ci.get("hi"),
             "n": ci.get("n"), "p_value": ci.get("p_value"),
             "mde80": ci.get("mde80"), "sd": ci.get("sd"),
             "dz": _std_effect(ci),
+            "a_mean": arm_a.get("mean"), "a_std": arm_a.get("std"),
+            "a_n": arm_a.get("n"),
+            "b_mean": arm_b.get("mean"), "b_std": arm_b.get("std"),
+            "b_n": arm_b.get("n"),
+            "arms_note": ci.get("arms_note"),
             "sesoi": sesoi,
             "test": "equivalence" if equiv else "difference",
             "equivalence_bound": ci.get("bound") if equiv else None,
@@ -1373,6 +1484,29 @@ class ContrastLog:
                   f"{sesoi_s}, seeds={r['n']}, "
                   f"sign-consistency={r['sign_consistency']:.2f}"
                   f"{loo_s}{need_s})")
+            a_mean, a_std = r.get("a_mean"), r.get("a_std")
+            b_mean, b_std = r.get("b_mean"), r.get("b_std")
+            if _finite(a_mean) and _finite(b_mean):
+                sd = r.get("sd")
+                if _finite(sd) and sd > 0.0 and _finite(r["mean"]):
+                    spread = ("|effect| > paired sd (gain exceeds the paired "
+                              "seed-to-seed spread)"
+                              if abs(r["mean"]) > sd else
+                              "|effect| <= paired sd (gain is within the "
+                              "paired seed-to-seed spread)")
+                    var_read = f"paired sd={sd:.4f}; {spread}"
+                elif _finite(sd):
+                    var_read = ("paired diffs identical across seeds "
+                                "(paired sd=0)")
+                else:
+                    var_read = "paired sd n/a"
+                std_a = f"{a_std:.4f}" if _finite(a_std) else "n/a"
+                std_b = f"{b_std:.4f}" if _finite(b_std) else "n/a"
+                note = r.get("arms_note")
+                label = f"arms ({note})" if note else "arms (mean±std)"
+                print(f"      {label}: a={a_mean:.4f}±{std_a} "
+                      f"(n={r.get('a_n')}) vs b={b_mean:.4f}±{std_b} "
+                      f"(n={r.get('b_n')}); {var_read}")
         if audited:
             print(f"[{self.tag}] controlled-variable audit: "
                   f"{len(controlled_pass)}/{len(audited)} contrasts pass "
@@ -2148,7 +2282,8 @@ def tune_shared_recipe(settings: Settings):
             accs.append(metrics["accuracy"])
             verdicts.append(curve["curve_verdict"])
         mean = sum(accs) / len(accs)
-        var = (sum((a - mean) ** 2 for a in accs) / len(accs)) if accs else 0.0
+        var = (sum((a - mean) ** 2 for a in accs) / (len(accs) - 1)
+               if len(accs) > 1 else 0.0)
         table.append({"lr": lr, "val_accuracy_mean": mean,
                       "val_accuracy_std": var ** 0.5, "n_seeds": len(accs),
                       "curve_verdicts": verdicts})
@@ -2329,7 +2464,8 @@ def _run_shallow_baseline(settings: Settings, out_dir: pathlib.Path,
         _write_result(out_dir / "baselines_runs.jsonl",
                       {"experiment": "baselines", "hypotheses": ["HB6"],
                        "name": "shallow_none_baseline", "lr": best["lr"],
-                       "training_seed": seed, "accuracy": metrics["accuracy"],
+                       "training_seed": seed, "eval_seed": TEST_SEED,
+                       "accuracy": metrics["accuracy"],
                        "accuracy_lo": metrics["accuracy_lo"],
                        "accuracy_hi": metrics["accuracy_hi"], "n": n,
                        **_training_record(settings, best["lr"]),
@@ -2638,6 +2774,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         _write_result(out_dir / "baselines_runs.jsonl",
                       {**record, "name": "negative_control_permuted_labels",
                        "lr": lr_shared, "training_seed": seed,
+                       "eval_seed": TEST_SEED,
                        "accuracy": metrics["accuracy"],
                        "accuracy_lo": metrics["accuracy_lo"],
                        "accuracy_hi": metrics["accuracy_hi"], "n": n,
@@ -2766,14 +2903,17 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
     ``model_overrides``; ``record_extra`` carries the ablation label that
     the controlled-variable audit compares, and the record stamps the
     *resolved* ``model_cfg`` the model was actually built from so the audit
-    can check the trained configuration instead of the label alone.
+    can check the trained configuration instead of the label alone.  The
+    evaluation-stream seeds are stamped too (from the same locals used for
+    the calls), so the audit verifies both sides read the same streams.
     Returns ``(record, errors)``.
     """
+    eval_seed, stats_seed = TEST_SEED, STATS_SEED
     model, params, metrics, curve, model_cfg = _train_and_eval(
-        settings, seed, lr, eval_seed=TEST_SEED, gate=gate, **model_overrides)
+        settings, seed, lr, eval_seed=eval_seed, gate=gate, **model_overrides)
     stats = collect_stats(model, settings.n_pairs, settings.vocab,
                           settings.device, batch=settings.stats_batch,
-                          batches=settings.stats_batches, seed=STATS_SEED)
+                          batches=settings.stats_batches, seed=stats_seed)
     corr = gate_stat_correlations(stats)
     fc = false_concentration_analysis(stats)
     fc_sweep = false_concentration_sweep(stats)
@@ -2781,10 +2921,11 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
     errors = collect_error_cases(
         model, settings.n_pairs, settings.vocab, settings.device,
         batch=settings.stats_batch, batches=settings.stats_batches,
-        seed=STATS_SEED, max_cases=settings.max_error_cases)
+        seed=stats_seed, max_cases=settings.max_error_cases)
     rec = {
         "experiment": "e1", "hypotheses": ["H1a", "H1b", "H1c", "H1d"],
         "gate": gate, "seed": seed, "lr": lr,
+        "eval_seed": eval_seed, "stats_seed": stats_seed,
         "params": params, "model_cfg": model_cfg, **metrics, **corr, **fc, **ed,
         **{f"err_{k}": v for k, v in errors["summary"].items()},
         **_training_record(settings, lr),
@@ -2849,10 +2990,12 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     table = {g: _aggregate_runs(rs) for g, rs in by_gate.items()}
     _report_ablation_coverage(
         out_dir, "e1",
-        runs + [r for rs in ablation_runs.values() for r in rs])
+        runs + [r for rs in ablation_runs.values() for r in rs],
+        planned_seeds=settings.seeds)
     _report_design_coverage(
         out_dir, "e1", runs, "gate",
-        lambda r: r.get("gate"), tuple(GATES))
+        lambda r: r.get("gate"), tuple(GATES),
+        planned_seeds=settings.seeds)
 
     print(f"\n[e1] test seed {TEST_SEED}, stats seed {STATS_SEED}, "
           f"lr={lr:g}, steps={settings.steps}")
@@ -3255,15 +3398,17 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                                    max_len=settings.max_len)
     print(f"[e2] training at n_pairs={settings.n_pairs}, sweep over {lengths} "
           f"(test seed {TEST_SEED}, stats seed {STATS_SEED})")
+    eval_seed, stats_seed = TEST_SEED, STATS_SEED
     runs = []
     examples = {}
     for label, gate, record_extra, model_overrides in _E2_VARIANTS:
         for seed in settings.seeds:
             model, params, base_metrics, curve, model_cfg = _train_and_eval(
-                settings, seed, lr, eval_seed=TEST_SEED, gate=gate,
+                settings, seed, lr, eval_seed=eval_seed, gate=gate,
                 **model_overrides)
             rec = {"experiment": "e2", "hypotheses": ["H2a", "H2b", "H2c"],
                    "gate": gate, "variant": label, "seed": seed, "lr": lr,
+                   "eval_seed": eval_seed, "stats_seed": stats_seed,
                    "params": params, "model_cfg": model_cfg,
                    "accuracy_by_length": {},
                    "entropy_by_length": {}, "entropy_norm_by_length": {},
@@ -3278,11 +3423,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                                         settings.device,
                                         batch=settings.eval_batch,
                                         batches=settings.eval_batches,
-                                        seed=TEST_SEED))
+                                        seed=eval_seed))
                 stats = collect_stats(model, length, settings.vocab,
                                       settings.device, batch=settings.stats_batch,
                                       batches=settings.stats_batches,
-                                      seed=STATS_SEED)
+                                      seed=stats_seed)
                 rec["accuracy_by_length"][length] = metrics["accuracy"]
                 rec["entropy_by_length"][length] = float(stats["entropy"].mean())
                 rec["entropy_norm_by_length"][length] = (
@@ -3304,7 +3449,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             errors = collect_error_cases(
                 model, lengths[-1], settings.vocab, settings.device,
                 batch=settings.stats_batch, batches=settings.stats_batches,
-                seed=STATS_SEED, max_cases=settings.max_error_cases)
+                seed=stats_seed, max_cases=settings.max_error_cases)
             rec.update({f"err_{k}": v for k, v in errors["summary"].items()})
             for case in errors["cases"]:
                 _write_result(out_dir / "e2_error_cases.jsonl",
@@ -3322,11 +3467,13 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     by_variant = {label: [r for r in runs if r["variant"] == label]
                   for label, *_ in _E2_VARIANTS}
     table = {label: _aggregate_runs(rs) for label, rs in by_variant.items()}
-    _report_ablation_coverage(out_dir, "e2", runs)
+    _report_ablation_coverage(out_dir, "e2", runs,
+                              planned_seeds=settings.seeds)
     _report_design_coverage(
         out_dir, "e2", runs, "variant",
         lambda r: r.get("variant"),
-        tuple(label for label, *_ in _E2_VARIANTS))
+        tuple(label for label, *_ in _E2_VARIANTS),
+        planned_seeds=settings.seeds)
     print(f"\n[e2] accuracy by n_pairs (mean +- std over seeds; the "
           f"calib_len_only / calib_ent_only / calib_no_terms arms are the "
           f"H2c calibration-term ablations, completing the 2x2 with calib):")
@@ -3463,24 +3610,26 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     print(f"[e3] grid gate x norm x layer_scale at lr={lr:g}, "
           f"test seed {TEST_SEED}, stats seed {STATS_SEED}")
     runs = []
+    eval_seed, stats_seed = TEST_SEED, STATS_SEED
     for gate in ("query", "calib"):
         for norm in NORMS:
             for layer_scale in (None, 1e-2):
                 for seed in settings.seeds:
                     model, params, metrics, curve, model_cfg = _train_and_eval(
-                        settings, seed, lr, eval_seed=TEST_SEED, gate=gate,
+                        settings, seed, lr, eval_seed=eval_seed, gate=gate,
                         norm=norm, layer_scale=layer_scale)
                     stats = collect_stats(model, settings.n_pairs,
                                           settings.vocab, settings.device,
                                           batch=settings.stats_batch,
                                           batches=settings.stats_batches,
-                                          seed=STATS_SEED)
+                                          seed=stats_seed)
                     resid = stats["resid_norm"].mean(dim=0)
                     rec = {
                         "experiment": "e3",
                         "hypotheses": ["H3a", "H3b", "H3c"],
                         "gate": gate, "norm": norm,
                         "layer_scale": layer_scale, "seed": seed, "lr": lr,
+                        "eval_seed": eval_seed, "stats_seed": stats_seed,
                         "params": params, "model_cfg": model_cfg,
                         "accuracy": metrics["accuracy"],
                         "f1_macro": metrics["f1_macro"],
@@ -3552,7 +3701,8 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
         tuple((gate, norm, ls)
               for gate in ("query", "calib")
               for norm in NORMS
-              for ls in (None, 1e-2)))
+              for ls in (None, 1e-2)),
+        planned_seeds=settings.seeds)
 
     print("\n[e3] pre-registered contrasts (H3b: "
           "resid_norm_last_over_first is the primary readout; "

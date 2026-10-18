@@ -236,7 +236,8 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
                                               batches=val_batches,
                                               seed=val_seed))
         mean = sum(accs) / len(accs)
-        var = sum((a - mean) ** 2 for a in accs) / len(accs)
+        var = (sum((a - mean) ** 2 for a in accs) / (len(accs) - 1)
+               if len(accs) > 1 else 0.0)
         row = {"lr": lr, "val_accuracy_mean": mean,
                "val_accuracy_std": var ** 0.5, "n_seeds": len(accs)}
         if loss_means:
