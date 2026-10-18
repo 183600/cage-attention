@@ -359,8 +359,6 @@ def _linear_into(x: torch.Tensor, weight: torch.Tensor,
 def _layer_norm_into(ln: nn.LayerNorm, x: torch.Tensor) -> torch.Tensor:
     """``ln(x)`` written into reusable buffers."""
     shape = x.shape
-    if not x.is_cuda:
-        return F.layer_norm(x, (shape[-1],), ln.weight, ln.bias, ln.eps)
     rows = x.numel() // shape[-1]
     out = _get_scratch(("ln_out",), x.device, x.dtype, x.numel())
     mean = _get_scratch(("ln_mean",), x.device, x.dtype, rows)
@@ -1019,9 +1017,13 @@ class Attention(nn.Module):
         gate_val = None
         if kind == "query":
             gate_val = self._gate_proj(x, B, T, C, grad_on)
+            if grad_on:
+                gate_val = gate_val.clone()
             gate_val.sigmoid_()
         elif is_calib:
             gate_val = self._gate_proj(x, B, T, C, grad_on)
+            if grad_on:
+                gate_val = gate_val.clone()
             if calc_len or calc_ent:
                 log_len = self._log_len_cache.get(T)
                 if log_len is None:
@@ -1153,11 +1155,14 @@ class Block(nn.Module):
             else:
                 x = torch.addcmul(x, a, ls1) if grad_on else x.addcmul_(a, ls1)
             x = self.ln1(x)
-            m = self._mlp(x)
-            if ls2 is None:
-                x = m.add_(x)
-            else:
+            if ls2 is not None:
+                m = self._mlp(x)
                 x = torch.addcmul(x, m, ls2) if grad_on else x.addcmul_(m, ls2)
+            elif grad_on:
+                h = x.reshape(-1, x.shape[-1])
+                x = self._mlp(h).add_(h).view_as(x)
+            else:
+                x = self._mlp(x).add_(x)
             x = self.ln2(x)
         else:
             x_norm = self.ln1(x)
@@ -1167,11 +1172,15 @@ class Block(nn.Module):
             else:
                 x = torch.addcmul(x, a, ls1) if grad_on else x.addcmul_(a, ls1)
             x_norm = self.ln2(x)
-            m = self._mlp(x_norm)
-            if ls2 is None:
-                x = m.add_(x)
-            else:
+            if ls2 is not None:
+                m = self._mlp(x_norm)
                 x = torch.addcmul(x, m, ls2) if grad_on else x.addcmul_(m, ls2)
+            elif grad_on:
+                h = x_norm.reshape(-1, x_norm.shape[-1])
+                x = self._mlp(h).add_(
+                    x.reshape(-1, x.shape[-1])).view_as(x)
+            else:
+                x = self._mlp(x_norm).add_(x)
         return x, s
 
 
