@@ -3554,7 +3554,11 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
         "hypotheses": ["H1a", "H1b", "H1c", "H1d", "H1e", "H1f"],
         "gate": gate, "seed": seed, "lr": lr,
         "eval_seed": eval_seed, "stats_seed": stats_seed,
-        "params": params, "model_cfg": model_cfg, **metrics, **corr, **fc, **ed,
+        "params": params, "model_cfg": model_cfg, **metrics, **corr, **fc,
+        # ed's "n" is the stats-stream sample count; it must not overwrite
+        # metrics' "n" (the eval stream the accuracy/Wilson CI come from).
+        # The stats count stays recorded as err_n_samples below.
+        **{k: v for k, v in ed.items() if k != "n"},
         **{f"err_{k}": v for k, v in errors["summary"].items()},
         **_training_record(settings, lr),
         **_cost_record(settings, model), **curve, **record_extra,
@@ -3912,16 +3916,18 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     # 10%.  ROC-AUC travels in the tables as the optimistic companion but
     # is deliberately not a decision metric here.  Seeds whose stats
     # stream contains no errors leave the metric undefined: _paired_diff
-    # records and drops them (never imputes them as 0).
-    for side in ("query", "none"):
-        for metric, hyp in (
-            ("prauc_lift_gate_to_error", "H1e"),
-            ("recall_at_10pct_gate_to_error", "H1e"),
-        ):
-            clog.print(f"calib - {side}", hyp, metric,
-                       _paired_diff(by_gate["calib"], by_gate[side], metric),
-                       warn=_curve_warn(("calib", by_gate["calib"]),
-                                        (side, by_gate[side])))
+    # records and drops them (never imputes them as 0).  The contrast is
+    # pre-registered as calib vs query only: with gate="none" there is no
+    # gate to rank by, so a calib-vs-none row would be undefined on one
+    # side by construction and misread as a pairing failure.
+    for metric, hyp in (
+        ("prauc_lift_gate_to_error", "H1e"),
+        ("recall_at_10pct_gate_to_error", "H1e"),
+    ):
+        clog.print("calib - query", hyp, metric,
+                   _paired_diff(by_gate["calib"], by_gate["query"], metric),
+                   warn=_curve_warn(("calib", by_gate["calib"]),
+                                    ("query", by_gate["query"])))
     null_margins = [r["null_mass_error_margin"] for r in by_gate["null"]
                     if _finite(r.get("null_mass_error_margin"))]
     clog.print("null margin vs 0", "H1c", "null_mass_error_margin",

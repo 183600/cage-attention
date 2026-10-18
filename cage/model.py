@@ -291,9 +291,9 @@ class _SoftmaxInPlace(torch.autograd.Function):
         if grad_out is None:
             return None
         gy = grad_out.mul(y)
-        n0, n1 = gy.size(0), gy.size(1)
+        rows = gy.numel() // gy.size(-1)
         rowsum = _get_scratch(("softmax_rowsum",), gy.device, gy.dtype,
-                              n0 * n1)[:n0 * n1].view(n0, n1, 1)
+                              rows)[:rows].view(*gy.shape[:-1], 1)
         torch.sum(gy, dim=-1, keepdim=True, out=rowsum)
         return gy.addcmul_(y, rowsum, value=-1.0)
 

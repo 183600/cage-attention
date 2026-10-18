@@ -934,7 +934,8 @@ def measure_inference_cost(model, n_pairs, vocab, device, batch=64, warmup=3,
     finally:
         model.train(was_training)
     times.sort()
-    median = times[len(times) // 2]
+    n_times = len(times)
+    median = (times[(n_times - 1) // 2] + times[n_times // 2]) / 2.0
     params_total = sum(p.numel() for p in model.parameters())
     embed = getattr(model, "tok", None)
     params_non_embedding = params_total - (

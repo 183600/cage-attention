@@ -214,7 +214,9 @@ def validate_batch(idx, targets, meta, vocab) -> dict:
         raise ValueError("structure: expected exactly one SEP token per row")
     if "key_pos" in meta:
         kp = meta["key_pos"].to(device=idx.device, dtype=torch.long)
-        if kp.shape == (batch_size,) and not bool(kp.eq(key_pos).all()):
+        if kp.shape != (batch_size,):
+            raise ValueError("meta['key_pos'] has the wrong shape")
+        if not bool(kp.eq(key_pos).all()):
             raise ValueError("meta['key_pos'] disagrees with the sequence")
     if targets is not None:
         if targets.shape != idx.shape:

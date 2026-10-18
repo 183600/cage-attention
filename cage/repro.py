@@ -32,6 +32,11 @@ import random
 
 import torch
 
+# Last PYTHONHASHSEED value pinned by :func:`seed_everything` (None when the
+# variable was absent or set externally).  Lets repeated calls in one process
+# refresh their own pin without ever overwriting an operator-set value.
+_HASHSEED_PINNED: str | None = None
+
 
 def seed_everything(seed: int, deterministic: bool = False) -> dict:
     """Seed Python, NumPy (if present) and PyTorch CPU + all CUDA devices.
@@ -48,7 +53,12 @@ def seed_everything(seed: int, deterministic: bool = False) -> dict:
     ``PYTHONHASHSEED`` is exported for child processes and recorded.  The
     hash seed of the *running* interpreter is fixed at launch, so a run
     that depends on set/dict iteration order must start with it exported.
+    A value already present in the environment is left untouched; a value
+    this helper pinned itself is refreshed on every call, so the recorded
+    and exported value always describes the seed of the current call
+    instead of the first one.
     """
+    global _HASHSEED_PINNED
     seed = int(seed)
     random.seed(seed)
     info = {
@@ -59,7 +69,10 @@ def seed_everything(seed: int, deterministic: bool = False) -> dict:
         "cuda_devices": 0,
         "deterministic": bool(deterministic),
     }
-    os.environ.setdefault("PYTHONHASHSEED", str(seed))
+    current = os.environ.get("PYTHONHASHSEED")
+    if current is None or current == _HASHSEED_PINNED:
+        _HASHSEED_PINNED = str(seed)
+        os.environ["PYTHONHASHSEED"] = _HASHSEED_PINNED
     info["pythonhashseed"] = os.environ.get("PYTHONHASHSEED")
     if deterministic:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
