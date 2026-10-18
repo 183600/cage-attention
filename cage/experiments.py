@@ -68,7 +68,11 @@ Design principles
    (``cage.metrics.seeds_for_power``), so a contrast is only read as
    supporting its hypothesis when it is both FDR-significant and
    practically relevant - a complex model that beats a strawman by a
-   statistically detectable sliver has not earned its complexity.  This
+       statistically detectable sliver has not earned its complexity.  Each
+    directional prediction additionally pre-registers its *sign* per
+    metric: an FDR-significant effect in the opposite direction is a
+    refutation of the hypothesis and can never be read as support,
+    whatever its magnitude.  This
    matters at the 5-seed scale used here: an uncorrected 95% readout over
    ~16 null contrasts would produce about one spurious "supported" claim
    per experiment.  At that same scale the percentile bootstrap is the
@@ -335,6 +339,7 @@ HYPOTHESES = {
                     "excludes 0 after Benjamini-Hochberg FDR control across "
                     "the E1 contrasts (q=0.05)",
         "sesoi": {"accuracy": 0.01, "abs_gate_vs_entropy": 0.05},
+        "direction": {"abs_gate_vs_entropy": "+"},
     },
     "H1b": {
         "experiment": "e1",
@@ -352,6 +357,7 @@ HYPOTHESES = {
                     "(q=0.05); the pre-registered threshold 0.5 is the "
                     "decision point, the sweep only reports robustness",
         "sesoi": {"gate_margin": 0.02},
+        "direction": {"gate_margin": "+"},
     },
     "H1c": {
         "experiment": "e1",
@@ -364,6 +370,7 @@ HYPOTHESES = {
                     "Benjamini-Hochberg FDR control across the E1 contrasts "
                     "(q=0.05)",
         "sesoi": {"null_mass_error_margin": 0.02},
+        "direction": {"null_mass_error_margin": "+"},
     },
     "H1d": {
         "experiment": "e1",
@@ -393,6 +400,8 @@ HYPOTHESES = {
                     "reported alongside, not as a decision criterion",
         "sesoi": {"accuracy": 0.01, "gate_margin": 0.02,
                   "abs_gate_vs_entropy": 0.05},
+        "direction": {"accuracy": "+", "gate_margin": "+",
+                      "abs_gate_vs_entropy": "+"},
     },
     "H1e": {
         "experiment": "e1",
@@ -423,6 +432,8 @@ HYPOTHESES = {
                     "never imputed",
         "sesoi": {"prauc_lift_gate_to_error": 0.1,
                   "recall_at_10pct_gate_to_error": 0.02},
+        "direction": {"prauc_lift_gate_to_error": "+",
+                      "recall_at_10pct_gate_to_error": "+"},
     },
     "H2a": {
         "experiment": "e2",
@@ -437,6 +448,7 @@ HYPOTHESES = {
                     "after Benjamini-Hochberg FDR control across the E2 "
                     "contrasts (q=0.05)",
         "sesoi": {"accuracy_at_longest": 0.01, "accuracy_drop": 0.01},
+        "direction": {"accuracy_at_longest": "+", "accuracy_drop": "-"},
     },
     "H2b": {
         "experiment": "e2",
@@ -458,6 +470,7 @@ HYPOTHESES = {
                     "not length-stability evidence",
         "sesoi": {"entropy_drift": 0.1, "entropy_norm_drift": 0.05,
                   "gate_drift": 0.02},
+        "direction": {"entropy_drift": "+"},
         # Metrics whose pre-registered prediction is a *null/equivalence*
         # claim: the SESOI above is then the bound the 95% CI must lie
         # inside (metrics.equivalence_test), not a minimum meaningful
@@ -484,6 +497,7 @@ HYPOTHESES = {
                     "(q=0.05); the calib_len_only arm is the reverse check "
                     "and is read together with it",
         "sesoi": {"accuracy_at_longest": 0.01, "accuracy_drop": 0.01},
+        "direction": {"accuracy_at_longest": "+", "accuracy_drop": "-"},
     },
     "H3a": {
         "experiment": "e3",
@@ -497,6 +511,7 @@ HYPOTHESES = {
                     "Benjamini-Hochberg FDR control across the E3 contrasts "
                     "(q=0.05)",
         "sesoi": {"gate_depth_ratio": 0.05, "accuracy": 0.01},
+        "direction": {"gate_depth_ratio": "+"},
     },
     "H3b": {
         "experiment": "e3",
@@ -535,6 +550,7 @@ HYPOTHESES = {
                     "Benjamini-Hochberg FDR control across the E3 contrasts "
                     "(q=0.05)",
         "sesoi": {"accuracy": 0.01, "gate_depth_ratio": 0.05},
+        "direction": {"accuracy": "+", "gate_depth_ratio": "+"},
     },
 }
 
@@ -1406,6 +1422,14 @@ class ContrastLog:
     effect below its SESOI is reported as practically negligible instead
     of "supported".
 
+    The pre-registered *direction* of the prediction (the ``direction``
+    sign registered per metric in ``HYPOTHESES``, e.g. H1c's
+    "null_mass_error_margin > 0") is enforced at the decision point as
+    well: an FDR-significant effect of the opposite sign refutes the
+    hypothesis, is labelled as such, and can never enter the supporting
+    set.  The SESOI gate bounds the *magnitude* of the required effect;
+    it is not a licence to count a reversed effect as support.
+
     Contrasts whose pre-registered prediction is *null/equivalence*
     ("this quantity stays inside +-bound") must be added through
     :meth:`print_equivalence`, which runs the bootstrap TOST from
@@ -1452,6 +1476,12 @@ class ContrastLog:
         equiv = ci.get("test") == "equivalence"
         audit = ci.get("controlled")
         sesoi = (HYPOTHESES.get(hyp, {}).get("sesoi") or {}).get(metric)
+        # Pre-registered sign of the predicted effect for this metric
+        # ("+" / "-", looked up in HYPOTHESES so it is part of the hashed
+        # pre-registration).  ``None`` means the prediction is not
+        # directional (e.g. H3b's "the readout shifts"), in which case a
+        # non-zero effect of either sign is admissible.
+        direction = (HYPOTHESES.get(hyp, {}).get("direction") or {}).get(metric)
         arms = ci.get("arms") or {}
         arm_a, arm_b = arms.get("a") or {}, arms.get("b") or {}
         self.rows.append({
@@ -1466,6 +1496,7 @@ class ContrastLog:
             "b_n": arm_b.get("n"),
             "arms_note": ci.get("arms_note"),
             "sesoi": sesoi,
+            "direction": direction,
             "test": "equivalence" if equiv else "difference",
             "equivalence_bound": ci.get("bound") if equiv else None,
             "equivalent": ci.get("equivalent") if equiv else None,
@@ -1497,6 +1528,9 @@ class ContrastLog:
         if sesoi is not None:
             line += (f"  [equivalence bound={sesoi:g}]" if equiv
                      else f"  [SESOI={sesoi:g}]")
+        if not equiv and direction is not None:
+            line += (f"  [prediction: effect "
+                     f"{'>' if direction == '+' else '<'} 0]")
         dropped = ci.get("seeds_dropped") or []
         if dropped:
             why = []
@@ -1562,10 +1596,25 @@ class ContrastLog:
                 # exactly the drift the prediction says should not occur).
                 row["practically_relevant"] = bool(row.get("equivalent"))
             else:
+                # Directional pre-registration: a prediction like
+                # "null_mass_error_margin > 0" is only confirmed by an
+                # effect in *that* direction.  A significant effect of the
+                # opposite sign refutes the hypothesis, so the sign is
+                # enforced here (before the SESOI magnitude gate) and such
+                # a row can never count as support.
+                direction = row.get("direction")
+                row["sign_ok"] = (None if direction is None
+                                  or not finite_effect
+                                  else bool(mean > 0.0 if direction == "+"
+                                            else mean < 0.0))
+                row["direction_reversed"] = bool(
+                    direction is not None and finite_effect
+                    and not row["sign_ok"])
                 row["practically_relevant"] = bool(
-                    sesoi is None
-                    or (finite_effect and math.isfinite(float(sesoi))
-                        and abs(mean) >= float(sesoi)))
+                    not row["direction_reversed"]
+                    and (sesoi is None
+                         or (finite_effect and math.isfinite(float(sesoi))
+                             and abs(mean) >= float(sesoi))))
             # Pre-registered seed floor: below ``min_seeds`` independent
             # paired seeds a "supported" verdict would be noise dressed as
             # evidence; such rows cannot support a claim at the decision
@@ -1604,8 +1653,17 @@ class ContrastLog:
         loo_flips = [r for r in testable if r.get("loo_flips_decision")]
         bca_differs = [r for r in testable if r.get("bca_disagrees")]
         low_resolution = [r for r in testable if r["n"] <= 5]
+        # A refutation is a decision claim like any other: it needs the
+        # pre-registered seed floor and an unconfounded contrast (the same
+        # precedence as the printed verdict), otherwise the row stays a raw
+        # sign observation without a claim.
+        reversed_effects = [
+            r for r in surviving
+            if r.get("direction_reversed") and r.get("claim_eligible", True)
+            and not r.get("confounded")]
         below_sesoi = [r for r in surviving
                        if not r["practically_relevant"]
+                       and not r.get("direction_reversed")
                        and r["test"] != "equivalence"]
         equiv_rows = [r for r in testable if r["test"] == "equivalence"]
         equivalent = [r for r in equiv_rows if r.get("equivalent")]
@@ -1655,6 +1713,9 @@ class ContrastLog:
             elif equiv:
                 verdict = ("TOST-significant but CI not fully inside bound "
                            "(borderline, not read as support)")
+            elif r.get("direction_reversed"):
+                verdict = ("REFUTED (FDR-significant effect opposite to the "
+                           "pre-registered direction, no support)")
             elif not r["practically_relevant"]:
                 verdict = ("FDR-significant but |effect| < SESOI "
                            "(practically negligible)")
@@ -1711,6 +1772,14 @@ class ContrastLog:
             print(f"[{self.tag}] WARNING: {len(confounded)} contrast(s) "
                   f"failed the controlled-variable audit and were refused "
                   f"regardless of their p-values")
+        if reversed_effects:
+            names = ", ".join(f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                              for r in reversed_effects)
+            print(f"[{self.tag}] WARNING: {len(reversed_effects)} "
+                  f"FDR-significant contrast(s) point in the opposite "
+                  f"direction of their pre-registered prediction ({names}): "
+                  f"each is read as a refutation, not as support, and never "
+                  f"enters the supporting set")
         if below_sesoi:
             underpowered = [r for r in below_sesoi
                             if math.isfinite(r.get("n_seeds_for_sesoi", 0.0))
@@ -1814,6 +1883,7 @@ class ContrastLog:
                    "n_surviving": len(surviving),
                    "n_supporting": len(supporting),
                    "n_below_sesoi": len(below_sesoi),
+                   "n_direction_reversed": len(reversed_effects),
                    "n_equivalence": len(equiv_rows),
                    "n_equivalent": len(equivalent),
                    "n_equiv_borderline": len(equiv_borderline),
@@ -1829,6 +1899,9 @@ class ContrastLog:
                    "n_loo_flip_decision": len(loo_flips),
                    "n_bca_disagree": len(bca_differs),
                    "n_low_resolution": len(low_resolution),
+                   "direction_reversed_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in reversed_effects],
                    "seed_coverage_loss_contrasts": [
                        f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                        for r in coverage_loss],
@@ -1882,12 +1955,22 @@ def _announce(hyp_ids):
         equiv = h.get("sesoi_test") or {}
         directional = {k: v for k, v in sorted(sesoi.items())
                        if k not in equiv}
+        direction = h.get("direction") or {}
         if directional:
-            detail = ", ".join(f"{k}>={v:g}"
-                               for k, v in directional.items())
-            print(f"    SESOI (smallest effect size of interest): {detail} "
-                  f"- statistical significance below this is reported as "
-                  f"practically negligible, not as support")
+            terms = []
+            for k, v in directional.items():
+                sign = direction.get(k)
+                if sign == "+":
+                    terms.append(f"{k} >= +{v:g}")
+                elif sign == "-":
+                    terms.append(f"{k} <= -{v:g}")
+                else:
+                    terms.append(f"|{k}| >= {v:g} (undirected)")
+            print(f"    SESOI (smallest effect size of interest): "
+                  f"{', '.join(terms)} - statistical significance below "
+                  f"this is reported as practically negligible, not as "
+                  f"support; a significant effect opposite to a registered "
+                  f"direction is a refutation, whatever its size")
         for k in sorted(equiv):
             if k not in sesoi:
                 continue
