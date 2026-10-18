@@ -291,7 +291,9 @@ class _RowEntropy(torch.autograd.Function):
                             p.numel())
         mask = mask[:p.numel()].view_as(p)
         torch.le(p, ctx.eps, out=mask)
-        d = p.clamp_min(ctx.eps)
+        d = _get_scratch(("rowent_bwd_d",), p.device, p.dtype, p.numel())
+        d = d[:p.numel()].view_as(p)
+        torch.clamp_min(p, ctx.eps, out=d)
         d.log_()
         d.add_(1.0)
         d.masked_fill_(mask, 0.0)
@@ -531,7 +533,6 @@ class _CalibAttn(torch.autograd.Function):
         gbuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if grad_ent is not None else None
         mbuf = _get_scratch(("calib_bwd_mbuf",), q.device, torch.bool, bh * max_rows * max_i1) if grad_ent is not None else None
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
-        tmpb = _get_scratch(("calib_bwd_tmp",), q.device, q.dtype, bh * T * dk)
         dqb = _get_scratch(("calib_bwd_dqb",), q.device, q.dtype,
                            bh * max_rows * dk)
         zero = _zero_scalar(q.device, q.dtype)
@@ -550,18 +551,19 @@ class _CalibAttn(torch.autograd.Function):
             d_s = _softmax_grad_from_p(d_p, p, ge,
                                        buf=None if gbuf is None else gbuf[:n],
                                        mbuf=None if mbuf is None else mbuf[:n])
-            tmp = tmpb[:bh * i1 * dk].view(bh, i1, dk)
+            # The reversed block order writes the widest block first, so
+            # the later (narrower) blocks accumulate into a prefix slice
+            # of ``d_v`` / ``d_k`` in place: no temporary, no extra pass.
             if first:
                 torch.bmm(p.transpose(1, 2), g, out=d_v)
-            else:
-                torch.bmm(p.transpose(1, 2), g, out=tmp)
-                d_v[:, :i1].add_(tmp)
-            torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1], beta=0.0,
-                          alpha=scale, out=d_k if first else tmp)
-            if first:
+                torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1],
+                              beta=0.0, alpha=scale, out=d_k)
                 first = False
             else:
-                d_k[:, :i1].add_(tmp)
+                d_v[:, :i1].baddbmm_(p.transpose(1, 2), g, beta=1.0,
+                                     alpha=1.0)
+                d_k[:, :i1].baddbmm_(d_s.transpose(1, 2), q[:, i0:i1],
+                                     beta=1.0, alpha=scale)
             dqblk = dqb[:bh * r * dk].view(bh, r, dk)
             torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
                           out=dqblk)
@@ -723,9 +725,7 @@ class _NullAttn(torch.autograd.Function):
         eb = _get_scratch(("null_bwd_e",), q.device, q.dtype, bh * max_rows * max_i1)
         gub = _get_scratch(("null_bwd_gu",), q.device, q.dtype, bh * max_rows)
         dotb = _get_scratch(("null_bwd_dot",), q.device, q.dtype, bh * max_rows)
-        tmp_rows = T if multi else 1
-        tmpb = _get_scratch(("null_bwd_tmp",), q.device, q.dtype,
-                            bh * tmp_rows * dk)
+        tmpb = _get_scratch(("null_bwd_tmp",), q.device, q.dtype, bh * dk)
         dqb = (_get_scratch(("null_bwd_dqb",), q.device, q.dtype,
                             bh * max_rows * dk) if multi else None)
         acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
@@ -751,18 +751,17 @@ class _NullAttn(torch.autograd.Function):
             d_s = d_u.mul_(p).mul_(scale)
             d_s0 = gu0.mul_(p0).mul_(scale)
             if multi:
-                tmp = tmpb[:bh * i1 * dk].view(bh, i1, dk)
+                # Reversed order: the widest block writes ``d_v`` / ``d_k``
+                # outright, the narrower ones accumulate in place.
                 if first:
                     torch.bmm(p.transpose(1, 2), g, out=d_v)
-                else:
-                    torch.bmm(p.transpose(1, 2), g, out=tmp)
-                    d_v[:, :i1].add_(tmp)
-                torch.bmm(d_s.transpose(1, 2), q_blk,
-                          out=d_k if first else tmp)
-                if first:
+                    torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
                     first = False
                 else:
-                    d_k[:, :i1].add_(tmp)
+                    d_v[:, :i1].baddbmm_(p.transpose(1, 2), g, beta=1.0,
+                                         alpha=1.0)
+                    d_k[:, :i1].baddbmm_(d_s.transpose(1, 2), q_blk,
+                                         beta=1.0, alpha=1.0)
                 dqblk = dqb[:bh * r * dk].view(bh, r, dk)
                 torch.bmm(d_s, k[:, :i1], out=dqblk)
                 d_q[:, i0:i1].copy_(dqblk)
@@ -1017,7 +1016,14 @@ class Attention(nn.Module):
         gate_val = None
         if kind == "query":
             gate_val = self._gate_proj(x, B, T, C, grad_on)
-            gate_val.sigmoid_()
+            if grad_on:
+                # Out-of-place under autograd: in-place elementwise ops on
+                # the gate projection make autograd materialize full-size
+                # copies of the output during backward (shallow-copy
+                # versioning), which out-of-place avoids.
+                gate_val = torch.sigmoid(gate_val)
+            else:
+                gate_val.sigmoid_()
         elif is_calib:
             gate_val = self._gate_proj(x, B, T, C, grad_on)
             if calc_len or calc_ent:
@@ -1026,7 +1032,10 @@ class Attention(nn.Module):
                     log_len = math.log(max(T, 2))
                     self._log_len_cache[T] = log_len
             if calc_len:
-                gate_val.sub_(self.calib_a * log_len)
+                if grad_on:
+                    gate_val = gate_val - self.calib_a * log_len
+                else:
+                    gate_val.sub_(self.calib_a * log_len)
             if calc_ent:
                 calib_cs = self.calib_c * self.calib_scale
                 if grad_on:
@@ -1035,10 +1044,17 @@ class Attention(nn.Module):
                     conc = _get_scratch(("calib_conc",), x.device, x.dtype,
                                         B * T)[:B * T].view(B, T)
                     torch.mean(ent, dim=1, out=conc)
-                conc = conc.div_(log_len).mul_(calib_cs).unsqueeze(-1)
-                gate_val.sub_(conc)
+                if grad_on:
+                    conc = conc.div(log_len).mul(calib_cs).unsqueeze(-1)
+                    gate_val = gate_val - conc
+                else:
+                    conc = conc.div_(log_len).mul_(calib_cs).unsqueeze(-1)
+                    gate_val.sub_(conc)
             tau = F.softplus(self.calib_tau) + 0.1
-            gate_val.div_(tau).sigmoid_()
+            if grad_on:
+                gate_val = torch.sigmoid(gate_val / tau)
+            else:
+                gate_val.div_(tau).sigmoid_()
             del ent
             ent = None
 
