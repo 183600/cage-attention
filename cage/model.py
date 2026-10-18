@@ -972,15 +972,16 @@ class Attention(nn.Module):
                 step = max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
             else:
                 step = B
+            qkv_buf = _get_scratch(("qkv_out",), x.device, x.dtype,
+                                   step * T * 3 * C).view(step * T, 3 * C)
             for b0 in range(0, B, step):
                 b1 = min(B, b0 + step)
                 rows = (b1 - b0) * T
-                qkv_buf = _get_scratch(("qkv_out",), x.device, x.dtype,
-                                       rows * 3 * C).view(rows, 3 * C)
+                qkv_b = qkv_buf[:rows]
                 _linear_into(x2[b0:b1].reshape(rows, C), self.qkv.weight,
-                             None, qkv_buf)
+                             None, qkv_b)
                 pv[:, b0:b1].copy_(
-                    qkv_buf.view(b1 - b0, T, 3, h, dk).permute(2, 0, 3, 1, 4))
+                    qkv_b.view(b1 - b0, T, 3, h, dk).permute(2, 0, 3, 1, 4))
 
         ent = None
         y4 = None
@@ -1041,10 +1042,7 @@ class Attention(nn.Module):
         gate_val = None
         if kind == "query":
             gate_val = self._gate_proj(x, B, T, C, grad_on)
-            if grad_on:
-                gate_val = torch.sigmoid(gate_val)
-            else:
-                gate_val.sigmoid_()
+            gate_val.sigmoid_()
         elif is_calib:
             gate_val = self._gate_proj(x, B, T, C, grad_on)
             if calc_len or calc_ent:
@@ -1053,29 +1051,20 @@ class Attention(nn.Module):
                     log_len = math.log(max(T, 2))
                     self._log_len_cache[T] = log_len
             if calc_len:
-                if grad_on:
-                    gate_val = gate_val - self.calib_a * log_len
-                else:
-                    gate_val.sub_(self.calib_a * log_len)
+                gate_val.sub_(self.calib_a * log_len)
             if calc_ent:
                 calib_cs = self.calib_c * self.calib_scale
                 if grad_on:
-                    conc = ent.mean(dim=1)
+                    conc = ent.mean(dim=1).div_(log_len).mul(
+                        calib_cs).unsqueeze(-1)
                 else:
                     conc = _get_scratch(("calib_conc",), x.device, x.dtype,
                                         B * T)[:B * T].view(B, T)
                     torch.mean(ent, dim=1, out=conc)
-                if grad_on:
-                    conc = conc.div(log_len).mul(calib_cs).unsqueeze(-1)
-                    gate_val = gate_val - conc
-                else:
                     conc = conc.div_(log_len).mul_(calib_cs).unsqueeze(-1)
-                    gate_val.sub_(conc)
+                gate_val.sub_(conc)
             tau = F.softplus(self.calib_tau) + 0.1
-            if grad_on:
-                gate_val = torch.sigmoid(gate_val / tau)
-            else:
-                gate_val.div_(tau).sigmoid_()
+            gate_val.div_(tau).sigmoid_()
             del ent
             ent = None
 
