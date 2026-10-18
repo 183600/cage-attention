@@ -417,6 +417,69 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
     return p_value, chi2
 
 
+# Calibration of the answer-uniformity test (``answer_uniformity_test``):
+# the sample size enters the test, so only the simulation count and its
+# fixed seed are constants here.
+_UNIFORMITY_SIM = 500
+_UNIFORMITY_SIM_SEED = 8675309
+
+
+def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
+                           seed=_UNIFORMITY_SIM_SEED) -> dict:
+    """Monte Carlo goodness-of-fit of answer counts against *uniform*.
+
+    Why this is a *decision*, not a diagnostic: the primary metric of the
+    recall task is plain accuracy, and that choice is only meaningful
+    because every value class is (by construction) equally likely - under
+    a majority class accuracy degrades into a class-prior metric and the
+    explicit F1 variants / PR-AUC companions in ``cage.metrics`` would
+    become the headline.  The claim "the task is balanced multi-class"
+    must therefore be *tested* on the drawn stream, not inferred from the
+    generator description.
+
+    ``counts`` is a 1-D count vector over the selectable classes (ids
+    ``2..vocab-1`` - PAD and SEP are never answers; the caller slices
+    accordingly).  The statistic is the Pearson chi-square against the
+    uniform expectation ``n / K``.  The null is calibrated by a
+    parametric bootstrap that redraws counts as independent
+    ``Poisson(n / K)`` variates - the standard Poissonization of
+    multinomial counts, whose conditioning correction is ``O(1/n)`` and
+    negligible at these sizes (same convention as
+    :func:`_distribution_shift_p`) - at the observed sample size, so the
+    small expected count per class (about 10 at the default audit size,
+    where the asymptotic chi-square table is not reliable) does not have
+    to be trusted.
+
+    Returns ``{"n", "n_classes", "expected_per_class", "chi2", "df",
+    "p_value", "uniform_supported"}`` with
+    ``p = (1 + #{chi2_sim >= chi2_obs}) / (n_sim + 1)`` and
+    ``uniform_supported = p > 0.05``.  A *passing* test bounds gross
+    imbalance at the audit sample size; it is not an equivalence proof
+    for arbitrarily small skew (use the reported per-class shares for
+    the descriptive bound).  Degenerate input (no samples, fewer than
+    two classes) returns NaN fields and ``uniform_supported=False``.
+    """
+    c = torch.as_tensor(counts).detach().reshape(-1).to(torch.float64)
+    n = float(c.sum())
+    k = c.numel()
+    out = {"n": int(n), "n_classes": int(k),
+           "expected_per_class": float(n / k) if k else float("nan"),
+           "chi2": float("nan"), "df": int(max(k - 1, 0)),
+           "p_value": float("nan"), "uniform_supported": False}
+    if k < 2 or n <= 0.0:
+        return out
+    expected = n / k
+    chi2 = float((((c - expected) ** 2) / expected).sum())
+    gen = torch.Generator().manual_seed(seed)
+    sim = torch.poisson(torch.full((n_sim, k), expected), generator=gen)
+    chi2_sim = (((sim - expected) ** 2) / expected).sum(1)
+    p_value = float((1.0 + (chi2_sim >= chi2).to(torch.float64).sum())
+                    / (n_sim + 1.0))
+    out.update({"chi2": chi2, "p_value": p_value,
+                "uniform_supported": bool(p_value > 0.05)})
+    return out
+
+
 def _fingerprints(idx):
     return {tuple(int(t) for t in row) for row in idx.tolist()}
 
@@ -612,6 +675,24 @@ def _self_test() -> int:
     tv_shift = _tv_between_counts(half_range, reference)
     check("old_tv_tolerance_would_pass", tv_shift < 3.0 * floor)
 
+    # Answer-uniformity decision: the balance claim behind "accuracy is the
+    # headline metric" must survive a uniform draw and reject a
+    # half-range draw at the default audit sample size (5 seeds x 4
+    # batches x 256 ~ 5120 samples, ~10 per class).
+    n_audit = 5 * 4 * 256
+    uni_counts = draw_counts(classes, n_audit, 31)[:classes]
+    uni = answer_uniformity_test(uni_counts, n_sim=400, seed=90210)
+    check("uniform_draw_supported", uni["uniform_supported"])
+    check("uniform_chi2_finite", math.isfinite(uni["chi2"]))
+    skewed_counts = draw_counts(classes // 2, n_audit, 32)[:classes]
+    skewed = answer_uniformity_test(skewed_counts, n_sim=400, seed=90210)
+    check("skewed_draw_rejected", not skewed["uniform_supported"])
+    check("skewed_p_below_floor", skewed["p_value"] <= 1.0 / 401.0)
+    degenerate = answer_uniformity_test(torch.zeros(1, dtype=torch.int64))
+    check("degenerate_input_not_supported",
+          not degenerate["uniform_supported"]
+          and math.isnan(degenerate["p_value"]))
+
     # Stream-level duplicate accounting: rows repeated across *different*
     # batches of one stream must be counted, not only within one batch.
     gen = torch.Generator().manual_seed(21)
@@ -628,7 +709,8 @@ def _self_test() -> int:
     print(f"data self-test: all checks passed "
           f"(same-source p={p_same:.3f}, half-range p={p_shift:.4f}, "
           f"chi2={chi2_shift:.1f}, tv={tv_shift:.3f} vs 3x floor="
-          f"{3.0 * floor:.3f})")
+          f"{3.0 * floor:.3f}; uniformity p={uni['p_value']:.3f} "
+          f"chi2={uni['chi2']:.1f}, skewed p={skewed['p_value']:.4f})")
     return 0
 
 

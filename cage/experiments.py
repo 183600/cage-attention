@@ -132,6 +132,7 @@ from .data import (
     STATS_SEED,
     TEST_SEED,
     VAL_SEED,
+    answer_uniformity_test,
     batch_fingerprint,
     check_eval_seed,
     check_train_seed,
@@ -1241,6 +1242,135 @@ def _curve_warn(*labeled_runs) -> str:
                           if counts.get(v))
         parts.append(f"{label}: {bad}/{len(runs)} curve-invalid ({detail})")
     return "WARN " + "; ".join(parts) if parts else ""
+
+
+def _selection_reliability(rows, metric="val_accuracy_mean",
+                           std_key="val_accuracy_std",
+                           n_key="n_seeds", curve_key="curve_verdicts",
+                           diverged_key="diverged_runs", grid=None) -> dict:
+    """Audit an argmax hyperparameter selection for winner's curse.
+
+    Every tuned baseline here selects a value by taking the argmax of a
+    validation column over a grid, then freezes it for the headline
+    comparisons.  An argmax with no uncertainty attached is a point
+    selection that can be entirely noise: the tuned baseline must beat
+    the untuned floor and be significantly beaten by the model under
+    test, so if the winning value sits inside the seed-to-seed spread of
+    the runner-up the "tuned" baseline is a strawman in the *conservative*
+    direction (it under-reports the baseline) and the contrast loses
+    power - exactly the failure mode the design contract exists to
+    prevent.  This helper records, next to the chosen value:
+
+    - ``margin`` = best - runner-up on the selection metric;
+    - ``margin_se`` an upper-bound gap standard error,
+      ``sqrt(std_best^2 / n_best + std_second^2 / n_second)``.  The grid
+      rows come from the *same* seeds (paired), so the conservative
+      unpaired combination is used deliberately: it cannot claim more
+      resolution than a paired test would;
+    - ``within_noise`` = ``margin < margin_se``: the winner is not
+      resolved beyond seed noise, and small follow-up differences built
+      on this value inherit that ambiguity;
+    - ``curve_invalid_best``: how many of the best row's runs are
+      curve-invalid (``plateau``/``diverging``/...): an argmax chosen
+      among runs that never learned measures the optimizer, not the
+      baseline.  Only present when the rows carry ``curve_verdicts``;
+    - ``diverged_runs_best``: how many of the best row's runs diverged
+      and were excluded from its statistic by the tuner (e.g.
+      ``tune_linear_probe``): a mean over the surviving runs understates
+      the uncertainty.  Only present when the rows carry
+      ``diverged_runs``;
+    - ``best_at_grid_boundary``: the winning index is the first or last
+      grid point, so the optimum may lie outside the searched range and
+      the true baseline could be stronger.  Only present when ``grid``
+      is given;
+    - ``reliable``: ``True`` only when the selection resolves the value
+      (no boundary, no within-noise margin, and no curve-invalid runs in
+      the winning row); ``None`` when the audit cannot be computed at
+      all (missing/constant metric).  ``None`` is an open audit item,
+      not a pass.
+
+    ``rows`` is the table (list of dicts) the tuner searched, ordered as
+    the grid; the selection metric is read with ``_finite`` so a
+    missing statistic can never be read as 0.0.
+    """
+    metric_rows = [(i, r) for i, r in enumerate(rows)
+                   if _finite(r.get(metric))]
+    out = {"metric": metric, "margin": float("nan"),
+           "margin_se": float("nan"), "within_noise": None,
+           "curve_invalid_best": None, "diverged_runs_best": None,
+           "best_at_grid_boundary": None, "reliable": None}
+    if len(metric_rows) < 2:
+        return out
+    ranked = sorted(metric_rows, key=lambda t: -float(t[1][metric]))
+    (i_best, r_best), (i_second, r_second) = ranked[0], ranked[1]
+    margin = float(r_best[metric]) - float(r_second[metric])
+
+    def _se(row):
+        # A single-seed row carries a convention-0 std, not a noise
+        # estimate; reading it as 0 resolution would be exactly the
+        # overconfidence this audit exists to catch.
+        std = row.get(std_key)
+        n = row.get(n_key)
+        if _finite(std) and _finite(n) and float(n) >= 2.0:
+            return (max(float(std), 0.0) ** 2) / float(n)
+        return float("nan")
+
+    var_best, var_second = _se(r_best), _se(r_second)
+    margin_se = math.sqrt(var_best + var_second) \
+        if math.isfinite(var_best) and math.isfinite(var_second) \
+        else float("nan")
+    within_noise = None
+    if math.isfinite(margin_se):
+        within_noise = bool(margin < margin_se)
+
+    curve_invalid_best = None
+    verdicts = r_best.get(curve_key)
+    if isinstance(verdicts, (list, tuple)):
+        curve_invalid_best = sum(1 for v in verdicts
+                                 if v in CURVE_INVALID_VERDICTS)
+    diverged_best = None
+    if _finite(r_best.get(diverged_key)):
+        diverged_best = int(r_best[diverged_key])
+    boundary = None
+    if grid is not None and len(grid) == len(rows):
+        boundary = bool(i_best in (0, len(rows) - 1))
+    reliable = None
+    if within_noise is not None:
+        reliable = not within_noise
+        if boundary is not None:
+            reliable = reliable and not boundary
+        if curve_invalid_best is not None:
+            reliable = reliable and curve_invalid_best == 0
+        if diverged_best is not None:
+            reliable = reliable and diverged_best == 0
+    out.update({"best_index": int(i_best), "second_index": int(i_second),
+                "best": float(r_best[metric]),
+                "runner_up": float(r_second[metric]), "margin": margin,
+                "margin_se": margin_se, "within_noise": within_noise,
+                "curve_invalid_best": curve_invalid_best,
+                "diverged_runs_best": diverged_best,
+                "best_at_grid_boundary": boundary, "reliable": reliable})
+    return out
+
+
+def _selection_warn(label, selection) -> str:
+    """Human-readable annotation for an unreliable selection, or ""."""
+    if not selection or selection.get("reliable") is not False:
+        return ""
+    reasons = []
+    if selection.get("best_at_grid_boundary"):
+        reasons.append("optimum at grid boundary - range may exclude it")
+    if selection.get("within_noise"):
+        reasons.append(f"margin {selection['margin']:.4f} < "
+                       f"seed-gap SE {selection['margin_se']:.4f}")
+    if selection.get("diverged_runs_best"):
+        reasons.append(f"{selection['diverged_runs_best']} diverged runs in "
+                       f"winning row (statistic over survivors only)")
+    if selection.get("curve_invalid_best"):
+        reasons.append(f"{selection['curve_invalid_best']} curve-invalid "
+                       f"runs in winning row (underfit/broken, not the "
+                       f"baseline)")
+    return f"WARN {label}: selection not resolved ({'; '.join(reasons)})"
 
 
 class ContrastLog:
@@ -2373,6 +2503,12 @@ def tune_shared_recipe(settings: Settings):
     diverging / instability) the selection was made between underfit or
     broken runs, and the frozen recipe cannot be trusted to expose the
     mechanism under test - ``_resolve_lr`` prints that warning.
+
+    Returns ``(best_lr, table, selection)`` where ``selection`` is the
+    :func:`_selection_reliability` audit of the argmax: with only up to
+    two tuning seeds the winning rate can sit inside the seed-to-seed
+    spread of a neighbour, and that point selection must be recorded
+    rather than printed as if the grid had resolved the recipe.
     """
     tune_seeds = settings.seeds[:max(1, min(2, len(settings.seeds)))]
     table = []
@@ -2391,7 +2527,8 @@ def tune_shared_recipe(settings: Settings):
                       "val_accuracy_std": var ** 0.5, "n_seeds": len(accs),
                       "curve_verdicts": verdicts})
     best = max(table, key=lambda row: row["val_accuracy_mean"])
-    return best["lr"], table
+    selection = _selection_reliability(table, grid=settings.lr_grid)
+    return best["lr"], table, selection
 
 
 def _resolve_lr(settings: Settings, out_dir: pathlib.Path, tag: str):
@@ -2413,20 +2550,16 @@ def _resolve_lr(settings: Settings, out_dir: pathlib.Path, tag: str):
             print(f"    lr={row['lr']:<8g} "
                   f"val_acc={row['val_accuracy_mean']:.4f} "
                   f"+- {row['val_accuracy_std']:.4f}  curves={verdicts}")
-        chosen = next(r for r in cached[1] if r["lr"] == cached[0])
-        invalid = [v for v in chosen.get("curve_verdicts", ())
-                   if v in CURVE_INVALID_VERDICTS]
-        if invalid:
-            print(f"[{tag}] WARNING: the selected lr={cached[0]:g} has "
-                  f"{len(invalid)}/{len(chosen['curve_verdicts'])} "
-                  f"curve-invalid tuning run(s) ({sorted(set(invalid))}): the "
-                  f"selection is between underfit/broken curves, so the frozen "
-                  f"recipe may make every variant look equally flat")
     else:
         print(f"[{tag}] reusing shared tuned recipe lr={cached[0]:g}")
-    lr, table = cached
+    lr, table, selection = cached
+    warn = _selection_warn(f"shared recipe selection lr={lr:g}", selection)
+    if warn:
+        print(f"[{tag}] {warn}: the frozen recipe may make every variant "
+              f"look equally flat")
     _write_json(out_dir / f"{tag}_lr_tuning.json",
-                {"val_seed": VAL_SEED, "table": table, "chosen_lr": lr})
+                {"val_seed": VAL_SEED, "table": table, "chosen_lr": lr,
+                 "selection": selection})
     return lr
 
 
@@ -2442,6 +2575,15 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seeds=None):
     to the configured training seeds (``(0,)`` when none are configured,
     matching the training convention elsewhere); each seed is refused if
     it is a reserved evaluation seed.
+
+    The returned ``uniformity`` block is the *decision* behind using
+    accuracy as the headline metric: a Monte Carlo-calibrated chi-square
+    test of the drawn answer counts against the uniform expectation over
+    ids ``2..vocab-1`` (PAD/SEP are never answers).  Shares alone cannot
+    separate sampling noise from a real shift at ~10 expected samples per
+    class; the test can (see ``cage.data.answer_uniformity_test``).  When
+    it fails, the verdict layer flags the balance premise and the
+    PR-AUC/F1 companions - not accuracy - carry the claims.
     """
     if seeds is None:
         seeds = tuple(settings.seeds) if settings.seeds else (0,)
@@ -2460,6 +2602,7 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seeds=None):
         per_seed[int(seed)] = int(n_seed)
     present = counts > 0
     shares = counts[present] / counts.sum()
+    uniformity = answer_uniformity_test(counts[2:])
     return {
         "train_seeds": [int(s) for s in seeds],
         "batches_per_seed": int(batches),
@@ -2470,6 +2613,7 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seeds=None):
         "min_class_share": float(shares.min()),
         "max_class_share": float(shares.max()),
         "expected_uniform_share": 1.0 / (settings.vocab - 2),
+        "uniformity": uniformity,
     }
 
 
@@ -2615,6 +2759,13 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     * a complex model is only credited for what it does beyond the tuned
       shallow baseline.
 
+    Each depth's argmax is audited by
+    :func:`_selection_reliability` (margin vs runner-up in seed units,
+    winning curve verdicts, grid-boundary position) and stored in the
+    payload's ``selection`` block: a rung whose tuned rate is not
+    resolved is a rung whose accuracy may understate the depth being
+    credited, and the warning says so at selection time.
+
     Returns ``{"depths": {depth: payload}, "ladder": [...],
     "saturation_depth": int|None, "hb7_depth_required": bool|None,
     "shallowest": depth}``; the shallow rung reuses the legacy names
@@ -2634,18 +2785,25 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     for depth in ladder:
         table = []
         for lr in settings.lr_grid:
-            accs = []
+            accs, verdicts = [], []
             for seed in tune_seeds:
-                _, _, metrics, _, _ = _train_and_eval(
+                _, _, metrics, curve, _ = _train_and_eval(
                     settings, seed, lr, eval_seed=VAL_SEED, selection=True,
                     gate="none", n_layers=depth)
                 accs.append(metrics["accuracy"])
+                verdicts.append(curve["curve_verdict"])
             mean = sum(accs) / len(accs)
             std = ((sum((a - mean) ** 2 for a in accs)
                     / (len(accs) - 1)) ** 0.5 if len(accs) > 1 else 0.0)
             table.append({"lr": lr, "val_accuracy_mean": mean,
-                          "val_accuracy_std": std, "n_seeds": len(accs)})
+                          "val_accuracy_std": std, "n_seeds": len(accs),
+                          "curve_verdicts": verdicts})
         best = max(table, key=lambda row: row["val_accuracy_mean"])
+        selection = _selection_reliability(table, grid=settings.lr_grid)
+        warn = _selection_warn(f"depth={depth} lr selection", selection)
+        if warn:
+            print(f"[baselines] {warn}: this rung's tuned accuracy may "
+                  f"understate the depth it is credited with")
         runs = []
         for seed in settings.seeds:
             _, params, metrics, curve, _ = _train_and_eval(
@@ -2684,6 +2842,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             "name": f"shallow_none_d{depth}", "n_layers": depth,
             "val_seed": VAL_SEED, "test_seed": TEST_SEED,
             "chosen_lr": best["lr"], "tuning_table": table,
+            "selection": selection,
             "accuracy_mean": summary["mean"], "accuracy_std": summary["std"],
             "accuracy_by_seed": {str(r["seed"]): r["accuracy"]
                                  for r in runs},
@@ -2749,7 +2908,8 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     _write_json(out_dir / "baselines_shallow_none.json", depths[shallowest])
     _write_json(out_dir / "baselines_shallow_tuning.json",
                 {"val_seed": VAL_SEED, "table": tuning_tables[shallowest],
-                 "chosen_lr": depths[shallowest]["chosen_lr"]})
+                 "chosen_lr": depths[shallowest]["chosen_lr"],
+                 "selection": depths[shallowest]["selection"]})
     _write_json(out_dir / "baselines_depth_ladder.json", ladder_payload)
     return {**ladder_payload, "depths": depths, "shallowest": shallowest}
 
@@ -2893,11 +3053,21 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
               "seed": TEST_SEED, **_run_context(settings)}
 
     balance = _answer_balance(settings)
+    uni = balance["uniformity"]
     print(f"[baselines] answer-value balance over {balance['n_samples']} "
           f"samples from training streams {balance['train_seeds']}: "
           f"{balance['n_classes_present']} classes present, share "
           f"min={balance['min_class_share']:.5f} max={balance['max_class_share']:.5f} "
-          f"(uniform={balance['expected_uniform_share']:.5f})")
+          f"(uniform={balance['expected_uniform_share']:.5f}); "
+          f"uniformity chi2={uni['chi2']:.1f} (df={uni['df']}, "
+          f"E/class={uni['expected_per_class']:.1f}) p={uni['p_value']:.4f} -> "
+          f"{'uniform supported' if uni['uniform_supported'] else 'NOT uniform'}")
+    if not uni["uniform_supported"]:
+        print("[baselines] WARNING: the drawn answers are not uniform at the "
+              "audit sample size: accuracy degrades toward a class-prior "
+              "metric, so the F1/PR-AUC companions (not accuracy) carry the "
+              "headline claims and the balance premise is flagged in "
+              "baselines_verdict.json")
     _write_json(out_dir / "baselines_balance.json", balance)
 
     # HB5 first: a broken training loop invalidates every learned number
@@ -2966,8 +3136,16 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         steps=settings.probe_steps, batch=settings.probe_batch,
         val_seed=VAL_SEED, val_batches=settings.eval_batches,
         probe_batch=settings.eval_batch)
+    probe_selection = _selection_reliability(table,
+                                             grid=settings.probe_lr_grid)
     _write_json(out_dir / "baselines_probe_tuning.json",
-                {"val_seed": VAL_SEED, "table": table, "chosen_lr": best_lr})
+                {"val_seed": VAL_SEED, "table": table, "chosen_lr": best_lr,
+                 "selection": probe_selection})
+    probe_warn = _selection_warn(f"linear probe selection lr={best_lr:g}",
+                                 probe_selection)
+    if probe_warn:
+        print(f"[baselines] {probe_warn}: HB2's near-chance bound may be an "
+              f"under-tuned strawman")
     n_diverged = int(sum(row.get("diverged_runs", 0) for row in table))
     print(f"[baselines] linear probe tuned on val seed {VAL_SEED} over lr "
           f"grid {settings.probe_lr_grid}: lr={best_lr:g}"
@@ -3090,6 +3268,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "hb6_supported": bool(shallow["hb6_supported"]),
         "hb7_depth_required": ladder["hb7_depth_required"],
         "saturation_depth": ladder["saturation_depth"],
+        "answer_balance": balance,
         "depth_ladder": {
             "ladder": ladder["ladder"],
             "val_seed": VAL_SEED,
@@ -3098,6 +3277,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                 str(d): {
                     "lr": payload["chosen_lr"],
                     "tuning_table": payload["tuning_table"],
+                    "selection": payload["selection"],
                     "accuracy_mean": payload["accuracy_mean"],
                     "accuracy_std": payload["accuracy_std"],
                     "accuracy_by_seed": payload["accuracy_by_seed"],
@@ -3114,11 +3294,13 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "probe_tuning": {
             "lr_grid": list(settings.probe_lr_grid),
             "diverged_runs": n_diverged,
+            "selection": probe_selection,
             "by_lr": table,
         },
         "shallow_none": {
             "n_layers": ladder["shallowest"], "lr": shallow["chosen_lr"],
             "tuning_table": shallow["tuning_table"],
+            "selection": shallow["selection"],
             "accuracy_mean": shallow["accuracy_mean"],
             "accuracy_std": shallow["accuracy_std"],
             "accuracy_by_seed": shallow["accuracy_by_seed"],
