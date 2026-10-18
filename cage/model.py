@@ -858,8 +858,13 @@ class Attention(nn.Module):
         ``(B, T, d_model) -> (3, B*h, T, dk)`` with the projection applied
         per batch chunk straight into the target buffer.
         """
-        step = (max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
-                if x.is_cuda else B)
+        row_bytes = T * 3 * x.size(-1) * x.element_size()
+        if x.is_cuda:
+            step = max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
+        elif B * row_bytes > _QKV_CHUNK_BYTES:
+            step = max(1, min(B, _QKV_CHUNK_BYTES // row_bytes))
+        else:
+            step = B
         if step >= B:
             return self._pack(F.linear(x, self.qkv.weight), B, h, T, dk)
         packed = x.new_empty(3, B * h, T, dk)
@@ -873,8 +878,17 @@ class Attention(nn.Module):
 
     def _gate_proj(self, x: torch.Tensor, B: int, T: int, C: int,
                    grad_on: bool) -> torch.Tensor:
+        """Project the gate.
+
+        With grad on the projection runs on the flattened ``(B*T, C)`` rows
+        and the result owns its storage; a 3-D ``F.linear`` returns a *view*
+        of the 2-D result, and each in-place gate op on that view would make
+        autograd materialize a full ``(B, T, C)`` copy (``CopySlices``).
+        Without grad the caller consumes the plain ``(B, T, C)`` layout.
+        """
         if grad_on:
-            return self.gate(x)
+            return F.linear(x.reshape(B * T, C), self.gate.weight,
+                            self.gate.bias)
         out = _get_scratch(("gate_out",), x.device, x.dtype, B * T * C)
         _linear_into(x.reshape(B * T, C), self.gate.weight, self.gate.bias,
                      out.view(B * T, C))
@@ -1056,7 +1070,7 @@ class Attention(nn.Module):
                 calib_cs = self.calib_c * self.calib_scale
                 if grad_on:
                     conc = ent.mean(dim=1).div_(log_len).mul(
-                        calib_cs).unsqueeze(-1)
+                        calib_cs).reshape(B * T, 1)
                 else:
                     conc = _get_scratch(("calib_conc",), x.device, x.dtype,
                                         B * T)[:B * T].view(B, T)
@@ -1105,7 +1119,7 @@ class Attention(nn.Module):
 
         gate_stat = None
         if gate_val is not None:
-            gate_stat = _pick_tokens(gate_val, stat_pos).detach()
+            gate_stat = _pick_tokens(gate_val.view(B, T, C), stat_pos).detach()
         return out, {
             "entropy": stats[0].detach(),
             "maxprob": None if stats[1] is None else stats[1].detach(),
