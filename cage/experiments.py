@@ -1932,6 +1932,43 @@ def _run_context(settings: Settings) -> dict:
     return ctx
 
 
+def _protocol_sha256(ctx: dict) -> str:
+    """Hash over exactly the resolved config and data-stream fingerprints.
+
+    Excludes the code revision, hypothesis registry and environment on
+    purpose: those do not change *which data* a check was run on, so a
+    verdict produced under the same protocol on an older revision is still
+    about the same splits.  Any config or stream-fingerprint change does
+    invalidate the stored HB marks.
+    """
+    payload = json.dumps({"config": ctx["config"],
+                          "data_fingerprints": ctx["data_fingerprints"]},
+                         ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _verdict_provenance_note(verdict: dict, settings: Settings) -> str | None:
+    """Explain why a stored baselines verdict may not apply to this run.
+
+    A verdict written under a different config/data protocol (or before
+    the stamp existed) cannot annotate the current grids: its HB1/HB2/HB4/
+    HB5/HB6/HB7 marks were measured on different streams or a different
+    recipe.
+    """
+    stored = verdict.get("protocol_sha256")
+    if stored is None:
+        return ("baselines verdict predates protocol stamping; re-run "
+                "`--only baselines` so its HB marks describe the current "
+                "data/recipe")
+    current = _protocol_sha256(_run_context(settings))
+    if stored != current:
+        return (f"baselines verdict protocol {stored} != current {current}; "
+                f"it was produced under a different config/data protocol, so "
+                f"its HB marks do not describe this run - re-run "
+                f"`--only baselines`")
+    return None
+
+
 def _write_manifest(settings: Settings, out_dir: pathlib.Path, tag: str) -> dict:
     """Per-experiment provenance manifest, written before any training.
 
@@ -1958,9 +1995,10 @@ def _load_baseline_verdict(out_dir: pathlib.Path):
     E1/E2/E3 read the learned model against the simple baselines, so a
     missing verdict file is surfaced as a note instead of silently
     treating the baseline check as passed.  A verdict file written by an
-    older version lacks the HB4/HB5 keys; those are reported as ``n/a``
-    (not ``FAILED``) so the right response is to re-run
-    ``--only baselines``, not to read the missing checks as failures.
+    older version lacks the HB4/HB5 keys or the protocol stamp; the marks
+    are reported as ``n/a`` (not ``FAILED``) and a provenance warning asks
+    for a re-run, so neither a missing check nor a stale one is mistaken
+    for a pass.
     """
     path = out_dir / "baselines_verdict.json"
     if not path.exists():
@@ -2410,7 +2448,12 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seed=VAL_SEED):
     }
 
 
-def _audit_data_splits(settings: Settings, out_dir: pathlib.Path) -> dict:
+class SplitAuditError(RuntimeError):
+    """The HB3 split/disjointness audit failed; no grid may run on this data."""
+
+
+def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
+                       tag: str = "baselines", enforce: bool = False) -> dict:
     """HB3: verify every stream pair is disjoint and field-wise IID before
     any model is trained.
 
@@ -2418,9 +2461,9 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path) -> dict:
     between *any* two streams - validation vs test included - or a
     distribution gap between the training set and a held-out split
     invalidates every number reported afterwards, so the outcome is printed
-    and stored next to the baselines.  Every configured training seed
-    enters the audit as its own stream and the exact-overlap check covers
-    all stream pairs.  Each audit field's shift is decided by a Monte
+    and stored under ``<tag>_split_audit.json``.  Every configured training
+    seed enters the audit as its own stream and the exact-overlap check
+    covers all stream pairs.  Each audit field's shift is decided by a Monte
     Carlo-calibrated Pearson chi-square against the pooled training
     distribution (see ``cage.data.split_leakage_audit``), Benjamini-
     Hochberg-adjusted over the field x split family at ``settings.fdr_q``:
@@ -2429,55 +2472,97 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path) -> dict:
     the tolerance approaches the maximum possible TV, so the calibrated
     test - not an arbitrary constant - carries the decision.  The
     TV/floor pair stays in the report as a descriptive companion.
+
+    The audit is deterministic for one ``Settings`` (fixed split seeds and
+    a fixed Monte Carlo seed), so the expensive computation runs once per
+    process and every experiment that depends on the protocol writes its
+    own copy.  ``enforce=True`` (E1/E2/E3 and the standalone pre-flight)
+    turns a failed audit into a hard :class:`SplitAuditError`: a protocol
+    with a shared sample or a held-out distribution shift cannot support
+    any grid result, so the grid is not started (same policy as the
+    reproducibility and overfit gates).
     """
     train_seeds = tuple(settings.seeds) or (0,)
-    audit = split_leakage_audit(
-        settings.n_pairs, settings.vocab, settings.device,
-        batch=settings.eval_batch, batches=settings.eval_batches,
-        train_seeds=train_seeds)
+    audit = getattr(settings, "_split_audit_cache", None)
+    fresh = audit is None
+    if fresh:
+        audit = split_leakage_audit(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.eval_batch, batches=settings.eval_batches,
+            train_seeds=train_seeds)
+        fields = audit["audit_fields"]
+        family = [(field, name) for field in fields
+                  for name in ("val", "test", "stats")]
+        bh = benjamini_hochberg(
+            [audit["shift_p_value"][field][name] for field, name in family],
+            q=settings.fdr_q)
+        shift_tests = {
+            f"{field}_train_{name}": {
+                "p": item["p"], "p_adj": item["p_adj"],
+                "reject": item["reject"],
+                "chi2": audit["shift_chi2"][field][name],
+            }
+            for (field, name), item in zip(family, bh)
+        }
+        audit["shift_p_value_bh"] = shift_tests
+        audit["hb3_supported"] = bool(
+            audit["max_pairwise_duplicate_overlap"] == 0
+            and not any(item["reject"] for item in shift_tests.values()))
+        settings._split_audit_cache = audit
+
     fields = audit["audit_fields"]
     floors = audit["tv_noise_floor"]
-    overlap_ok = audit["max_pairwise_duplicate_overlap"] == 0
-    family = [(field, name) for field in fields
-              for name in ("val", "test", "stats")]
-    bh = benjamini_hochberg(
-        [audit["shift_p_value"][field][name] for field, name in family],
-        q=settings.fdr_q)
-    shift_tests = {
-        f"{field}_train_{name}": {
-            "p": item["p"], "p_adj": item["p_adj"],
-            "reject": item["reject"], "chi2": audit["shift_chi2"][field][name],
-        }
-        for (field, name), item in zip(family, bh)
-    }
-    audit["shift_p_value_bh"] = shift_tests
-    shift_ok = not any(item["reject"] for item in shift_tests.values())
-    audit["hb3_supported"] = bool(overlap_ok and shift_ok)
+    shift_tests = audit["shift_p_value_bh"]
     rejected = [key for key, item in shift_tests.items() if item["reject"]]
-    detail = "; ".join(
-        f"{name}: tv_max={max(audit[f'{field}_tv_train_{name}']
-                              for field in fields):.5f}"
-        for name in ("val", "test", "stats"))
-    floor_txt = ", ".join(f"{field}={floors[field]:.5f}" for field in fields)
-    adj_txt = ", ".join(
-        f"{field}_train_{name}={shift_tests[f'{field}_train_{name}']['p_adj']:.3f}"
-        for field in fields for name in ("val", "test", "stats"))
-    print(f"[baselines] split audit (HB3, train seeds {list(train_seeds)}): "
-          f"{detail}; pairwise overlap max="
-          f"{audit['max_pairwise_duplicate_overlap']} over "
-          f"{len(audit['pairwise_duplicate_overlap'])} stream pairs; "
-          f"TV noise floor [{floor_txt}]; calibrated shift test "
-          f"(BH q={settings.fdr_q:g}) adjusted p: [{adj_txt}]; "
-          f"unique_key_rate={audit['unique_key_rate']:.4f}")
+    if fresh:
+        detail = "; ".join(
+            f"{name}: tv_max={max(audit[f'{field}_tv_train_{name}']
+                                  for field in fields):.5f}"
+            for name in ("val", "test", "stats"))
+        floor_txt = ", ".join(f"{field}={floors[field]:.5f}" for field in fields)
+        adj_txt = ", ".join(
+            f"{field}_train_{name}={shift_tests[f'{field}_train_{name}']['p_adj']:.3f}"
+            for field in fields for name in ("val", "test", "stats"))
+        dup_txt = ", ".join(
+            f"{name}={audit[f'n_duplicate_rows_{name}']}"
+            for name in ("val", "test", "stats"))
+        print(f"[{tag}] split audit (HB3, train seeds {list(train_seeds)}): "
+              f"{detail}; pairwise overlap max="
+              f"{audit['max_pairwise_duplicate_overlap']} over "
+              f"{len(audit['pairwise_duplicate_overlap'])} stream pairs; "
+              f"TV noise floor [{floor_txt}]; calibrated shift test "
+              f"(BH q={settings.fdr_q:g}) adjusted p: [{adj_txt}]; "
+              f"stream duplicates train="
+              f"{audit['n_duplicate_rows_train']} ({dup_txt}); "
+              f"unique_key_rate={audit['unique_key_rate']:.4f}")
+    else:
+        print(f"[{tag}] split audit (HB3, train seeds {list(train_seeds)}): "
+              f"deterministic result reused; hb3_supported="
+              f"{audit['hb3_supported']}")
     if rejected:
-        print(f"[baselines] WARNING: calibrated shift test rejects "
+        print(f"[{tag}] WARNING: calibrated shift test rejects "
               f"{', '.join(rejected)}: held-out counts differ from the "
               f"pooled training distribution beyond same-stream sampling "
               f"noise")
     if not audit["hb3_supported"]:
-        print("[baselines] WARNING: HB3 split/disjointness audit failed; "
-              "all reported numbers are suspect")
-    _write_json(out_dir / "baselines_split_audit.json", audit)
+        print(f"[{tag}] WARNING: HB3 split/disjointness audit failed; "
+              f"all reported numbers are suspect")
+    _write_json(out_dir / f"{tag}_split_audit.json", audit)
+    if enforce and not audit["hb3_supported"]:
+        _write_json(out_dir / f"{tag}_aborted.json", {
+            "experiment": tag,
+            "reason": "HB3 split/disjointness audit failed",
+            "rejected_shift_tests": rejected,
+            "max_pairwise_duplicate_overlap":
+                audit["max_pairwise_duplicate_overlap"],
+            "split_audit": audit,
+            **_run_context(settings),
+        })
+        raise SplitAuditError(
+            f"{tag}: HB3 failed (max pairwise duplicate overlap="
+            f"{audit['max_pairwise_duplicate_overlap']}, rejected shift "
+            f"tests={rejected or 'none'}); a data protocol with leakage or "
+            f"a held-out distribution shift cannot support any grid result")
     return audit
 
 
@@ -2774,13 +2859,12 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
 def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7"))
     _write_manifest(settings, out_dir, "baselines")
+    audit = _audit_data_splits(settings, out_dir, "baselines")
     repro_audit = _enforce_reproducibility(settings, out_dir, "baselines")
     record = {"experiment": "baselines",
               "hypotheses": ["HB1", "HB2", "HB3", "HB4", "HB5", "HB6",
                              "HB7"],
               "seed": TEST_SEED, **_run_context(settings)}
-
-    audit = _audit_data_splits(settings, out_dir)
 
     balance = _answer_balance(settings)
     print(f"[baselines] answer-value balance over {balance['n_samples']} "
@@ -2957,6 +3041,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     })
 
     verdict = {
+        "protocol_sha256": _protocol_sha256(_run_context(settings)),
+        "git_sha": _run_context(settings)["git_sha"],
         "train_seed": settings.seeds[0] if settings.seeds else None,
         "test_seed": TEST_SEED,
         "val_seed": VAL_SEED,
@@ -3136,6 +3222,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
 def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H1a", "H1b", "H1c", "H1d", "H1e"))
     _write_manifest(settings, out_dir, "e1")
+    _audit_data_splits(settings, out_dir, "e1", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e1")
     _enforce_overfit_gate(settings, out_dir, "e1")
     lr = _resolve_lr(settings, out_dir, "e1")
@@ -3294,6 +3381,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               "against the tuned simple baselines (probe, rules, shallow "
               "transformer) before crediting any gate variant")
     else:
+        stale = _verdict_provenance_note(verdict, settings)
+        if stale:
+            print(f"[e1] WARNING: {stale}")
         probe = verdict.get("probe_accuracy_mean", float("nan"))
 
         def _mark(key):
@@ -3622,6 +3712,7 @@ _E2_VARIANTS = (
 def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H2a", "H2b", "H2c"))
     _write_manifest(settings, out_dir, "e2")
+    _audit_data_splits(settings, out_dir, "e2", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e2")
     _enforce_overfit_gate(settings, out_dir, "e2")
     lr = _resolve_lr(settings, out_dir, "e2")
@@ -3876,6 +3967,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
 def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H3a", "H3b", "H3c"))
     _write_manifest(settings, out_dir, "e3")
+    _audit_data_splits(settings, out_dir, "e3", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e3")
     _enforce_overfit_gate(settings, out_dir, "e3")
     lr = _resolve_lr(settings, out_dir, "e3")
@@ -3890,6 +3982,9 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
               "`--only baselines` first to check whether the 8-layer grid "
               "depth is measurably required (HB7)")
     else:
+        stale = _verdict_provenance_note(verdict, settings)
+        if stale:
+            print(f"[e3] WARNING: {stale}")
         required = verdict.get("hb7_depth_required")
         saturation = verdict.get("saturation_depth")
         if required is None:
@@ -4058,13 +4153,14 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
 
 
 def run_sanity(settings: Settings, out_dir: pathlib.Path) -> None:
-    """Standalone pre-flight: seed-determinism audit + HB5 overfit gate.
+    """Standalone pre-flight: HB3 split audit + seed-determinism + HB5 gate.
 
     The E1/E2/E3 runners invoke the identical gates themselves, so a clean
     E1/E2/E3 run implies a passed pre-flight (``--only sanity``).
     """
-    _announce(("HB5",))
+    _announce(("HB3", "HB5"))
     _write_manifest(settings, out_dir, "sanity")
+    _audit_data_splits(settings, out_dir, "sanity", enforce=True)
     _enforce_reproducibility(settings, out_dir, "sanity")
     _enforce_overfit_gate(settings, out_dir, "sanity")
 
@@ -4146,7 +4242,8 @@ def main(argv=None) -> int:
             run_e3(settings, out_dir)
         else:
             run_all(settings, out_dir)
-    except (OverfitSanityError, ReproducibilityError) as e:
+    except (OverfitSanityError, ReproducibilityError,
+            SplitAuditError) as e:
         print(f"[runner] ABORTED before grid training: {e}")
         return 3
     print(f"\n[runner] done; records in {out_dir}/")

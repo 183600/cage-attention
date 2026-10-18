@@ -482,13 +482,17 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
 
     ``permute_labels`` (negative control, default off): after the first
     batch has passed the data-cleaning gate, the supervised labels of every
-    batch are shuffled across the batch before the loss is computed.  A
-    model trained this way cannot learn any true answer, so its accuracy on
-    the *unchanged* evaluation streams must stay at chance - a clear
-    above-chance result means answer information leaks through the
-    pipeline.  The staged non-finite triage is fed the un-permuted batch,
-    so the intentional label mismatch is never mistaken for a data
-    problem.
+    batch are shuffled across the batch before the loss is computed.  The
+    permutation draws from its own generator (seeded from ``seed``), not
+    from the data generator, so a permuted run sees exactly the same
+    batches as an otherwise identical non-permuted run and only the label
+    channel differs - the control isolates the labels instead of also
+    changing the data stream.  A model trained this way cannot learn any
+    true answer, so its accuracy on the *unchanged* evaluation streams
+    must stay at chance - a clear above-chance result means answer
+    information leaks through the pipeline.  The staged non-finite triage
+    is fed the un-permuted batch, so the intentional label mismatch is
+    never mistaken for a data problem.
 
     ``seed`` must not collide with a held-out evaluation stream
     (``cage.data.RESERVED_EVAL_SEEDS``); the first batch of the run is
@@ -529,6 +533,9 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     check_train_seed(seed)
     seed_everything(seed)
     gen = stream_generator(seed, device)
+    # Labels are permuted from their own stream so the negative control
+    # draws the same data batches as the corresponding clean run.
+    perm_gen = stream_generator(seed, device)
     val_gen = stream_generator(VAL_SEED, device)
     params = list(model.parameters())
     opt = _make_adamw(params, lr)
@@ -546,7 +553,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             validate_batch(idx, tgt, meta, vocab)
         diag_tgt = tgt
         if permute_labels:
-            tgt = _permute_batch_labels(tgt, gen)
+            tgt = _permute_batch_labels(tgt, perm_gen)
         opt.zero_grad(set_to_none=True)
         sup_pos = None if dense_lm else meta["query_pos"]
         _, loss, _ = model(idx, tgt, sup_pos=sup_pos)
@@ -982,7 +989,10 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
 
     The label audit makes "labels cannot be the cause" a *measured* claim:
     ``label_noise_rate`` is computed over every evaluated sample rather
-    than assumed to be 0 from the construction.
+    than assumed to be 0 from the construction.  The first batch
+    additionally passes the full ``validate_batch`` cleaning gate, so a
+    structurally invalid batch aborts the analysis instead of being
+    taxonomised as a model error.
 
     Returns ``{"cases": [...], "summary": {...}}``; cases are capped at
     ``max_cases`` but the summary aggregates every evaluated sample.
@@ -1035,8 +1045,10 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
     key_right_n = torch.zeros((), dtype=i64, device=device)
     tertile_denom = max(1, n_pairs)
     try:
-        for _ in range(batches):
-            idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+        for i in range(batches):
+            idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+            if i == 0:
+                validate_batch(idx, tgt, meta, vocab)
             per_layer_mass.clear()
             state["meta"] = meta
             logits, _, _ = model(idx)
@@ -1242,14 +1254,21 @@ def _error_case_flags(idx, meta, pred, n_pairs):
 @torch.inference_mode()
 def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
                   seed=VAL_SEED):
-    """Recall accuracy at the query position."""
+    """Recall accuracy at the query position.
+
+    The first batch of the stream passes the same ``validate_batch``
+    cleaning gate as training, so a reported accuracy can never be
+    computed on structurally invalid or label-noisy data.
+    """
     gen = torch.Generator(device=device).manual_seed(seed)
     was_training = model.training
     model.eval()
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
-    for _ in range(batches):
-        idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+    for i in range(batches):
+        idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+        if i == 0:
+            validate_batch(idx, tgt, meta, vocab)
         logits, _, _ = model(idx)
         pred = logits.squeeze(1).argmax(-1)
         correct.add_((pred == meta["answer"]).sum())
@@ -1281,14 +1300,18 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     training variance, while this interval quantifies how precisely the
     *reported* stream of ``batch * batches`` samples pins the accuracy
     down (the two are different uncertainties and both belong next to a
-    headline number).
+    headline number).  The first batch passes the ``validate_batch``
+    cleaning gate, so the metric panel is only computed on data that
+    satisfies the same integrity/label invariants as training.
     """
     gen = torch.Generator(device=device).manual_seed(seed)
     was_training = model.training
     model.eval()
     logits_all, tgt_all = [], []
-    for _ in range(batches):
-        idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+    for i in range(batches):
+        idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+        if i == 0:
+            validate_batch(idx, tgt, meta, vocab)
         logits, _, _ = model(idx)
         logits_all.append(logits.squeeze(1).float())
         tgt_all.append(meta["answer"])
@@ -1314,14 +1337,20 @@ def collect_stats(model, n_pairs, vocab, device, batch=128, batches=4,
                   seed=STATS_SEED):
     """Collect per-layer gate / entropy / maxprob / null-mass at query positions,
     plus false-concentration labels (high max-prob but wrong answer).
+
+    The first batch passes the ``validate_batch`` cleaning gate, so the
+    mechanism statistics are computed on the same validated data contract
+    as training and the reported accuracy metrics.
     """
     gen = torch.Generator(device=device).manual_seed(seed)
     was_training = model.training
     model.eval()
     out = {"gate": [], "entropy": [], "maxprob": [], "null_mass": [],
            "correct": [], "resid_norm": []}
-    for _ in range(batches):
-        idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+    for i in range(batches):
+        idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+        if i == 0:
+            validate_batch(idx, tgt, meta, vocab)
         logits, _, layer_stats = model(idx, stat_pos=meta["query_pos"])
         pred = logits.squeeze(1).argmax(-1)
         out["correct"].append((pred == meta["answer"]).float())

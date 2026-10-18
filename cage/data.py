@@ -156,6 +156,18 @@ def make_batch(batch: int, n_pairs: int, vocab: int, device, dense_lm: bool = Fa
     return idx, targets, meta
 
 
+def _count_duplicate_rows(idx) -> int:
+    """Exact duplicate rows in ``idx`` (content comparison, no fitting).
+
+    Used both for the per-batch cleaning diagnostics and for the
+    whole-stream duplicate count in :func:`split_leakage_audit`: counting
+    duplicates is a deterministic set operation, so it is safe on any
+    split and needs no train-fitted statistics.
+    """
+    rows = idx.detach().cpu().tolist()
+    return int(len(rows) - len({tuple(int(t) for t in row) for row in rows}))
+
+
 def validate_batch(idx, targets, meta, vocab) -> dict:
     """Data-cleaning gate for one freshly generated batch.
 
@@ -214,10 +226,8 @@ def validate_batch(idx, targets, meta, vocab) -> dict:
         sup = targets.gather(1, qp.unsqueeze(1)).squeeze(1)
         if not bool(sup.eq(answer).all()):
             raise ValueError("supervised target at query_pos != answer")
-    rows = idx.detach().cpu().tolist()
-    n_unique = len({tuple(int(t) for t in row) for row in rows})
     return {"n": int(idx.size(0)), "unique_key_rate": 1.0,
-            "n_duplicate_rows": int(len(rows) - n_unique)}
+            "n_duplicate_rows": _count_duplicate_rows(idx)}
 
 
 def batch_fingerprint(idx, tgt, meta) -> str:
@@ -441,8 +451,12 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
       unattainable tolerance.
     * **cleaning diagnostics** from :func:`validate_batch`, run on every
       batch of every split: NaN/Inf, out-of-range ids, structural
-      violations and ambiguous label noise raise; the per-split
-      duplicate-row count and unique-key rate are returned.
+      violations and ambiguous label noise raise; a whole-split exact
+      duplicate-row count and the unique-key rate are returned, plus the
+      subset of duplicates that occur *within* one batch (a stream-level
+      count above the within-batch count means the same sample was drawn
+      in two different batches of the same stream; overlaps *between*
+      streams are the leakage signal above).
 
     The audit only *reads* data: it fits nothing on held-out streams and
     writes nothing.  A shared sample or a gap above the noise floor
@@ -510,14 +524,19 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
     }
     per_split_dup = {name: sum(d["n_duplicate_rows"] for d in s["diagnostics"])
                      for name, s in splits.items()}
-    out["n_duplicate_rows_train"] = sum(per_split_dup[n] for n in train_names)
+    stream_dup = {name: _count_duplicate_rows(s["idx"])
+                  for name, s in splits.items()}
+    out["n_duplicate_rows_train"] = sum(stream_dup[n] for n in train_names)
+    out["n_duplicate_rows_within_batch_train"] = sum(
+        per_split_dup[n] for n in train_names)
     out["unique_key_rate"] = min(
         d["unique_key_rate"] for s in splits.values()
         for d in s["diagnostics"])
     for name in ("val", "test", "stats"):
         out[f"duplicate_overlap_train_{name}"] = pairwise[
             f"{train_names[0]}|{name}"]
-        out[f"n_duplicate_rows_{name}"] = per_split_dup[name]
+        out[f"n_duplicate_rows_{name}"] = stream_dup[name]
+        out[f"n_duplicate_rows_within_batch_{name}"] = per_split_dup[name]
         for field in _AUDIT_FIELDS:
             out[f"{field}_tv_train_{name}"] = _total_variation(
                 reference[field],
@@ -553,7 +572,10 @@ def _self_test() -> int:
     held-out split drawn from half the class range must be (power) even
     though its total-variation gap stays below the historical
     ``3 x noise floor`` tolerance - the blindness that motivated the
-    Monte Carlo-calibrated chi-square.  Run with ``python3 -m cage.data``.
+    Monte Carlo-calibrated chi-square.  Also pins the duplicate-row
+    accounting used by the split audit, including duplicates that only
+    appear when two batches are concatenated.  Run with
+    ``python3 -m cage.data``.
     """
     failures = []
 
@@ -589,6 +611,16 @@ def _self_test() -> int:
     floor = _tv_between_counts(same_source, draw_counts(classes, n_h, 14))
     tv_shift = _tv_between_counts(half_range, reference)
     check("old_tv_tolerance_would_pass", tv_shift < 3.0 * floor)
+
+    # Stream-level duplicate accounting: rows repeated across *different*
+    # batches of one stream must be counted, not only within one batch.
+    gen = torch.Generator().manual_seed(21)
+    batch_a, _, _ = make_batch(8, 4, 64, "cpu", gen=gen)
+    batch_b, _, _ = make_batch(8, 4, 64, "cpu", gen=gen)
+    check("clean_batch_has_no_duplicates",
+          _count_duplicate_rows(batch_a) == 0)
+    check("stream_duplicates_counted",
+          _count_duplicate_rows(torch.cat([batch_a, batch_a[:3], batch_b])) == 3)
 
     if failures:
         print("data self-test FAILED: " + ", ".join(failures))

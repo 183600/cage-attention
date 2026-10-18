@@ -70,12 +70,20 @@ def _answer_meta(idx, meta):
 
 @torch.inference_mode()
 def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
+    """Score a rule-based predictor on fixed streams.
+
+    The first batch passes the shared ``validate_batch`` cleaning gate, so
+    the ceiling/floor baselines are measured on the same data contract as
+    the learned models.
+    """
     gen = torch.Generator(device=device).manual_seed(seed)
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
     extra = {}
-    for _ in range(batches):
-        idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+    for i in range(batches):
+        idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+        if i == 0:
+            validate_batch(idx, tgt, meta, vocab)
         pred, stats = predict(idx, meta)
         correct.add_((pred == meta["answer"]).sum())
         total += idx.size(0)
@@ -224,11 +232,14 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
 @torch.inference_mode()
 def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
                           batches=4, seed=123):
+    """Probe accuracy on a held-out stream, cleaning-gated like training."""
     gen = torch.Generator(device=device).manual_seed(seed)
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
-    for _ in range(batches):
-        idx, _, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+    for i in range(batches):
+        idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+        if i == 0:
+            validate_batch(idx, tgt, meta, vocab)
         pred = model(idx).argmax(dim=-1)
         correct.add_((pred == meta["answer"]).sum())
         total += idx.size(0)
