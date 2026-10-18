@@ -3993,7 +3993,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     print(f"\n[e1] inference cost (batch="
           f"{min(settings.eval_batch, 128)}, seq_len={by_gate['none'][0]['seq_len']};"
           f" latency = median of {settings.cost_runs} runs; cpu memory is a"
-          f" profiler alloc-sum proxy, not peak RSS):")
+          f" profiler-tracked live-tensor peak, not peak RSS):")
     print(f"{'gate':>6} {'params':>10} {'flops/M':>9} {'ms/sample':>10} "
           f"{'mem/MB':>9}")
     for gate in GATES:

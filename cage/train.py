@@ -820,8 +820,8 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
                         dense_lm, validate=False):
     """Validation loss (and accuracy) on fixed, held-out validation batches.
 
-    Uses eval mode + ``no_grad`` (no dropout, no RNG consumption), so the
-    training RNG stream - and therefore the training trajectory - is
+    Uses eval mode + ``inference_mode`` (no dropout, no RNG consumption), so
+    the training RNG stream - and therefore the training trajectory - is
     unaffected by monitoring.
     """
     was_training = model.training
@@ -830,7 +830,7 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
     val_gen.manual_seed(VAL_SEED)
-    with torch.no_grad():
+    with torch.inference_mode():
         for i in range(max(1, batches)):
             idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
                                         dense_lm=dense_lm, gen=val_gen)
@@ -882,8 +882,11 @@ def measure_inference_cost(model, n_pairs, vocab, device, batch=64, warmup=3,
 
     Latency is the median of ``runs`` passes after ``warmup`` (batch
     ``batch`` at ``n_pairs``; fixed seed so every variant scores the same
-    shapes).  Memory is the CUDA allocation peak on GPU; on CPU it is the
-    profiler-attributed allocation total of one pass.
+    shapes); on CUDA each timed pass is bracketed by
+    ``torch.cuda.synchronize()`` so async kernel enqueueing is not timed.
+    Memory is the CUDA allocation peak on GPU; on CPU it is the peak of the
+    profiler-tracked live tensor bytes during one pass (derived from the
+    allocation/free events, not RSS).
     """
     gen = torch.Generator(device=device).manual_seed(seed)
     idx, _, _ = make_batch(batch, n_pairs, vocab, device, gen=gen)
@@ -894,15 +897,23 @@ def measure_inference_cost(model, n_pairs, vocab, device, batch=64, warmup=3,
     mem_method = "unavailable"
     try:
         with torch.inference_mode():
+            is_cuda = idx.is_cuda
             for _ in range(max(0, warmup)):
                 model(idx)
+            if is_cuda:
+                torch.cuda.synchronize()
             for _ in range(max(1, runs)):
+                if is_cuda:
+                    torch.cuda.synchronize()
                 t0 = time.perf_counter()
                 model(idx)
+                if is_cuda:
+                    torch.cuda.synchronize()
                 times.append(time.perf_counter() - t0)
-            if idx.is_cuda:
+            if is_cuda:
                 torch.cuda.reset_peak_memory_stats()
                 model(idx)
+                torch.cuda.synchronize()
                 mem_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
                 mem_method = "cuda_peak"
             else:
@@ -911,9 +922,13 @@ def measure_inference_cost(model, n_pairs, vocab, device, batch=64, warmup=3,
                     with profile(activities=[ProfilerActivity.CPU],
                                  profile_memory=True) as prof:
                         model(idx)
-                    mem_mb = prof.key_averages().total_average(
-                    ).cpu_memory_usage / (1024 * 1024)
-                    mem_method = "cpu_profiler_alloc_sum"
+                    live = 0
+                    peak = 0
+                    for event in prof.events():
+                        live += getattr(event, "cpu_memory_usage", 0) or 0
+                        peak = max(peak, live)
+                    mem_mb = peak / (1024 * 1024)
+                    mem_method = "cpu_profiler_peak"
                 except Exception:  # noqa: BLE001 - measurement must not fail
                     pass
     finally:
