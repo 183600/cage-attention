@@ -364,7 +364,13 @@ def _linear_into(x: torch.Tensor, weight: torch.Tensor,
 
 
 def _layer_norm_into(ln: nn.LayerNorm, x: torch.Tensor) -> torch.Tensor:
-    """``ln(x)`` written into reusable buffers."""
+    """``ln(x)`` written into reusable buffers.
+
+    The ``out=`` scratch is deliberately kept over the functionally-equivalent
+    result allocation: in the model the reused (cache-warm) destination is
+    measurably faster end to end than a freshly allocated one, even though
+    the standalone op is not.
+    """
     shape = x.shape
     rows = x.numel() // shape[-1]
     out = _get_scratch(("ln_out",), x.device, x.dtype, x.numel())
@@ -1055,29 +1061,30 @@ class Attention(nn.Module):
         ybt = None
         stats = None
         if not dropping:
-            if is_null and not grad_on:
-                # as for the `none` gate below: no gate follows, so the
-                # kernel writes the projection input directly.
-                ybt = _get_scratch(("attn_y",), x.device, x.dtype,
-                                   B * T * C).view(B, T, h, dk)
-                _NullAttn.apply(packed, self.null_k, self.null_v,
-                                self.inv_scale, B, False, ybt)
-            elif is_null:
+            if grad_on and is_null:
                 y4 = _NullAttn.apply(packed, self.null_k, self.null_v,
                                      self.inv_scale, B, grad_on).view(B, h, T, dk)
-            elif kind == "none" and not grad_on:
-                # No gate follows: the kernel can write its blocks straight
-                # into the ``(B, T, H, dk)`` projection input, which removes
-                # both the separate ``(B*H, T, dk)`` output and the full
-                # transpose copy the other variants need.
-                ybt = _get_scratch(("attn_y",), x.device, x.dtype,
-                                   B * T * C).view(B, T, h, dk)
-                _CalibAttn.apply(packed, self.inv_scale, _EPS, calc_ent, ybt)
-            else:
+            elif grad_on:
                 y, ent = _CalibAttn.apply(packed, self.inv_scale, _EPS,
                                           calc_ent)
                 y4 = y.view(B, h, T, dk)
                 ent = None if ent is None else ent.view(B, h, T)
+            else:
+                # No-grad: every variant has the kernel write its blocks
+                # straight into the ``(B, T, H, dk)`` projection input, which
+                # removes the separate ``(B*H, T, dk)`` output buffer and the
+                # full transpose copy the gated variants would otherwise
+                # need.  Gated variants multiply the gate into the buffer in
+                # place below.
+                ybt = _get_scratch(("attn_y",), x.device, x.dtype,
+                                   B * T * C).view(B, T, h, dk)
+                if is_null:
+                    _NullAttn.apply(packed, self.null_k, self.null_v,
+                                    self.inv_scale, B, False, ybt)
+                else:
+                    _, ent = _CalibAttn.apply(packed, self.inv_scale, _EPS,
+                                              calc_ent, ybt)
+                    ent = None if ent is None else ent.view(B, h, T)
             if need_stats:
                 stats = self._row_stats_at(
                     packed[0].view(B, h, T, dk), packed[1], B, h, T,
@@ -1154,8 +1161,10 @@ class Attention(nn.Module):
             ent = None
 
         if ybt is not None:
-            # the calibrated kernel already wrote the projection input;
-            # this variant carries no gate.
+            # The kernel already wrote the projection input; a gate, if any,
+            # is applied to it in place.
+            if gate_val is not None:
+                torch.mul(gate_val.view(B, T, h, dk), ybt, out=ybt)
             y = ybt.view(B, T, C)
         elif gate_val is None:
             if grad_on:
