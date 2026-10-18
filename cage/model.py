@@ -330,11 +330,13 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
     ckey = (name, device, dtype)
     entry = _scratch_cache.get(ckey)
     if entry is not None and entry.numel() >= numel and _servable(entry):
-        return entry[:numel]
+        # Exact-size requests hand out the cached tensor itself; the slice
+        # view is only built for the (few) undersized requests.
+        return entry if entry.numel() == numel else entry[:numel]
     with torch.inference_mode(False):
         buf = torch.empty(numel, device=device, dtype=dtype)
     _scratch_cache[ckey] = buf
-    return buf[:numel]
+    return buf
 
 
 def _release_scratch(*names: str) -> None:
@@ -428,28 +430,59 @@ class _CalibAttn(torch.autograd.Function):
     The entropy output is only produced when ``need_ent`` is set (calibrated
     gate or diagnostics); the attention output itself is identical either
     way, so the kernel stays shared by all gate variants.
+
+    ``ybt`` optionally supplies a ``(B, T, H, dk)`` buffer used by the
+    no-grad eval path: each block is written straight into it (transposing
+    the block once on the way) and returned in that layout, which removes
+    the separate ``(B*H, T, dk)`` output buffer and the full transpose copy
+    that the caller would otherwise need.
     """
 
     @staticmethod
     @_no_compile
-    def forward(ctx, qkv, scale: float, eps: float, need_ent: bool = True):
+    def forward(ctx, qkv, scale: float, eps: float, need_ent: bool = True,
+                ybt: torch.Tensor | None = None):
         ctx.set_materialize_grads(False)
+        if ybt is not None and any(ctx.needs_input_grad):
+            raise RuntimeError("_CalibAttn ybt layout is no-grad only")
         q, k, v = qkv[0], qkv[1], qkv[2]
         bh, T = q.size(0), q.size(1)
         blocks = _query_blocks(bh, T)
         mask = _causal_mask(T, q.device, q.dtype)
         kt = k.transpose(1, 2)
         dv = v.size(-1)
-        if any(ctx.needs_input_grad):
-            y = q.new_empty(bh, T, dv)
-        else:
-            y = _get_scratch(("calib_y",), q.device, q.dtype,
-                             bh * T * dv).view(bh, T, dv)
         rows0 = blocks[0][1] - blocks[0][0]
         max_rows = rows0
         max_i1 = T
         grad_needed = any(ctx.needs_input_grad)
         s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
+        if ybt is not None:
+            B, _, h, dv = ybt.shape
+            ent = (_get_scratch(("calib_ent",), q.device, q.dtype,
+                                bh * T).view(bh, T)) if need_ent else None
+            ebuf = _get_scratch(("calib_f",), q.device, q.dtype,
+                                bh * max_rows * max_i1) if need_ent else None
+            yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
+                                bh * max_rows * dv)
+            for i0, i1 in blocks:
+                r = i1 - i0
+                p = _softmax_inplace(torch.baddbmm(
+                    mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
+                    beta=1.0, alpha=scale,
+                    out=s[:bh * r * i1].view(bh, r, i1)))
+                yb = yblk[:bh * r * dv].view(bh, r, dv)
+                torch.bmm(p, v[:, :i1], out=yb)
+                ybt[:, i0:i1].copy_(yb.view(B, h, r, dv).transpose(1, 2))
+                if need_ent:
+                    _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
+            ctx.scale = scale
+            ctx.eps = eps
+            return ybt, ent
+        if any(ctx.needs_input_grad):
+            y = q.new_empty(bh, T, dv)
+        else:
+            y = _get_scratch(("calib_y",), q.device, q.dtype,
+                             bh * T * dv).view(bh, T, dv)
         if len(blocks) == 1:
             p = _softmax_inplace(torch.baddbmm(
                 mask, q, kt, beta=1.0, alpha=scale,
@@ -493,7 +526,7 @@ class _CalibAttn(torch.autograd.Function):
     def backward(ctx, grad_y, grad_ent):
         saved = ctx.saved_tensors
         if not saved:
-            return None, None, None, None
+            return None, None, None, None, None
         (qkv,) = saved
         q, k, v = qkv[0], qkv[1], qkv[2]
         scale, eps = ctx.scale, ctx.eps
@@ -524,7 +557,7 @@ class _CalibAttn(torch.autograd.Function):
             torch.baddbmm(zero, d_s, k, beta=0.0, alpha=scale, out=d_qkv[0])
             torch.baddbmm(zero, d_s.transpose(1, 2), q, beta=0.0, alpha=scale,
                           out=d_qkv[1])
-            return d_qkv, None, None, None
+            return d_qkv, None, None, None, None
         d_qkv = torch.empty_like(qkv)
         d_q = d_qkv[0].view_as(q)
         d_k = d_qkv[1].view_as(k)
@@ -581,7 +614,7 @@ class _CalibAttn(torch.autograd.Function):
             torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
                           out=dqblk)
             d_q[:, i0:i1].copy_(dqblk)
-        return d_qkv, None, None, None
+        return d_qkv, None, None, None, None
 
 
 def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
@@ -665,7 +698,8 @@ class _NullAttn(torch.autograd.Function):
 
     @staticmethod
     @_no_compile
-    def forward(ctx, qkv, null_k, null_v, scale, B, need_grad: bool = True):
+    def forward(ctx, qkv, null_k, null_v, scale, B, need_grad: bool = True,
+                ybt: torch.Tensor | None = None):
         q, k, v = qkv[0], qkv[1], qkv[2]
         bh, T = q.size(0), q.size(1)
         h = null_k.size(0)
@@ -676,6 +710,28 @@ class _NullAttn(torch.autograd.Function):
         rows0 = blocks[0][1] - blocks[0][0]
         max_rows = rows0
         max_i1 = T
+        if ybt is not None:
+            # No-grad eval: write each block (plus its null-slot term)
+            # straight into the ``(B, T, h, dv)`` caller buffer.
+            if need_grad:
+                raise RuntimeError("_NullAttn ybt layout is no-grad only")
+            sbuf = _get_scratch(("null_s",), q.device, q.dtype,
+                                bh * max_rows * max_i1)
+            yblk = _get_scratch(("null_yblk",), q.device, q.dtype,
+                                bh * max_rows * dv)
+            nv4t = null_v.view(1, 1, h, dv)
+            for i0, i1 in blocks:
+                r = i1 - i0
+                p, p0 = _null_probs(q[:, i0:i1], kt[:, :, :i1], i0, i1,
+                                    mask[i0:i1, :i1], null_k, B, h, scale, sbuf)
+                yb = yblk[:bh * r * dv].view(bh, r, dv)
+                torch.bmm(p, v[:, :i1], out=yb)
+                dst = ybt[:, i0:i1]
+                dst.copy_(yb.view(B, h, r, dv).transpose(1, 2))
+                dst.addcmul_(p0.view(B, h, r, 1).transpose(1, 2), nv4t)
+            ctx.scale = scale
+            ctx.shape = (B, h)
+            return ybt
         if need_grad:
             y = q.new_empty(bh, T, dv)
         else:
@@ -709,7 +765,7 @@ class _NullAttn(torch.autograd.Function):
     def backward(ctx, grad_y):
         saved = ctx.saved_tensors
         if not saved:
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None
         qkv, null_k, null_v = saved
         q, k, v = qkv[0], qkv[1], qkv[2]
         scale = ctx.scale
@@ -799,7 +855,7 @@ class _NullAttn(torch.autograd.Function):
             acc_v.add_(acc_blk)
         d_null_k = acc_k.view(B, h, dk).sum(0)
         d_null_v = acc_v.view(B, h, dk).sum(0)
-        return d_qkv, d_null_k, d_null_v, None, None, None
+        return d_qkv, d_null_k, d_null_v, None, None, None, None
 
 
 class Attention(nn.Module):
@@ -996,11 +1052,27 @@ class Attention(nn.Module):
 
         ent = None
         y4 = None
+        ybt = None
         stats = None
         if not dropping:
-            if is_null:
+            if is_null and not grad_on:
+                # as for the `none` gate below: no gate follows, so the
+                # kernel writes the projection input directly.
+                ybt = _get_scratch(("attn_y",), x.device, x.dtype,
+                                   B * T * C).view(B, T, h, dk)
+                _NullAttn.apply(packed, self.null_k, self.null_v,
+                                self.inv_scale, B, False, ybt)
+            elif is_null:
                 y4 = _NullAttn.apply(packed, self.null_k, self.null_v,
                                      self.inv_scale, B, grad_on).view(B, h, T, dk)
+            elif kind == "none" and not grad_on:
+                # No gate follows: the kernel can write its blocks straight
+                # into the ``(B, T, H, dk)`` projection input, which removes
+                # both the separate ``(B*H, T, dk)`` output and the full
+                # transpose copy the other variants need.
+                ybt = _get_scratch(("attn_y",), x.device, x.dtype,
+                                   B * T * C).view(B, T, h, dk)
+                _CalibAttn.apply(packed, self.inv_scale, _EPS, calc_ent, ybt)
             else:
                 y, ent = _CalibAttn.apply(packed, self.inv_scale, _EPS,
                                           calc_ent)
@@ -1081,7 +1153,11 @@ class Attention(nn.Module):
             del ent
             ent = None
 
-        if gate_val is None:
+        if ybt is not None:
+            # the calibrated kernel already wrote the projection input;
+            # this variant carries no gate.
+            y = ybt.view(B, T, C)
+        elif gate_val is None:
             if grad_on:
                 y = y4.transpose(1, 2).reshape(B, T, C)
             else:
@@ -1172,7 +1248,10 @@ class Block(nn.Module):
             return self.mlp(h)
         c = self.cfg.d_model
         n = h.numel() // c
-        if not h.is_cuda and n > _MLP_CHUNK_ROWS:
+        # Row-chunked on every device: the up projection scratch drops from
+        # ``4*n*c`` to ``4*_MLP_CHUNK_ROWS*c`` elements, while the per-chunk
+        # GEMMs stay well above the size where launch overhead matters.
+        if n > _MLP_CHUNK_ROWS:
             up = _get_scratch(("mlp_up",), h.device, h.dtype,
                               4 * _MLP_CHUNK_ROWS * c)
             down = _get_scratch(("mlp_down_big",), h.device, h.dtype, n * c)
