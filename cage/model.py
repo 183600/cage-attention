@@ -17,6 +17,16 @@ Gate variants
                  ``Cfg.calib_use_len`` / ``Cfg.calib_use_ent`` switch one
                  term off at a time for the E1/E2 ablation arms; their
                  defaults (True/True) reproduce the full gate exactly.
+                 ``Cfg.calib_shuffle_ent`` (default False) is the E1
+                 *active-control* switch: the gate keeps the identical
+                 architecture, parameter count and computation, but the
+                 entropy it reads is replaced by a fixed position
+                 permutation of the same tensor - the same values and
+                 marginal distribution, decorrelated from each queried
+                 row's own attention - so the entropy *information* can be
+                 separated from the mere presence of an extra
+                 data-dependent input.  Defaults reproduce the full gate
+                 exactly; the flag is ablation-only.
 - ``null``     : explicit null-attention / sparse selection baseline
                  (a learnable "null" key-value slot competes with real
                  tokens; choosing null suppresses the attention write).
@@ -100,6 +110,16 @@ class Cfg:
     # contributions) without changing the implementation of the full gate.
     calib_use_len: bool = True
     calib_use_ent: bool = True
+    # Active-control (placebo) switch for the concentration term: when True
+    # the entropy that drives the gate is a fixed per-(layer, T) position
+    # permutation of the real entropy.  The architecture, parameter count,
+    # computation and marginal signal distribution are unchanged - only the
+    # association between a queried row and its own attention concentration
+    # is destroyed - so E1 can test whether the calibrated gate's effect is
+    # carried by the attention-distribution information or by capacity.
+    # Requires the concentration term to be on; default False reproduces
+    # the full calibrated gate exactly.
+    calib_shuffle_ent: bool = False
     use_gradient_checkpointing: bool = False
 
     def __post_init__(self):
@@ -111,6 +131,13 @@ class Cfg:
             raise ValueError(
                 f"d_model={self.d_model} is not a positive multiple of "
                 f"n_heads={self.n_heads}"
+            )
+        if self.calib_shuffle_ent and (self.gate != "calib"
+                                       or not self.calib_use_ent):
+            raise ValueError(
+                "calib_shuffle_ent is an active-control switch for the "
+                "concentration term of gate='calib'; it requires "
+                "gate='calib' and calib_use_ent=True"
             )
 
 
@@ -864,10 +891,14 @@ class _NullAttn(torch.autograd.Function):
         return d_qkv, d_null_k, d_null_v, None, None, None, None
 
 
+_ENT_PLACEBO_SEED = 0x9E3779B1
+
+
 class Attention(nn.Module):
-    def __init__(self, cfg: Cfg):
+    def __init__(self, cfg: Cfg, layer_idx: int = 0):
         super().__init__()
         self.cfg = cfg
+        self.layer_idx = int(layer_idx)
         self.gate_kind = cfg.gate
         self.h = cfg.n_heads
         self.dk = cfg.d_model // cfg.n_heads
@@ -894,9 +925,12 @@ class Attention(nn.Module):
             self.calib_tau = nn.Parameter(torch.tensor(tau_init))
             self.calib_scale = nn.Parameter(torch.tensor(float(cfg.calib_scale)))
             self._log_len_cache: dict[int, float] = {}
+            self._ent_perm_cache: dict | None = (
+                {} if cfg.calib_shuffle_ent else None)
         else:
             self.calib_a = self.calib_c = self.calib_tau = self.calib_scale = None
             self._log_len_cache = None
+            self._ent_perm_cache = None
         if cfg.gate == "null":
             self.null_k = nn.Parameter(torch.zeros(self.h, self.dk))
             self.null_v = nn.Parameter(torch.zeros(self.h, self.dk))
@@ -937,6 +971,28 @@ class Attention(nn.Module):
             pv[:, b0:b1].copy_(
                 qkv.view(b1 - b0, T, 3, h, dk).permute(2, 0, 3, 1, 4))
         return packed
+
+    def _ent_perm(self, T: int, device: torch.device) -> torch.Tensor:
+        """Fixed position permutation for the shuffled-entropy active control.
+
+        Seeded only from ``(layer_idx, T)``, so every training seed of the
+        placebo arm reads the *same* placebo signal: the treatment cannot
+        vary with the seed, which keeps the arm paired with its controls
+        and leaves the between-seed variance interpretable.  Cached per
+        device like the causal mask; created outside inference mode so the
+        tensor stays usable in gradient-enabled forwards.
+        """
+        key = (T, device)
+        perm = self._ent_perm_cache.get(key)
+        if perm is None:
+            seed = (_ENT_PLACEBO_SEED * (self.layer_idx + 1)
+                    + 0x85EBCA6B * T) & 0x7FFFFFFF
+            with torch.inference_mode(False):
+                gen = torch.Generator()
+                gen.manual_seed(seed)
+                perm = torch.randperm(T, generator=gen).to(device)
+            self._ent_perm_cache[key] = perm
+        return perm
 
     def _gate_proj(self, x: torch.Tensor, B: int, T: int, C: int,
                    grad_on: bool) -> torch.Tensor:
@@ -1141,13 +1197,22 @@ class Attention(nn.Module):
                     log_len = math.log(max(T, 2))
                     self._log_len_cache[T] = log_len
             if calc_ent:
+                # Active control: the gate reads a position-shuffled copy of
+                # the real entropy (same values and marginal distribution,
+                # decorrelated from the queried row's own attention).  Only
+                # the gate input is shuffled; every reported statistic below
+                # still reads the real entropy.
+                ent_gate = ent
+                if self._ent_perm_cache is not None:
+                    ent_gate = ent.index_select(
+                        2, self._ent_perm(T, x.device))
                 calib_cs = self.calib_c * self.calib_scale
                 if grad_on:
-                    shift = ent.mean(dim=1).div_(log_len).mul(calib_cs)
+                    shift = ent_gate.mean(dim=1).div_(log_len).mul(calib_cs)
                 else:
                     shift = _get_scratch(("calib_conc",), x.device,
                                          x.dtype, B * T)[:B * T].view(B, T)
-                    torch.mean(ent, dim=1, out=shift)
+                    torch.mean(ent_gate, dim=1, out=shift)
                     shift.div_(log_len).mul_(calib_cs)
                 if calc_len:
                     shift.add_(self.calib_a * log_len)
@@ -1239,7 +1304,7 @@ class Block(nn.Module):
         self.post = use_post
         self.ln1 = make_norm(cfg.norm, cfg.d_model)
         self.ln2 = make_norm(cfg.norm, cfg.d_model)
-        self.attn = Attention(cfg)
+        self.attn = Attention(cfg, layer_idx)
         self.mlp = nn.Sequential(
             nn.Linear(cfg.d_model, 4 * cfg.d_model),
             _GeluLinear(4 * cfg.d_model, cfg.d_model),

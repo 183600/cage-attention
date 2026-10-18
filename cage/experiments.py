@@ -178,7 +178,8 @@ from .train import (
 #   STATS_SEED - mechanism statistics (matches the collect_stats default)
 
 HYPO_IDS = ("HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7", "H1a", "H1b",
-            "H1c", "H1d", "H1e", "H2a", "H2b", "H2c", "H3a", "H3b", "H3c")
+            "H1c", "H1d", "H1e", "H1f", "H2a", "H2b", "H2c", "H3a", "H3b",
+            "H3c")
 
 # Every hypothesis entry may carry ``"sesoi"``: the smallest effect size of
 # interest per metric (same metric keys as the pre-registered contrasts).
@@ -435,6 +436,45 @@ HYPOTHESES = {
         "direction": {"prauc_lift_gate_to_error": "+",
                       "recall_at_10pct_gate_to_error": "+"},
     },
+    "H1f": {
+        "experiment": "e1",
+        "question": "Is the calibrated gate's association with the attention "
+                    "distribution carried by the real entropy *information*, "
+                    "or only by the presence of an extra data-dependent "
+                    "input (active placebo control)?",
+        "hypothesis": "An active-control arm with the identical calib "
+                      "architecture, parameter count, computation and "
+                      "optimiser, but whose gate reads a fixed "
+                      "position-shuffled copy of the attention entropy (same "
+                      "values and marginal distribution, decorrelated from "
+                      "each queried row's own attention), must lose the "
+                      "gate/entropy association and must not reproduce the "
+                      "full gate's advantage over the query-only gate.  The "
+                      "leave-one-out ablations remove the term *and* its "
+                      "parameter, so they cannot separate 'the gate reads "
+                      "the concentration information' from 'an extra "
+                      "data-dependent input helps'; this control can.",
+        "prediction": "|gate_vs_entropy|(calib) - |gate_vs_entropy|("
+                      "calib_shuf_ent) > 0 (the shuffled signal contains no "
+                      "information about the read row, so the association "
+                      "must collapse), and accuracy and gate_margin of full "
+                      "calib exceed the placebo arm's - a placebo that "
+                      "matches full calib would refute the calibration "
+                      "story and show the effect is capacity, not "
+                      "attention-distribution information",
+        "decision": "paired bootstrap 95% CIs of the three calib - placebo "
+                    "differences exclude 0 in the pre-registered directions "
+                    "after Benjamini-Hochberg FDR control across the E1 "
+                    "family (q=0.05).  The mechanism leg validates that the "
+                    "placebo actually severed the signal pathway; the "
+                    "accuracy/gate_margin legs are the specificity test - a "
+                    "reversed or null read there means the calibration "
+                    "benefit is not attributable to the entropy information",
+        "sesoi": {"accuracy": 0.01, "gate_margin": 0.02,
+                  "abs_gate_vs_entropy": 0.05},
+        "direction": {"accuracy": "+", "gate_margin": "+",
+                      "abs_gate_vs_entropy": "+"},
+    },
     "H2a": {
         "experiment": "e2",
         "question": "Does length calibration slow the degradation beyond "
@@ -661,37 +701,49 @@ _AUDIT_FACTOR_KEYS = ("gate", "norm", "layer_scale", "calib_variant")
 # key must match: a difference there is an undeclared confound no matter
 # what the labels say.
 _AUDIT_MODEL_FACTOR_KEYS = ("gate", "norm", "layer_scale",
-                            "calib_use_len", "calib_use_ent")
+                            "calib_use_len", "calib_use_ent",
+                            "calib_shuffle_ent")
 
 # Ground truth of the calib gate's additive terms, keyed by the resolved
-# ``(calib_use_len, calib_use_ent)`` flags of the model that trained: the
-# cell of the 2x2 "length term x concentration term" design a run is in.
+# ``(calib_use_len, calib_use_ent, calib_shuffle_ent)`` flags of the model
+# that trained: the cell of the 2x2 "length term x concentration term"
+# design a run is in, plus the E1 active-control (shuffled entropy) cell.
 # Cross-checking the declared ``calib_variant`` label against the flags the
 # model was actually built with catches a mislabelled or mis-wired arm.
 _CALIB_FACTORIAL = {
-    (True, True): "full",
-    (True, False): "calib_len_only",
-    (False, True): "calib_ent_only",
-    (False, False): "calib_no_terms",
+    (True, True, False): "full",
+    (True, False, False): "calib_len_only",
+    (False, True, False): "calib_ent_only",
+    (False, False, False): "calib_no_terms",
+    (True, True, True): "calib_shuf_ent",
 }
 
 _CALIB_FACTORIAL_CELLS = ("full", "calib_len_only", "calib_ent_only",
                           "calib_no_terms")
+
+_CALIB_PLACEBO_CELL = "calib_shuf_ent"
 
 
 def _calib_cell(run):
     """The calibration-term cell a run actually trained (None when N/A).
 
     Uses the resolved ``model_cfg`` when present (ground truth); falls back
-    to the declared label for records that predate the stamp.
+    to the declared label for records that predate the stamp.  A shuffle
+    flag combined with anything but the full term set is not a declared
+    cell: it returns a non-matching name so the label audit fails loudly
+    instead of crediting a mis-wired placebo.
     """
     cfg = run.get("model_cfg")
     if cfg is not None:
         if cfg.get("gate") != "calib":
             return None
-        return _CALIB_FACTORIAL.get(
-            (bool(cfg.get("calib_use_len", True)),
-             bool(cfg.get("calib_use_ent", True))))
+        flags = (bool(cfg.get("calib_use_len", True)),
+                 bool(cfg.get("calib_use_ent", True)),
+                 bool(cfg.get("calib_shuffle_ent", False)))
+        cell = _CALIB_FACTORIAL.get(flags)
+        if cell is None and flags[2]:
+            return "calib_shuf_ent_undeclared"
+        return cell
     label = run.get("calib_variant")
     return label or None
 
@@ -735,7 +787,7 @@ def _cell_seed_balance(runs, cell_of, expected, planned_seeds):
 
 
 def _report_ablation_coverage(out_dir, tag, runs, cells=_CALIB_FACTORIAL_CELLS,
-                              planned_seeds=None):
+                              planned_seeds=None, design=None):
     """Verify a declared factorial ablation ran every cell of its design.
 
     A "each component is doing work" claim over a 2x2 (or leave-one-out)
@@ -753,7 +805,7 @@ def _report_ablation_coverage(out_dir, tag, runs, cells=_CALIB_FACTORIAL_CELLS,
                                              planned_seeds)
     payload = {
         "tag": tag,
-        "design": "calib_use_len x calib_use_ent (2x2)",
+        "design": design or "calib_use_len x calib_use_ent (2x2)",
         "expected_cells": list(cells),
         "present_cells": present,
         "missing_cells": missing,
@@ -3455,6 +3507,19 @@ _E1_CALIB_ABLATION = (
     ("calib_no_terms", {"calib_use_len": False, "calib_use_ent": False}),
 )
 
+# E1 active-control (placebo) arm for the concentration signal (H1f): the
+# identical calib architecture, parameter count, computation and recipe,
+# but the entropy driving the gate is a fixed position permutation of the
+# real entropy (Cfg.calib_shuffle_ent).  The treatment therefore has the
+# same marginal distribution as the real signal and differs from full
+# calib *only* in the information linking a queried row to its own
+# attention concentration - which the leave-one-out ablations (removing the
+# term and its parameter) cannot isolate.
+_E1_CALIB_PLACEBO = (
+    ("calib_shuf_ent", {"calib_use_len": True, "calib_use_ent": True,
+                        "calib_shuffle_ent": True}),
+)
+
 
 def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
             record_extra: dict, **model_overrides):
@@ -3485,7 +3550,8 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
         batch=settings.stats_batch, batches=settings.stats_batches,
         seed=stats_seed, max_cases=settings.max_error_cases)
     rec = {
-        "experiment": "e1", "hypotheses": ["H1a", "H1b", "H1c", "H1d", "H1e"],
+        "experiment": "e1",
+        "hypotheses": ["H1a", "H1b", "H1c", "H1d", "H1e", "H1f"],
         "gate": gate, "seed": seed, "lr": lr,
         "eval_seed": eval_seed, "stats_seed": stats_seed,
         "params": params, "model_cfg": model_cfg, **metrics, **corr, **fc, **ed,
@@ -3512,7 +3578,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
 
 
 def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("H1a", "H1b", "H1c", "H1d", "H1e"))
+    _announce(("H1a", "H1b", "H1c", "H1d", "H1e", "H1f"))
     _write_manifest(settings, out_dir, "e1")
     _audit_data_splits(settings, out_dir, "e1", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e1")
@@ -3538,7 +3604,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             _write_result(out_dir / "e1_runs.jsonl", rec)
             runs.append(rec)
     ablation_runs = {}
-    for label, overrides in _E1_CALIB_ABLATION:
+    for label, overrides in _E1_CALIB_ABLATION + _E1_CALIB_PLACEBO:
         for seed in settings.seeds:
             rec, errors = _e1_run(settings, seed, lr, "calib",
                                   {"calib_variant": label}, **overrides)
@@ -3554,7 +3620,10 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     _report_ablation_coverage(
         out_dir, "e1",
         runs + [r for rs in ablation_runs.values() for r in rs],
-        planned_seeds=settings.seeds)
+        cells=_CALIB_FACTORIAL_CELLS + (_CALIB_PLACEBO_CELL,),
+        planned_seeds=settings.seeds,
+        design=("calib_use_len x calib_use_ent (2x2) + shuffled-entropy "
+                "active control"))
     _report_design_coverage(
         out_dir, "e1", runs, "gate",
         lambda r: r.get("gate"), tuple(GATES),
@@ -3647,6 +3716,33 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         print(f"{label:>16} {int(abl_index[label][0]['params']):>8} "
               f"{acell('accuracy'):>17} {acell('abs_gate_vs_entropy'):>17} "
               f"{acell('gate_margin'):>17}")
+
+    placebo_runs = ablation_runs[_CALIB_PLACEBO_CELL]
+    placebo_table = _aggregate_runs(placebo_runs)
+    print(f"\n[e1] H1f active control (placebo): the shuffled-entropy arm "
+          f"keeps the identical architecture, parameter count, computation "
+          f"and recipe; only the link between a queried row and its own "
+          f"attention concentration is severed.  'query' is printed as the "
+          f"capacity reference: if the placebo tracks full calib, the "
+          f"effect is capacity, not attention-distribution information; if "
+          f"it collapses toward 'query', the entropy content is doing the "
+          f"work.")
+    print(f"{'arm':>16} {'params':>8} {'accuracy':>17} {'abs_r_ent':>17} "
+          f"{'gate_margin':>17}")
+    for label, cell_table in (("full", abl_table["full"]),
+                              (_CALIB_PLACEBO_CELL, placebo_table),
+                              ("query", table["query"])):
+        def pcell(key):
+            m = cell_table.get(key)
+            if not m or not math.isfinite(m["mean"]):
+                return "n/a"
+            return f"{m['mean']:.4f}±{m['std']:.4f}"
+
+        n_params = int(abl_index[label][0]["params"]) if label in abl_index \
+            else int(by_gate["query"][0]["params"])
+        print(f"{label:>16} {n_params:>8} "
+              f"{pcell('accuracy'):>17} {pcell('abs_gate_vs_entropy'):>17} "
+              f"{pcell('gate_margin'):>17}")
 
     print(f"\n[e1] positive control: the parameter-free structural rule is "
           f"the task ceiling, so every learned accuracy must be read as a "
@@ -3782,7 +3878,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         print(f"{gate:>6}" + "".join(f"{c:>12}" for c in cells))
 
     print("\n[e1] pre-registered contrasts (calib vs query/none):")
-    clog = ContrastLog("e1", hypotheses=("H1a", "H1b", "H1c", "H1d", "H1e"),
+    clog = ContrastLog("e1",
+                       hypotheses=("H1a", "H1b", "H1c", "H1d", "H1e", "H1f"),
                        min_seeds=settings.min_seeds_for_claim)
     clog.print("calib - none", "H1a", "accuracy",
                _paired_diff(by_gate["calib"], by_gate["none"], "accuracy"),
@@ -3847,6 +3944,24 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         clog.print(f"calib - {label}", "H1d", "abs_gate_vs_entropy",
                    _paired_diff(by_gate["calib"], rs, "abs_gate_vs_entropy"),
                    warn=_curve_warn(("calib", by_gate["calib"]), (label, rs)))
+    print(f"\n[e1] H1f active-control (placebo) contrasts: full calib vs "
+          f"the shuffled-entropy arm (identical architecture/parameters/"
+          f"recipe; only the signal's link to the read row changes).  A "
+          f"supported accuracy/gate_margin read is the specificity test - "
+          f"the entropy *information* does the work; the mechanism leg "
+          f"validates that the placebo actually severed the pathway:")
+    placebo_warn = _curve_warn(("calib", by_gate["calib"]),
+                               (_CALIB_PLACEBO_CELL, placebo_runs))
+    for metric in ("abs_gate_vs_entropy", "accuracy", "gate_margin"):
+        clog.print(f"calib - {_CALIB_PLACEBO_CELL}", "H1f", metric,
+                   _paired_diff(by_gate["calib"], placebo_runs, metric),
+                   warn=placebo_warn)
+    for metric in ("abs_gate_vs_entropy", "accuracy", "gate_margin"):
+        ci = _paired_diff(placebo_runs, by_gate["query"], metric)
+        print(f"      exploratory (outside the FDR family): "
+              f"{_CALIB_PLACEBO_CELL} - query ({metric}): {_fmt_ci(ci)} - "
+              f"a CI including 0 means the placebo's extra capacity alone "
+              f"buys no advantage over the query gate")
     clog.finalize(out_dir, q=settings.fdr_q)
 
     print(f"\n[e1] training curves (val monitored on fixed stream seed "
