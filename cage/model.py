@@ -560,10 +560,20 @@ class _CalibAttn(torch.autograd.Function):
                               beta=0.0, alpha=scale, out=d_k)
                 first = False
             else:
-                d_v[:, :i1].baddbmm_(p.transpose(1, 2), g, beta=1.0,
-                                     alpha=1.0)
-                d_k[:, :i1].baddbmm_(d_s.transpose(1, 2), q[:, i0:i1],
-                                     beta=1.0, alpha=scale)
+                # The contribution is built in the one-block-wide
+                # ``dqb`` scratch in column chunks and added into the
+                # leading ``i1`` columns of ``d_v`` / ``d_k``.
+                pT = p.transpose(1, 2)
+                dsT = d_s.transpose(1, 2)
+                q_blk = q[:, i0:i1]
+                for c0 in range(0, i1, max_rows):
+                    c1 = min(i1, c0 + max_rows)
+                    t = dqb[:bh * (c1 - c0) * dk].view(bh, c1 - c0, dk)
+                    torch.bmm(pT[:, c0:c1, :], g, out=t)
+                    d_v[:, c0:c1].add_(t)
+                    torch.baddbmm(zero, dsT[:, c0:c1, :], q_blk,
+                                  beta=0.0, alpha=scale, out=t)
+                    d_k[:, c0:c1].add_(t)
             dqblk = dqb[:bh * r * dk].view(bh, r, dk)
             torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
                           out=dqblk)
@@ -752,16 +762,25 @@ class _NullAttn(torch.autograd.Function):
             d_s0 = gu0.mul_(p0).mul_(scale)
             if multi:
                 # Reversed order: the widest block writes ``d_v`` / ``d_k``
-                # outright, the narrower ones accumulate in place.
+                # outright, the narrower ones add their contribution into
+                # the leading ``i1`` columns.
                 if first:
                     torch.bmm(p.transpose(1, 2), g, out=d_v)
                     torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
                     first = False
                 else:
-                    d_v[:, :i1].baddbmm_(p.transpose(1, 2), g, beta=1.0,
-                                         alpha=1.0)
-                    d_k[:, :i1].baddbmm_(d_s.transpose(1, 2), q_blk,
-                                         beta=1.0, alpha=1.0)
+                    # The contribution is built in the one-block-wide
+                    # ``dqb`` scratch in column chunks and added into the
+                    # leading ``i1`` columns of ``d_v`` / ``d_k``.
+                    pT = p.transpose(1, 2)
+                    dsT = d_s.transpose(1, 2)
+                    for c0 in range(0, i1, max_rows):
+                        c1 = min(i1, c0 + max_rows)
+                        t = dqb[:bh * (c1 - c0) * dk].view(bh, c1 - c0, dk)
+                        torch.bmm(pT[:, c0:c1, :], g, out=t)
+                        d_v[:, c0:c1].add_(t)
+                        torch.bmm(dsT[:, c0:c1, :], q_blk, out=t)
+                        d_k[:, c0:c1].add_(t)
                 dqblk = dqb[:bh * r * dk].view(bh, r, dk)
                 torch.bmm(d_s, k[:, :i1], out=dqblk)
                 d_q[:, i0:i1].copy_(dqblk)
