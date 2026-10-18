@@ -1017,13 +1017,9 @@ class Attention(nn.Module):
         gate_val = None
         if kind == "query":
             gate_val = self._gate_proj(x, B, T, C, grad_on)
-            if grad_on:
-                gate_val = gate_val.clone()
             gate_val.sigmoid_()
         elif is_calib:
             gate_val = self._gate_proj(x, B, T, C, grad_on)
-            if grad_on:
-                gate_val = gate_val.clone()
             if calc_len or calc_ent:
                 log_len = self._log_len_cache.get(T)
                 if log_len is None:
