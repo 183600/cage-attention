@@ -154,6 +154,9 @@ def make_norm(kind: str, dim: int) -> nn.Module:
 _MAX_MASK_CACHE = 64
 
 _QKV_CHUNK_ROWS = 2048
+_QKV_CHUNK_BYTES = 32 * 1024 * 1024
+
+_MLP_CHUNK_ROWS = 2048
 
 _causal_mask_cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
 
@@ -964,8 +967,11 @@ class Attention(nn.Module):
                 ("packed",), x.device, x.dtype, 3 * bh * T * dk).view(3, bh, T, dk)
             pv = packed.view(3, B, h, T, dk)
             x2 = x.reshape(B, T, C)
-            step = (max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
-                    if x.is_cuda else B)
+            if (x.is_cuda or
+                    B * T * 3 * C * x.element_size() > _QKV_CHUNK_BYTES):
+                step = max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
+            else:
+                step = B
             for b0 in range(0, B, step):
                 b1 = min(B, b0 + step)
                 rows = (b1 - b0) * T
@@ -1164,6 +1170,21 @@ class Block(nn.Module):
             return self.mlp(h)
         c = self.cfg.d_model
         n = h.numel() // c
+        if not h.is_cuda and n > _MLP_CHUNK_ROWS:
+            up = _get_scratch(("mlp_up",), h.device, h.dtype,
+                              4 * _MLP_CHUNK_ROWS * c)
+            down = _get_scratch(("mlp_down_big",), h.device, h.dtype, n * c)
+            gelu = self.mlp[1]
+            h2 = h.reshape(n, c)
+            for r0 in range(0, n, _MLP_CHUNK_ROWS):
+                r1 = min(n, r0 + _MLP_CHUNK_ROWS)
+                b = r1 - r0
+                upb = up[:4 * b * c].view(b, 4 * c)
+                _linear_into(h2[r0:r1], self.mlp[0].weight, self.mlp[0].bias, upb)
+                torch.ops.aten.gelu_(upb, approximate="none")
+                _linear_into(upb, gelu.weight, gelu.bias,
+                             down[r0 * c:(r0 + b) * c].view(b, c))
+            return self.mlp[2](down.view_as(h))
         up = _get_scratch(("mlp_up",), h.device, h.dtype, 4 * n * c)
         _linear_into(h.reshape(n, c), self.mlp[0].weight, self.mlp[0].bias,
                      up.view(n, 4 * c))
