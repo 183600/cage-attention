@@ -2476,11 +2476,12 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
     The audit is deterministic for one ``Settings`` (fixed split seeds and
     a fixed Monte Carlo seed), so the expensive computation runs once per
     process and every experiment that depends on the protocol writes its
-    own copy.  ``enforce=True`` (E1/E2/E3 and the standalone pre-flight)
-    turns a failed audit into a hard :class:`SplitAuditError`: a protocol
-    with a shared sample or a held-out distribution shift cannot support
-    any grid result, so the grid is not started (same policy as the
-    reproducibility and overfit gates).
+    own copy.  ``enforce=True`` (baselines, E1/E2/E3 and the standalone
+    pre-flight) turns a failed audit into a hard
+    :class:`SplitAuditError`: a protocol with a shared sample or a
+    held-out distribution shift cannot support any grid result, so the
+    grid is not started (same policy as the reproducibility and overfit
+    gates).
     """
     train_seeds = tuple(settings.seeds) or (0,)
     audit = getattr(settings, "_split_audit_cache", None)
@@ -2859,7 +2860,7 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
 def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7"))
     _write_manifest(settings, out_dir, "baselines")
-    audit = _audit_data_splits(settings, out_dir, "baselines")
+    audit = _audit_data_splits(settings, out_dir, "baselines", enforce=True)
     repro_audit = _enforce_reproducibility(settings, out_dir, "baselines")
     record = {"experiment": "baselines",
               "hypotheses": ["HB1", "HB2", "HB3", "HB4", "HB5", "HB6",
