@@ -9,10 +9,12 @@ Design principles
    hyperparameter sweep: each contrast answers a mechanism question.
 2. **Tuned baselines and sanity checks before complex models.**  The
    complexity ladder is explicit and every rung is tuned: the rule
-   system (exact ceiling), the trivial floor, a learning-rate-tuned
-   linear probe, and a learning-rate-tuned **single-layer standard
-   transformer** (HB6, the simplest learned model) all run before any
-    deep grid.  A shared training recipe is tuned on the plain ``none``
+   system (exact ceiling), the trivial floor, a wide-grid-tuned linear
+   probe, and a learning-rate-tuned **depth ladder of standard
+   transformers** (HB6/HB7: 1/2/4 layers, each rung tuned on the
+   validation seed) all run before any deep grid, so both the simplest
+   learned model and the depth at which the task saturates are measured
+   rather than assumed.  A shared training recipe is tuned on the plain ``none``
     baseline (validation seed), then frozen for all gate variants so the
     E1/E3 comparisons stay controlled (each side of every pre-registered
     contrast carries a machine-checked controlled-variable audit).  Every
@@ -169,8 +171,8 @@ from .train import (
 #   TEST_SEED  - the reported numbers; never used for any decision
 #   STATS_SEED - mechanism statistics (matches the collect_stats default)
 
-HYPO_IDS = ("HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "H1a", "H1b", "H1c",
-            "H1d", "H2a", "H2b", "H2c", "H3a", "H3b", "H3c")
+HYPO_IDS = ("HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7", "H1a", "H1b",
+            "H1c", "H1d", "H1e", "H2a", "H2b", "H2c", "H3a", "H3b", "H3c")
 
 # Every hypothesis entry may carry ``"sesoi"``: the smallest effect size of
 # interest per metric (same metric keys as the pre-registered contrasts).
@@ -293,6 +295,30 @@ HYPOTHESES = {
                     "E1's 8-layer gate contrasts are informative for it",
         "sesoi": {"accuracy": 0.01},
     },
+    "HB7": {
+        "experiment": "baselines",
+        "question": "At which depth does the tuned standard transformer "
+                    "saturate on the recall task, and is the 8-layer grid "
+                    "depth-justified at this scale?",
+        "hypothesis": "Depth helps the match-then-shift readout, but it "
+                      "saturates at some small depth: once a rung's accuracy "
+                      "is no longer distinguishable from the "
+                      "parameter-free ceiling, deeper grids (E1/E3 at 8 "
+                      "layers) can only test what depth unlocks, not whether "
+                      "depth is needed.",
+        "prediction": "the ladder's saturation depth d* - the smallest depth "
+                      "whose pooled Wilson 95% interval reaches the "
+                      "rule-ceiling point estimate - is reported (None when "
+                      "no ladder rung reaches it); adjacent-depth paired "
+                      "bootstrap CIs show where the gain stops",
+        "decision": "pre-registered readout: depth beyond two layers is "
+                    "'measurably required' only when d* is None or d* > 2; "
+                    "for d* <= 2 every depth-based motivation (E3's "
+                    "deep-contribution premise, the 8-layer E1 setting) must "
+                    "carry the annotation that a 2-layer standard "
+                    "transformer already saturates the task at this scale",
+        "sesoi": {"accuracy": 0.01},
+    },
     "H1a": {
         "experiment": "e1",
         "question": "Does the calibrated gate use attention concentration / "
@@ -365,6 +391,36 @@ HYPOTHESES = {
                     "reported alongside, not as a decision criterion",
         "sesoi": {"accuracy": 0.01, "gate_margin": 0.02,
                   "abs_gate_vs_entropy": 0.05},
+    },
+    "H1e": {
+        "experiment": "e1",
+        "question": "Does the calibrated gate rank the model's own errors "
+                    "above the query-only gate's ranking (the operational, "
+                    "imbalance-aware reading of 'the gate doubts itself')?",
+        "hypothesis": "Errors are the rare class after convergence, so the "
+                      "mechanism's operational value is a rare-positive "
+                      "ranking claim: low calibrated-gate values should "
+                      "concentrate on wrong answers more than the query "
+                      "gate's values do.  Under this imbalance the metric "
+                      "choice matters: PR-AUC is the headline (ROC-AUC stays "
+                      "optimistic as the negative population grows), and the "
+                      "recall of the most doubtful 10% is its operational "
+                      "companion.",
+        "prediction": "prauc_lift_gate_to_error(calib) - "
+                      "prauc_lift_gate_to_error(query) > 0 and "
+                      "recall_at_10pct_gate_to_error(calib) - "
+                      "recall_at_10pct_gate_to_error(query) > 0 (lift = "
+                      "PR-AUC / prevalence, 1.0 = random ranking; ROC-AUC is "
+                      "reported as the optimistic companion, not the "
+                      "decision metric)",
+        "decision": "paired bootstrap 95% CI of the pre-registered "
+                    "imbalance-aware readout excludes 0 after "
+                    "Benjamini-Hochberg FDR control across the E1 contrasts "
+                    "(q=0.05); seeds whose stats stream contains no errors "
+                    "leave the metric undefined and are recorded as such, "
+                    "never imputed",
+        "sesoi": {"prauc_lift_gate_to_error": 0.1,
+                  "recall_at_10pct_gate_to_error": 0.02},
     },
     "H2a": {
         "experiment": "e2",
@@ -499,6 +555,14 @@ class Settings:
     stats_batches: int = 4
     probe_steps: int = 400
     probe_batch: int = 64
+    # The simple-baseline controls are tuned harder than the mechanism grids
+    # on purpose: "the complex model beats a tuned simple baseline" is only
+    # credible when the simple baseline got its best shot.  The probe grid
+    # spans 30x (a diverged high-lr point is recorded and excluded, not
+    # read as "cannot do better"); the depth ladder re-tunes the learning
+    # rate per depth so the shallow rungs are not handicapped.
+    probe_lr_grid: tuple = (1e-2, 3e-3, 1e-3, 3e-4)
+    depth_ladder: tuple = (1, 2, 4)
     dropout: float = 0.0        # model regularisation (recorded in the recipe)
     deterministic: bool = False  # opt-in deterministic torch kernels
     lr: float | None = None
@@ -2417,90 +2481,166 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path) -> dict:
     return audit
 
 
-def _run_shallow_baseline(settings: Settings, out_dir: pathlib.Path,
-                          ceiling: dict | None) -> dict:
-    """HB6 complexity control: the tuned single-layer standard transformer.
+def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
+                      ceiling: dict | None) -> dict:
+    """HB6/HB7 complexity ladder: the tuned standard transformer per depth.
 
-    The simplest *learned* model on the baseline ladder.  It goes through
-    the same entry point as the deep grids (``_train_and_eval``): same
+    The simplest *learned* model on the baseline ladder is the 1-layer
+    transformer (HB6), but a single shallow point cannot say where depth
+    stops mattering.  This runner tunes the learning rate of the standard
+    ``gate="none"`` transformer separately at every ladder depth (default
+    1/2/4 layers) through the same entry point as the deep grids - same
     optimizer factory, cosine schedule, batch geometry and evaluation
-    streams, with the learning rate tuned on the validation seed (up to
-    two seeds per grid point) and the chosen rate reported on the disjoint
-    test seed.  Depth is the only architectural difference from the
-    ``none`` baseline of E1, so the gap to the rule ceiling measures how
-    much depth the recall readout actually requires, and a complex model
-    is only worth crediting for what it does beyond *this* tuned baseline
-    (E1 pairs the 8-layer ``none`` runs against it as a complexity
-    reference).
+    streams - on the validation seed, and reports the chosen rate on the
+    disjoint test seed.  Depth is the only architectural difference from
+    E1's ``none`` arm, so:
+
+    * each rung's gap to the parameter-free rule ceiling measures how much
+      depth the recall readout actually requires;
+    * the saturation depth ``d*`` (smallest rung whose pooled Wilson 95%
+      interval reaches the ceiling estimate) is the reference the
+      deep grids must justify themselves against (HB7): a gain a 2-layer
+      standard transformer already matches is not evidence about depth;
+    * a complex model is only credited for what it does beyond the tuned
+      shallow baseline.
+
+    Returns ``{"depths": {depth: payload}, "ladder": [...],
+    "saturation_depth": int|None, "hb7_depth_required": bool|None,
+    "shallowest": depth}``; the shallow rung reuses the legacy names
+    (``shallow_none_baseline`` records, ``baselines_shallow_none.json``)
+    that E1's complexity readout reads from the verdict.
     """
+    ladder = tuple(dict.fromkeys(int(d) for d in settings.depth_ladder))
+    if not ladder or any(d < 1 for d in ladder):
+        raise ValueError(
+            f"depth_ladder must be non-empty positive ints, got "
+            f"{settings.depth_ladder!r}")
     tune_seeds = settings.seeds[:max(1, min(2, len(settings.seeds)))]
-    table = []
-    for lr in settings.lr_grid:
-        accs = []
-        for seed in tune_seeds:
-            _, _, metrics, _, _ = _train_and_eval(
-                settings, seed, lr, eval_seed=VAL_SEED, selection=True,
-                gate="none", n_layers=1)
-            accs.append(metrics["accuracy"])
-        mean = sum(accs) / len(accs)
-        std = ((sum((a - mean) ** 2 for a in accs) / (len(accs) - 1)) ** 0.5
-               if len(accs) > 1 else 0.0)
-        table.append({"lr": lr, "val_accuracy_mean": mean,
-                      "val_accuracy_std": std, "n_seeds": len(accs)})
-    best = max(table, key=lambda row: row["val_accuracy_mean"])
-    runs = []
-    for seed in settings.seeds:
-        _, params, metrics, curve, _ = _train_and_eval(
-            settings, seed, best["lr"], eval_seed=TEST_SEED, gate="none",
-            n_layers=1)
-        n = int(metrics["n"])
-        runs.append({
-            "seed": seed, "accuracy": metrics["accuracy"],
-            "accuracy_lo": metrics["accuracy_lo"],
-            "accuracy_hi": metrics["accuracy_hi"], "n": n,
-            "correct": int(round(metrics["accuracy"] * n)),
-            "params": params, "curve_verdict": curve["curve_verdict"],
-        })
-        _write_result(out_dir / "baselines_runs.jsonl",
-                      {"experiment": "baselines", "hypotheses": ["HB6"],
-                       "name": "shallow_none_baseline", "lr": best["lr"],
-                       "training_seed": seed, "eval_seed": TEST_SEED,
-                       "accuracy": metrics["accuracy"],
-                       "accuracy_lo": metrics["accuracy_lo"],
-                       "accuracy_hi": metrics["accuracy_hi"], "n": n,
-                       **_training_record(settings, best["lr"]),
-                       **_run_context(settings), **curve})
-    pooled = wilson_ci(sum(r["correct"] for r in runs),
-                       sum(r["n"] for r in runs))
-    summary = _mean_std([r["accuracy"] for r in runs])
     ceiling_acc = float(ceiling["accuracy"]) if ceiling else float("nan")
-    hb6_supported = bool(
-        math.isfinite(ceiling_acc) and math.isfinite(pooled["hi"])
-        and pooled["hi"] < ceiling_acc)
-    payload = {
-        "name": "shallow_none", "n_layers": 1,
+    ceiling_known = math.isfinite(ceiling_acc)
+    depths: dict[int, dict] = {}
+    tuning_tables: dict[int, list] = {}
+    for depth in ladder:
+        table = []
+        for lr in settings.lr_grid:
+            accs = []
+            for seed in tune_seeds:
+                _, _, metrics, _, _ = _train_and_eval(
+                    settings, seed, lr, eval_seed=VAL_SEED, selection=True,
+                    gate="none", n_layers=depth)
+                accs.append(metrics["accuracy"])
+            mean = sum(accs) / len(accs)
+            std = ((sum((a - mean) ** 2 for a in accs)
+                    / (len(accs) - 1)) ** 0.5 if len(accs) > 1 else 0.0)
+            table.append({"lr": lr, "val_accuracy_mean": mean,
+                          "val_accuracy_std": std, "n_seeds": len(accs)})
+        best = max(table, key=lambda row: row["val_accuracy_mean"])
+        runs = []
+        for seed in settings.seeds:
+            _, params, metrics, curve, _ = _train_and_eval(
+                settings, seed, best["lr"], eval_seed=TEST_SEED, gate="none",
+                n_layers=depth)
+            n = int(metrics["n"])
+            runs.append({
+                "seed": seed, "accuracy": metrics["accuracy"],
+                "accuracy_lo": metrics["accuracy_lo"],
+                "accuracy_hi": metrics["accuracy_hi"], "n": n,
+                "correct": int(round(metrics["accuracy"] * n)),
+                "params": params, "curve_verdict": curve["curve_verdict"],
+            })
+            name = ("shallow_none_baseline" if depth == ladder[0]
+                    else f"shallow_none_baseline_d{depth}")
+            _write_result(out_dir / "baselines_runs.jsonl",
+                          {"experiment": "baselines",
+                           "hypotheses": ["HB6", "HB7"], "name": name,
+                           "n_layers": depth, "lr": best["lr"],
+                           "training_seed": seed, "eval_seed": TEST_SEED,
+                           "accuracy": metrics["accuracy"],
+                           "accuracy_lo": metrics["accuracy_lo"],
+                           "accuracy_hi": metrics["accuracy_hi"], "n": n,
+                           **_training_record(settings, best["lr"]),
+                           **_run_context(settings), **curve})
+        pooled = wilson_ci(sum(r["correct"] for r in runs),
+                           sum(r["n"] for r in runs))
+        summary = _mean_std([r["accuracy"] for r in runs])
+        reaches_ceiling = bool(
+            ceiling_known and math.isfinite(pooled["hi"])
+            and pooled["hi"] >= ceiling_acc)
+        hb6_supported = bool(
+            ceiling_known and math.isfinite(pooled["hi"])
+            and pooled["hi"] < ceiling_acc)
+        payload = {
+            "name": f"shallow_none_d{depth}", "n_layers": depth,
+            "val_seed": VAL_SEED, "test_seed": TEST_SEED,
+            "chosen_lr": best["lr"], "tuning_table": table,
+            "accuracy_mean": summary["mean"], "accuracy_std": summary["std"],
+            "accuracy_by_seed": {str(r["seed"]): r["accuracy"]
+                                 for r in runs},
+            "pooled_wilson": pooled, "ceiling": ceiling_acc,
+            "ceiling_gap": (ceiling_acc - summary["mean"]
+                            if ceiling_known else float("nan")),
+            "reaches_ceiling": reaches_ceiling,
+            "hb6_supported": hb6_supported,
+            "runs": runs,
+        }
+        depths[depth] = payload
+        tuning_tables[depth] = table
+        status = ("reaches the ceiling (saturated here)" if reaches_ceiling
+                  else "below the ceiling")
+        print(f"[baselines] HB6/HB7 depth={depth} tuned standard "
+              f"transformer (lr={best['lr']:g} on val seed {VAL_SEED}, test "
+              f"seed {TEST_SEED}): accuracy={summary['mean']:.4f} +- "
+              f"{summary['std']:.4f} (pooled Wilson "
+              f"[{pooled['lo']:.4f}, {pooled['hi']:.4f}], n={pooled['n']}); "
+              f"rule ceiling={ceiling_acc:.4f}, gap="
+              f"{payload['ceiling_gap']:.4f}; {status}")
+        _write_json(out_dir / f"baselines_depth{depth}.json", payload)
+
+    saturation_depth = next((d for d in ladder if depths[d]["reaches_ceiling"]),
+                            None)
+    hb7_depth_required = (None if not ceiling_known
+                          else bool(saturation_depth is None
+                                    or saturation_depth > 2))
+    adjacent = {}
+    for a, b in zip(ladder, ladder[1:]):
+        by_seed_b = {r["seed"]: r for r in depths[b]["runs"]}
+        diffs = [r["accuracy"] - by_seed_b[r["seed"]]["accuracy"]
+                 for r in depths[a]["runs"] if r["seed"] in by_seed_b]
+        ci = paired_bootstrap_ci(diffs)
+        adjacent[f"{a}->{b}"] = ci
+        print(f"[baselines] HB7 adjacent-depth contrast {a}->{b} layers "
+              f"(paired over seeds, each rung val-tuned): {_fmt_ci(ci)}")
+    shallowest = ladder[0]
+    ladder_payload = {
+        "name": "depth_ladder_none",
         "val_seed": VAL_SEED, "test_seed": TEST_SEED,
-        "chosen_lr": best["lr"], "tuning_table": table,
-        "accuracy_mean": summary["mean"], "accuracy_std": summary["std"],
-        "accuracy_by_seed": {str(r["seed"]): r["accuracy"] for r in runs},
-        "pooled_wilson": pooled, "ceiling": ceiling_acc,
-        "ceiling_gap": (ceiling_acc - summary["mean"]
-                        if math.isfinite(ceiling_acc) else float("nan")),
-        "hb6_supported": hb6_supported, "runs": runs,
+        "ladder": list(ladder), "ceiling": ceiling_acc,
+        "depths": {str(d): depths[d] for d in ladder},
+        "tuning_tables": {str(d): tuning_tables[d] for d in ladder},
+        "adjacent_contrasts": adjacent,
+        "saturation_depth": saturation_depth,
+        "hb7_depth_required": hb7_depth_required,
     }
-    print(f"[baselines] HB6 complexity control: tuned 1-layer standard "
-          f"transformer (lr={best['lr']:g} on val seed {VAL_SEED}, test seed "
-          f"{TEST_SEED}): accuracy={summary['mean']:.4f} +- "
-          f"{summary['std']:.4f} (pooled Wilson "
-          f"[{pooled['lo']:.4f}, {pooled['hi']:.4f}], n={pooled['n']}); "
-          f"rule ceiling={ceiling_acc:.4f}, gap="
-          f"{payload['ceiling_gap']:.4f}; "
-          f"{'SUPPORTED (a single layer is not enough: depth is measurably required)' if hb6_supported else 'FLAG - the shallow baseline reaches the rule ceiling within its CI: annotate depth-based (E3) motivations'}")
-    _write_json(out_dir / "baselines_shallow_none.json", payload)
+    sat_txt = (saturation_depth if saturation_depth is not None
+               else "none (no rung reaches the ceiling)")
+    if hb7_depth_required is None:
+        depth_txt = "n/a (rule ceiling unavailable)"
+    elif hb7_depth_required:
+        depth_txt = "measurably required"
+    else:
+        depth_txt = ("NOT measurably required - annotate every depth-based "
+                     "motivation")
+    print(f"[baselines] HB7 saturation: depth ladder {list(ladder)} -> "
+          f"saturation_depth={sat_txt}; depth beyond two layers is "
+          f"{depth_txt}")
+    # Legacy single-depth artifacts: E1 reads the shallow rung
+    # (``shallow_none``) and its tuning table from the verdict.
+    _write_json(out_dir / "baselines_shallow_none.json", depths[shallowest])
     _write_json(out_dir / "baselines_shallow_tuning.json",
-                {"val_seed": VAL_SEED, "table": table,
-                 "chosen_lr": best["lr"]})
-    return payload
+                {"val_seed": VAL_SEED, "table": tuning_tables[shallowest],
+                 "chosen_lr": depths[shallowest]["chosen_lr"]})
+    _write_json(out_dir / "baselines_depth_ladder.json", ladder_payload)
+    return {**ladder_payload, "depths": depths, "shallowest": shallowest}
 
 
 class OverfitSanityError(RuntimeError):
@@ -2632,11 +2772,12 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
 
 
 def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("HB1", "HB2", "HB3", "HB4", "HB5", "HB6"))
+    _announce(("HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7"))
     _write_manifest(settings, out_dir, "baselines")
     repro_audit = _enforce_reproducibility(settings, out_dir, "baselines")
     record = {"experiment": "baselines",
-              "hypotheses": ["HB1", "HB2", "HB3", "HB4", "HB5", "HB6"],
+              "hypotheses": ["HB1", "HB2", "HB3", "HB4", "HB5", "HB6",
+                             "HB7"],
               "seed": TEST_SEED, **_run_context(settings)}
 
     audit = _audit_data_splits(settings, out_dir)
@@ -2709,13 +2850,19 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
 
     best_lr, table = tune_linear_probe(
         settings.n_pairs, settings.vocab, settings.device,
-        lr_grid=settings.lr_grid, seeds=settings.seeds[:max(1, len(settings.seeds))],
+        lr_grid=settings.probe_lr_grid,
+        seeds=settings.seeds[:max(1, len(settings.seeds))],
         steps=settings.probe_steps, batch=settings.probe_batch,
         val_seed=VAL_SEED, val_batches=settings.eval_batches,
         probe_batch=settings.eval_batch)
     _write_json(out_dir / "baselines_probe_tuning.json",
                 {"val_seed": VAL_SEED, "table": table, "chosen_lr": best_lr})
-    print(f"[baselines] linear probe tuned on val seed {VAL_SEED}: lr={best_lr:g}")
+    n_diverged = int(sum(row.get("diverged_runs", 0) for row in table))
+    print(f"[baselines] linear probe tuned on val seed {VAL_SEED} over lr "
+          f"grid {settings.probe_lr_grid}: lr={best_lr:g}"
+          + ("" if not n_diverged else
+             f" ({n_diverged} diverged grid runs excluded from selection, "
+             f"see baselines_probe_tuning.json)"))
     probe_accs = []
     for seed in settings.seeds:
         probe_curve = []
@@ -2730,6 +2877,9 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         _write_result(out_dir / "baselines_runs.jsonl",
                       {**record, "name": "linear_bag_probe", "lr": best_lr,
                        "training_seed": seed, "accuracy": acc,
+                       "diverged": bool(any(
+                           "nonfinite" in p or "nonfinite_grad" in p
+                           for p in probe_curve)),
                        "train_loss_first": probe_curve[0]["loss"],
                        "train_loss_last": probe_curve[-1]["loss"],
                        "probe_curve": probe_curve,
@@ -2746,11 +2896,13 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
           f"(p={hb2['p_value']:.3f}, MDE80={hb2['mde80']:.4f}); "
           f"{'SUPPORTED (probe confidently <2x chance)' if hb2['hb2_supported'] else 'NOT SUPPORTED - inspect the simple-baseline comparison'}")
 
-    # HB6 complexity control: the simplest learned model must be tried --
+    # HB6/HB7 complexity ladder: the simplest learned model must be tried --
     # and tuned -- before the deep grids can claim that depth/gating is
-    # needed.  Runs before the negative control so a shallow-model finding
-    # (single layer already solves the task) is on record next to it.
-    shallow = _run_shallow_baseline(settings, out_dir, rule_stats)
+    # needed, and a single shallow point cannot say *where* depth stops
+    # mattering.  Runs before the negative control so a shallow-model
+    # finding (few layers already saturate the task) is on record next to it.
+    ladder = _run_depth_ladder(settings, out_dir, rule_stats)
+    shallow = ladder["depths"][ladder["shallowest"]]
 
     # HB4 negative control: same architecture and shared recipe as E1, but
     # the supervised answers are permuted across the batch during training.
@@ -2823,10 +2975,36 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "hb4_supported": hb4_supported,
         "hb5_supported": bool(hb5_supported),
         "hb6_supported": bool(shallow["hb6_supported"]),
+        "hb7_depth_required": ladder["hb7_depth_required"],
+        "saturation_depth": ladder["saturation_depth"],
+        "depth_ladder": {
+            "ladder": ladder["ladder"],
+            "val_seed": VAL_SEED,
+            "test_seed": TEST_SEED,
+            "by_depth": {
+                str(d): {
+                    "lr": payload["chosen_lr"],
+                    "tuning_table": payload["tuning_table"],
+                    "accuracy_mean": payload["accuracy_mean"],
+                    "accuracy_std": payload["accuracy_std"],
+                    "accuracy_by_seed": payload["accuracy_by_seed"],
+                    "pooled_wilson": payload["pooled_wilson"],
+                    "ceiling_gap": payload["ceiling_gap"],
+                    "reaches_ceiling": payload["reaches_ceiling"],
+                }
+                for d, payload in ladder["depths"].items()
+            },
+            "adjacent_contrasts": ladder["adjacent_contrasts"],
+        },
         "probe_accuracy_mean": summary["mean"],
         "probe_accuracy_std": summary["std"],
+        "probe_tuning": {
+            "lr_grid": list(settings.probe_lr_grid),
+            "diverged_runs": n_diverged,
+            "by_lr": table,
+        },
         "shallow_none": {
-            "n_layers": 1, "lr": shallow["chosen_lr"],
+            "n_layers": ladder["shallowest"], "lr": shallow["chosen_lr"],
             "tuning_table": shallow["tuning_table"],
             "accuracy_mean": shallow["accuracy_mean"],
             "accuracy_std": shallow["accuracy_std"],
@@ -2834,6 +3012,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "pooled_wilson": shallow["pooled_wilson"],
             "ceiling": shallow["ceiling"],
             "ceiling_gap": shallow["ceiling_gap"],
+            "reaches_ceiling": shallow["reaches_ceiling"],
         },
         "hb2_accuracy_minus_chance": {
             "mean": hb2["mean"], "lo": hb2["lo"], "hi": hb2["hi"],
@@ -2870,14 +3049,19 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         },
     }
     _write_json(out_dir / "baselines_verdict.json", verdict)
+    hb7_txt = ("n/a" if verdict["hb7_depth_required"] is None else
+               ("required" if verdict["hb7_depth_required"]
+                else f"NOT required (saturated at depth "
+                     f"{verdict['saturation_depth']})"))
     print(f"[baselines] verdict: HB1={'ok' if verdict['hb1_supported'] else 'FAILED'}"
           f" HB2={'ok' if verdict['hb2_supported'] else 'FAILED'}"
           f" HB3={'ok' if verdict['hb3_supported'] else 'FAILED'}"
           f" HB4={'ok' if verdict['hb4_supported'] else 'FAILED'}"
           f" HB5={'ok' if verdict['hb5_supported'] else 'FAILED'}"
-          f" HB6={'ok' if verdict['hb6_supported'] else 'FLAG'} "
+          f" HB6={'ok' if verdict['hb6_supported'] else 'FLAG'}"
+          f" HB7={hb7_txt} "
           f"(stored in baselines_verdict.json; a failed baseline check "
-          f"invalidates the corresponding claims above it, HB6 only flags "
+          f"invalidates the corresponding claims above it, HB6/HB7 only flag "
           f"depth-based motivations)")
 
 
@@ -2923,7 +3107,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
         batch=settings.stats_batch, batches=settings.stats_batches,
         seed=stats_seed, max_cases=settings.max_error_cases)
     rec = {
-        "experiment": "e1", "hypotheses": ["H1a", "H1b", "H1c", "H1d"],
+        "experiment": "e1", "hypotheses": ["H1a", "H1b", "H1c", "H1d", "H1e"],
         "gate": gate, "seed": seed, "lr": lr,
         "eval_seed": eval_seed, "stats_seed": stats_seed,
         "params": params, "model_cfg": model_cfg, **metrics, **corr, **fc, **ed,
@@ -2950,7 +3134,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
 
 
 def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("H1a", "H1b", "H1c", "H1d"))
+    _announce(("H1a", "H1b", "H1c", "H1d", "H1e"))
     _write_manifest(settings, out_dir, "e1")
     _enforce_reproducibility(settings, out_dir, "e1")
     _enforce_overfit_gate(settings, out_dir, "e1")
@@ -3125,7 +3309,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{verdict.get('chance', float('nan')):.4f} - the transformer is "
               f"only credited for what it does beyond this tuned baseline and "
               f"the rule ceiling (HB4 = no label leakage, HB5 = loop can "
-              f"memorise a tiny batch, HB6 = depth is measurably required)")
+              f"memorise a tiny batch, HB6 = the shallowest ladder rung is "
+              f"below the ceiling)")
         shallow = verdict.get("shallow_none") or {}
         shallow_by_seed = {}
         for key, value in (shallow.get("accuracy_by_seed") or {}).items():
@@ -3134,8 +3319,10 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             except (TypeError, ValueError):
                 continue
         if shallow_by_seed:
-            print(f"[e1] complexity control (HB6): tuned 1-layer standard "
-                  f"transformer (lr={shallow.get('lr', float('nan')):g}) test "
+            shallow_depth = int(shallow.get("n_layers", 1))
+            print(f"[e1] complexity control (HB6): tuned {shallow_depth}-layer "
+                  f"standard transformer "
+                  f"(lr={shallow.get('lr', float('nan')):g}) test "
                   f"accuracy={shallow.get('accuracy_mean', float('nan')):.4f}, "
                   f"rule ceiling={shallow.get('ceiling', float('nan')):.4f}, "
                   f"gap={shallow.get('ceiling_gap', float('nan')):.4f}")
@@ -3148,11 +3335,37 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                      for r in by_gate["none"] if r["seed"] in shallow_by_seed]
             if len(diffs) >= 2:
                 ci = paired_bootstrap_ci(diffs)
-                print(f"      paired deep(none, 8 layers) - shallow(1 layer) "
+                deep_layers = int(
+                    (by_gate["none"][0].get("model_cfg") or {})
+                    .get("n_layers", settings.n_layers))
+                print(f"      paired deep(none, "
+                      f"{deep_layers} layers) - "
+                      f"shallow({shallow_depth} layer) "
                       f"accuracy: {_fmt_ci(ci)} (each side val-tuned; a "
                       f"supported gap means the depth of the E1/E3 grids is "
                       f"measurably required, a gap including 0 means a gate "
                       f"gain must be beyond what one layer already reaches)")
+        ladder = verdict.get("depth_ladder") or {}
+        by_depth = ladder.get("by_depth") or {}
+        if by_depth:
+            rungs = "/".join(
+                f"{d}L {float(row.get('accuracy_mean', float('nan'))):.4f}"
+                for d, row in sorted(by_depth.items(), key=lambda kv: int(kv[0])))
+            sat = verdict.get("saturation_depth")
+            req = verdict.get("hb7_depth_required")
+            if req is None:
+                sat_txt = "unavailable (rule ceiling unknown)"
+            elif req:
+                sat_txt = ("no rung up to "
+                           f"{max(int(d) for d in by_depth)} layers reaches "
+                           "the ceiling: depth is measurably required")
+            else:
+                sat_txt = (f"saturated at {sat} layers: depth beyond that is "
+                           f"not measurably required here")
+            print(f"[e1] complexity ladder (HB7, each rung val-tuned, "
+                  f"test accuracy): {rungs}; {sat_txt}")
+            for pair, ci in (ladder.get("adjacent_contrasts") or {}).items():
+                print(f"      adjacent-depth {pair} accuracy: {_fmt_ci(ci)}")
 
     print("\n[e1] H1a robustness: rank (Spearman) gate-entropy correlation "
           "alongside Pearson (a monotone effect must survive the change of "
@@ -3187,7 +3400,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         print(f"{gate:>6}" + "".join(f"{c:>12}" for c in cells))
 
     print("\n[e1] pre-registered contrasts (calib vs query/none):")
-    clog = ContrastLog("e1", hypotheses=("H1a", "H1b", "H1c", "H1d"),
+    clog = ContrastLog("e1", hypotheses=("H1a", "H1b", "H1c", "H1d", "H1e"),
                        min_seeds=settings.min_seeds_for_claim)
     clog.print("calib - none", "H1a", "accuracy",
                _paired_diff(by_gate["calib"], by_gate["none"], "accuracy"),
@@ -3212,6 +3425,24 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                             "gate_margin"),
                warn=_curve_warn(("calib", by_gate["calib"]),
                                 ("query", by_gate["query"])))
+    # H1e: the operational, imbalance-aware reading of the same gate
+    # values.  Errors are the rare class after convergence, so the claim
+    # "the calibrated gate concentrates doubt on its own errors" is a
+    # rare-positive ranking claim, read through PR-AUC (reported as lift
+    # over prevalence; 1.0 = random) and the recall of the most doubtful
+    # 10%.  ROC-AUC travels in the tables as the optimistic companion but
+    # is deliberately not a decision metric here.  Seeds whose stats
+    # stream contains no errors leave the metric undefined: _paired_diff
+    # records and drops them (never imputes them as 0).
+    for side in ("query", "none"):
+        for metric, hyp in (
+            ("prauc_lift_gate_to_error", "H1e"),
+            ("recall_at_10pct_gate_to_error", "H1e"),
+        ):
+            clog.print(f"calib - {side}", hyp, metric,
+                       _paired_diff(by_gate["calib"], by_gate[side], metric),
+                       warn=_curve_warn(("calib", by_gate["calib"]),
+                                        (side, by_gate[side])))
     null_margins = [r["null_mass_error_margin"] for r in by_gate["null"]
                     if _finite(r.get("null_mass_error_margin"))]
     clog.print("null margin vs 0", "H1c", "null_mass_error_margin",
@@ -3396,8 +3627,31 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     lr = _resolve_lr(settings, out_dir, "e2")
     lengths = length_sweep_lengths(base=settings.n_pairs, factor=2, n=4,
                                    max_len=settings.max_len)
+    # Per-length absolute reference: the parameter-free structural rule is
+    # the task ceiling at *every* length.  Without it a length-related
+    # accuracy drop cannot be attributed: part of it may be the task's own
+    # unique-key requirement (a duplicate key makes the answer ambiguous,
+    # see data._sample_keys), which has nothing to do with the mechanism
+    # under test.  unique_key_rate is reported alongside so the ceiling is
+    # read as exact only where keys stay unique.
+    rule_ceiling_by_length = {}
+    for length in lengths:
+        rule_ceiling_by_length[length] = rule_pair_lookup_stats(
+            length, settings.vocab, settings.device,
+            batch=settings.eval_batch, batches=settings.eval_batches,
+            seed=TEST_SEED)
+    _write_json(out_dir / "e2_rule_ceiling.json", {
+        "experiment": "e2", "test_seed": TEST_SEED,
+        "by_length": {str(L): stats
+                      for L, stats in rule_ceiling_by_length.items()},
+    })
     print(f"[e2] training at n_pairs={settings.n_pairs}, sweep over {lengths} "
           f"(test seed {TEST_SEED}, stats seed {STATS_SEED})")
+    print(f"[e2] per-length rule ceiling (parameter-free structural rule; "
+          f"exact only where keys are unique): "
+          + ", ".join(f"L={L}: acc={rule_ceiling_by_length[L]['accuracy']:.4f} "
+                      f"unique={rule_ceiling_by_length[L]['unique_key_rate']:.3f}"
+                      for L in lengths))
     eval_seed, stats_seed = TEST_SEED, STATS_SEED
     runs = []
     examples = {}
@@ -3441,6 +3695,15 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             rec["accuracy_at_base"] = base_acc
             rec["accuracy_at_longest"] = long_acc
             rec["accuracy_drop"] = base_acc - long_acc
+            rec["rule_ceiling_by_length"] = {
+                L: rule_ceiling_by_length[L]["accuracy"] for L in lengths}
+            rec["rule_unique_key_rate_by_length"] = {
+                L: rule_ceiling_by_length[L]["unique_key_rate"]
+                for L in lengths}
+            rec["ceiling_gap_by_length"] = {
+                L: rule_ceiling_by_length[L]["accuracy"]
+                - rec["accuracy_by_length"][L] for L in lengths}
+            rec["ceiling_gap_at_longest"] = rec["ceiling_gap_by_length"][lengths[-1]]
             rec["entropy_drift"] = (rec["entropy_by_length"][lengths[-1]]
                                     - rec["entropy_by_length"][settings.n_pairs])
             rec["entropy_norm_drift"] = (
@@ -3476,9 +3739,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         planned_seeds=settings.seeds)
     print(f"\n[e2] accuracy by n_pairs (mean +- std over seeds; the "
           f"calib_len_only / calib_ent_only / calib_no_terms arms are the "
-          f"H2c calibration-term ablations, completing the 2x2 with calib):")
+          f"H2c calibration-term ablations, completing the 2x2 with calib; "
+          f"gap@long = mean gap to the per-length rule ceiling at the "
+          f"longest length, the absolute reference for H2a's drop):")
     line = f"{'arm':>16}" + "".join(f"{L:>12}" for L in lengths) + \
-           f"{'drop':>10} {'entropy_drift':>14}"
+           f"{'drop':>10} {'gap@long':>10} {'entropy_drift':>14}"
     print(line)
     for label, *_ in _E2_VARIANTS:
         cells = []
@@ -3487,9 +3752,16 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                              for r in by_variant[label]])
             cells.append(f"{agg['mean']:.3f}±{agg['std']:.3f}")
         drop = _mean_std([r["accuracy_drop"] for r in by_variant[label]])
+        gap = _mean_std([r["ceiling_gap_at_longest"]
+                         for r in by_variant[label]])
         drift = _mean_std([r["entropy_drift"] for r in by_variant[label]])
         print(f"{label:>16}" + "".join(f"{c:>12}" for c in cells)
-              + f"{drop['mean']:>10.3f} {drift['mean']:>14.3f}")
+              + f"{drop['mean']:>10.3f} {gap['mean']:>10.3f} "
+              + f"{drift['mean']:>14.3f}")
+    ceil_cells = [f"{rule_ceiling_by_length[L]['accuracy']:.3f}"
+                  for L in lengths]
+    print(f"{'rule ceiling':>16}" + "".join(f"{c:>12}" for c in ceil_cells)
+          + f"{'-':>10} {'(gap@long)':>10} {'-':>14}")
 
     print(f"\n[e2] inference cost at the training length (same protocol as "
           f"e1; check whether the length benefit costs latency; curve_ok = "
@@ -3607,6 +3879,30 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     _enforce_reproducibility(settings, out_dir, "e3")
     _enforce_overfit_gate(settings, out_dir, "e3")
     lr = _resolve_lr(settings, out_dir, "e3")
+    # HB7 pre-registers an annotation on every depth-based motivation: the
+    # deep-write readouts of H3a/H3b are only informative about depth if the
+    # task actually needs the grid's depth.  The baselines verdict carries
+    # the tuned ladder's saturation point, so the annotation is automatic
+    # rather than left to the reader.
+    verdict = _load_baseline_verdict(out_dir)
+    if verdict is None:
+        print("[e3] note: no baselines_verdict.json in the output dir - run "
+              "`--only baselines` first to check whether the 8-layer grid "
+              "depth is measurably required (HB7)")
+    else:
+        required = verdict.get("hb7_depth_required")
+        saturation = verdict.get("saturation_depth")
+        if required is None:
+            print("[e3] HB7 depth context unavailable (rule ceiling unknown): "
+                  "the depth-based framing of H3a/H3b is unverified")
+        elif not required:
+            print(f"[e3] HB7 FLAG: a tuned standard transformer already "
+                  f"saturates at depth {saturation}, so the deep-write "
+                  f"readouts (H3a/H3b) must not be presented as evidence "
+                  f"that depth is needed at this scale")
+        else:
+            print("[e3] HB7: depth beyond two layers is measurably required, "
+                  "so the deep-write readouts are informative about depth")
     print(f"[e3] grid gate x norm x layer_scale at lr={lr:g}, "
           f"test seed {TEST_SEED}, stats seed {STATS_SEED}")
     runs = []

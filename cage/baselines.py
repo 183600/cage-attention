@@ -14,26 +14,34 @@ Why these baselines
   string matcher would suffer.
 * ``copy_last_token``: trivial floor (echo the query token).
 * ``LinearBagProbe``: a one-layer linear model on bag-of-token counts,
-  tuned over a learning-rate grid on a *validation* seed and reported on
-  a separate *test* seed.  It cannot represent key-value lookup, so it
-  should stay near chance (``1 / (vocab - 2)``).  A complex model earns
-  its keep only if it clearly beats this tuned probe *and* approaches
-  the rule ceiling.  "Near chance" is checked statistically
-  (``probe_vs_chance_test``), not by eyeballing: a point estimate inside
-  "a few x chance" with a wide CI is inconclusive, not evidence.
+  tuned over a deliberately wide learning-rate grid (four rates spanning
+  30x) on a *validation* seed and reported on a separate *test* seed.  It
+  cannot represent key-value lookup, so it should stay near chance
+  (``1 / (vocab - 2)``).  A complex model earns its keep only if it
+  clearly beats this tuned probe *and* approaches the rule ceiling.
+  "Near chance" is checked statistically (``probe_vs_chance_test``), not
+  by eyeballing: a point estimate inside "a few x chance" with a wide CI
+  is inconclusive, not evidence.  A grid point whose loss goes non-finite
+  is stopped, recorded (``diverged_runs``) and excluded from selection
+  (its accuracy is unknown, not a legitimate "bad" tuning result), so a
+  diverged run can neither fake a tuned baseline nor silently poison the
+  tuned estimate.
 
 The transformer with ``gate="none"`` is the architecture-internal
 baseline that the gate variants of E1 are compared against; these
 external baselines calibrate what "good" even means on this task.  On
-the learned side the ladder has a third rung that lives in
-``cage.experiments`` (``_run_shallow_baseline``, hypothesis HB6): the
-same transformer truncated to a single layer, with its learning rate
-tuned on a validation seed and reported on the test seed.  It is the
-simplest *learned* model that could plausibly solve the task, so any
-depth-based motivation must survive comparison against it.
+the learned side the ladder lives in ``cage.experiments``
+(``_run_depth_ladder``, hypotheses HB6/HB7): the same transformer at
+each ladder depth (default 1/2/4 layers), with the learning rate tuned
+per depth on a validation seed and reported on the test seed.  The
+shallowest rung is the simplest *learned* model that could plausibly
+solve the task, and the ladder's saturation depth is the depth against
+which any depth-based motivation must be read.
 """
 
 from __future__ import annotations
+
+import math
 
 import torch
 import torch.nn.functional as F
@@ -164,6 +172,13 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     ``{"step", "loss"}`` points (~20 per run plus the last step) are
     appended to it: the probe is part of the HB2 negative control, so its
     training curve must be as auditable as the transformer grids'.
+
+    If the loss (or the pre-clip gradient norm) goes non-finite, the run
+    stops *before* the update with a ``"nonfinite": True`` /
+    ``"nonfinite_grad": True`` history entry instead of silently stepping
+    NaN weights through the rest of the schedule: a diverged grid point
+    has no measured accuracy and must be excluded from tuning, not read
+    as "the probe cannot do better".
     """
     check_train_seed(seed)
     seed_everything(seed)
@@ -181,8 +196,21 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
             validate_batch(idx, targets, meta, vocab)
         opt.zero_grad(set_to_none=True)
         loss = F.cross_entropy(model(idx), meta["answer"])
+        if not bool(torch.isfinite(loss)):
+            if history is not None:
+                history.append({"step": int(step),
+                                "loss": float(loss.detach()),
+                                "nonfinite": True})
+            break
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(params, 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(params, 1.0)
+        if not bool(torch.isfinite(grad_norm)):
+            if history is not None:
+                history.append({"step": int(step),
+                                "loss": float(loss.detach()),
+                                "nonfinite_grad": True})
+            opt.zero_grad(set_to_none=True)
+            break
         opt.step()
         sched.step()
         if history is not None and (step % sample_every == 0
@@ -212,7 +240,17 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
                       val_batches=4, probe_batch=256):
     """Pick the probe learning rate by *mean validation accuracy* over the
     probe seeds.  Model selection happens on ``val_seed`` only; the chosen
-    rate is then reported on a disjoint test seed by the caller."""
+    rate is then reported on a disjoint test seed by the caller.
+
+    Robustness: a diverged grid point (non-finite loss/gradient, see
+    ``train_linear_probe``) is counted in ``diverged_runs`` and its
+    accuracy treated as ``-inf`` for selection - its validation number
+    measures an exploded model, not the probe's representational ceiling.
+    Non-finite training losses are excluded from ``train_loss_mean``.  This
+    matters because the grid intentionally reaches high learning rates so
+    that "the tuned probe stays near chance" cannot be attributed to an
+    under-tuned strawman.
+    """
     check_eval_seed(val_seed, selection=True)
     if val_seed in tuple(seeds):
         raise ValueError(
@@ -222,28 +260,47 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
     table = []
     for lr in lr_grid:
         accs = []
+        diverged_accs = []
         loss_means = []
+        diverged = 0
         for seed in seeds:
             history = []
             model = train_linear_probe(n_pairs, vocab, device, steps=steps,
                                        batch=batch, lr=lr, seed=seed,
                                        history=history)
-            losses = [p["loss"] for p in history]
+            run_diverged = any("nonfinite" in p or "nonfinite_grad" in p
+                               for p in history)
+            if run_diverged:
+                diverged += 1
+            losses = [p["loss"] for p in history
+                      if math.isfinite(p.get("loss", float("nan")))]
             if losses:
                 loss_means.append(sum(losses) / len(losses))
-            accs.append(linear_probe_accuracy(model, n_pairs, vocab, device,
-                                              batch=probe_batch,
-                                              batches=val_batches,
-                                              seed=val_seed))
-        mean = sum(accs) / len(accs)
-        var = (sum((a - mean) ** 2 for a in accs) / (len(accs) - 1)
-               if len(accs) > 1 else 0.0)
+            acc = linear_probe_accuracy(model, n_pairs, vocab, device,
+                                        batch=probe_batch,
+                                        batches=val_batches, seed=val_seed)
+            if run_diverged:
+                # The run stopped at an arbitrary step: this accuracy is
+                # recorded for transparency but is not a completed-run
+                # measurement and does not enter selection.
+                if math.isfinite(acc):
+                    diverged_accs.append(acc)
+            elif math.isfinite(acc):
+                accs.append(acc)
+        mean = (sum(accs) / len(accs)) if accs else float("nan")
+        var = (sum((a - mean) ** 2 for a in accs)
+               / (len(accs) - 1) if len(accs) > 1 else 0.0)
         row = {"lr": lr, "val_accuracy_mean": mean,
-               "val_accuracy_std": var ** 0.5, "n_seeds": len(accs)}
+               "val_accuracy_std": var ** 0.5, "n_seeds": len(accs),
+               "diverged_runs": diverged}
+        if diverged_accs:
+            row["diverged_accuracy_mean"] = (sum(diverged_accs)
+                                             / len(diverged_accs))
         if loss_means:
             row["train_loss_mean"] = sum(loss_means) / len(loss_means)
         table.append(row)
-    best = max(table, key=lambda row: row["val_accuracy_mean"])
+    best = max(table, key=lambda row: row["val_accuracy_mean"]
+               if math.isfinite(row["val_accuracy_mean"]) else float("-inf"))
     return best["lr"], table
 
 
