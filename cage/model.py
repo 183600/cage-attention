@@ -271,18 +271,16 @@ def _arange(n: int, device: torch.device) -> torch.Tensor:
 def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.Tensor:
     """``(B*h, 1, T)`` additive mask rows for the query positions ``pos``.
 
-    Row ``b`` is 0 up to column ``pos[b]`` and ``-inf`` beyond it.
+    Row ``b`` is 0 up to column ``pos[b]`` and ``-inf`` beyond it - exactly
+    row ``pos[b]`` of the cached causal mask, so the rows are gathered from
+    the cache and expanded over the heads instead of being rebuilt with a
+    compare/shift/fill pass over ``B*h*T`` elements.
     """
     B = pos.size(0)
-    cols = _arange(T, pos.device)
-    m = _get_scratch(("mask_rows",), pos.device, dtype, B * h * T)
-    m = m[:B * h * T].view(B, h, T)
-    m.zero_()
-    mb = _get_scratch(("mask_rows_b",), pos.device, torch.bool, B * T)
-    mb = mb[:B * T].view(B, 1, T)
-    torch.gt(cols.view(1, 1, T), pos.view(B, 1, 1), out=mb)
-    m.masked_fill_(mb, float("-inf"))
-    return m.view(B * h, 1, T)
+    rows = _causal_mask(T, pos.device, dtype).index_select(0, pos)
+    if h == 1:
+        return rows.view(B, 1, T)
+    return rows.unsqueeze(1).expand(B, h, T).reshape(B * h, 1, T)
 
 
 def _softmax_inplace(s: torch.Tensor) -> torch.Tensor:
@@ -402,6 +400,20 @@ def _release_scratch(*names: str) -> None:
     drop = set(names)
     for key in [k for k in _scratch_cache if k[0] in drop]:
         del _scratch_cache[key]
+
+
+def _balanced_step(n: int, cap: int) -> int:
+    """Balanced chunk size covering ``n`` units in ``ceil(n/cap)`` chunks.
+
+    A plain ``cap`` sized chunk leaves the tail chunk arbitrarily small
+    (``n % cap``), and the backward of a tiny tail GEMM is pure dispatch
+    overhead.  Splitting evenly keeps every chunk within the ``cap`` while
+    making all chunks the same size (within one unit).
+    """
+    if n <= cap:
+        return n
+    n_chunks = -(-n // cap)
+    return max(1, min(cap, -(-n // n_chunks)))
 
 
 def _linear_into(x: torch.Tensor, weight: torch.Tensor,
@@ -974,7 +986,7 @@ class Attention(nn.Module):
         ``(B, T, d_model) -> (3, B*h, T, dk)`` with the projection applied
         per batch chunk straight into the target buffer.
         """
-        step = max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
+        step = _balanced_step(B, max(1, _QKV_CHUNK_ROWS // max(T, 1)))
         if step >= B:
             return self._pack(F.linear(x, self.qkv.weight), B, h, T, dk)
         packed = x.new_empty(3, B * h, T, dk)
@@ -1111,7 +1123,7 @@ class Attention(nn.Module):
             pv = packed.view(3, B, h, T, dk)
             x2 = x.reshape(B, T, C)
             # Row-capped staging buffer feeding the permute-copy.
-            step = max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
+            step = _balanced_step(B, max(1, _QKV_CHUNK_ROWS // max(T, 1)))
             qkv_buf = _get_scratch(("qkv_out",), x.device, x.dtype,
                                    step * T * 3 * C).view(step * T, 3 * C)
             for b0 in range(0, B, step):
@@ -1340,13 +1352,14 @@ class Block(nn.Module):
         n = h.numel() // c
         # Row-chunked up projection.
         if n > _MLP_CHUNK_ROWS:
+            step = _balanced_step(n, _MLP_CHUNK_ROWS)
             up = _get_scratch(("mlp_up",), h.device, h.dtype,
-                              4 * _MLP_CHUNK_ROWS * c)
+                              4 * step * c)
             down = _get_scratch(("mlp_down_big",), h.device, h.dtype, n * c)
             gelu = self.mlp[1]
             h2 = h.reshape(n, c)
-            for r0 in range(0, n, _MLP_CHUNK_ROWS):
-                r1 = min(n, r0 + _MLP_CHUNK_ROWS)
+            for r0 in range(0, n, step):
+                r1 = min(n, r0 + step)
                 b = r1 - r0
                 upb = up[:4 * b * c].view(b, 4 * c)
                 _linear_into(h2[r0:r1], self.mlp[0].weight, self.mlp[0].bias, upb)
