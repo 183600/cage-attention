@@ -332,16 +332,12 @@ class _RowEntropy(torch.autograd.Function):
         (p,) = saved
         if grad_out is None:
             return None, None
-        mask = _get_scratch(("rowent_bwd_m",), p.device, torch.bool,
-                            p.numel())
-        mask = mask[:p.numel()].view_as(p)
-        torch.le(p, ctx.eps, out=mask)
         d = _get_scratch(("rowent_bwd_d",), p.device, p.dtype, p.numel())
         d = d[:p.numel()].view_as(p)
         torch.clamp_min(p, ctx.eps, out=d)
         d.log_()
         d.add_(1.0)
-        d.masked_fill_(mask, 0.0)
+        torch.where(p > ctx.eps, d, _zero_scalar(p.device, p.dtype), out=d)
         gn = _get_scratch(("rowent_bwd_g",), grad_out.device,
                           grad_out.dtype, grad_out.numel())
         gn = gn[:grad_out.numel()].view_as(grad_out)
@@ -616,13 +612,12 @@ class _CalibAttn(torch.autograd.Function):
                 mask, q, kt, beta=1.0, alpha=scale,
                 out=s[:bh * T * T].view(bh, T, T)))
             n = p.numel()
-            gbuf = mbuf = None
+            gbuf = None
             if grad_ent is not None:
                 gbuf = _get_scratch(("calib_f",), q.device, q.dtype, n)
-                mbuf = _get_scratch(("calib_bwd_mbuf",), q.device, torch.bool, n)
             d_p = _get_scratch(("calib_dp",), q.device, q.dtype, n).view(bh, T, T)
             torch.bmm(grad_y, vt, out=d_p)
-            d_s = _softmax_grad_from_p(d_p, p, grad_ent, buf=gbuf, mbuf=mbuf)
+            d_s = _softmax_grad_from_p(d_p, p, grad_ent, buf=gbuf)
             d_qkv = torch.empty_like(qkv)
             torch.bmm(p.transpose(1, 2), grad_y, out=d_qkv[2])
             zero = _zero_scalar(d_s.device, d_s.dtype)
@@ -638,7 +633,6 @@ class _CalibAttn(torch.autograd.Function):
         max_i1 = T
         s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
         gbuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if grad_ent is not None else None
-        mbuf = _get_scratch(("calib_bwd_mbuf",), q.device, torch.bool, bh * max_rows * max_i1) if grad_ent is not None else None
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
         # One scratch serves both uses below: the block's ``d_v`` / ``d_k``
         # contribution and the narrow ``d_q`` block copy.
@@ -658,8 +652,7 @@ class _CalibAttn(torch.autograd.Function):
             d_p = dpb[:n].view(bh, r, i1)
             torch.bmm(g, vt[:, :, :i1], out=d_p)
             d_s = _softmax_grad_from_p(d_p, p, ge,
-                                       buf=None if gbuf is None else gbuf[:n],
-                                       mbuf=None if mbuf is None else mbuf[:n])
+                                       buf=None if gbuf is None else gbuf[:n])
             # The first block writes ``d_v`` / ``d_k`` outright; later
             # blocks accumulate into their prefix slice.
             if first:
@@ -683,13 +676,11 @@ class _CalibAttn(torch.autograd.Function):
 
 def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
                          grad_ent: torch.Tensor | None,
-                         buf: torch.Tensor | None = None,
-                         mbuf: torch.Tensor | None = None) -> torch.Tensor:
+                         buf: torch.Tensor | None = None) -> torch.Tensor:
     """Score gradient for ``p = softmax(s)`` plus the calibrated-entropy term.
     Consumes ``d_p``.
 
-    ``buf`` optionally supplies a flat buffer for the ``log(p)`` term and
-    ``mbuf`` one for the ``p <= _EPS`` drop selector.
+    ``buf`` optionally supplies a flat buffer for the ``log(p)`` term.
 
     The surviving term is ``log(p) + 1`` on ``p > _EPS`` and ``0`` elsewhere;
     the sub-eps entries are dropped by the trailing select, so the value taken
@@ -701,18 +692,13 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     if grad_ent is not None:
         if buf is None:
             logterm = torch.clamp_min(p, _EPS).log()
-            mask = p <= _EPS
         else:
             logterm = buf[:p.numel()].view_as(p)
             torch.clamp_min(p, _EPS, out=logterm)
             logterm.log_()
-            if mbuf is None:
-                mask = p <= _EPS
-            else:
-                mask = mbuf[:p.numel()].view_as(p)
-                torch.le(p, _EPS, out=mask)
         logterm.add_(1.0)
-        logterm.masked_fill_(mask, 0.0)
+        torch.where(p > _EPS, logterm, _zero_scalar(p.device, p.dtype),
+                    out=logterm)
         d_p.addcmul_(logterm, grad_ent.unsqueeze(-1), value=-1.0)
     d_p.mul_(p)
     n0, n1 = d_p.size(0), d_p.size(1)
