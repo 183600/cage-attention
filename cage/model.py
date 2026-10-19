@@ -797,19 +797,18 @@ class _NullAttn(torch.autograd.Function):
                                 bh * max_rows * max_i1)
             yblk = _get_scratch(("null_yblk",), q.device, q.dtype,
                                 bh * max_rows * dv)
-            nv4t = null_v.view(1, 1, h, dv)
+            nv4 = null_v.view(1, h, 1, dv)
             for i0, i1 in blocks:
                 r = i1 - i0
                 p, p0 = _null_probs(q[:, i0:i1], kt[:, :, :i1], i0, i1,
                                     mask[i0:i1, :i1], null_k, B, h, scale, sbuf)
                 yb = yblk[:bh * r * dv].view(bh, r, dv)
                 torch.bmm(p, v[:, :i1], out=yb)
-                dst = ybt[:, i0:i1]
-                # Write the transposed block plus its null-slot term into
-                # the caller buffer.
-                torch.addcmul(yb.view(B, h, r, dv).transpose(1, 2),
-                              p0.view(B, h, r, 1).transpose(1, 2),
-                              nv4t, out=dst)
+                # Fold the null-slot term into the contiguous block before
+                # the transposed copy into the caller buffer (same
+                # locality argument as the non-``ybt`` path below).
+                yb.view(B, h, r, dv).addcmul_(p0.view(B, h, r, 1), nv4)
+                ybt[:, i0:i1].copy_(yb.view(B, h, r, dv).transpose(1, 2))
             ctx.scale = scale
             ctx.shape = (B, h)
             return ybt
@@ -940,6 +939,10 @@ class _NullAttn(torch.autograd.Function):
                 dqblk = stg[:bh * r * dk].view(bh, r, dk)
                 torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
                               out=dqblk)
+                # Fold the null-key term into the contiguous staging block
+                # before the copy, mirroring the forward-path locality fix.
+                dqblk.view(B, h, r, dk).addcmul_(d_s0.view(B, h, r, 1), nk4,
+                                                 value=scale)
                 d_q[:, i0:i1].copy_(dqblk)
             else:
                 torch.bmm(p.transpose(1, 2), g, out=d_qkv[2])
@@ -947,8 +950,8 @@ class _NullAttn(torch.autograd.Function):
                               alpha=scale, out=d_qkv[1])
                 torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
                               out=d_qkv[0])
-            d_q4[:, :, i0:i1].addcmul_(d_s0.view(B, h, r, 1), nk4,
-                                       value=scale)
+                d_q4[:, :, i0:i1].addcmul_(d_s0.view(B, h, r, 1), nk4,
+                                           value=scale)
             if first_null:
                 torch.baddbmm(zero, d_s0.transpose(-2, -1), q_blk, beta=0.0,
                               alpha=scale, out=acc_k)
@@ -1094,7 +1097,8 @@ class Attention(nn.Module):
             else:
                 null_mass = None
                 pr = rows
-            return _row_entropy(pr, _EPS), pr.max(-1).values, null_mass
+            buf = _get_scratch(("rowent",), pr.device, pr.dtype, pr.numel())
+            return _row_entropy(pr, _EPS, buf=buf), pr.max(-1).values, null_mass
 
     def _row_stats_at(self, q, k, B, h, T, stat_pos, is_null, ent_full=None):
         """Diagnostics for the queried rows only.
