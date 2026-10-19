@@ -377,8 +377,6 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
     entry = _scratch_cache.get(ckey)
     if entry is not None and entry.numel() >= numel and _servable(entry):
         if entry.numel() > 4 * numel:
-            # A much smaller request would otherwise pin the old
-            # high-water buffer for the rest of the process.
             with torch.inference_mode(False):
                 buf = torch.empty(numel, device=device, dtype=dtype)
             _scratch_cache[ckey] = buf
@@ -406,11 +404,8 @@ def _release_scratch(*names: str) -> None:
         del _scratch_cache[key]
 
 
-# Every buffer the dropout-free, gradient-free forward can hold at its end.
-# Releasing the cache entries when the forward returns keeps the retained
-# high-water mark of a long-sequence / large-batch evaluation from being
-# carried into every later call (the CUDA no-grad path additionally drops
-# its per-layer buffers inside ``Attention.forward``).
+# Every buffer the dropout-free, gradient-free forward can hold at its end;
+# released once the forward returns.
 _NOGRAD_SCRATCH = (
     "embed_out", "packed", "qkv_out", "ln_out", "ln_f_out", "ln_mean",
     "ln_rstd", "seed_scale", "mlp_up", "mlp_down", "mlp_down_big",
@@ -574,10 +569,8 @@ class _CalibAttn(torch.autograd.Function):
                    _get_scratch(("calib_ent",), q.device, q.dtype,
                                 bh * T).view(bh, T)) if need_ent else None
             ebuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
-            # The block result is produced in a contiguous one-block-wide
-            # staging buffer and copied into its disjoint row slice of
-            # ``y``: unlike a GEMM straight into a strided ``y`` slice,
-            # both passes stay contiguous.
+            # Each block's result is built in a one-block-wide staging
+            # buffer and copied into its row slice of ``y``.
             yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
                                 bh * max_rows * dv)
             for i0, i1 in blocks:
@@ -643,11 +636,8 @@ class _CalibAttn(torch.autograd.Function):
         gbuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if grad_ent is not None else None
         mbuf = _get_scratch(("calib_bwd_mbuf",), q.device, torch.bool, bh * max_rows * max_i1) if grad_ent is not None else None
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
-        # One contiguous scratch serves both uses below: the block's
-        # ``d_v`` / ``d_k`` contribution (a full-height ``i1``-wide GEMM, so
-        # the accumulations stay contiguous) and the narrow ``d_q`` block
-        # copy.  It replaces the former one-block-wide ``dqb`` buffer whose
-        # transposed-input chunk loop made the GEMMs stride-bound.
+        # One scratch serves both uses below: the block's ``d_v`` / ``d_k``
+        # contribution and the narrow ``d_q`` block copy.
         dk = q.size(-1)
         stg = _get_scratch(("calib_bwd_stg",), q.device, q.dtype, bh * max_i1 * dk)
         zero = _zero_scalar(q.device, q.dtype)
@@ -666,10 +656,9 @@ class _CalibAttn(torch.autograd.Function):
             d_s = _softmax_grad_from_p(d_p, p, ge,
                                        buf=None if gbuf is None else gbuf[:n],
                                        mbuf=None if mbuf is None else mbuf[:n])
-            # The reversed block order writes the widest block first, so
-            # the later (narrower) blocks accumulate into a prefix slice
-            # of ``d_v`` / ``d_k``: build the ``(i1, dk)`` contribution in
-            # the contiguous scratch, then one strided ``add_``.
+            # The reversed block order writes the widest block first; the
+            # later (narrower) blocks accumulate into a prefix slice of
+            # ``d_v`` / ``d_k``.
             if first:
                 torch.bmm(p.transpose(1, 2), g, out=d_v)
                 torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1],
@@ -892,10 +881,8 @@ class _NullAttn(torch.autograd.Function):
             d_s0 = gu0.mul_(p0).mul_(scale)
             if multi:
                 # Reversed order: the widest block writes ``d_v`` / ``d_k``
-                # outright; the narrower ones build their ``(i1, dk)``
-                # contribution contiguously in the scratch and add it into
-                # the leading ``i1`` columns (the former transposed-input
-                # chunk loop was stride-bound).
+                # outright; the narrower ones add their ``(i1, dk)``
+                # contribution into the leading ``i1`` columns.
                 if first:
                     torch.bmm(p.transpose(1, 2), g, out=d_v)
                     torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
@@ -1122,9 +1109,7 @@ class Attention(nn.Module):
                 ("packed",), x.device, x.dtype, 3 * bh * T * dk).view(3, bh, T, dk)
             pv = packed.view(3, B, h, T, dk)
             x2 = x.reshape(B, T, C)
-            # Cap the staging buffer by rows, not by the total size: the
-            # staging only exists to feed the permute-copy, so a full-size
-            # second ``(B, T, 3C)`` buffer is pure overhead.
+            # Row-capped staging buffer feeding the permute-copy.
             step = max(1, min(B, _QKV_CHUNK_ROWS // max(T, 1)))
             qkv_buf = _get_scratch(("qkv_out",), x.device, x.dtype,
                                    step * T * 3 * C).view(step * T, 3 * C)

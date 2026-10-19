@@ -183,10 +183,10 @@ def validate_batch(idx, targets, meta, vocab) -> dict:
     * targets (when given): ids in ``[-1, vocab)``, the supervised entry
       at the query position equal to the answer, and *every* entry aligned
       with its position (``-1`` or the true next-token label).  Checking
-      more than the single supervised entry catches the classic off-by-one
-      / foreign-label target bug: a label silently shifted onto the wrong
-      position passes the one-spot check whenever the shift happens not to
-      touch the query position, but fails the alignment check.
+      more than the single supervised entry catches off-by-one /
+      foreign-label target misalignment: a label silently shifted onto the
+      wrong position passes the one-spot check whenever the shift happens
+      not to touch the query position, but fails the alignment check.
 
     Returns a small diagnostics dict (sample count, unique-key rate, number
     of exact duplicate rows inside the batch) used by the split audit.
@@ -737,9 +737,9 @@ def _self_test() -> int:
 
     # Label-alignment and reserved-id gates: freshly drawn sparse and dense
     # batches pass the cleaning gate; a target that is neither ``-1`` nor
-    # the true continuation is rejected (off-by-one / foreign-label class
-    # of bug), and a reserved answer id (PAD/SEP) is rejected even when the
-    # paired value and the supervised entry agree with it.
+    # the true continuation is rejected (off-by-one / foreign-label
+    # misalignment), and a reserved answer id (PAD/SEP) is rejected even
+    # when the paired value and the supervised entry agree with it.
     gen = torch.Generator().manual_seed(22)
     sparse_idx, sparse_tgt, sparse_meta = make_batch(8, 4, 64, "cpu", gen=gen)
     check("validate_accepts_sparse_targets",

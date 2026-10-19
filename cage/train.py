@@ -886,10 +886,9 @@ def measure_inference_cost(model, n_pairs, vocab, device, batch=64, warmup=3,
     ``torch.cuda.synchronize()`` so async kernel enqueueing is not timed.
     Memory is the CUDA allocation peak on GPU; on CPU it is the peak of the
     profiler-tracked live tensor bytes during one pass (derived from the
-    allocation/free events, not RSS).  The CPU profiler records every
-    allocation event, so its instrumentation cost far exceeds the forward
-    it measures; pass ``measure_memory=False`` to skip it (the reported
-    memory is then ``nan`` / ``"unavailable"``).
+    allocation/free events, not RSS).  Pass ``measure_memory=False`` to
+    skip the CPU profiler (the reported memory is then ``nan`` /
+    ``"unavailable"``).
     """
     gen = torch.Generator(device=device).manual_seed(seed)
     idx, _, _ = make_batch(batch, n_pairs, vocab, device, gen=gen)
@@ -983,14 +982,9 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     """One pass over the diagnostic stream producing both the per-layer
     mechanism statistics and the bad-case mining record.
 
-    ``collect_stats`` and ``collect_error_cases`` used to replay the exact
-    same seeded stream in two separate full model forwards (and the mining
-    hooks re-projected q/k per layer each time).  The merged pass reads the
-    layer statistics off the same forward that feeds the mining hooks, so
-    both outputs are bit-identical to the two-pass version while one model
-    forward per call disappears.  ``max_cases=None`` collects statistics
-    only (no hooks, no case taxonomy) and returns ``None`` for the error
-    record.
+    The layer statistics are read off the same forward that feeds the
+    mining hooks.  ``max_cases=None`` collects statistics only (no hooks,
+    no case taxonomy) and returns ``None`` for the error record.
 
     Statistics: per-layer gate / entropy / maxprob / null-mass at query
     positions, plus false-concentration labels (high max-prob but wrong

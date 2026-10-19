@@ -2864,9 +2864,6 @@ def _curve_record(hist):
 
 
 def _cost_record(settings: Settings, model):
-    # The CPU memory figure needs the allocation-event profiler, whose
-    # instrumentation cost dwarfs the forward it measures; the CUDA peak is
-    # a cheap allocator counter, so only CPU skips the profiler.
     return measure_inference_cost(
         model, settings.n_pairs, settings.vocab, settings.device,
         batch=min(settings.eval_batch, 128), warmup=settings.cost_warmup,
@@ -3965,8 +3962,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
     model, params, metrics, curve, model_cfg = _train_and_eval(
         settings, seed, lr, eval_seed=eval_seed, gate=gate, **model_overrides)
     # One diagnostic pass feeds both the layer statistics and the error
-    # mining (same seed and stream as the two separate passes used before,
-    # so every derived number is unchanged).
+    # mining.
     stats, errors = collect_stats_and_errors(
         model, settings.n_pairs, settings.vocab, settings.device,
         batch=settings.stats_batch, batches=settings.stats_batches,
@@ -4678,8 +4674,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                                         batches=settings.eval_batches,
                                         seed=eval_seed))
                 want_errors = length == lengths[-1]
-                # Last length: one merged pass instead of the previous
-                # stats pass + error-mining pass over the same stream.
+                # Only the last length also collects the error-mining
+                # record.
                 stats, last_errors = collect_stats_and_errors(
                     model, length, settings.vocab, settings.device,
                     batch=settings.stats_batch,
