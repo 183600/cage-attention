@@ -480,9 +480,9 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     runs of the same config on one machine are stable.  Without this the
     global RNG (dropout) and/or the data stream would silently differ.
 
-    ``permute_labels`` (negative control, default off): after the first
-    batch has passed the data-cleaning gate, the supervised labels of every
-    batch are shuffled across the batch before the loss is computed.  The
+    ``permute_labels`` (negative control, default off): after each batch
+    has passed the data-cleaning gate, its supervised labels are shuffled
+    across the batch before the loss is computed.  The
     permutation draws from its own generator (seeded from ``seed``), not
     from the data generator, so a permuted run sees exactly the same
     batches as an otherwise identical non-permuted run and only the label
@@ -495,8 +495,9 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     never mistaken for a data problem.
 
     ``seed`` must not collide with a held-out evaluation stream
-    (``cage.data.RESERVED_EVAL_SEEDS``); the first batch of the run is
-    validated as a data-cleaning gate before any gradient step.
+    (``cage.data.RESERVED_EVAL_SEEDS``); every batch of the run passes the
+    data-cleaning gate before its gradient step, so a generator defect
+    that only appears after the first batch cannot be trained on.
 
     Curve monitoring (``eval_every > 0``): every ``eval_every`` steps the
     model is scored on ``val_batches`` fresh batches drawn from the fixed
@@ -549,8 +550,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     model.train()
     for step in range(steps):
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, dense_lm=dense_lm, gen=gen)
-        if step == 0:
-            validate_batch(idx, tgt, meta, vocab)
+        validate_batch(idx, tgt, meta, vocab)
         diag_tgt = tgt
         if permute_labels:
             tgt = _permute_batch_labels(tgt, perm_gen)
@@ -611,7 +611,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         if do_val:
             val_loss, val_acc = _validation_metrics(
                 model, val_gen, n_pairs, vocab, device, batch, val_batches,
-                dense_lm, validate=step == 0)
+                dense_lm)
             entry["val_loss"] = val_loss
             entry["val_acc"] = val_acc
             if not math.isfinite(val_loss):
@@ -817,12 +817,13 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
 
 
 def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
-                        dense_lm, validate=False):
+                        dense_lm):
     """Validation loss (and accuracy) on fixed, held-out validation batches.
 
     Uses eval mode + ``inference_mode`` (no dropout, no RNG consumption), so
     the training RNG stream - and therefore the training trajectory - is
-    unaffected by monitoring.
+    unaffected by monitoring.  Every validation batch passes the shared
+    data-cleaning gate, so monitoring never reads invalid data.
     """
     was_training = model.training
     model.eval()
@@ -834,8 +835,7 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
         for i in range(max(1, batches)):
             idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
                                         dense_lm=dense_lm, gen=val_gen)
-            if validate and i == 0:
-                validate_batch(idx, tgt, meta, vocab)
+            validate_batch(idx, tgt, meta, vocab)
             sup_pos = None if dense_lm else meta["query_pos"]
             logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
             total_loss.add_(loss.detach().to(torch.float64))
@@ -977,7 +977,10 @@ def _label_audit(idx, meta):
     training gate and the wrong one for an error audit).
     """
     query = idx.gather(1, meta["query_pos"].unsqueeze(1)).squeeze(1)
-    keys = idx[:, 0::2]
+    # Key columns only: drop the trailing SEP and query columns (see
+    # ``cage.data.validate_batch``), so the SEP id can never enter the
+    # key-uniqueness / answer-pairing judgment.
+    keys = idx[:, :-2:2]
     match = keys.eq(query.unsqueeze(1))
     key_pos = match.to(torch.int64).argmax(dim=1).mul(2)
     paired = idx.gather(1, (key_pos + 1).unsqueeze(1)).squeeze(1)
@@ -996,8 +999,8 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
 
     Statistics: per-layer gate / entropy / maxprob / null-mass at query
     positions, plus false-concentration labels (high max-prob but wrong
-    answer).  The first batch passes the ``validate_batch`` cleaning gate,
-    so the mechanism statistics are computed on the same validated data
+    answer).  Every batch passes the ``validate_batch`` cleaning gate, so
+    the mechanism statistics are computed on the same validated data
     contract as training and the reported accuracy metrics.
 
     Error mining: each error is recorded with the evidence needed to
@@ -1026,10 +1029,10 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
 
     The label audit makes "labels cannot be the cause" a *measured* claim:
     ``label_noise_rate`` is computed over every evaluated sample rather
-    than assumed to be 0 from the construction.  The first batch
-    additionally passes the full ``validate_batch`` cleaning gate, so a
-    structurally invalid batch aborts the analysis instead of being
-    taxonomised as a model error.
+    than assumed to be 0 from the construction.  Every batch additionally
+    passes the full ``validate_batch`` cleaning gate, so a structurally
+    invalid batch aborts the analysis instead of being taxonomised as a
+    model error.
 
     Returns ``(stats, errors)``; cases are capped at ``max_cases`` but the
     summary aggregates every evaluated sample.  ``stats`` matches the
@@ -1092,8 +1095,7 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     try:
         for i in range(batches):
             idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-            if i == 0:
-                validate_batch(idx, tgt, meta, vocab)
+            validate_batch(idx, tgt, meta, vocab)
             per_layer_mass.clear()
             state["meta"] = meta
             logits, _, layer_stats = model(idx, stat_pos=meta["query_pos"])
@@ -1342,9 +1344,9 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
                   seed=VAL_SEED):
     """Recall accuracy at the query position.
 
-    The first batch of the stream passes the same ``validate_batch``
-    cleaning gate as training, so a reported accuracy can never be
-    computed on structurally invalid or label-noisy data.
+    Every batch of the stream passes the same ``validate_batch`` cleaning
+    gate as training, so a reported accuracy can never be computed on
+    structurally invalid or label-noisy data.
     """
     gen = torch.Generator(device=device).manual_seed(seed)
     was_training = model.training
@@ -1353,8 +1355,7 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     total = 0
     for i in range(batches):
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        if i == 0:
-            validate_batch(idx, tgt, meta, vocab)
+        validate_batch(idx, tgt, meta, vocab)
         logits, _, _ = model(idx)
         pred = logits.squeeze(1).argmax(-1)
         correct.add_((pred == meta["answer"]).sum())
@@ -1386,9 +1387,9 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     training variance, while this interval quantifies how precisely the
     *reported* stream of ``batch * batches`` samples pins the accuracy
     down (the two are different uncertainties and both belong next to a
-    headline number).  The first batch passes the ``validate_batch``
-    cleaning gate, so the metric panel is only computed on data that
-    satisfies the same integrity/label invariants as training.
+    headline number).  Every batch passes the ``validate_batch`` cleaning
+    gate, so the metric panel is only computed on data that satisfies the
+    same integrity/label invariants as training.
     """
     gen = torch.Generator(device=device).manual_seed(seed)
     was_training = model.training
@@ -1396,8 +1397,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     logits_all, tgt_all = [], []
     for i in range(batches):
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        if i == 0:
-            validate_batch(idx, tgt, meta, vocab)
+        validate_batch(idx, tgt, meta, vocab)
         logits, _, _ = model(idx)
         logits_all.append(logits.squeeze(1).float())
         tgt_all.append(meta["answer"])
@@ -1424,7 +1424,7 @@ def collect_stats(model, n_pairs, vocab, device, batch=128, batches=4,
     """Collect per-layer gate / entropy / maxprob / null-mass at query positions,
     plus false-concentration labels (high max-prob but wrong answer).
 
-    The first batch passes the ``validate_batch`` cleaning gate, so the
+    Every batch passes the ``validate_batch`` cleaning gate, so the
     mechanism statistics are computed on the same validated data contract
     as training and the reported accuracy metrics.  Single-purpose wrapper
     around ``collect_stats_and_errors`` (statistics-only mode).

@@ -72,9 +72,9 @@ def _answer_meta(idx, meta):
 def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
     """Score a rule-based predictor on fixed streams.
 
-    The first batch passes the shared ``validate_batch`` cleaning gate, so
-    the ceiling/floor baselines are measured on the same data contract as
-    the learned models.
+    Every batch passes the shared ``validate_batch`` cleaning gate, so the
+    ceiling/floor baselines are measured on the same data contract as the
+    learned models.
     """
     gen = torch.Generator(device=device).manual_seed(seed)
     correct = torch.zeros((), dtype=torch.int64, device=device)
@@ -82,8 +82,7 @@ def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
     extra = {}
     for i in range(batches):
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        if i == 0:
-            validate_batch(idx, tgt, meta, vocab)
+        validate_batch(idx, tgt, meta, vocab)
         pred, stats = predict(idx, meta)
         correct.add_((pred == meta["answer"]).sum())
         total += idx.size(0)
@@ -104,7 +103,9 @@ def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
 
 def _predict_rule_pair(idx, meta):
     query = _answer_meta(idx, meta)
-    keys = idx[:, 0::2]
+    # Key columns only: drop the trailing SEP and query columns (see
+    # ``cage.data.validate_batch``).
+    keys = idx[:, :-2:2]
     match = keys == query.unsqueeze(1)
     unique_rate = match.sum(dim=1).eq(1).to(torch.float64).mean()
     key_pos = match.to(torch.int64).argmax(dim=1).mul(2)
@@ -174,8 +175,8 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     """Fit the probe with the same optimizer/schedule recipe pinned for the
     transformer (``_make_adamw``, cosine schedule, gradient clipping).
 
-    ``seed`` must not collide with a held-out evaluation stream; the first
-    batch is validated as a data-cleaning gate (same protocol as
+    ``seed`` must not collide with a held-out evaluation stream; every
+    batch passes the data-cleaning gate (same protocol as
     ``train_model``).  When ``history`` is given, sampled
     ``{"step", "loss"}`` points (~20 per run plus the last step) are
     appended to it: the probe is part of the HB2 negative control, so its
@@ -200,8 +201,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     model.train()
     for step in range(steps):
         idx, targets, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        if step == 0:
-            validate_batch(idx, targets, meta, vocab)
+        validate_batch(idx, targets, meta, vocab)
         opt.zero_grad(set_to_none=True)
         loss = F.cross_entropy(model(idx), meta["answer"])
         if not bool(torch.isfinite(loss)):
@@ -232,14 +232,14 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
 @torch.inference_mode()
 def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
                           batches=4, seed=123):
-    """Probe accuracy on a held-out stream, cleaning-gated like training."""
+    """Probe accuracy on a held-out stream, every batch cleaning-gated like
+    training."""
     gen = torch.Generator(device=device).manual_seed(seed)
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
     for i in range(batches):
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        if i == 0:
-            validate_batch(idx, tgt, meta, vocab)
+        validate_batch(idx, tgt, meta, vocab)
         pred = model(idx).argmax(dim=-1)
         correct.add_((pred == meta["answer"]).sum())
         total += idx.size(0)

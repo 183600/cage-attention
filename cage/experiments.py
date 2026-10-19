@@ -174,8 +174,14 @@ from .train import (
 # Seeds with fixed roles (independent of every training seed) are defined in
 # ``cage.data`` so that every entry point shares one source of truth:
 #   VAL_SEED   - model selection only (learning-rate tuning, baseline checks)
-#   TEST_SEED  - the reported numbers; never used for any decision
+#   TEST_SEED  - the final reported numbers *and* the pre-registered gate
+#                rules fixed in this module (HB1 rule ceiling, HB4 permuted-
+#                label control, HB0/HB6/HB7 competence/saturation marks);
+#                never read by any model/hyperparameter/recipe choice
 #   STATS_SEED - mechanism statistics (matches the collect_stats default)
+# Seal = no *selection* reads these streams; the fixed rules above are
+# re-measured on TEST when the CI loop re-runs `--only baselines`, which is
+# not re-selection.  See the sealing-note paragraph in ``cage.data``.
 
 HYPO_IDS = ("HB0", "HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7",
             "H1a", "H1b",
@@ -3758,6 +3764,23 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "train_seed": settings.seeds[0] if settings.seeds else None,
         "test_seed": TEST_SEED,
         "val_seed": VAL_SEED,
+        # Seal semantics, written into the verdict so a reader of the JSON
+        # alone cannot mistake "sealed" for "evaluated once at the very
+        # end": TEST_SEED is read by the final reported numbers *and* by
+        # the pre-registered, fixed-in-code validity gates (HB1 rule
+        # ceiling, HB4 permuted-label control, HB0/HB6/HB7 competence and
+        # saturation marks).  No model/hyperparameter/recipe choice ever
+        # reads it - all selection is VAL_SEED-only - and the CI loop's
+        # re-measurement of the same fixed rules after a code change is
+        # not re-selection (rules and grid are pre-registered, the gate is
+        # pass/fail), so the stream cannot become an implicit validation
+        # split.
+        "sealing_note": (
+            "sealed = no model/hyperparameter/recipe choice may read the "
+            "stream; the fixed pre-registered gate rules and the final "
+            "report may. Re-running `--only baselines` re-measures those "
+            "fixed rules on TEST (verdicts are recomputed, not reselected)."
+        ),
         "chance": chance,
         "repro_audit_passed": bool(repro_audit["passed"]),
         "repro_audit": {
