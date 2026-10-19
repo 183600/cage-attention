@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import time
 
 import torch
 import torch.nn as nn
@@ -882,86 +881,6 @@ def estimate_forward_flops(model, seq_len: int) -> int:
     if cfg.norm == "seednorm":
         per_layer += 4 * T * C * C   # two dynamic scale projections
     return int(L * per_layer + 2 * T * C * V)
-
-
-def measure_inference_cost(model, n_pairs, vocab, device, batch=64, warmup=3,
-                           runs=10, seed=STATS_SEED, measure_memory=True):
-    """Parameters / FLOPs / latency / memory of one eval-mode forward pass.
-
-    Latency is the median of ``runs`` passes after ``warmup`` (batch
-    ``batch`` at ``n_pairs``; fixed seed so every variant scores the same
-    shapes); on CUDA each timed pass is bracketed by
-    ``torch.cuda.synchronize()`` so async kernel enqueueing is not timed.
-    Memory is the CUDA allocation peak on GPU; on CPU it is the peak of the
-    profiler-tracked live tensor bytes during one pass (derived from the
-    allocation/free events, not RSS).  Pass ``measure_memory=False`` to
-    skip the CPU profiler (the reported memory is then ``nan`` /
-    ``"unavailable"``).
-    """
-    gen = torch.Generator(device=device).manual_seed(seed)
-    idx, _, _ = make_batch(batch, n_pairs, vocab, device, gen=gen)
-    was_training = model.training
-    model.eval()
-    times = []
-    mem_mb = float("nan")
-    mem_method = "unavailable"
-    try:
-        with torch.inference_mode():
-            is_cuda = idx.is_cuda
-            for _ in range(max(0, warmup)):
-                model(idx)
-            if is_cuda:
-                torch.cuda.synchronize()
-            for _ in range(max(1, runs)):
-                if is_cuda:
-                    torch.cuda.synchronize()
-                t0 = time.perf_counter()
-                model(idx)
-                if is_cuda:
-                    torch.cuda.synchronize()
-                times.append(time.perf_counter() - t0)
-            if is_cuda:
-                torch.cuda.reset_peak_memory_stats()
-                model(idx)
-                torch.cuda.synchronize()
-                mem_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
-                mem_method = "cuda_peak"
-            elif measure_memory:
-                try:
-                    from torch.profiler import ProfilerActivity, profile
-                    with profile(activities=[ProfilerActivity.CPU],
-                                 profile_memory=True) as prof:
-                        model(idx)
-                    live = 0
-                    peak = 0
-                    for event in prof.events():
-                        live += getattr(event, "cpu_memory_usage", 0) or 0
-                        peak = max(peak, live)
-                    mem_mb = peak / (1024 * 1024)
-                    mem_method = "cpu_profiler_peak"
-                except Exception:  # noqa: BLE001 - measurement must not fail
-                    pass
-    finally:
-        model.train(was_training)
-    times.sort()
-    n_times = len(times)
-    median = (times[(n_times - 1) // 2] + times[n_times // 2]) / 2.0
-    params_total = sum(p.numel() for p in model.parameters())
-    embed = getattr(model, "tok", None)
-    params_non_embedding = params_total - (
-        embed.weight.numel() if embed is not None else 0)
-    seq_len = idx.size(1)
-    return {
-        "seq_len": int(seq_len),
-        "batch": int(batch),
-        "params_total": int(params_total),
-        "params_non_embedding": int(params_non_embedding),
-        "flops_per_forward": estimate_forward_flops(model, seq_len),
-        "latency_ms_per_batch": median * 1e3,
-        "latency_ms_per_sample": median * 1e3 / batch,
-        "peak_mem_mb": mem_mb,
-        "mem_method": mem_method,
-    }
 
 
 def _label_audit(idx, meta):

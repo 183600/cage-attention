@@ -164,7 +164,6 @@ from .train import (
     false_concentration_sweep,
     gate_depth_ratio,
     gate_stat_correlations,
-    measure_inference_cost,
     overfit_sanity_check,
     train_model,
     training_curve_verdict,
@@ -211,7 +210,7 @@ HYPOTHESES = {
     "HB0": {
         "experiment": "all",
         "question": "Is a mechanism claim readable at all - did the models "
-                    "under test actually learn the task at this budget?",
+                    "under test actually learn the task at this step count?",
         "hypothesis": "The depth/mechanism contrasts are only informative "
                       "about the mechanism when the trained arms are in a "
                       "competent regime; an underfit grid produces "
@@ -338,7 +337,7 @@ HYPOTHESES = {
                     "chance), depth is measurably required and E1's 8-layer "
                     "gate contrasts are informative for it; a rung at "
                     "chance (HB0 competence prerequisite failed) shows only "
-                    "that this budget did not solve the task - it is not "
+                    "that this step count did not solve the task - it is not "
                     "evidence that depth is required",
         "sesoi": {"accuracy": 0.01},
     },
@@ -369,7 +368,7 @@ HYPOTHESES = {
                     "annotation that a 2-layer standard transformer already "
                     "saturates the task at this scale; when no rung clears "
                     "chance the ladder did not solve the task at this "
-                    "budget, so the depth demand is 'not determinable' "
+                    "step count, so the depth demand is 'not determinable' "
                     "(never 'required') and E3's depth framing is "
                     "unverified",
         "sesoi": {"accuracy": 0.01},
@@ -436,7 +435,7 @@ HYPOTHESES = {
                       "concentration term must dismantle the gate/entropy "
                       "association, and removing a term that does work must "
                       "show up in accuracy or in the false-concentration "
-                      "margin - a component removable at no cost is not "
+                      "margin - a component removable without effect is not "
                       "doing work.",
         "prediction": "|gate_vs_entropy| collapses toward the query gate in "
                       "the no-concentration arms and stays clearly positive "
@@ -697,8 +696,6 @@ class Settings:
     lr_grid: tuple = (1e-3, 3e-4, 1e-4)
     curve_points: int = 10      # validation checks per run (0 disables)
     val_batches: int = 2        # validation batches per check (fixed stream)
-    cost_warmup: int = 2
-    cost_runs: int = 7
     max_error_cases: int = 64   # per gate x seed, dumped to disk
     fdr_q: float = 0.05         # BH false-discovery rate for contrast families
     # Pre-registered floor on the number of independent training seeds a
@@ -1597,7 +1594,7 @@ class ContrastLog:
         self.rows: list[dict] = []
         # HB0: the family's competence prerequisite (at least one arm above
         # chance).  When it fails, no contrast in the family may support a
-        # claim - an underfit grid's differences describe the budget, not
+        # claim - an underfit grid's differences describe the step count, not
         # the mechanism.  ``None`` means "not assessed" and does not gate.
         self.competence = competence
 
@@ -1945,9 +1942,9 @@ class ContrastLog:
                   f"bound above chance {self.competence.get('chance', float('nan')):.4g} "
                   f"(best: {self.competence.get('best_arm') or 'none'}), so "
                   f"the grid did not demonstrably solve the task at this "
-                  f"budget: all {len(competence_failed)} contrast(s) are "
+                  f"step count: all {len(competence_failed)} contrast(s) are "
                   f"marked claim-ineligible and may not be read as mechanism "
-                  f"statements; raise the training budget/step count and "
+                  f"statements; raise the step count and "
                   f"re-run before interpreting any contrast")
         low_seed = [r for r in testable
                     if not r.get("claim_eligible", True)
@@ -2521,7 +2518,7 @@ def _competence_check(named_runs, correct_and_n, chance, what="arm"):
     A mechanism contrast (does the gate read entropy? does depth help?)
     is only interpretable when at least one trained condition demonstrably
     learned the task: an all-at-chance grid turns "no difference" into a
-    statement about the budget, not the mechanism, and makes HB7 read
+    statement about the step count, not the mechanism, and makes HB7 read
     "depth required" from pure underfit.  This is the one premise the
     registry lacked (HB0), so it is checked *before* any claim: every
     condition pools its runs' correct counts on the sealed test stream
@@ -2869,14 +2866,6 @@ def _curve_record(hist):
     }
 
 
-def _cost_record(settings: Settings, model):
-    return measure_inference_cost(
-        model, settings.n_pairs, settings.vocab, settings.device,
-        batch=min(settings.eval_batch, 128), warmup=settings.cost_warmup,
-        runs=settings.cost_runs,
-        measure_memory=torch.device(settings.device).type != "cpu")
-
-
 def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
                     permute_labels: bool = False, selection: bool = False,
                     **model_overrides):
@@ -3188,7 +3177,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
       depth the recall readout actually requires - but only rungs whose
       pooled Wilson 95% *lower* bound clears chance count as evidence:
       the HB0 competence premise separates "needs more depth" from "this
-      budget did not learn the task", and with no competent rung the depth
+      step count did not learn the task", and with no competent rung the depth
       demand is reported as *not determinable* instead of "required";
     * the saturation depth ``d*`` (smallest competent rung whose pooled
       Wilson 95% interval reaches the ceiling estimate) is the reference
@@ -3274,7 +3263,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         summary = _mean_std([r["accuracy"] for r in runs])
         # HB0 competence premise for HB6/HB7: "below the ceiling" is only
         # evidence that depth is required when the rung demonstrably
-        # learned the task.  A rung at chance is an underfit/budget
+        # learned the task.  A rung at chance is an underfit/step-count
         # statement, not a depth statement, so it can neither support HB6
         # ("depth measurably required") nor feed the saturation depth.
         above_chance = bool(math.isfinite(pooled["lo"])
@@ -3308,7 +3297,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         elif not above_chance:
             status = (f"at chance (pooled Wilson lower bound "
                       f"{pooled['lo']:.4f} <= chance {chance:.4f}): this "
-                      f"rung did not learn the task at this budget, so it "
+                      f"rung did not learn the task at this step count, so it "
                       f"is not depth evidence")
         else:
             status = "below the ceiling"
@@ -3325,7 +3314,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     saturation_depth = next((d for d in ladder if depths[d]["reaches_ceiling"]),
                             None)
     # HB7's competence premise: when no rung clears chance the ladder did
-    # not solve the task at this budget, so the depth demand is "not
+    # not solve the task at this step count, so the depth demand is "not
     # determinable" - never "required" (the pre-#HB0 reading of a None
     # saturation depth conflated underfit with "needs more depth").
     if not ceiling_known or not ladder_competent:
@@ -3366,8 +3355,8 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                else "none (no rung reaches the ceiling)")
     if hb7_depth_required is None:
         depth_txt = ("not determinable - no rung is above chance, so the "
-                     "ladder did not solve the task at this budget "
-                     "(raise the budget before reading depth)"
+                     "ladder did not solve the task at this step count "
+                     "(raise the step count before reading depth)"
                      if not ladder_competent
                      else "n/a (rule ceiling unavailable)")
     elif hb7_depth_required:
@@ -4006,7 +3995,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
         **{k: v for k, v in ed.items() if k != "n"},
         **{f"err_{k}": v for k, v in errors["summary"].items()},
         **_training_record(settings, lr),
-        **_cost_record(settings, model), **curve, **record_extra,
+        **curve, **record_extra,
         **_run_context(settings),
     }
     if _finite(rec.get("gate_vs_entropy")):
@@ -4276,7 +4265,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                     else " [provisional: below the pre-registered seed floor]")
         if not shallow.get("above_chance", True):
             hb6_prov += (" [HB6 not read as depth evidence: the rung is not "
-                         "above chance, so this budget did not learn the "
+                         "above chance, so this step count did not learn the "
                          "task]")
         print(f"[e1] complexity control (HB6): tuned {shallow_depth}-layer "
               f"standard transformer "
@@ -4316,8 +4305,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             if verdict.get("ladder_competent") is False:
                 sat_txt = ("not determinable: no ladder rung is above "
                            "chance, so the ladder did not solve the task at "
-                           "this budget - depth is unverified either way "
-                           "(raise the budget and re-run `--only baselines`)")
+                           "this step count - depth is unverified either way "
+                           "(raise the step count and re-run `--only baselines`)")
             else:
                 sat_txt = "unavailable (rule ceiling unknown)"
         elif req:
@@ -4368,7 +4357,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
 
     # HB0 competence prerequisite: "does the gate read entropy?" is only a
     # mechanism question when at least one trained condition demonstrably
-    # learned the task at this budget (pooled Wilson lower bound above
+    # learned the task at this step count (pooled Wilson lower bound above
     # chance).  Written to e1_competence.json and handed to the ContrastLog,
     # which then marks every contrast claim-ineligible if it fails.
     competence = _competence_check(
@@ -4386,7 +4375,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     else:
         print(f"[e1] HB0 competence: FAILED - no condition's pooled Wilson "
               f"95% lower bound is above chance {competence['chance']:.4f}; "
-              f"the grid did not demonstrably learn the task at this budget, "
+              f"the grid did not demonstrably learn the task at this step count, "
               f"so no contrast below may be read as a mechanism statement")
     print("\n[e1] pre-registered contrasts (calib vs query/none):")
     clog = ContrastLog("e1",
@@ -4504,53 +4493,15 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                        if r["curve_verdict"] == label)
             print(f"       [{label} x{count}] {rec}")
 
-    print(f"\n[e1] inference cost (batch="
-          f"{min(settings.eval_batch, 128)}, seq_len={by_gate['none'][0]['seq_len']};"
-          f" latency = median of {settings.cost_runs} runs; memory peak is the"
-          f" CUDA allocator peak, n/a on CPU):")
-    print(f"{'gate':>6} {'params':>10} {'flops/M':>9} {'ms/sample':>10} "
-          f"{'mem/MB':>9}")
-    for gate in GATES:
-        t = table[gate]
-
-        def cell(key, fmt="{:.3f}"):
-            m = t.get(key)
-            if not m or not math.isfinite(m["mean"]):
-                return "n/a"
-            return fmt.format(m["mean"])
-
-        flops = t.get("flops_per_forward", {}).get("mean", float("nan")) / 1e6
-        flops_s = f"{flops:.2f}" if math.isfinite(flops) else "n/a"
-        print(f"{gate:>6} {cell('params_total', '{:.0f}'):>10} "
-              f"{flops_s:>9} "
-              f"{cell('latency_ms_per_sample'):>10} "
-              f"{cell('peak_mem_mb', '{:.2f}'):>9}")
-
-    def _ratio(a, b, key):
-        ma = table[a].get(key, {}).get("mean")
-        mb = table[b].get(key, {}).get("mean")
-        if not ma or not mb or not math.isfinite(ma) or not math.isfinite(mb) \
-                or mb == 0:
-            return float("nan")
-        return ma / mb
-
-    print(f"[e1] accuracy delta vs relative cost, each gate vs none "
-          f"(exploratory and uncorrected - the pre-registered family above "
-          f"is FDR-controlled; a gain is only read as supported when the CI "
-          f"excludes 0, and a supported gain still has to be read against "
-          f"the multipliers):")
+    print(f"[e1] accuracy delta vs none, each gate (exploratory and "
+          f"uncorrected - the pre-registered family above is FDR-controlled; "
+          f"a gain is only read as supported when the CI excludes 0):")
     for gate in GATES:
         if gate == "none":
             continue
         acc_ci = _paired_diff(by_gate[gate], by_gate["none"], "accuracy")
         warn = _curve_warn((gate, by_gate[gate]), ("none", by_gate["none"]))
-        mem_ratio = _ratio(gate, "none", "peak_mem_mb")
-        mem_s = f"x{mem_ratio:.3f}" if math.isfinite(mem_ratio) else "n/a"
-        print(f"  {gate:>6}: {_fmt_ci(acc_ci)} | "
-              f"params x{_ratio(gate, 'none', 'params_total'):.3f}"
-              f"  flops x{_ratio(gate, 'none', 'flops_per_forward'):.3f}"
-              f"  latency x{_ratio(gate, 'none', 'latency_ms_per_sample'):.3f}"
-              f"  mem {mem_s}"
+        print(f"  {gate:>6}: {_fmt_ci(acc_ci)}"
               + (f"  [{warn}]" if warn else ""))
 
     print(f"\n[e1] bad cases (stats seed {STATS_SEED}; train batch: "
@@ -4686,7 +4637,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                    "maxprob_by_length": {}, "gate_by_length": {},
                    **record_extra,
                    **_training_record(settings, lr),
-                   **_cost_record(settings, model), **curve,
+                   **curve,
                    **_run_context(settings)}
             errors = None
             for length in lengths:
@@ -4785,28 +4736,13 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     print(f"{'rule ceiling':>16}" + "".join(f"{c:>12}" for c in ceil_cells)
           + f"{'-':>10} {'(gap@long)':>10} {'-':>14}")
 
-    print(f"\n[e2] inference cost at the training length (same protocol as "
-          f"e1; check whether the length benefit costs latency; curve_ok = "
-          f"curve-valid runs / all runs):")
-    print(f"{'arm':>16} {'params':>10} {'flops/M':>9} {'ms/sample':>10} "
-          f"{'mem/MB':>9} {'curve_ok':>8} {'curve':>10}")
+    print(f"\n[e2] training-curve health (curve_ok = curve-valid runs / "
+          f"all runs):")
+    print(f"{'arm':>16} {'curve_ok':>8} {'curve':>10}")
     for label, *_ in _E2_VARIANTS:
-        t = table[label]
-
-        def cell(key, fmt="{:.3f}"):
-            m = t.get(key)
-            if not m or not math.isfinite(m["mean"]):
-                return "n/a"
-            return fmt.format(m["mean"])
-
-        flops = t.get("flops_per_forward", {}).get("mean", float("nan")) / 1e6
-        flops_s = f"{flops:.2f}" if math.isfinite(flops) else "n/a"
         _, invalid = _curve_health(by_variant[label])
         verdicts = sorted({r["curve_verdict"] for r in by_variant[label]})
-        print(f"{label:>16} {cell('params_total', '{:.0f}'):>10} "
-              f"{flops_s:>9} "
-              f"{cell('latency_ms_per_sample'):>10} "
-              f"{cell('peak_mem_mb', '{:.2f}'):>9} "
+        print(f"{label:>16} "
               f"{invalid}/{len(by_variant[label])} "
               f"{'/'.join(verdicts):>10}")
 
@@ -4858,7 +4794,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         print(f"[e2] HB0 competence: FAILED - no arm's pooled Wilson 95% "
               f"lower bound is above chance {competence['chance']:.4f} at "
               f"the training length; the grid did not demonstrably learn the "
-              f"task at this budget, so no contrast below may be read as a "
+              f"task at this step count, so no contrast below may be read as a "
               f"mechanism statement")
     print("\n[e2] pre-registered contrasts:")
     clog = ContrastLog("e2", hypotheses=("H2a", "H2b", "H2c"),
@@ -4936,9 +4872,9 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
         if verdict.get("ladder_competent") is False:
             print("[e3] HB7 NOT DETERMINABLE: no ladder rung (1/2/4 layers) "
                   "had a pooled Wilson lower bound above chance, so the "
-                  "ladder did not solve the task at this budget - the "
+                  "ladder did not solve the task at this step count - the "
                   "depth-based framing of H3a/H3b is unverified (raise the "
-                  "budget and re-run `--only baselines`)")
+                  "step count and re-run `--only baselines`)")
         else:
             print("[e3] HB7 depth context unavailable (rule ceiling unknown): "
                   "the depth-based framing of H3a/H3b is unverified")
@@ -4986,7 +4922,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                         "resid_norm_last_over_first": float(
                             resid[-1] / resid[0].clamp_min(1e-12)),
                         **_training_record(settings, lr),
-                        **_cost_record(settings, model), **curve,
+                        **curve,
                         **_run_context(settings),
                     }
                     _write_result(out_dir / "e3_runs.jsonl", rec)
@@ -4994,7 +4930,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
 
     print(f"\n[e3] {'gate':>5} {'norm':>9} {'ls':>5} {'accuracy':>16} "
           f"{'gate_depth_ratio':>18} {'resid_growth':>14} "
-          f"{'params':>9} {'ms/sample':>10} {'mem/MB':>8} {'curve_ok':>9} {'curve':>10}")
+          f"{'params':>9} {'curve_ok':>9} {'curve':>10}")
     index = {}
     for gate in ("query", "calib"):
         for norm in NORMS:
@@ -5006,9 +4942,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                 acc = _mean_std([r["accuracy"] for r in rs])
                 ratio = _mean_std([r["gate_depth_ratio"] for r in rs])
                 growth = _mean_std([r["resid_norm_last_over_first"] for r in rs])
-                params = _mean_std([r["params_total"] for r in rs])
-                lat = _mean_std([r["latency_ms_per_sample"] for r in rs])
-                mem = _mean_std([r["peak_mem_mb"] for r in rs])
+                params = _mean_std([r["params"] for r in rs])
                 verdicts = sorted({r["curve_verdict"] for r in rs})
                 _, invalid = _curve_health(rs)
                 ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
@@ -5016,32 +4950,8 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                       f"{acc['mean']:>8.4f}±{acc['std']:<7.4f} "
                       f"{ratio['mean']:>9.4f}±{ratio['std']:<8.4f} "
                       f"{growth['mean']:>7.3f}±{growth['std']:<6.3f} "
-                      f"{params['mean']:>9.0f} {lat['mean']:>10.3f} "
-                      f"{mem['mean']:>8.2f} {invalid}/{len(rs)} "
+                      f"{params['mean']:>9.0f} {invalid}/{len(rs)} "
                       f"{'/'.join(verdicts):>10}")
-
-    print("\n[e3] seednorm vs pre cost (exploratory and uncorrected: the "
-          "pre-registered family below is FDR-controlled; accuracy delta vs "
-          "relative cost):")
-    for gate in ("query", "calib"):
-        acc_ci = _paired_diff(index[(gate, "seednorm", None)],
-                              index[(gate, "pre", None)], "accuracy")
-        a = _aggregate_runs(index[(gate, "seednorm", None)])
-        b = _aggregate_runs(index[(gate, "pre", None)])
-        ratios = []
-        for key, label in (("params_total", "params"),
-                           ("flops_per_forward", "flops"),
-                           ("latency_ms_per_sample", "latency")):
-            ma = a.get(key, {}).get("mean")
-            mb = b.get(key, {}).get("mean")
-            r = (ma / mb) if ma and mb else float("nan")
-            ratios.append(f"{label} x{r:.3f}" if math.isfinite(r)
-                          else f"{label} n/a")
-        warn = _curve_warn(
-            (f"{gate}/seednorm", index[(gate, "seednorm", None)]),
-            (f"{gate}/pre", index[(gate, "pre", None)]))
-        print(f"  [{gate}] {_fmt_ci(acc_ci)} | {'  '.join(ratios)}"
-              + (f"  [{warn}]" if warn else ""))
 
     _report_design_coverage(
         out_dir, "e3", runs, "grid",
@@ -5054,7 +4964,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
 
     # HB0 competence prerequisite: the deep-write readouts under test are
     # only interpretable when at least one grid cell demonstrably learned
-    # the task at this budget.
+    # the task at this step count.
     competence = _competence_check(
         [(f"{g}/{n}/{('off' if ls is None else f'{ls:g}')}", rs)
          for (g, n, ls), rs in index.items()],
@@ -5070,7 +4980,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     else:
         print(f"[e3] HB0 competence: FAILED - no grid cell's pooled Wilson "
               f"95% lower bound is above chance {competence['chance']:.4f}; "
-              f"the grid did not demonstrably learn the task at this budget, "
+              f"the grid did not demonstrably learn the task at this step count, "
               f"so no contrast below may be read as a mechanism statement")
     print("\n[e3] pre-registered contrasts (H3b: "
           "resid_norm_last_over_first is the primary readout; "
