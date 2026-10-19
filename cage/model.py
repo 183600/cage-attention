@@ -399,8 +399,10 @@ def _release_scratch(*names: str) -> None:
 def _balanced_step(n: int, cap: int) -> int:
     """Balanced chunk size covering ``n`` units in ``ceil(n/cap)`` chunks.
 
-    Every chunk stays within ``cap`` and all chunks have the same size
-    (within one unit), including the tail chunk.
+    Every chunk stays within ``cap``; the evenly split size makes the tail
+    chunk at most ``ceil(n/cap) - 1`` units smaller than the full chunks
+    (equal when ``n`` divides evenly), instead of leaving the raw
+    ``n % cap`` remainder as an arbitrarily small tail.
     """
     if n <= cap:
         return n
@@ -1266,7 +1268,7 @@ class Attention(nn.Module):
                 "calib_f", "calib_ent", "calib_ent_shuf", "calib_conc",
                 "null_y", "null_s", "null_s0",
                 "null_m", "rowstats_att", "rowstats_att_null", "rowstats_sum",
-                "rowent", "mask_rows", "mask_rows_b", "gate_out", "attn_y")
+                "rowent", "gate_out", "attn_y")
         if not need_stats:
             return out, None
 
