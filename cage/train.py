@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import math
+import os
+import threading
+import time
 
 import torch
 import torch.nn as nn
@@ -282,6 +285,23 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     different graph and can surface non-finite values the single-token
     loss never touches).
     """
+    # Tensors created inside ``torch.inference_mode`` (e.g. a validation
+    # batch handed over from ``_validation_metrics``) cannot be saved for
+    # backward: the triage's grad-enabled forward would raise and the
+    # report would blame the activations for what is a tensor-lifetime
+    # artifact.  Normalise the inputs to ordinary tensors first.
+    def _normal(t):
+        if torch.is_tensor(t) and t.is_inference():
+            with torch.inference_mode(False):
+                return t.clone()
+        return t
+
+    if torch.is_tensor(idx) or torch.is_tensor(tgt):
+        with torch.inference_mode(False):
+            idx, tgt = _normal(idx), _normal(tgt)
+    if isinstance(meta, dict):
+        meta = {k: _normal(v) for k, v in meta.items()}
+
     report = {
         "data": "ok",
         "activations": "ok",
@@ -608,15 +628,28 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         is_log = (log_every > 0 and step % log_every == 0) or step == steps - 1
         do_val = (eval_every > 0 and (step % eval_every == 0 or step == steps - 1))
         if do_val:
-            val_loss, val_acc = _validation_metrics(
+            val_loss, val_acc, val_batch = _validation_metrics(
                 model, val_gen, n_pairs, vocab, device, batch, val_batches,
                 dense_lm)
             entry["val_loss"] = val_loss
             entry["val_acc"] = val_acc
             if not math.isfinite(val_loss):
+                # The staged triage must cover the validation side too: a
+                # finite training loss with a non-finite validation loss is
+                # the eval-protocol branch of the same NaN triage (data ->
+                # activations -> loss -> gradients), and running it on the
+                # exact validation batch that produced the value is what
+                # separates an eval-stream data problem from a kernel one.
+                v_idx, v_tgt, v_meta = val_batch
+                diag = diagnose_nonfinite(model, v_idx, v_tgt, v_meta, vocab,
+                                          device=device, dense_lm=dense_lm)
+                entry["val_diagnosis"] = diag
                 print(f"  step {step:5d}  validation loss is non-finite "
-                      f"({val_loss}); the run is numerically unstable "
-                      f"(see the curve verdict)")
+                      f"({val_loss}); the run is numerically unstable - "
+                      f"staged triage first_bad_stage="
+                      f"{diag['first_bad_stage']!r} (train loss and "
+                      f"pre-clip grad norm are finite, so the eval "
+                      f"batch/forward is the prime suspect)")
             if val_loss < best_val:
                 best_val, best_val_step = val_loss, step
                 evals_since_improve = 0
@@ -823,19 +856,30 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     the training RNG stream - and therefore the training trajectory - is
     unaffected by monitoring.  Every validation batch passes the shared
     data-cleaning gate, so monitoring never reads invalid data.
+
+    Returns ``(loss, accuracy, last_batch)`` where ``last_batch`` is the
+    ``(idx, targets, meta)`` of the final validation forward: the caller
+    keeps it so a non-finite validation loss can be run through the staged
+    ``diagnose_nonfinite`` triage *on the exact batch that produced it*
+    instead of only being noted.
     """
     was_training = model.training
     model.eval()
     total_loss = torch.zeros((), dtype=torch.float64, device=device)
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
+    last_batch = None
     val_gen.manual_seed(VAL_SEED)
-    with torch.inference_mode():
-        for i in range(max(1, batches)):
-            idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
-                                        dense_lm=dense_lm, gen=val_gen)
-            validate_batch(idx, tgt, meta, vocab)
-            sup_pos = None if dense_lm else meta["query_pos"]
+    for i in range(max(1, batches)):
+        # Batch construction stays outside inference_mode: the returned
+        # last_batch may be re-used by a grad-enabled triage/backward, and
+        # inference tensors cannot be saved for backward.
+        idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
+                                    dense_lm=dense_lm, gen=val_gen)
+        validate_batch(idx, tgt, meta, vocab)
+        last_batch = (idx, tgt, meta)
+        sup_pos = None if dense_lm else meta["query_pos"]
+        with torch.inference_mode():
             logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
             total_loss.add_(loss.detach().to(torch.float64))
             if dense_lm:
@@ -852,7 +896,8 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     model.train(was_training)
     n_batches = max(1, batches)
     return (total_loss.item() / n_batches,
-            correct.item() / total if total else float("nan"))
+            correct.item() / total if total else float("nan"),
+            last_batch)
 
 
 def estimate_forward_flops(model, seq_len: int) -> int:
@@ -881,6 +926,159 @@ def estimate_forward_flops(model, seq_len: int) -> int:
     if cfg.norm == "seednorm":
         per_layer += 4 * T * C * C   # two dynamic scale projections
     return int(L * per_layer + 2 * T * C * V)
+
+
+def estimate_attention_peak_mb(model, seq_len, batch=1, bytes_per=4):
+    """Deterministic attention-buffer peak of the fixed chunked kernel (MB).
+
+    The fixed design materialises one query block of the ``(B*H, rows, T)``
+    score matrix at a time (``_query_blocks`` of ``cage/model.py``, D3:
+    ``max_rows = max(32, (1 << 20) // (bh * T))``), so the attention path's
+    transient memory is *bounded* independent of ``T`` - the property behind
+    the recompute-not-store kernels (D6).  This returns the two-block bound
+    the forward holds (the score block ``calib_s`` plus the entropy temp
+    ``calib_f``), in MB, computed through ``_query_blocks`` itself so the
+    number cannot drift from the pinned formula.  Returns NaN if the helper
+    is unavailable.
+    """
+    try:
+        from .model import _query_blocks  # local: pinned helper, no cycle
+        cfg = model.cfg
+        bh = int(batch) * int(cfg.n_heads)
+        T = int(seq_len)
+        rows = max(r - s for s, r in _query_blocks(bh, T))
+        return 2.0 * bh * rows * T * float(bytes_per) / (1024.0 * 1024.0)
+    except Exception:  # noqa: BLE001 - a cost probe must not break a run
+        return float("nan")
+
+
+def _rss_bytes():
+    """Current resident set size in bytes, or ``None`` where unavailable.
+
+    Linux exposes it cheaply through ``/proc/self/statm`` (second field =
+    resident pages); other platforms return ``None`` and the memory probe
+    degrades to a NaN instead of inventing a number.
+    """
+    try:
+        with open("/proc/self/statm", "r", encoding="ascii") as fh:
+            resident_pages = int(fh.read().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError, AttributeError):
+        return None
+
+
+def efficiency_profile(model, seq_len, device="cpu", reps=5, warmup=2):
+    """Measured cost of one inference forward at ``seq_len``.
+
+    Accuracy alone is half of a result: a +0.5% accuracy at 10x forward
+    cost is a different finding from +0.5% at equal cost, and the fixed
+    experiment contract compares variants that differ in *computation*
+    (the gate projection, the entropy readout, the two dynamic-scale
+    projections of seednorm), so the trade-off has to be measured on the
+    same instance that produced the metrics.  Returns
+
+    * ``params``         - trainable parameter count (capacity);
+    * ``flops_forward``  - analytic matmul-only FLOPs of one full-sequence
+      forward (:func:`estimate_forward_flops`); elementwise work is
+      excluded, so it is a lower bound;
+    * ``latency_ms``     - median wall-clock time of ``reps`` timed
+      forwards after ``warmup`` warmups, with ``latency_ms_min/_max``
+      companions (a shared runner makes single timings noisy; the min/max
+      bracket shows how noisy);
+    * ``attn_peak_mb``   - deterministic peak of the fixed chunked
+      attention buffers (:func:`estimate_attention_peak_mb`); the memory
+      term that grows with ``T`` and is bounded by the D3 block formula;
+    * ``host_mem_delta_mb`` - peak growth of this process' RSS while the
+      timed forwards run (sampled from ``/proc/self/statm``).  This is a
+      coarse *process-level* high-water mark: the allocator's caches mean
+      it only reads the extra pages this model's forwards needed beyond
+      the process' current footprint, so it is comparable within one
+      measurement session but not across processes; NaN where the probe
+      is unavailable;
+    * ``device_mem_mb``  - peak CUDA memory allocated during the timed
+      forwards; NaN on CPU.
+
+    The latency column is the only place the elementwise work that the
+    analytic FLOPs exclude (softmax, entropy, normalisation) shows up, and
+    the memory column is the only place the recompute-not-store kernels'
+    footprint shows up - which is exactly where the fixed kernel design
+    trades compute for memory.
+
+    Measurement never raises: every probe degrades to NaN on failure, so
+    a cost readout can never invalidate a training run.  The model's
+    train/eval mode is restored and timing runs under ``inference_mode``
+    so nothing accumulates.
+    """
+    seq_len = int(seq_len)
+    out = {
+        "cost_seq_len": seq_len,
+        "params": int(sum(p.numel() for p in model.parameters())),
+        "flops_forward": float(estimate_forward_flops(model, seq_len)),
+        "attn_peak_mb": estimate_attention_peak_mb(model, seq_len),
+        "latency_ms": float("nan"),
+        "latency_ms_min": float("nan"),
+        "latency_ms_max": float("nan"),
+        "host_mem_delta_mb": float("nan"),
+        "device_mem_mb": float("nan"),
+    }
+    try:
+        x = torch.zeros((1, seq_len), dtype=torch.long, device=device)
+    except Exception:  # noqa: BLE001 - a cost probe must not break a run
+        return out
+    cuda = str(device).startswith("cuda") and torch.cuda.is_available()
+    was_training = model.training
+    model.eval()
+    times = []
+    try:
+        with torch.inference_mode():
+            if cuda:
+                torch.cuda.synchronize()
+                torch.cuda.reset_peak_memory_stats()
+            # The high-water mark is taken from *before* the warmup so the
+            # allocator's cached blocks from the first forwards (the real
+            # activation footprint) are counted, not hidden by reuse.
+            baseline = _rss_bytes()
+            stop = threading.Event()
+            peak = [baseline if baseline is not None else 0]
+            sampler = None
+            if baseline is not None:
+                def _sample():
+                    while not stop.is_set():
+                        rss = _rss_bytes()
+                        if rss is not None and rss > peak[0]:
+                            peak[0] = rss
+                        time.sleep(0.0005)
+                sampler = threading.Thread(target=_sample, daemon=True)
+                sampler.start()
+            for _ in range(max(0, int(warmup))):
+                model(x)
+            for _ in range(max(1, int(reps))):
+                if cuda:
+                    torch.cuda.synchronize()
+                t0 = time.perf_counter()
+                model(x)
+                if cuda:
+                    torch.cuda.synchronize()
+                times.append((time.perf_counter() - t0) * 1e3)
+            if sampler is not None:
+                stop.set()
+                sampler.join(timeout=1.0)
+            if baseline is not None:
+                out["host_mem_delta_mb"] = max(
+                    0.0, (peak[0] - baseline) / (1024.0 * 1024.0))
+            if cuda:
+                out["device_mem_mb"] = (
+                    torch.cuda.max_memory_allocated() / (1024.0 * 1024.0))
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        model.train(was_training)
+    if times:
+        times.sort()
+        out["latency_ms"] = times[len(times) // 2]
+        out["latency_ms_min"] = times[0]
+        out["latency_ms_max"] = times[-1]
+    return out
 
 
 def _label_audit(idx, meta):
@@ -1323,7 +1521,18 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     model.train(was_training)
     logits_cat = torch.cat(logits_all, dim=0).cpu()
     tgt_cat = torch.cat(tgt_all, dim=0).cpu()
+    # Reported metrics must be as traceable as training: if any evaluation
+    # row carries non-finite logits, its accuracy/NLL/calibration values are
+    # meaningless.  Stamp the finite fraction on every metric record and say
+    # so loudly once, instead of silently averaging poisoned rows.
+    finite_rows = torch.isfinite(logits_cat).all(dim=-1)
     out = multiclass_metrics(logits_cat, tgt_cat, topk=topk)
+    out["finite_logit_frac"] = float(finite_rows.float().mean())
+    if not bool(finite_rows.all()):
+        print(f"[eval] WARNING: {int((~finite_rows).sum())}/"
+              f"{finite_rows.numel()} evaluation rows have non-finite "
+              f"logits; accuracy/NLL/calibration over those rows are not "
+              f"interpretable (see cage.train.diagnose_nonfinite)")
     acc_ci = wilson_ci(int((logits_cat.argmax(-1) == tgt_cat).sum()),
                        int(tgt_cat.numel()))
     out["accuracy_lo"] = acc_ci["lo"]
