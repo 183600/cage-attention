@@ -1953,11 +1953,11 @@ def error_detection_aucs(stats):
     }
     if stats.get("gate") is not None:
         scores["gate"] = -stats["gate"].mean(dim=1)
-    primary = "gate" if scores.get("gate") is not None else "maxprob"
-    out["primary_metric"] = f"prauc_{primary}_to_error"
+    praucs = {}
     for name in ("maxprob", "entropy", "gate"):
         score = scores.get(name)
         if score is None or n_err == 0 or n_err == n:
+            praucs[name] = float("nan")
             out[f"rocauc_{name}_to_error"] = float("nan")
             out[f"prauc_{name}_to_error"] = float("nan")
             out[f"prauc_lift_{name}_to_error"] = float("nan")
@@ -1965,6 +1965,7 @@ def error_detection_aucs(stats):
             out[f"lift_at_10pct_{name}_to_error"] = float("nan")
             continue
         pa = pr_auc(score, err)
+        praucs[name] = pa
         out[f"rocauc_{name}_to_error"] = roc_auc(score, err)
         out[f"prauc_{name}_to_error"] = pa
         out[f"prauc_lift_{name}_to_error"] = (
@@ -1972,4 +1973,13 @@ def error_detection_aucs(stats):
         sel = selection_at_fraction(score, err, 0.1)
         out[f"recall_at_10pct_{name}_to_error"] = sel["recall"]
         out[f"lift_at_10pct_{name}_to_error"] = sel["lift"]
+    # The headline must name a readable ranking: keep the pre-registered
+    # preference order (gate > maxprob > entropy) but skip any score whose
+    # PR-AUC is non-finite on this stream, so ``primary_metric`` never
+    # points at NaN while a finite companion exists.
+    primary = next((name for name in ("gate", "maxprob", "entropy")
+                    if name in scores
+                    and math.isfinite(praucs[name])), None)
+    out["primary_metric"] = (f"prauc_{primary}_to_error" if primary
+                             else "none (no finite PR-AUC on this stream)")
     return out

@@ -249,21 +249,24 @@ HYPOTHESES = {
                       "1/(vocab-2) even after tuning.",
         "prediction": "the 95% bootstrap CI of (tuned probe accuracy - chance) "
                       "stays below +chance, i.e. the probe is confidently "
-                      "below 2x chance; the one-sided bootstrap p-value for "
-                      "H0: margin >= +chance certifies this at adequate "
-                      "power (the probe evaluation stream is sized so the "
-                      "binomial noise does not dominate the bound)",
+                      "below 2x chance; the CI resamples both seeds and the "
+                      "finite scoring stream (Binomial(n_per_seed) re-draws "
+                      "inside every replication), so the bound is certified "
+                      "against measurement noise, not just between-seed "
+                      "spread; the one-sided bootstrap p-value for H0: "
+                      "margin >= +chance certifies this at adequate power",
         "decision": "The quantitative near-chance test "
                     "(cage.baselines.probe_vs_chance_test) must be "
                     "*certified* (CI upper bound < +chance); a CI that "
                     "merely straddles the bound is 'inconclusive' - not "
                     "certified, possibly underpowered - and the reported "
-                    "seeds_for_certification says whether more seeds/the "
-                    "probe stream can settle it; only a CI entirely at or "
-                    "above +chance (state 'violated') is evidence that "
-                    "answer information leaks into the bag-of-tokens "
-                    "features (or a shortcut exists), which invalidates "
-                    "the simple-baseline comparison",
+                    "seeds_for_certification (planned on the total per-seed "
+                    "SD: seed spread + scoring noise) says whether more "
+                    "seeds/the probe stream can settle it; only a CI "
+                    "entirely at or above +chance (state 'violated') is "
+                    "evidence that answer information leaks into the "
+                    "bag-of-tokens features (or a shortcut exists), which "
+                    "invalidates the simple-baseline comparison",
     },
     "HB3": {
         "experiment": "baselines",
@@ -328,18 +331,28 @@ HYPOTHESES = {
                       "parameter-free rule ceiling.",
         "prediction": "the tuned 1-layer standard transformer is competent "
                       "(pooled Wilson 95% lower bound above chance) and its "
-                      "Wilson 95% upper bound on the test stream lies below "
-                      "the rule-ceiling point estimate",
+                      "pooled Wilson 95% *upper* bound on the test stream "
+                      "lies at least the pre-registered SESOI (0.01 "
+                      "accuracy) below the rule-ceiling point estimate - "
+                      "i.e. the plausible gap is practically meaningful, "
+                      "not merely statistically non-zero",
         "decision": "the baseline is a complexity control, not a pipeline "
-                    "validity gate: if the shallow upper bound reaches the "
-                    "ceiling, every depth-based motivation (E3) must be "
-                    "annotated that a 1-layer model suffices at this scale; "
-                    "if it stays below *while being competent* (above "
-                    "chance), depth is measurably required and E1's 8-layer "
-                    "gate contrasts are informative for it; a rung at "
-                    "chance (HB0 competence prerequisite failed) shows only "
-                    "that this step count did not solve the task - it is not "
-                    "evidence that depth is required",
+                    "validity gate.  The rung is read as *practically at the "
+                    "ceiling* when its pooled Wilson 95% *lower* bound lies "
+                    "within SESOI of the ceiling (one-sided equivalence: the "
+                    "whole interval sits inside the practically-saturated "
+                    "band), in which case every depth-based motivation (E3) "
+                    "must be annotated that a 1-layer model suffices at this "
+                    "scale.  By contrast, 'depth measurably required' needs "
+                    "the pooled Wilson 95% *upper* bound to stay at least "
+                    "SESOI below the ceiling: a statistically detectable but "
+                    "practically negligible gap does not earn the complexity. "
+                    "The bare 'CI includes the ceiling point estimate' "
+                    "criterion is absence of evidence, so it is recorded as a "
+                    "companion (hb6_supported_ci) and never decides.  A rung "
+                    "at chance (HB0 competence prerequisite failed) shows "
+                    "only that this step count did not solve the task - it is "
+                    "not evidence that depth is required",
         "sesoi": {"accuracy": 0.01},
     },
     "HB7": {
@@ -353,11 +366,16 @@ HYPOTHESES = {
                       "parameter-free ceiling, deeper grids (E1/E3 at 8 "
                       "layers) can only test what depth unlocks, not whether "
                       "depth is needed.",
-        "prediction": "the ladder's saturation depth d* - the smallest depth "
-                      "whose pooled Wilson 95% interval reaches the "
-                      "rule-ceiling point estimate - is reported (None when "
-                      "no ladder rung reaches it); adjacent-depth paired "
-                      "bootstrap CIs show where the gain stops; the depth "
+        "prediction": "the ladder's saturation depth d* - the smallest "
+                      "*competent* depth whose pooled Wilson 95% lower bound "
+                      "lies within the pre-registered SESOI (0.01 accuracy) "
+                      "of the rule-ceiling point estimate (one-sided "
+                      "equivalence: the whole interval is inside the "
+                      "practically-saturated band) - is reported (None when "
+                      "no ladder rung is equivalent-within-SESOI); adjacent-"
+                      "depth paired bootstrap CIs plus bootstrap-TOST "
+                      "equivalence checks against the same SESOI show where "
+                      "the gain stops being practically meaningful; the depth "
                       "demand is only readable when at least one rung is "
                       "competent (HB0: pooled Wilson 95% lower bound above "
                       "chance)",
@@ -371,7 +389,9 @@ HYPOTHESES = {
                     "chance the ladder did not solve the task at this "
                     "step count, so the depth demand is 'not determinable' "
                     "(never 'required') and E3's depth framing is "
-                    "unverified",
+                    "unverified.  Saturation is an equivalence claim with the "
+                    "registered SESOI bound, never the bare 'CI reaches the "
+                    "ceiling' (absence of evidence) reading",
         "sesoi": {"accuracy": 0.01},
     },
     "H1a": {
@@ -3282,7 +3302,19 @@ def tune_shared_recipe(settings: Settings):
         table.append({"lr": lr, "val_accuracy_mean": mean,
                       "val_accuracy_std": var ** 0.5, "n_seeds": len(accs),
                       "curve_verdicts": verdicts})
-    best = max(table, key=lambda row: row["val_accuracy_mean"])
+    # Same all-NaN guard as the depth ladder: ``max`` over an all-NaN key
+    # returns an arbitrary row, which would freeze an unmeasured recipe for
+    # every controlled contrast - refuse instead of fabricating a selection.
+    finite_rows = [row for row in table
+                   if _finite(row["val_accuracy_mean"])]
+    if not finite_rows:
+        raise RuntimeError(
+            f"shared recipe tuning produced no finite validation accuracy "
+            f"across lr grid {tuple(settings.lr_grid)}: every tuning run "
+            f"diverged or returned NaN, so no learning rate can be frozen "
+            f"for the controlled grids (inspect the run records; no "
+            f"downstream contrast from this run is interpretable)")
+    best = max(finite_rows, key=lambda row: row["val_accuracy_mean"])
     selection = _selection_reliability(table, grid=settings.lr_grid)
     return best["lr"], table, selection
 
@@ -3518,10 +3550,16 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
       step count did not learn the task", and with no competent rung the depth
       demand is reported as *not determinable* instead of "required";
     * the saturation depth ``d*`` (smallest competent rung whose pooled
-      Wilson 95% interval reaches the ceiling estimate) is the reference
-      the deep grids must justify themselves against (HB7): a gain a
-      2-layer standard transformer already matches is not evidence about
-      depth;
+      Wilson 95% *lower* bound lies within the pre-registered SESOI of the
+      ceiling estimate, i.e. a one-sided equivalence statement) is the
+      reference the deep grids must justify themselves against (HB7): a
+      gain a 2-layer standard transformer already matches is not evidence
+      about depth.  The bare "the CI touches the ceiling" criterion is an
+      *absence-of-evidence* reading and is kept only as the companion
+      ``reaches_ceiling_ci``; the same SESOI is the minimum plausible gap
+      for "depth measurably required" (``ceiling - pooled_hi >= SESOI``),
+      so a statistically detectable but practically negligible gap cannot
+      earn the complexity;
     * a complex model is only credited for what it does beyond the tuned
       shallow baseline.
 
@@ -3547,6 +3585,16 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     ceiling_acc = float(ceiling["accuracy"]) if ceiling else float("nan")
     ceiling_known = math.isfinite(ceiling_acc)
     chance = 1.0 / (settings.vocab - 2)
+    # Pre-registered practical-significance bound for the depth readouts:
+    # HB6/HB7 both register ``sesoi: {accuracy: 0.01}``, so the same bound
+    # decides "saturated" (one-sided equivalence within the band) and
+    # "depth measurably required" (plausible gap at least the band).
+    sesoi = float((HYPOTHESES["HB6"].get("sesoi") or {}).get("accuracy", 0.01))
+    if float((HYPOTHESES["HB7"].get("sesoi") or {}).get("accuracy", sesoi)) \
+            != sesoi:
+        raise ValueError(
+            "HB6/HB7 must share one registered accuracy SESOI for the "
+            "depth ladder's saturation rule")
     depths: dict[int, dict] = {}
     tuning_tables: dict[int, list] = {}
     for depth in ladder:
@@ -3565,8 +3613,41 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             table.append({"lr": lr, "val_accuracy_mean": mean,
                           "val_accuracy_std": std, "n_seeds": len(accs),
                           "curve_verdicts": verdicts})
-        best = max(table, key=lambda row: row["val_accuracy_mean"])
+        # An all-non-finite tuning table (every run diverged / produced no
+        # finite validation accuracy) must not be silently read as an argmax:
+        # NaN comparisons make ``max`` return an arbitrary row, which would
+        # freeze an unmeasured learning rate and manufacture a rung.
+        finite_rows = [row for row in table
+                       if _finite(row["val_accuracy_mean"])]
         selection = _selection_reliability(table, grid=settings.lr_grid)
+        if not finite_rows:
+            print(f"[baselines] WARNING: depth={depth} tuning table has no "
+                  f"finite validation accuracy (all {len(table)} lr "
+                  f"candidates non-finite); the rung is recorded as "
+                  f"unmeasured and cannot support HB6/HB7 or the saturation "
+                  f"depth")
+            depths[depth] = {
+                "name": f"shallow_none_d{depth}", "n_layers": depth,
+                "val_seed": VAL_SEED, "test_seed": TEST_SEED,
+                "chosen_lr": None, "tuning_table": table,
+                "selection": selection,
+                "accuracy_mean": float("nan"),
+                "accuracy_std": float("nan"), "accuracy_by_seed": {},
+                "pooled_wilson": {"p": float("nan"), "lo": float("nan"),
+                                  "hi": float("nan"), "n": 0},
+                "ceiling": ceiling_acc, "chance": chance,
+                "sesoi_accuracy": sesoi,
+                "above_chance": False, "ceiling_gap": float("nan"),
+                "ceiling_gap_lower": float("nan"),
+                "reaches_ceiling": False, "reaches_ceiling_ci": False,
+                "hb6_supported": False, "hb6_supported_ci": False,
+                "unmeasured": True, "runs": [],
+            }
+            tuning_tables[depth] = table
+            _write_json(out_dir / f"baselines_depth{depth}.json",
+                        depths[depth])
+            continue
+        best = max(finite_rows, key=lambda row: row["val_accuracy_mean"])
         warn = _selection_warn(f"depth={depth} lr selection", selection)
         if warn:
             print(f"[baselines] {warn}: this rung's tuned accuracy may "
@@ -3607,12 +3688,33 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         # ("depth measurably required") nor feed the saturation depth.
         above_chance = bool(math.isfinite(pooled["lo"])
                             and pooled["lo"] > chance)
-        reaches_ceiling = bool(
+        # The registered SESOI turns both depth readouts from
+        # absence-of-evidence into practical claims:
+        #   * reaches_ceiling (saturation): one-sided equivalence - even the
+        #     pool's *lower* bound lies within SESOI of the ceiling, so the
+        #     rung is practically at the ceiling;
+        #   * hb6_supported ("depth measurably required"): the pool's
+        #     *upper* bound still sits at least SESOI below the ceiling, so
+        #     the gap is practically meaningful at the optimistic end, not
+        #     merely a statistically detectable sliver.
+        # The historical bare-CI readings are kept as companions only.
+        within_sesoi = bool(
+            ceiling_known and above_chance and math.isfinite(pooled["lo"])
+            and ceiling_acc - pooled["lo"] <= sesoi)
+        reaches_ceiling_ci = bool(
             ceiling_known and above_chance and math.isfinite(pooled["hi"])
             and pooled["hi"] >= ceiling_acc)
         hb6_supported = bool(
             ceiling_known and above_chance and math.isfinite(pooled["hi"])
+            and ceiling_acc - pooled["hi"] >= sesoi)
+        hb6_supported_ci = bool(
+            ceiling_known and above_chance and math.isfinite(pooled["hi"])
             and pooled["hi"] < ceiling_acc)
+        ceiling_gap = (ceiling_acc - summary["mean"]
+                       if ceiling_known else float("nan"))
+        ceiling_gap_lower = (ceiling_acc - pooled["hi"]
+                             if math.isfinite(pooled["hi"])
+                             and ceiling_known else float("nan"))
         payload = {
             "name": f"shallow_none_d{depth}", "n_layers": depth,
             "val_seed": VAL_SEED, "test_seed": TEST_SEED,
@@ -3623,21 +3725,34 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                                  for r in runs},
             "pooled_wilson": pooled, "ceiling": ceiling_acc,
             "chance": chance, "above_chance": above_chance,
-            "ceiling_gap": (ceiling_acc - summary["mean"]
-                            if ceiling_known else float("nan")),
-            "reaches_ceiling": reaches_ceiling,
+            "sesoi_accuracy": sesoi,
+            "ceiling_gap": ceiling_gap,
+            # Smallest plausible gap to the ceiling (upper-bound side): the
+            # SESOI gate for "depth measurably required" reads this.
+            "ceiling_gap_lower": ceiling_gap_lower,
+            "reaches_ceiling": within_sesoi,
+            "reaches_ceiling_ci": reaches_ceiling_ci,
             "hb6_supported": hb6_supported,
+            "hb6_supported_ci": hb6_supported_ci,
+            "unmeasured": False,
             "runs": runs,
         }
         depths[depth] = payload
         tuning_tables[depth] = table
-        if reaches_ceiling:
-            status = "reaches the ceiling (saturated here)"
+        if within_sesoi:
+            status = (f"within SESOI {sesoi:g} of the ceiling (saturated: "
+                      f"even the pooled lower bound is inside the "
+                      f"practical band, reach={ceiling_gap:+.4f})")
         elif not above_chance:
             status = (f"at chance (pooled Wilson lower bound "
                       f"{pooled['lo']:.4f} <= chance {chance:.4f}): this "
                       f"rung did not learn the task at this step count, so it "
                       f"is not depth evidence")
+        elif reaches_ceiling_ci:
+            status = (f"CI touches the ceiling but the pooled lower bound is "
+                      f"more than SESOI={sesoi:g} below it "
+                      f"(reach={ceiling_gap:+.4f}): saturation not "
+                      f"established")
         else:
             status = "below the ceiling"
         print(f"[baselines] HB6/HB7 depth={depth} tuned standard "
@@ -3646,13 +3761,16 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
               f"{summary['std']:.4f} (pooled Wilson "
               f"[{pooled['lo']:.4f}, {pooled['hi']:.4f}], n={pooled['n']}); "
               f"chance={chance:.4f}; rule ceiling={ceiling_acc:.4f}, gap="
-              f"{payload['ceiling_gap']:.4f}; params={int(runs[0]['params'])}; "
+              f"{ceiling_gap:.4f} (lower-bound gap="
+              f"{ceiling_gap_lower:.4f}); params={int(runs[0]['params'])}; "
               f"{status}")
         _write_json(out_dir / f"baselines_depth{depth}.json", payload)
 
     ladder_competent = any(depths[d]["above_chance"] for d in ladder)
     saturation_depth = next((d for d in ladder if depths[d]["reaches_ceiling"]),
                             None)
+    saturation_depth_ci = next(
+        (d for d in ladder if depths[d]["reaches_ceiling_ci"]), None)
     # HB7's competence premise: when no rung clears chance the ladder did
     # not solve the task at this step count, so the depth demand is "not
     # determinable" - never "required" (a None saturation depth alone must
@@ -3667,19 +3785,49 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         by_seed_b = {r["seed"]: r for r in depths[b]["runs"]}
         diffs = [r["accuracy"] - by_seed_b[r["seed"]]["accuracy"]
                  for r in depths[a]["runs"] if r["seed"] in by_seed_b]
+        if not diffs:
+            adjacent[f"{a}->{b}"] = {
+                "n": 0, "sesoi_accuracy": sesoi,
+                "equivalent": False, "unmeasured": True,
+            }
+            print(f"[baselines] HB7 adjacent-depth contrast {a}->{b} layers: "
+                  f"no paired runs (unmeasured rung); skipped")
+            continue
         ci = paired_bootstrap_ci(diffs)
-        adjacent[f"{a}->{b}"] = ci
+        # The paired gain gets the same practical-significance reading as
+        # the point rungs: a gain whose paired interval sits entirely
+        # within +-SESOI is no longer *practically* meaningful even if its
+        # point estimate is positive, matching the saturation rule.
+        eq = equivalence_test(diffs, sesoi)
+        adjacent[f"{a}->{b}"] = {
+            **ci,
+            "sesoi_accuracy": sesoi,
+            "within_sesoi": bool(eq["equivalent"]),
+            "tost_p_value": eq["p_value"],
+            "tost_n": eq["n"],
+        }
         print(f"[baselines] HB7 adjacent-depth contrast {a}->{b} layers "
-              f"(paired over seeds, each rung val-tuned): {_fmt_ci(ci)}")
+              f"(paired over seeds, each rung val-tuned): {_fmt_ci(ci)}; "
+              f"companion TOST vs SESOI={sesoi:g}: "
+              f"{eq['mean']:+.4f} [{eq['lo']:+.4f}, {eq['hi']:+.4f}] "
+              f"n={eq['n']} p={eq['p_value']:.3f} "
+              f"({'within SESOI' if eq['equivalent'] else 'beyond SESOI'})")
     shallowest = ladder[0]
     ladder_payload = {
         "name": "depth_ladder_none",
         "val_seed": VAL_SEED, "test_seed": TEST_SEED,
         "ladder": list(ladder), "ceiling": ceiling_acc,
+        "sesoi_accuracy": sesoi,
+        "saturation_rule": ("smallest competent rung whose pooled Wilson 95% "
+                            "lower bound lies within SESOI of the rule "
+                            "ceiling (one-sided equivalence); the bare "
+                            "'interval reaches the ceiling' companion is "
+                            "reaches_ceiling_ci only"),
         "depths": {str(d): depths[d] for d in ladder},
         "tuning_tables": {str(d): tuning_tables[d] for d in ladder},
         "adjacent_contrasts": adjacent,
         "saturation_depth": saturation_depth,
+        "saturation_depth_ci": saturation_depth_ci,
         "hb7_depth_required": hb7_depth_required,
         "chance": chance,
         "competence": {
@@ -3693,6 +3841,10 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     }
     sat_txt = (saturation_depth if saturation_depth is not None
                else "none (no rung reaches the ceiling)")
+    if saturation_depth is None and saturation_depth_ci is not None:
+        sat_txt = (f"none within SESOI {sesoi:g} (depth "
+                   f"{saturation_depth_ci} only touches the ceiling - "
+                   f"absence of evidence, not saturation)")
     if hb7_depth_required is None:
         depth_txt = ("not determinable - no rung is above chance, so the "
                      "ladder did not solve the task at this step count "
@@ -3981,8 +4133,11 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                             * settings.probe_eval_batches})
     summary = _mean_std(probe_accs)
     chance = 1.0 / (settings.vocab - 2)
-    hb2 = probe_vs_chance_test(probe_accs, chance,
-                               seed=settings.seeds[0] if settings.seeds else 0)
+    probe_n_per_seed = settings.probe_eval_batch * settings.probe_eval_batches
+    hb2 = probe_vs_chance_test(
+        probe_accs, chance,
+        seed=settings.seeds[0] if settings.seeds else 0,
+        n_per_seed=probe_n_per_seed)
     n_seeds = len(settings.seeds)
     floor = int(settings.min_seeds_for_claim)
     print(f"[baselines] tuned linear probe (test seed {TEST_SEED}): "
@@ -3992,8 +4147,12 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
           f"seed)")
     print(f"[baselines] HB2 near-chance test: accuracy - chance = "
           f"{hb2['mean']:+.4f} [{hb2['lo']:+.4f}, {hb2['hi']:+.4f}] "
-          f"(one-sided p(H0: margin >= +chance)="
-          f"{hb2['p_above_chance']:.3f}, MDE80={hb2['mde80']:.4f})")
+          f"(seed-level [{hb2['lo_seed']:+.4f}, {hb2['hi_seed']:+.4f}]; "
+          f"two-level bootstrap: seeds x Binomial scoring noise with "
+          f"n_per_seed={hb2['n_per_seed']}; one-sided p(H0: margin >= "
+          f"+chance)={hb2['p_above_chance']:.3f}, MDE80={hb2['mde80']:.4f}, "
+          f"sd_seed={hb2['sd_seed']:.4f}, sd_scoring="
+          f"{hb2['sd_binomial']:.4f}, sd_total={hb2['sd_effective']:.4f})")
     if hb2["hb2_state"] == "certified":
         print("  state: CERTIFIED - the tuned probe stays confidently below "
               "the 2x-chance bound")
@@ -4128,10 +4287,12 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "hb4_supported": hb4_supported,
         "hb5_supported": bool(hb5_supported),
         "hb6_supported": bool(shallow["hb6_supported"]),
+        "hb6_supported_ci": bool(shallow["hb6_supported_ci"]),
         "hb6_competent": bool(shallow["above_chance"]),
         "hb7_depth_required": ladder["hb7_depth_required"],
         "ladder_competent": bool(ladder["competence"]["ladder_competent"]),
         "saturation_depth": ladder["saturation_depth"],
+        "saturation_depth_ci": ladder["saturation_depth_ci"],
         # Pre-registered seed floor (Settings.min_seeds_for_claim) applied
         # to the seed-level marks: a supported HB2/HB4/HB6/HB7 resting on
         # fewer seeds is provisional and must be displayed/stamped as such.
@@ -4153,6 +4314,9 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "val_seed": VAL_SEED,
             "test_seed": TEST_SEED,
             "chance": chance,
+            "sesoi_accuracy": ladder["sesoi_accuracy"],
+            "saturation_rule": ladder["saturation_rule"],
+            "saturation_depth_ci": ladder["saturation_depth_ci"],
             "competence": ladder["competence"],
             "by_depth": {
                 str(d): {
@@ -4164,8 +4328,14 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                     "accuracy_by_seed": payload["accuracy_by_seed"],
                     "pooled_wilson": payload["pooled_wilson"],
                     "above_chance": payload["above_chance"],
+                    "unmeasured": payload["unmeasured"],
+                    "sesoi_accuracy": payload["sesoi_accuracy"],
                     "ceiling_gap": payload["ceiling_gap"],
+                    "ceiling_gap_lower": payload["ceiling_gap_lower"],
                     "reaches_ceiling": payload["reaches_ceiling"],
+                    "reaches_ceiling_ci": payload["reaches_ceiling_ci"],
+                    "hb6_supported": payload["hb6_supported"],
+                    "hb6_supported_ci": payload["hb6_supported_ci"],
                 }
                 for d, payload in ladder["depths"].items()
             },
@@ -4189,9 +4359,15 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "pooled_wilson": shallow["pooled_wilson"],
             "chance": chance,
             "above_chance": shallow["above_chance"],
+            "unmeasured": shallow["unmeasured"],
             "ceiling": shallow["ceiling"],
+            "sesoi_accuracy": shallow["sesoi_accuracy"],
             "ceiling_gap": shallow["ceiling_gap"],
+            "ceiling_gap_lower": shallow["ceiling_gap_lower"],
             "reaches_ceiling": shallow["reaches_ceiling"],
+            "reaches_ceiling_ci": shallow["reaches_ceiling_ci"],
+            "hb6_supported": shallow["hb6_supported"],
+            "hb6_supported_ci": shallow["hb6_supported_ci"],
         },
         "hb2_accuracy_minus_chance": {
             "mean": hb2["mean"], "lo": hb2["lo"], "hi": hb2["hi"],
@@ -4201,6 +4377,12 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "n": hb2["n"],
             "state": hb2["hb2_state"],
             "seeds_for_certification": hb2["seeds_for_certification"],
+            "seed_level": hb2["seed_level"],
+            "sd_seed": hb2["sd_seed"],
+            "sd_binomial": hb2["sd_binomial"],
+            "sd_effective": hb2["sd_effective"],
+            "n_per_seed": hb2["n_per_seed"],
+            "measurement_noise_accounted": hb2["measurement_noise_accounted"],
         },
         "hb4_negative_control": {
             "lr": lr_shared, "tolerance": settings.negative_control_tol,
@@ -4244,7 +4426,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     elif verdict["hb7_depth_required"]:
         hb7_txt = "required"
     else:
-        hb7_txt = (f"NOT required (saturated at depth "
+        hb7_txt = (f"NOT required (saturated within SESOI "
+                   f"{ladder['sesoi_accuracy']:g} at depth "
                    f"{verdict['saturation_depth']})")
     provisional = [k for k in ("hb2", "hb4", "hb6")
                    if verdict[f"{k}_supported"] is True
@@ -4447,10 +4630,12 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         primary = str(by_gate[gate][0].get("primary_metric", ""))
         if primary.startswith("prauc_"):
             score = primary.split("_")[1]
-        elif _finite(by_gate[gate][0].get("prauc_gate_to_error")):
-            score = "gate"
         else:
-            score = "maxprob"
+            def _finite_prauc(name):
+                m = t.get(f"prauc_{name}_to_error")
+                return bool(m and math.isfinite(m["mean"]))
+            score = next((name for name in ("gate", "maxprob", "entropy")
+                          if _finite_prauc(name)), "maxprob")
 
         def ecell(key):
             m = t.get(key)
@@ -4608,12 +4793,20 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             hb6_prov += (" [HB6 not read as depth evidence: the rung is not "
                          "above chance, so this step count did not learn the "
                          "task]")
+        if (shallow.get("reaches_ceiling_ci")
+                and not shallow.get("reaches_ceiling")):
+            hb6_prov += (" [companion: the 95% CI touches the ceiling "
+                         "(absence of evidence); saturation requires the "
+                         "pooled lower bound within SESOI]")
         print(f"[e1] complexity control (HB6): tuned {shallow_depth}-layer "
               f"standard transformer "
               f"(lr={shallow.get('lr', float('nan')):g}) test "
               f"accuracy={shallow.get('accuracy_mean', float('nan')):.4f}, "
               f"rule ceiling={shallow.get('ceiling', float('nan')):.4f}, "
-              f"gap={shallow.get('ceiling_gap', float('nan')):.4f}"
+              f"gap={shallow.get('ceiling_gap', float('nan')):.4f} "
+              f"(lower-bound gap="
+              f"{shallow.get('ceiling_gap_lower', float('nan')):.4f}, "
+              f"SESOI={shallow.get('sesoi_accuracy', float('nan')):g})"
               f"{hb6_prov}")
         # Paired complexity reference: same seeds, same test stream,
         # each side optimised with its own val-tuned learning rate
@@ -4652,11 +4845,20 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 sat_txt = "unavailable (rule ceiling unknown)"
         elif req:
             sat_txt = ("no rung up to "
-                       f"{max(int(d) for d in by_depth)} layers reaches "
-                       "the ceiling: depth is measurably required")
+                       f"{max(int(d) for d in by_depth)} layers is within "
+                       f"SESOI={ladder.get('sesoi_accuracy', float('nan')):g} "
+                       "of the ceiling: depth is measurably required")
+            if (sat is None
+                    and verdict.get("saturation_depth_ci") is not None):
+                sat_txt += (" (companion: depth "
+                            f"{verdict['saturation_depth_ci']} only touches "
+                            f"the ceiling by CI - absence of evidence, not "
+                            f"saturation)")
         else:
-            sat_txt = (f"saturated at {sat} layers: depth beyond that is "
-                       f"not measurably required here")
+            sat_txt = (f"saturated within SESOI="
+                       f"{ladder.get('sesoi_accuracy', float('nan')):g} at "
+                       f"{sat} layers: depth beyond that is not measurably "
+                       f"required here")
         if req is True and not floor.get("hb7_claim_eligible", True):
             sat_txt += " [provisional: below the pre-registered seed floor]"
         print(f"[e1] complexity ladder (HB7, each rung val-tuned, "
@@ -5352,8 +5554,11 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
             print("[e3] HB7 depth context unavailable (rule ceiling unknown): "
                   "the depth-based framing of H3a/H3b is unverified")
     elif not required:
-        print(f"[e3] HB7 FLAG: a tuned standard transformer already "
-              f"saturates at depth {saturation}, so the deep-write "
+        sat_sesoi = (verdict.get("depth_ladder") or {}).get(
+            "sesoi_accuracy", float("nan"))
+        print(f"[e3] HB7 FLAG: a tuned standard transformer is practically "
+              f"at the rule ceiling (saturated within SESOI={sat_sesoi:g}) "
+              f"at depth {saturation}, so the deep-write "
               f"readouts (H3a/H3b) must not be presented as evidence "
               f"that depth is needed at this scale")
     else:

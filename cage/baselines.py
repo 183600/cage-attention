@@ -316,7 +316,7 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
 
 
 def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
-                         seed: int = 0) -> dict:
+                         seed: int = 0, n_per_seed: int | None = None) -> dict:
     """Quantitative HB2 test: does the tuned probe stay near chance?
 
     ``accuracies`` holds the test-seed accuracy of the tuned probe for each
@@ -330,6 +330,27 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     probe below the 2x-chance bound while ``p >= 0.5`` says the point
     estimate does not even fall below it.
 
+    ``n_per_seed`` is the number of evaluation examples behind *each*
+    seed's accuracy.  When given (the production call always gives it),
+    the interval is widened to account for a second uncertainty source
+    that the plain seed bootstrap treats as absent: each recorded accuracy
+    is itself a finite-sample measurement, so it is re-drawn as
+    ``Binomial(n_per_seed, accuracy) / n_per_seed`` inside every bootstrap
+    replication (measurement error, not a claim that the probe is
+    stochastic).  The primary ``lo``/``hi``/``p_value``/``p_above_chance``
+    then carry both seed noise and scoring noise, and
+    ``seeds_for_certification`` is planned on the total per-seed SD
+    ``sd_effective = sqrt(sd_seed^2 + mean(p(1-p))/n_per_seed)`` instead of
+    the seed-only ``sd``.  Without this correction a near-bound run can
+    look certifiable purely because a small evaluation stream was scored;
+    with it, "certified" means the same thing at every stream size (still
+    note that n_per_seed only enters as sqrt: the design lever for HB2 is
+    independent seeds).  The seed-level readouts remain available as
+    ``*_seed`` companions, and ``measurement_noise_accounted`` records
+    whether the widening was applied.  When ``n_per_seed`` is ``None``
+    (legacy/smoke callers) the behaviour is the historical one-level
+    bootstrap.
+
     The three states are explicit, because "not certified" is *not* the
     same as "leakage shown":
 
@@ -341,18 +362,98 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     * ``inconclusive`` - the CI straddles the bound.  This is the state a
       low-power run lands in (few seeds, small probe evaluation stream),
       so the result also carries ``seeds_for_certification``: how many
-      independent seeds the observed paired SD would need at 80% power to
-      certify the bound (``inf`` when the observed mean is not below the
-      bound, since more seeds alone cannot rescue such a point estimate).
+      independent seeds the observed total per-seed SD would need at 80%
+      power to certify the bound (``inf`` when the observed mean is not
+      below the bound, since more seeds alone cannot rescue such a point
+      estimate).
 
     Returns the bootstrap CI dict for ``accuracy - chance`` plus the
     ``chance`` level, ``hb2_supported`` (certified), ``hb2_violated``,
     ``hb2_state``, ``p_above_chance`` and ``seeds_for_certification``.
     """
-    margins = [float(a) - float(chance) for a in accuracies]
-    ci = paired_bootstrap_ci(margins, n_boot=n_boot, seed=seed)
     chance = float(chance)
+    accs = [float(a) for a in accuracies if math.isfinite(float(a))]
+    margins = [a - chance for a in accs]
+    ci = paired_bootstrap_ci(margins, n_boot=n_boot, seed=seed)
     ci["chance"] = chance
+    if n_per_seed is not None:
+        n_per_seed = int(n_per_seed)
+        if n_per_seed < 1:
+            raise ValueError(
+                f"n_per_seed must be a positive example count, "
+                f"got {n_per_seed!r}")
+    n = len(accs)
+    sd_seed = float(ci.get("sd", float("nan")))
+    if n_per_seed is not None and n > 0:
+        a = torch.tensor(accs, dtype=torch.float64)
+        gen = torch.Generator(device=a.device).manual_seed(seed)
+        idx = torch.randint(0, n, (n_boot, n), generator=gen, device=a.device)
+        draws = a[idx]
+        probs = draws.clamp(0.0, 1.0)
+        counts = torch.binomial(
+            torch.full_like(probs, float(n_per_seed)), probs, generator=gen)
+        samples = (counts / float(n_per_seed) - chance).mean(dim=1)
+        mean = float(samples.mean())
+        lo = float(torch.quantile(samples, 0.025))
+        hi = float(torch.quantile(samples, 0.975))
+        p_lo = float((samples <= 0.0).to(torch.float64).mean())
+        p_hi = float((samples >= 0.0).to(torch.float64).mean())
+        p_two = min(1.0, 2.0 * (min(p_lo, p_hi) * n_boot + 1.0)
+                    / (n_boot + 1.0))
+        p_above = float((samples >= chance).to(torch.float64).mean())
+        p_above = min(1.0, (p_above * n_boot + 1.0) / (n_boot + 1.0))
+        # Total per-seed SD = between-seed spread + within-seed scoring
+        # noise.  The scoring noise enters the *planning* quantities (MDE80,
+        # seeds_for_certification); the CI above already carries it through
+        # the two-level resampling.
+        var_binom = (float((probs * (1.0 - probs)).mean()) / n_per_seed
+                     if n_per_seed > 0 else float("nan"))
+        sd_binomial = math.sqrt(max(var_binom, 0.0))
+        sd_effective = math.sqrt(max(sd_seed, 0.0) ** 2 + max(var_binom, 0.0))
+        ci.update({
+            "mean": mean, "lo": lo, "hi": hi,
+            "sd": sd_effective,
+            "half_width": (hi - lo) / 2.0,
+            "mde80": (2.8015852 * sd_effective / math.sqrt(n)
+                      if n else float("nan")),
+            "p_value": p_two,
+            "p_above_chance": p_above,
+            "seed_level": {
+                "mean": float(ci.get("mean", float("nan"))),
+                "lo": float(ci.get("lo", float("nan"))),
+                "hi": float(ci.get("hi", float("nan"))),
+                "p_value": float(ci.get("p_value", float("nan"))),
+                "p_above_chance": float(ci.get("p_above_chance",
+                                               float("nan"))),
+                "sd": sd_seed,
+                "mde80": float(ci.get("mde80", float("nan"))),
+            },
+            "mean_seed": float(ci.get("mean", float("nan"))),
+            "lo_seed": float(ci.get("lo", float("nan"))),
+            "hi_seed": float(ci.get("hi", float("nan"))),
+            "p_value_seed": float(ci.get("p_value", float("nan"))),
+            "p_above_chance_seed": float(ci.get("p_above_chance",
+                                                float("nan"))),
+            "sd_seed": sd_seed,
+            "sd_binomial": sd_binomial,
+            "sd_effective": sd_effective,
+            "n_per_seed": n_per_seed,
+            "measurement_noise_accounted": True,
+        })
+    else:
+        ci.update({
+            "mean_seed": float(ci.get("mean", float("nan"))),
+            "lo_seed": float(ci.get("lo", float("nan"))),
+            "hi_seed": float(ci.get("hi", float("nan"))),
+            "p_value_seed": float(ci.get("p_value", float("nan"))),
+            "p_above_chance_seed": float(ci.get("p_above_chance",
+                                                float("nan"))),
+            "sd_seed": sd_seed,
+            "sd_binomial": float("nan"),
+            "sd_effective": sd_seed,
+            "n_per_seed": n_per_seed,
+            "measurement_noise_accounted": False,
+        })
     certified = bool(ci["n"] > 0 and ci["hi"] < chance)
     violated = bool(ci["n"] > 0 and ci["lo"] >= chance)
     ci["hb2_supported"] = certified
@@ -366,8 +467,9 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     else:
         state = "inconclusive"
     ci["hb2_state"] = state
-    ci["p_above_chance"] = bootstrap_upper_p(
-        margins, chance, n_boot=n_boot, seed=seed)
+    if not ci["measurement_noise_accounted"]:
+        ci["p_above_chance"] = bootstrap_upper_p(
+            margins, chance, n_boot=n_boot, seed=seed)
     margin = chance - float(ci["mean"])
     ci["seeds_for_certification"] = (
         float(seeds_for_power(ci.get("sd"), margin))
