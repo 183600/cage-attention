@@ -1842,6 +1842,16 @@ class ContrastLog:
         equiv = ci.get("test") == "equivalence"
         audit = ci.get("controlled")
         sesoi = (HYPOTHESES.get(hyp, {}).get("sesoi") or {}).get(metric)
+        if equiv:
+            # An equivalence row's decision bound is the CI's registered
+            # bound, which can live under a separate registry key when the
+            # displayed metric is shared with directional rows (H2c's
+            # reverse check).  ``sesoi`` above is keyed by the display
+            # metric, so using it here would print and apply the
+            # directional SESOI as if it were the bound.
+            bound = ci.get("bound")
+            if bound is not None:
+                sesoi = bound
         # Pre-registered sign of the predicted effect for this metric
         # ("+" / "-", looked up in HYPOTHESES so it is part of the hashed
         # pre-registration).  ``None`` means the prediction is not

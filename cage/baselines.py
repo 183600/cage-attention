@@ -257,10 +257,12 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
     ``train_linear_probe``) is counted in ``diverged_runs`` and its
     accuracy treated as ``-inf`` for selection - its validation number
     measures an exploded model, not the probe's representational ceiling.
-    Non-finite training losses are excluded from ``train_loss_mean``.  This
-    matters because the grid intentionally reaches high learning rates so
-    that "the tuned probe stays near chance" cannot be attributed to an
-    under-tuned strawman.
+    Non-finite training losses are excluded from ``train_loss_mean``.  An
+    all-diverged grid is refused with ``RuntimeError`` (mirroring
+    ``tune_shared_recipe``) rather than letting ``max`` pick an arbitrary
+    unmeasured row.  This matters because the grid intentionally reaches
+    high learning rates so that "the tuned probe stays near chance" cannot
+    be attributed to an under-tuned strawman.
     """
     check_eval_seed(val_seed, selection=True)
     if val_seed in tuple(seeds):
@@ -310,8 +312,20 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
         if loss_means:
             row["train_loss_mean"] = sum(loss_means) / len(loss_means)
         table.append(row)
-    best = max(table, key=lambda row: row["val_accuracy_mean"]
-               if math.isfinite(row["val_accuracy_mean"]) else float("-inf"))
+    # Same all-NaN guard as ``tune_shared_recipe`` / the depth ladder:
+    # ``max`` over an all-non-finite key returns an arbitrary row, which
+    # would hand the caller an unmeasured rate that is then re-trained and
+    # certified against by HB2 - refuse instead of fabricating a selection.
+    finite_rows = [row for row in table
+                   if math.isfinite(row["val_accuracy_mean"])]
+    if not finite_rows:
+        raise RuntimeError(
+            f"linear probe tuning produced no finite validation accuracy "
+            f"across lr grid {tuple(lr_grid)}: every probe run diverged or "
+            f"returned NaN, so no learning rate can be selected (inspect "
+            f"the training histories; no HB2 near-chance read from this run "
+            f"is interpretable)")
+    best = max(finite_rows, key=lambda row: row["val_accuracy_mean"])
     return best["lr"], table
 
 
