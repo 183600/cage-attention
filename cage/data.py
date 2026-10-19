@@ -185,7 +185,7 @@ def _count_duplicate_rows(idx) -> int:
     """
     if idx.numel() == 0:
         return 0
-    unique_rows = torch.unique(idx.detach(), dim=0).size(0)
+    unique_rows = torch.unique(idx.detach(), dim=0, sorted=False).size(0)
     return int(idx.size(0)) - int(unique_rows)
 
 
@@ -233,14 +233,13 @@ def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
         if not torch.is_tensor(idx) or idx.dim() != 2:
             return False
         batch_size, width = idx.shape
-        checks = [(idx >= 0).all(), (idx < vocab).all()]
+        checks = [((idx >= 0) & (idx < vocab)).all()]
         if idx.is_floating_point():
             checks.append(torch.isfinite(idx).all())
         qp = meta["query_pos"].to(device=idx.device, dtype=torch.long)
         if qp.shape != (batch_size,):
             return False
-        checks.append((qp >= 0).all())
-        checks.append((qp < width).all())
+        checks.append(((qp >= 0) & (qp < width)).all())
         # Clamped only to keep the gathers below in range: the clamped
         # positions are simultaneously rejected by the range checks above,
         # so an invalid batch can never slip through on the clamped index.
@@ -248,8 +247,7 @@ def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
         query = idx.gather(1, safe_qp).squeeze(1)
         answer = meta["answer"].to(device=idx.device, dtype=torch.long)
         answer_ok = answer.shape == (batch_size,)
-        checks.append((answer >= 2).all())
-        checks.append((answer < vocab).all())
+        checks.append(((answer >= 2) & (answer < vocab)).all())
         # Key columns only: ``idx`` is ``[k1 v1 ... kn vn SEP query]``, so
         # the last two columns (SEP at 2n, query at 2n+1) must be excluded.
         keys = idx[:, :-2:2]

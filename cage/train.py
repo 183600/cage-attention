@@ -26,6 +26,7 @@ from .metrics import (
     selection_at_fraction,
     wilson_ci,
 )
+from .model import release_eval_scratch
 from .repro import seed_everything, stream_generator
 
 
@@ -457,6 +458,9 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     finally:
         for hd in handles:
             hd.remove()
+        for blk in model.blocks:
+            blk.attn._capture_qk = False
+            blk.attn._qk_capture = None
         model.train(was_training)
     if bad_layers:
         mark("activations",
@@ -1228,16 +1232,24 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     handles = []
 
     def _make_hook(layer_idx, null_k):
-        def _hook(module, inputs):
+        def _hook(module, inputs, output):
             meta = state["meta"]
             if meta is not None:
-                per_layer_mass[layer_idx] = _attention_mass_on_key(
-                    inputs[0], module.qkv.weight, meta, H, inv_scale, null_k)
+                qk = getattr(module, "_qk_capture", None)
+                if qk is not None:
+                    per_layer_mass[layer_idx] = _attention_mass_from_qk(
+                        qk[0], qk[1], meta, H, inv_scale, null_k)
+                else:
+                    per_layer_mass[layer_idx] = _attention_mass_on_key(
+                        inputs[0], module.qkv.weight, meta, H, inv_scale,
+                        null_k)
+            module._qk_capture = None
         return _hook
 
     if with_errors:
         for i, blk in enumerate(model.blocks):
-            handles.append(blk.attn.register_forward_pre_hook(
+            blk.attn._capture_qk = True
+            handles.append(blk.attn.register_forward_hook(
                 _make_hook(i, getattr(blk.attn, "null_k", None))))
 
     # Device-side accumulators for the per-batch reductions.
@@ -1433,6 +1445,7 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
         model.train(was_training)
 
     stats = {k: torch.cat(v).cpu() for k, v in stats_out.items() if v}
+    release_eval_scratch()
     if not with_errors:
         return stats, None
 
@@ -1566,6 +1579,41 @@ def _attention_mass_on_key(x, weight, meta, n_heads, inv_scale, null_k):
     return tapped.squeeze(1).mean(-1)
 
 
+def _attention_mass_from_qk(q, k, meta, n_heads, inv_scale, null_k):
+    """Attention mass on the correct key from already-projected ``q`` / ``k``.
+
+    ``q`` / ``k`` are the ``(B*h, T, dk)`` tensors the fixed kernel just used
+    (``Attention._qk_capture``).  Reusing them removes the duplicate key
+    projection the error-mining hook would otherwise run for every layer;
+    the mass itself is computed exactly as in :func:`_attention_mass_on_key`.
+    """
+    from .model import _arange  # local: pinned helper, no cycle
+
+    bh, T, dk = k.shape
+    B = q.size(0) // n_heads
+    h = n_heads
+    qp = meta["query_pos"]
+    kp = meta["key_pos"]
+    rows = _arange(B, q.device)
+    q_all = q.view(B, h, T, dk)[rows, :, qp]
+    # Match the pre-hook's ``(B, T, H, dk)`` key layout exactly; with the
+    # same einsum contraction this makes the diagnostics bit-identical to
+    # the recomputed-key version.
+    k_all = k.view(B, h, T, dk).permute(0, 2, 1, 3).contiguous()
+    scores = torch.einsum("bhd,bthd->bth", q_all, k_all).mul_(inv_scale)
+    cols = _arange(T, q.device).view(1, T, 1)
+    scores.masked_fill_(cols > qp.view(B, 1, 1), float("-inf"))
+    if null_k is not None:
+        s0 = torch.einsum("bhd,hd->bh", q_all, null_k).mul_(inv_scale)
+        scores = torch.cat([s0.unsqueeze(1), scores], dim=1)
+        tapped = torch.softmax(scores, dim=1).gather(
+            1, (kp + 1).view(B, 1, 1).expand(B, 1, h))
+    else:
+        tapped = torch.softmax(scores, dim=1).gather(
+            1, kp.view(B, 1, 1).expand(B, 1, h))
+    return tapped.squeeze(1).mean(-1)
+
+
 def _error_case_flags(idx, meta, pred, n_pairs):
     """Per-sample structural flags used to classify an error's cause."""
     from .model import _arange  # local: pinned helper, no cycle
@@ -1607,6 +1655,7 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
         correct.add_((pred == meta["answer"]).sum())
         total += idx.size(0)
     model.train(was_training)
+    release_eval_scratch()
     return correct.item() / total
 
 
@@ -1672,6 +1721,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     out["ece_15bin"] = expected_calibration_error(confidence, pred == tgt_cat,
                                                   n_bins=15)
     out["brier"] = brier_score(confidence, pred == tgt_cat)
+    release_eval_scratch()
     return out
 
 

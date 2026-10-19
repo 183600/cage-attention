@@ -379,6 +379,25 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
     return buf
 
 
+# Buffers a dropout-free, gradient-free forward may hold when it returns.
+# Evaluation entry points release them after the whole pass so a long
+# sequence / large batch does not pin its high-water buffers for the rest of
+# the process; the per-forward scratch reuse is left untouched.
+_EVAL_SCRATCH = (
+    "embed_out", "packed", "qkv_out", "ln_out", "ln_f_out", "ln_mean",
+    "ln_rstd", "seed_scale", "mlp_up", "mlp_down", "mlp_down_big",
+    "proj_out", "attn_y", "gate_out", "calib_s", "calib_y", "calib_yblk",
+    "calib_ent", "calib_ent_shuf", "calib_f", "calib_conc", "null_s",
+    "null_s0", "null_y", "null_yblk", "null_m", "rowent", "rowstats_att",
+    "rowstats_att_null", "rowstats_sum", "mask_rows", "mask_rows_b",
+)
+
+
+def release_eval_scratch() -> None:
+    """Release the reusable buffers held by the last evaluation pass."""
+    _release_scratch(*_EVAL_SCRATCH)
+
+
 def _release_scratch(*names: str) -> None:
     """Drop the cached buffers with the given names.
 
@@ -432,9 +451,7 @@ def _layer_norm_into(ln: nn.LayerNorm, x: torch.Tensor,
     """
     shape = x.shape
     if not x.is_cuda:
-        out, _, _ = torch.ops.aten.native_layer_norm(
-            x, [shape[-1]], ln.weight, ln.bias, ln.eps)
-        return out.view(shape)
+        return torch.layer_norm(x, [shape[-1]], ln.weight, ln.bias, ln.eps)
     rows = x.numel() // shape[-1]
     out = _get_scratch((key,), x.device, x.dtype, x.numel())
     mean = _get_scratch(("ln_mean",), x.device, x.dtype, rows)
@@ -776,8 +793,12 @@ class _NullAttn(torch.autograd.Function):
                 yb = yblk[:bh * r * dv].view(bh, r, dv)
                 torch.bmm(p, v[:, :i1], out=yb)
                 dst = ybt[:, i0:i1]
-                dst.copy_(yb.view(B, h, r, dv).transpose(1, 2))
-                dst.addcmul_(p0.view(B, h, r, 1).transpose(1, 2), nv4t)
+                # Fold the null-slot term into the transpose copy: one pass
+                # over the caller buffer instead of a copy followed by an
+                # in-place addcmul pass.
+                torch.addcmul(yb.view(B, h, r, dv).transpose(1, 2),
+                              p0.view(B, h, r, 1).transpose(1, 2),
+                              nv4t, out=dst)
             ctx.scale = scale
             ctx.shape = (B, h)
             return ybt
@@ -843,11 +864,12 @@ class _NullAttn(torch.autograd.Function):
         eb = _get_scratch(("null_bwd_e",), q.device, q.dtype, bh * max_rows * max_i1)
         gub = _get_scratch(("null_bwd_gu",), q.device, q.dtype, bh * max_rows)
         dotb = _get_scratch(("null_bwd_dot",), q.device, q.dtype, bh * max_rows)
-        acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
-        acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk).zero_()
+        acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk)
+        acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk)
         stg = (_get_scratch(("null_bwd_stg",), q.device, q.dtype,
                             bh * max_i1 * dk) if multi else None)
         first = True
+        first_null = True
         for i0, i1 in reversed(blocks):
             q_blk = q[:, i0:i1]
             g = grad_y[:, i0:i1]
@@ -889,10 +911,15 @@ class _NullAttn(torch.autograd.Function):
                 torch.bmm(d_s.transpose(1, 2), q_blk, out=d_qkv[1])
                 torch.bmm(d_s, k[:, :i1], out=d_qkv[0])
             d_q4[:, :, i0:i1].addcmul_(d_s0.view(B, h, r, 1), nk4)
-            torch.baddbmm(acc_k, d_s0.transpose(-2, -1), q_blk, beta=1.0,
-                          alpha=1.0, out=acc_k)
-            torch.baddbmm(acc_v, p0.transpose(-2, -1), g, beta=1.0,
-                          alpha=1.0, out=acc_v)
+            if first_null:
+                torch.bmm(d_s0.transpose(-2, -1), q_blk, out=acc_k)
+                torch.bmm(p0.transpose(-2, -1), g, out=acc_v)
+                first_null = False
+            else:
+                torch.baddbmm(acc_k, d_s0.transpose(-2, -1), q_blk, beta=1.0,
+                              alpha=1.0, out=acc_k)
+                torch.baddbmm(acc_v, p0.transpose(-2, -1), g, beta=1.0,
+                              alpha=1.0, out=acc_v)
         d_null_k = acc_k.view(B, h, dk).sum(0)
         d_null_v = acc_v.view(B, h, dk).sum(0)
         return d_qkv, d_null_k, d_null_v, None, None, None, None
@@ -943,6 +970,13 @@ class Attention(nn.Module):
             self.null_v = nn.Parameter(torch.zeros(self.h, self.dk))
         else:
             self.null_k = self.null_v = None
+        # Error-mining diagnostics read the already-projected Q/K instead of
+        # recomputing the key projection for every layer (see
+        # ``collect_stats_and_errors``).  The capture is opt-in and only used
+        # by the inference-mode statistics pass; ``_qk_capture`` is cleared by
+        # the forward hook that consumes it.
+        self._capture_qk = False
+        self._qk_capture = None
 
     def _pack_qkv_grad(self, x: torch.Tensor, B: int, h: int, T: int,
                        dk: int) -> torch.Tensor:
@@ -1022,7 +1056,7 @@ class Attention(nn.Module):
             else:
                 null_mass = None
                 pr = rows
-            return _RowEntropy.apply(pr, _EPS), pr.max(-1).values, null_mass
+            return _row_entropy(pr, _EPS), pr.max(-1).values, null_mass
 
     def _row_stats_at(self, q, k, B, h, T, stat_pos, is_null, ent_full=None):
         """Diagnostics for the queried rows only.
@@ -1097,6 +1131,8 @@ class Attention(nn.Module):
                 pv[:, b0:b1].copy_(
                     qkv_b.view(b1 - b0, T, 3, h, dk).permute(2, 0, 3, 1, 4))
 
+        if self._capture_qk and not grad_on:
+            self._qk_capture = (packed[0], packed[1])
         ent = None
         y4 = None
         ybt = None
@@ -1111,19 +1147,27 @@ class Attention(nn.Module):
                 y4 = y.view(B, h, T, dk)
                 ent = None if ent is None else ent.view(B, h, T)
             else:
-                # No-grad: every variant has the kernel write its blocks
-                # straight into the ``(B, T, H, dk)`` projection input.
-                # Gated variants multiply the gate into the buffer in place
-                # below.
-                ybt = _get_scratch(("attn_y",), x.device, x.dtype,
-                                   B * T * C).view(B, T, h, dk)
-                if is_null:
-                    _NullAttn.apply(packed, self.null_k, self.null_v,
-                                    self.inv_scale, B, False, ybt)
+                # No-grad: ungated variants have the kernel write its blocks
+                # straight into the ``(B, T, H, dk)`` projection input.  A
+                # gated variant instead keeps the kernel's head-major output
+                # and folds the gate into the layout conversion below: one
+                # transpose pass writes the gate-multiplied ``(B, T, C)``
+                # input, instead of a transpose copy followed by an in-place
+                # multiply pass over the same buffer.
+                if is_null or self.gate is None:
+                    ybt = _get_scratch(("attn_y",), x.device, x.dtype,
+                                       B * T * C).view(B, T, h, dk)
+                    if is_null:
+                        _NullAttn.apply(packed, self.null_k, self.null_v,
+                                        self.inv_scale, B, False, ybt)
+                    else:
+                        _, ent = _CalibAttn.apply(packed, self.inv_scale,
+                                                  _EPS, calc_ent, ybt)
                 else:
-                    _, ent = _CalibAttn.apply(packed, self.inv_scale, _EPS,
-                                              calc_ent, ybt)
-                    ent = None if ent is None else ent.view(B, h, T)
+                    y, ent = _CalibAttn.apply(packed, self.inv_scale, _EPS,
+                                              calc_ent)
+                    y4 = y.view(B, h, T, dk)
+                ent = None if ent is None else ent.view(B, h, T)
             if need_stats:
                 stats = self._row_stats_at(
                     packed[0].view(B, h, T, dk), packed[1], B, h, T,
