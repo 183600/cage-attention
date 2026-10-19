@@ -689,6 +689,54 @@ HYPOTHESES = {
 }
 
 
+def _validate_training_seeds(seeds):
+    """Validate the configured training-seed set; return it as an int tuple.
+
+    A training-seed set must be non-empty, integral, duplicate-free and
+    disjoint from the reserved held-out evaluation streams:
+
+    * **duplicates** break the premises the seed-level statistics rest on.
+      A paired contrast pairs runs by seed (``_paired_diff``); a seed that
+      appears twice on a side is counted twice in ``diffs``, so ``n`` is
+      inflated and the bootstrap CI too narrow, and the "independent
+      seeds" behind a Mean +- Std are not independent at all;
+    * **reserved seeds** (``VAL_SEED`` / ``TEST_SEED`` / ``STATS_SEED``)
+      would fit the model on the validation/test/statistics streams, so
+      the reported numbers stop being held-out.
+
+    Checked both at ``Settings`` construction and from ``_run_context``
+    (which every runner reaches before training), so a post-construction
+    attribute assignment - the CLI applies ``--seeds`` that way - cannot
+    bypass it either.
+    """
+    seeds = tuple(seeds)
+    if not seeds:
+        raise ValueError(
+            "seeds must be a non-empty sequence of training seeds")
+    if any(isinstance(s, bool) or not isinstance(s, int) for s in seeds):
+        raise ValueError(
+            f"training seeds must be plain integers, got {seeds!r}")
+    seeds = tuple(int(s) for s in seeds)
+    seen, duplicates = set(), []
+    for s in seeds:
+        if s in seen and s not in duplicates:
+            duplicates.append(s)
+        seen.add(s)
+    if duplicates:
+        raise ValueError(
+            f"duplicate training seeds {sorted(duplicates)} in {list(seeds)}: "
+            f"a repeated seed is the same run twice, so paired contrasts "
+            f"would double-count it (inflated n, too-narrow CI) and the "
+            f"seed-level Mean +- Std would not average independent runs")
+    reserved = sorted(set(seeds) & set(RESERVED_EVAL_SEEDS))
+    if reserved:
+        raise ValueError(
+            f"training seeds {reserved} are reserved held-out evaluation "
+            f"streams {RESERVED_EVAL_SEEDS}: training on them would fit the "
+            f"model on validation/test data")
+    return seeds
+
+
 @dataclass
 class Settings:
     device: str = "cpu"
@@ -743,6 +791,13 @@ class Settings:
     overfit_lr: float = 3e-3
     negative_control_tol: float = 0.02  # HB4 pre-registered tolerance
     out_dir: pathlib.Path = field(default_factory=lambda: pathlib.Path("results"))
+
+    def __post_init__(self) -> None:
+        # Fail at construction on an invalid training-seed set instead of
+        # letting a duplicated reserve-dataset seed flow into a grid; the
+        # runner entry point re-checks (see ``_validate_training_seeds``)
+        # because ``--seeds`` is applied to the attribute afterwards.
+        self.seeds = _validate_training_seeds(self.seeds)
 
     @classmethod
     def quick(cls, device: str = "cpu") -> "Settings":
@@ -1026,10 +1081,14 @@ def _recipe_view(run):
     the two sides.  The stamped evaluation-stream seeds enter the view as
     well: equal stream *sizes* do not prove equal streams, and a metric
     read from a different stream is an evaluation-protocol difference the
-    audit must refuse exactly like a recipe difference.  Finally, the
-    *executed* step count / early-stop state is included: the intended
-    step count in ``training_recipe.steps`` does not prove both sides
-    actually ran it.
+    audit must refuse exactly like a recipe difference.  The stamped
+    ``data_fingerprints`` (the content hash of every training/validation/
+    test/statistics stream) enter the view for the same reason one level
+    deeper: the same *seeds* can still generate a different stream if the
+    batch geometry or generator path changed, and then the two sides did
+    not train or read the same data at all.  Finally, the *executed* step
+    count / early-stop state is included: the intended step count in
+    ``training_recipe.steps`` does not prove both sides actually ran it.
     """
     cfg = run.get("config") or {}
     view = {k: cfg.get(k) for k in _AUDIT_RECIPE_KEYS}
@@ -1044,6 +1103,12 @@ def _recipe_view(run):
     view["steps_run"] = run.get("steps_run")
     view["stopped_early"] = run.get("stopped_early")
     view["restored_best"] = run.get("restored_best")
+    # The data-stream fingerprints ride with the run context; a record that
+    # predates the stamp compares as ``None == None`` and is skipped, while
+    # stamped records now prove "same seed, same stream" - per training
+    # seed (the ``train`` sub-map is keyed by seed, so a stray Settings
+    # whose stream geometry changed cannot masquerade as the paired run).
+    view["data_fingerprints"] = run.get("data_fingerprints")
     recipe = run.get("training_recipe")
     if isinstance(recipe, dict):
         for key, val in recipe.items():
@@ -1065,7 +1130,11 @@ def _controlled_audit(runs_a, runs_b):
 
     1. **Paired seeds**: both sides were run on the same seed set, so the
        paired bootstrap differences each seed with itself (fewer / different
-       seeds silently shrink the sample and break the pairing);
+       seeds silently shrink the sample and break the pairing).  A seed
+       repeated within one side is refused too: it is one run counted
+       twice, which inflates the paired n and narrows the CI (new grids
+       cannot get here - ``Settings`` / ``_run_context`` validate the seed
+       set - but pooled or legacy records can);
     2. **Within-side recipe**: every run on a side used the same learning
        rate, step count, batch geometry, data size and evaluation-stream
        size and seed, the same *actual* ``steps_run`` / early-stop state,
@@ -1087,6 +1156,18 @@ def _controlled_audit(runs_a, runs_b):
        ``calib_variant`` label must name the (calib_use_len, calib_use_ent)
        cell that trained, so a mis-wired ablation arm cannot pass as the
        intended condition.
+
+    The actual parameter count each side trained is recorded as well.  A
+    differing count is legitimate across gates (``calib`` carries the
+    calibration terms, ``none`` does not), so it is not a mismatch by
+    itself - but where the design's *defining claim* is matched capacity
+    it is enforced: the H1f active control differs from full ``calib``
+    only in ``calib_shuffle_ent`` and is registered as the "identical
+    calib architecture, parameter count, computation and optimiser"
+    placebo, so a capacity difference there would silently confound the
+    specificity test and is refused.  A side that trained more than one
+    parameter count is refused as a build inconsistency whatever the
+    design.
 
     The optimizer factory, cosine schedule, clipping and gradient settings
     are fixed in the single training entry point (``train.train_model``) and
@@ -1110,6 +1191,33 @@ def _controlled_audit(runs_a, runs_b):
         audit["mismatches"].append(
             f"seed sets differ: a={audit['seeds_a']} b={audit['seeds_b']} "
             f"(contrast must be paired over identical seeds)")
+    for side, seeds in (("a", audit["seeds_a"]), ("b", audit["seeds_b"])):
+        repeats = sorted({s for s in seeds
+                          if s is not None and seeds.count(s) > 1})
+        if repeats:
+            audit["mismatches"].append(
+                f"side {side} repeats training seed(s) {repeats}: a "
+                f"repeated seed is one run counted twice, so the paired n "
+                f"would be inflated and the difference is not independent")
+    # Capacity: the parameter count each side actually trained (recorded for
+    # every contrast; the placebo-specific enforcement happens below, where
+    # the resolved model configs have been compared).
+    params_a = sorted({int(r["params"]) for r in runs_a
+                       if _finite(r.get("params"))})
+    params_b = sorted({int(r["params"]) for r in runs_b
+                       if _finite(r.get("params"))})
+    audit["params"] = {"a": params_a, "b": params_b}
+    for side, counts in (("a", params_a), ("b", params_b)):
+        if len(counts) > 1:
+            audit["mismatches"].append(
+                f"side {side} trained {len(counts)} distinct parameter "
+                f"counts {counts}: the side is not one fixed model")
+    if len(params_a) == 1 and len(params_b) == 1:
+        audit["capacity"] = {
+            "a": params_a[0], "b": params_b[0],
+            "delta_b_minus_a": params_b[0] - params_a[0],
+            "matched": params_a[0] == params_b[0],
+        }
     for side, runs in (("a", runs_a), ("b", runs_b)):
         views = [_recipe_view(r) for r in runs]
         if not views:
@@ -1194,6 +1302,26 @@ def _controlled_audit(runs_a, runs_b):
                     f"vary the mechanism")
             if audit["model_factor_diffs"]:
                 audit["varying_factors"].update(audit["model_factor_diffs"])
+            # H1f's active control is registered as the identical calib
+            # architecture / parameter count / computation, differing only
+            # in the shuffled entropy signal.  When the resolved configs
+            # say that is the *only* difference, matched capacity is a
+            # defining property of the contrast, so a differing count is a
+            # confound (capacity, not entropy information) and the audit
+            # refuses the contrast instead of letting the specificity test
+            # read as if the placebo were capacity-matched.
+            capacity = audit.get("capacity")
+            if capacity and not capacity["matched"] \
+                    and set(audit["model_factor_diffs"]) == \
+                    {"calib_shuffle_ent"}:
+                audit["mismatches"].append(
+                    f"placebo capacity mismatch: the only resolved "
+                    f"model-config difference is calib_shuffle_ent, whose "
+                    f"defining claim is the identical calib architecture "
+                    f"and parameter count, but the sides trained "
+                    f"{capacity['a']} vs {capacity['b']} parameters - the "
+                    f"capacity would be confounded with the shuffled "
+                    f"entropy signal")
         if not audit["varying_factors"]:
             audit["mismatches"].append(
                 "no declared model factor (gate/norm/layer_scale/"
@@ -1903,6 +2031,12 @@ class ContrastLog:
                                 else audit.get("varying_factors")),
             "control_mismatches": ([] if audit is None
                                    else audit.get("mismatches", [])),
+            # The parameter counts the two sides actually trained (with the
+            # matched flag): a gate contrast may legitimately differ, but
+            # the reader must see the capacity delta rather than infer that
+            # "only the factor varies" also means "same size".
+            "capacity": (None if audit is None
+                         else audit.get("capacity")),
             "seeds_used": ci.get("seeds_used"),
             "seeds_dropped": ci.get("seeds_dropped"),
             "seeds_unpaired": ci.get("seeds_unpaired"),
@@ -1913,6 +2047,10 @@ class ContrastLog:
             factors = ",".join(sorted(audit.get("varying_factors", {}))) or "n/a"
             line += (f"  [control: {'ok' if audit['controlled'] else 'FAILED'}"
                      f", varies={factors}]")
+            cap = audit.get("capacity")
+            if cap and not cap["matched"]:
+                line += (f"  [capacity: {cap['a']} vs {cap['b']} params, "
+                         f"delta={cap['delta_b_minus_a']:+d}]")
         if sesoi is not None:
             line += (f"  [equivalence bound={sesoi:g}]" if equiv
                      else f"  [SESOI={sesoi:g}]")
@@ -2572,11 +2710,18 @@ def _run_context(settings: Settings) -> dict:
     record, so a result file is traceable without relying on defaults that
     may have changed since.  The ``setup_sha256`` hash over exactly
     {revision, hypotheses, config, data fingerprints} gives every record a
-    compact id for "same code + same recipe + same data": records carrying
+    compact id for "same code + same recipe + same data":     records carrying
     different ids were not produced by the same setup and cannot be pooled
     silently.  Cached on the Settings object: the environment probe (and
     git call) runs once per process.
+
+    The configured training-seed set is re-validated on every call (cheap,
+    before the cache lookup): every official entry point builds the run
+    context before training, so a seed set mutated after construction -
+    the runner applies ``--seeds`` that way - is still refused when it is
+    not duplicate-free / disjoint from the reserved evaluation streams.
     """
+    _validate_training_seeds(settings.seeds)
     ctx = getattr(settings, "_run_context_cache", None)
     if ctx is not None:
         return ctx
@@ -3279,10 +3424,12 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
 def tune_shared_recipe(settings: Settings):
     """Tune the learning rate on the plain ``none`` baseline.
 
-    Selection uses the validation seed only (up to two training seeds);
-    the winning rate is then frozen for *every* variant, so a gate variant
-    can never win via a luckier optimizer setting - the E1/E3 comparisons
-    remain controlled.
+    Selection uses the validation seed only, over the pre-registered
+    ``min_seeds_for_claim`` floor's worth of training seeds (the grid never
+    freezes a recipe on fewer seeds than a claim would need - a two-seed
+    argmax is inside the seed-to-seed noise); the winning rate is then
+    frozen for *every* variant, so a gate variant can never win via a
+    luckier optimizer setting - the E1/E3 comparisons remain controlled.
 
     The learning-curve verdict of every tuning run is stored with the
     table: if the selected rate's runs are all curve-invalid (plateau /
@@ -3291,12 +3438,13 @@ def tune_shared_recipe(settings: Settings):
     mechanism under test - ``_resolve_lr`` prints that warning.
 
     Returns ``(best_lr, table, selection)`` where ``selection`` is the
-    :func:`_selection_reliability` audit of the argmax: with only up to
-    two tuning seeds the winning rate can sit inside the seed-to-seed
-    spread of a neighbour, and that point selection must be recorded
-    rather than printed as if the grid had resolved the recipe.
+    :func:`_selection_reliability` audit of the argmax: even at the claim
+    floor the winning rate can sit inside the seed-to-seed spread of a
+    neighbour, and that point selection must be recorded rather than
+    printed as if the grid had resolved the recipe.
     """
-    tune_seeds = settings.seeds[:max(1, min(2, len(settings.seeds)))]
+    tune_seeds = settings.seeds[:max(1, min(settings.min_seeds_for_claim,
+                                             len(settings.seeds)))]
     table = []
     for lr in settings.lr_grid:
         accs, verdicts = [], []
@@ -3549,8 +3697,10 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     ``gate="none"`` transformer separately at every ladder depth (default
     1/2/4 layers) through the same entry point as the deep grids - same
     optimizer factory, cosine schedule, batch geometry and evaluation
-    streams - on the validation seed, and reports the chosen rate on the
-    disjoint test seed.  Depth is the only architectural difference from
+    streams - on the validation seed (over the pre-registered
+    ``min_seeds_for_claim`` floor's worth of training seeds, so no rung's
+    rate is frozen on a two-seed argmax), and reports the chosen rate on
+    the disjoint test seed.  Depth is the only architectural difference from
     E1's ``none`` arm, so:
 
     * each rung's gap to the parameter-free rule ceiling measures how much
@@ -3591,7 +3741,8 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         raise ValueError(
             f"depth_ladder must be non-empty positive ints, got "
             f"{settings.depth_ladder!r}")
-    tune_seeds = settings.seeds[:max(1, min(2, len(settings.seeds)))]
+    tune_seeds = settings.seeds[:max(1, min(settings.min_seeds_for_claim,
+                                             len(settings.seeds)))]
     ceiling_acc = float(ceiling["accuracy"]) if ceiling else float("nan")
     ceiling_known = math.isfinite(ceiling_acc)
     chance = 1.0 / (settings.vocab - 2)
