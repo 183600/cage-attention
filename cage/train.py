@@ -1071,7 +1071,6 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     """
     was_training = model.training
     model.eval()
-    total_loss = torch.zeros((), dtype=torch.float64, device=device)
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
     last_batch = None
@@ -1087,8 +1086,7 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
         sup_pos = None if dense_lm else meta["query_pos"]
         with torch.inference_mode():
             logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
-            total_loss.add_(loss.detach().to(torch.float64))
-            batch_losses.append(float(loss.detach()))
+            batch_losses.append(loss.detach())
             if dense_lm:
                 # Dense training supervises every position, so the forward
                 # returns the full-sequence logits flattened row-major; the
@@ -1102,14 +1100,15 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
             total += idx.size(0)
     model.train(was_training)
     n_batches = max(1, batches)
-    if len(batch_losses) > 1:
-        mean_loss = sum(batch_losses) / len(batch_losses)
-        var = sum((x - mean_loss) ** 2 for x in batch_losses) \
-            / (len(batch_losses) - 1)
-        loss_se = math.sqrt(var / len(batch_losses))
+    losses = [float(x) for x in batch_losses]
+    if len(losses) > 1:
+        mean_loss = sum(losses) / len(losses)
+        var = sum((x - mean_loss) ** 2 for x in losses) \
+            / (len(losses) - 1)
+        loss_se = math.sqrt(var / len(losses))
     else:
         loss_se = float("nan")
-    return (total_loss.item() / n_batches,
+    return (sum(losses) / n_batches,
             correct.item() / total if total else float("nan"),
             last_batch, loss_se)
 

@@ -285,7 +285,7 @@ def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
                            | targets[:, -1].eq(answer)).all())
         acc = checks[0]
         for c in checks[1:]:
-            acc = acc & c
+            acc.logical_and_(c)
         return answer_ok and bool(acc)
     except Exception:  # noqa: BLE001 - any unevaluable input is strict's job
         return False

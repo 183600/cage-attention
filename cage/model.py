@@ -200,7 +200,7 @@ def _norm_out(norm: nn.Module, x: torch.Tensor, key: str) -> torch.Tensor:
 
 _MAX_MASK_CACHE = 64
 
-_QKV_CHUNK_ROWS = 2048
+_QKV_CHUNK_ELEMS = 3 * (1 << 20)
 
 _MLP_CHUNK_ROWS = 2048
 
@@ -419,6 +419,12 @@ def _balanced_step(n: int, cap: int) -> int:
         return n
     n_chunks = -(-n // cap)
     return max(1, min(cap, -(-n // n_chunks)))
+
+
+def _qkv_step(B: int, T: int, C: int) -> int:
+    """Batch chunk whose ``F.linear`` staging stays inside the budget."""
+    rows = max(1, _QKV_CHUNK_ELEMS // max(1, T * 3 * C))
+    return _balanced_step(B, rows)
 
 
 def _linear_into(x: torch.Tensor, weight: torch.Tensor,
@@ -1017,7 +1023,7 @@ class Attention(nn.Module):
         The three slices are handed to the attention kernel as a single
         tensor.
         """
-        step = _balanced_step(B, max(1, _QKV_CHUNK_ROWS // max(T, 1)))
+        step = _qkv_step(B, T, x.size(-1))
         packed = x.new_empty(3, B * h, T, dk)
         pv = packed.view(3, B, h, T, dk)
         for b0 in range(0, B, step):
@@ -1151,7 +1157,7 @@ class Attention(nn.Module):
                 ("packed",), x.device, x.dtype, 3 * bh * T * dk).view(3, bh, T, dk)
             pv = packed.view(3, B, h, T, dk)
             # Staging buffer feeding the permute-copy.
-            step = _balanced_step(B, max(1, _QKV_CHUNK_ROWS // max(T, 1)))
+            step = _qkv_step(B, T, C)
             qkv_buf = _get_scratch(("qkv_out",), x.device, x.dtype,
                                    step * T * 3 * C).view(step * T, 3 * C)
             for b0 in range(0, B, step):
