@@ -211,9 +211,8 @@ def validate_batch(idx, targets, meta, vocab, diagnostics: bool = True) -> dict:
 
     Returns a small diagnostics dict (sample count, unique-key rate, number
     of exact duplicate rows inside the batch) used by the split audit.
-    ``diagnostics=False`` skips only the duplicate-row count (a
-    ``torch.unique`` pass plus host read-back) for callers that discard the
-    result; every cleaning invariant above still runs.
+    ``diagnostics=False`` skips only the duplicate-row count for callers
+    that discard the result; every cleaning invariant above still runs.
     """
     if not _batch_invariants_hold(idx, targets, meta, vocab):
         _validate_batch_strict(idx, targets, meta, vocab)

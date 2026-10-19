@@ -422,7 +422,7 @@ def _balanced_step(n: int, cap: int) -> int:
 
 
 def _qkv_step(B: int, T: int, C: int) -> int:
-    """Batch chunk whose ``F.linear`` staging stays inside the budget."""
+    """Batch chunk size for the staged QKV projection."""
     rows = max(1, _QKV_CHUNK_ELEMS // max(1, T * 3 * C))
     return _balanced_step(B, rows)
 
@@ -655,9 +655,8 @@ class _CalibAttn(torch.autograd.Function):
         # one read ``stg`` (the first block processed writes ``d_v`` /
         # ``d_k`` outright), so its width is the second-widest block end,
         # not ``T``.  The entropy ``log(p)`` buffer is dead after each
-        # ``_softmax_grad_from_p`` call and is large enough to serve as
-        # ``stg`` in the usual ``dk <= T`` case, so share the two instead
-        # of pinning one more large scratch.
+        # ``_softmax_grad_from_p`` call, so it serves as ``stg`` in the
+        # ``dk <= T`` case.
         dk = q.size(-1)
         stg_i1 = blocks[-2][1] if len(blocks) > 1 else T
         stg_numel = bh * stg_i1 * dk
@@ -804,9 +803,8 @@ class _NullAttn(torch.autograd.Function):
                                     mask[i0:i1, :i1], null_k, B, h, scale, sbuf)
                 yb = yblk[:bh * r * dv].view(bh, r, dv)
                 torch.bmm(p, v[:, :i1], out=yb)
-                # Fold the null-slot term into the contiguous block before
-                # the transposed copy into the caller buffer (same
-                # locality argument as the non-``ybt`` path below).
+                # Fold the null-slot term into the block before the
+                # transposed copy into the caller buffer.
                 yb.view(B, h, r, dv).addcmul_(p0.view(B, h, r, 1), nv4)
                 ybt[:, i0:i1].copy_(yb.view(B, h, r, dv).transpose(1, 2))
             ctx.scale = scale
@@ -833,10 +831,7 @@ class _NullAttn(torch.autograd.Function):
                                     scale, sbuf)
                 yb = yblk[:bh * r * dv].view(bh, r, dv)
                 torch.bmm(p, v[:, :i1], out=yb)
-                # Fold the null-slot term into the contiguous block before
-                # the copy: the add runs on ``(B, h, r, dv)`` contiguous
-                # storage instead of a strided ``(B, h, r, dv)`` slice of
-                # the head-major output.
+                # Fold the null-slot term into the block before the copy.
                 yb.view(B, h, r, dv).addcmul_(p0.view(B, h, r, 1), nv4)
                 y[:, i0:i1].copy_(yb)
         if need_grad:
@@ -881,10 +876,9 @@ class _NullAttn(torch.autograd.Function):
         acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk)
         acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk)
         # ``peb`` only holds ``p * e`` until its row sum is taken; afterwards
-        # it can serve as the ``d_v`` / ``d_k`` staging buffer instead of
-        # keeping a separate scratch alive.  As in the calibrated kernel,
-        # only the narrower (non-first processed) blocks use it, so its
-        # width is the second-widest block end.
+        # it serves as the ``d_v`` / ``d_k`` staging buffer.  Only the
+        # narrower (non-first processed) blocks use it, so its width is the
+        # second-widest block end.
         if multi:
             stg_i1 = blocks[-2][1]
             stg_numel = bh * stg_i1 * dk
@@ -915,9 +909,8 @@ class _NullAttn(torch.autograd.Function):
             dot.addcmul_(p0, gu0)
             d_u = e.sub_(dot)
             gu0.sub_(dot)
-            # Keep the score gradients unscaled and apply ``scale`` in the
-            # GEMM epilogue (``alpha``), saving one elementwise pass over
-            # the full ``(B*H, r, i1)`` block per iteration.
+            # Score gradients are unscaled; ``scale`` is applied in the
+            # GEMM epilogue (``alpha``).
             d_s = d_u.mul_(p)
             d_s0 = gu0.mul_(p0)
             if multi:
@@ -939,8 +932,8 @@ class _NullAttn(torch.autograd.Function):
                 dqblk = stg[:bh * r * dk].view(bh, r, dk)
                 torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
                               out=dqblk)
-                # Fold the null-key term into the contiguous staging block
-                # before the copy, mirroring the forward-path locality fix.
+                # Fold the null-key term into the staging block before the
+                # copy.
                 dqblk.view(B, h, r, dk).addcmul_(d_s0.view(B, h, r, 1), nk4,
                                                  value=scale)
                 d_q[:, i0:i1].copy_(dqblk)
