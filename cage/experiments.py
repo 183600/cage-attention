@@ -583,14 +583,29 @@ HYPOTHESES = {
         "prediction": "accuracy_at_longest(calib) > accuracy_at_longest("
                       "calib_ent_only) and accuracy_drop(calib) < "
                       "accuracy_drop(calib_ent_only); calib_len_only stays "
-                      "close to the full calib arm",
+                      "close to the full calib arm (within the registered "
+                      "bound on both accuracy_at_longest and accuracy_drop)",
         "decision": "paired bootstrap 95% CI of calib - calib_ent_only on "
                     "accuracy_at_longest excludes 0 after "
                     "Benjamini-Hochberg FDR control across the E2 contrasts "
-                    "(q=0.05); the calib_len_only arm is the reverse check "
-                    "and is read together with it",
-        "sesoi": {"accuracy_at_longest": 0.01, "accuracy_drop": 0.01},
+                    "(q=0.05).  The calib_len_only arm is a *null* reverse "
+                    "check, not a superiority row: its 95% CI for calib - "
+                    "calib_len_only must lie inside +-SESOI on both "
+                    "accuracy_at_longest and accuracy_drop (bootstrap TOST, "
+                    "same FDR family); a non-significant difference is not "
+                    "enough to call the term dispensable",
+        "sesoi": {"accuracy_at_longest": 0.01, "accuracy_drop": 0.01,
+                  # Separately registered bounds for the reverse check:
+                  # the displayed metrics are shared with the directional
+                  # calib - calib_ent_only rows, so the null prediction
+                  # needs its own keys in the registry.
+                  "calib_minus_len_only_accuracy_at_longest": 0.01,
+                  "calib_minus_len_only_accuracy_drop": 0.01},
         "direction": {"accuracy_at_longest": "+", "accuracy_drop": "-"},
+        "sesoi_test": {
+            "calib_minus_len_only_accuracy_at_longest": "equivalence",
+            "calib_minus_len_only_accuracy_drop": "equivalence",
+        },
     },
     "H3a": {
         "experiment": "e3",
@@ -790,6 +805,33 @@ _CALIB_FACTORIAL = {
 _CALIB_FACTORIAL_CELLS = ("full", "calib_len_only", "calib_ent_only",
                           "calib_no_terms")
 
+# The two axes of the calibration-term 2x2.  A main effect averages the
+# factor's effect over the two levels of the other term, so the "on"/"off"
+# cells and the two within-level pairwise audits are both part of the
+# contract.  ``model_key`` is the resolved Cfg flag that must be the only
+# model-config difference in each pair.
+_FACTORIAL_MAIN_EFFECTS = {
+    "length": {
+        "on": ("full", "calib_ent_only"),
+        "off": ("calib_len_only", "calib_no_terms"),
+        # Within each concentration level, the pair that differs only in
+        # the length flag: full-vs-ent_only (entropy on) and
+        # len_only-vs-no_terms (entropy off).
+        "pairs": (("full", "calib_ent_only"),
+                  ("calib_len_only", "calib_no_terms")),
+        "model_key": "calib_use_len",
+    },
+    "concentration": {
+        "on": ("full", "calib_len_only"),
+        "off": ("calib_ent_only", "calib_no_terms"),
+        # Within each length level, the pair that differs only in the
+        # concentration flag: full-vs-len_only and ent_only-vs-no_terms.
+        "pairs": (("full", "calib_len_only"),
+                  ("calib_ent_only", "calib_no_terms")),
+        "model_key": "calib_use_ent",
+    },
+}
+
 _CALIB_PLACEBO_CELL = "calib_shuf_ent"
 
 
@@ -964,13 +1006,24 @@ def _recipe_view(run):
     the two sides.  The stamped evaluation-stream seeds enter the view as
     well: equal stream *sizes* do not prove equal streams, and a metric
     read from a different stream is an evaluation-protocol difference the
-    audit must refuse exactly like a recipe difference.
+    audit must refuse exactly like a recipe difference.  Finally, the
+    *executed* step count / early-stop state is included: the intended
+    budget in ``training_recipe.steps`` does not prove both sides actually
+    ran it.
     """
     cfg = run.get("config") or {}
     view = {k: cfg.get(k) for k in _AUDIT_RECIPE_KEYS}
     view["lr"] = run.get("lr")
     view["eval_seed"] = run.get("eval_seed")
     view["stats_seed"] = run.get("stats_seed")
+    # The intended step budget lives in ``training_recipe.steps``; these
+    # stamped fields are what the run *actually* executed.  Auditing them
+    # keeps "same epochs" true even if early stopping is ever enabled, and
+    # makes a short/diverged run visible as a confound rather than as a
+    # silent extra degree of freedom.
+    view["steps_run"] = run.get("steps_run")
+    view["stopped_early"] = run.get("stopped_early")
+    view["restored_best"] = run.get("restored_best")
     recipe = run.get("training_recipe")
     if isinstance(recipe, dict):
         for key, val in recipe.items():
@@ -995,10 +1048,11 @@ def _controlled_audit(runs_a, runs_b):
        seeds silently shrink the sample and break the pairing);
     2. **Within-side recipe**: every run on a side used the same learning
        rate, step count, batch geometry, data size and evaluation-stream
-       size and seed, and - when the record carries the stamped
-       ``training_recipe`` - the same optimizer, weight decay, betas,
-       schedule, eta_min, gradient clipping and augmentation pipeline (no
-       per-variant optimizer or schedule drift);
+       size and seed, the same *actual* ``steps_run`` / early-stop state,
+       and - when the record carries the stamped ``training_recipe`` - the
+       same optimizer, weight decay, betas, schedule, eta_min, gradient
+       clipping and augmentation pipeline (no per-variant optimizer or
+       schedule drift, and no run that silently trained for fewer steps);
     3. **Across-side recipe**: the two recipes are identical (the same
        fields as above), so a "gain" that is really a changed optimizer or
        learning-rate schedule is refused instead of reported as a win;
@@ -1140,7 +1194,10 @@ def _paired_diff(runs_a, runs_b, metric):
     with the contrast too, so the decision table answers the pre-registered
     "did the effect exceed the seed-to-seed spread?" question directly
     instead of only through ``dz``/MDE80 - both arms are reported on the
-    same stream, and an arm mean resting on a shrunken seed set is visible.
+    paired sample (the seeds where both sides carry a finite value), so the
+    printed levels, the effect and ``rel_effect`` can never describe
+    different seed sets.  ``arms_all`` keeps the full-run levels for
+    transparency, but only the paired ``arms`` feed the decision table.
 
     The controlled-variable audit (``_controlled_audit``) is attached as
     ``controlled``: a difference between recipes (optimizer settings, step
@@ -1177,10 +1234,29 @@ def _paired_diff(runs_a, runs_b, metric):
             dropped.append(ra["seed"])
             undefined.append(ra["seed"])
     ci = paired_bootstrap_ci(diffs)
-    side_a = _mean_std([r[metric] for r in runs_a if metric in r])
-    base = _mean_std([r[metric] for r in runs_b if metric in r])
+    # Levels are reported on exactly the seeds that entered the paired
+    # difference.  Using all runs here would let a metric-undefined or
+    # unpaired seed contribute to an arm mean but not to the effect (or
+    # vice versa), making the printed levels and the contrast describe
+    # different samples.  The full-run levels remain available as
+    # ``arms_all`` for inspection.
+    by_a = {r["seed"]: r for r in runs_a}
+    if used:
+        side_a = _mean_std([by_a[s][metric] for s in used])
+        base = _mean_std([by_seed[s][metric] for s in used])
+    else:
+        side_a = _mean_std([])
+        base = _mean_std([])
     ci["arms"] = {"a": side_a, "b": base}
+    ci["arms_all"] = {
+        "a": _mean_std([r[metric] for r in runs_a if metric in r]),
+        "b": _mean_std([r[metric] for r in runs_b if metric in r]),
+    }
+    ci["arms_note"] = "paired seeds used by the effect"
     ci["baseline_mean"] = base["mean"]
+    # Raw per-seed differences: lets an equivalence companion reuse the
+    # identical pairing instead of re-deriving it (and drifting from it).
+    ci["diffs"] = list(diffs)
     # The paired sample is only the seeds where *both* sides carry a
     # finite value for this metric: recording which seeds actually entered
     # makes a silently shrunken sample visible (and the finalize layer
@@ -1204,11 +1280,15 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
 
     The controlled audit is the conjunction of the four marginal audits:
     within each arm the recipe is fixed and only the intended factor
-    varies, and all four cells share one recipe and one seed set.  A
-    contrast whose audit fails is refused downstream exactly like a
+    varies, and all four cells share one recipe and one seed set.  Both
+    marginal contrasts must also vary the *same* declared factor with the
+    same level sets, otherwise the DiD mixes two different manipulations.
+    A contrast whose audit fails is refused downstream exactly like a
     marginal one, and the effective paired seed set is recorded.  ``arms``
     carries each marginal difference (a = a1-b1, b = a2-b2) with its mean
-    +- std, so the interaction row shows the levels it differences.
+    +- std over the interaction sample, so the row shows the levels it
+    differences; ``baseline_mean`` is the control marginal (b = a2-b2),
+    which is what the interaction modifies.
     """
     def _by_seed(rs):
         return {r["seed"]: r for r in rs}
@@ -1236,22 +1316,27 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
             dropped.append(seed)
             unpaired.append(seed)
     ci = paired_bootstrap_ci(diffs)
-    base1 = _mean_std([r[metric] for r in runs_b1 if metric in r])
-    base2 = _mean_std([r[metric] for r in runs_b2 if metric in r])
-    ci["baseline_mean"] = base1["mean"] - base2["mean"]
     # The two arms of an interaction are the two *marginal differences*
     # (a1-b1 and a2-b2), each summarised with mean +- std over the same
-    # paired seeds, so the decision table shows the levels the interaction
-    # is computed from next to the DiD effect itself.
+    # four-cell paired seeds the interaction itself uses.  Restricting to
+    # ``used`` (not ``planned``) keeps the printed marginal levels on the
+    # interaction sample: a seed missing one cell must not contribute to
+    # an arm but not to the DiD.
     arms = {}
     for name, (ra, rb) in (("a", (runs_a1, runs_b1)), ("b", (runs_a2, runs_b2))):
         ma, mb = _by_seed(ra), _by_seed(rb)
-        ds = [float(ma[s][metric]) - float(mb[s][metric]) for s in planned
+        ds = [float(ma[s][metric]) - float(mb[s][metric]) for s in used
               if s in ma and s in mb
               and _finite(ma[s].get(metric)) and _finite(mb[s].get(metric))]
         arms[name] = _mean_std(ds)
     ci["arms"] = arms
-    ci["arms_note"] = "marginal differences (a1-b1 vs a2-b2)"
+    ci["arms_note"] = ("marginal differences (a1-b1 vs a2-b2) on the "
+                       "interaction sample")
+    # The interaction modifies the second marginal effect (a2-b2), so
+    # ``rel_effect`` must be relative to that control marginal - not to
+    # the difference between the two b-levels, which is a different
+    # quantity and can be near zero even when the interaction is real.
+    ci["baseline_mean"] = arms["b"]["mean"]
     ci["seeds_used"] = sorted(used)
     ci["seeds_dropped"] = sorted(dropped)
     ci["seeds_unpaired"] = sorted(unpaired)
@@ -1262,9 +1347,143 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
               _controlled_audit(runs_b1, runs_b2)]
     mismatches = [msg for audit in audits
                   for msg in audit.get("mismatches", [])]
+    # A difference-in-differences is only an interaction of *the same*
+    # manipulation measured under two contexts: both marginal contrasts
+    # must vary the same declared factor with the same level sets (e.g.
+    # calib - query under seednorm and under pre).  Otherwise the DiD
+    # mixes two different manipulations and cannot be read as one
+    # interaction.
+    marginal_factors = [audits[0].get("varying_factors") or {},
+                        audits[1].get("varying_factors") or {}]
+    if marginal_factors[0] != marginal_factors[1]:
+        mismatches.append(
+            "interaction marginals vary different factor(s): "
+            f"{sorted(marginal_factors[0])} vs "
+            f"{sorted(marginal_factors[1])}")
     factors = {}
     for audit in audits:
         factors.update(audit.get("varying_factors", {}))
+    ci["controlled"] = {"controlled": not mismatches,
+                        "mismatches": mismatches,
+                        "varying_factors": factors}
+    return ci
+
+
+def _paired_equivalence(runs_a, runs_b, metric, bound):
+    """Paired bootstrap-TOST contrast with the full controlled audit.
+
+    A null prediction ("arm A stays close to arm B") still needs the same
+    seed pairing and recipe audit as a directional contrast: equivalence
+    computed on mispaired or recipe-confounded arms would certify the wrong
+    thing.  Reuses :func:`_paired_diff`'s exact pairing and copies its
+    audit/arm/seed metadata onto the TOST result, so the printed row and
+    the decision table carry the same sample the effect was computed on.
+    """
+    paired = _paired_diff(runs_a, runs_b, metric)
+    ci = equivalence_test(paired.get("diffs") or [], bound)
+    for key in ("arms", "arms_all", "arms_note", "baseline_mean",
+                "seeds_used", "seeds_dropped", "seeds_unpaired",
+                "seeds_undefined", "controlled"):
+        if key in paired:
+            ci[key] = paired[key]
+    return ci
+
+
+def _factorial_main_effect(cells, metric, factor):
+    """Averaged main effect of one factor in the complete calibration 2x2.
+
+    ``cells`` maps the four ``_CALIB_FACTORIAL_CELLS`` to their run lists.
+    The contrast is the factor-on mean minus the factor-off mean, where each
+    arm averages over both levels of the other factor: for ``length`` this
+    is ``mean(full, calib_ent_only) - mean(calib_len_only, calib_no_terms)``.
+    Unlike a leave-one-out contrast (which is conditional on the other term
+    being on), this estimates the term's average contribution across the
+    full factorial, so a component that only helps in one configuration is
+    not credited as a general effect.
+
+    The paired sample is the seeds where *all four* cells carry a finite
+    value (the same seed must appear in every cell); the effective seed set
+    and every dropped seed are recorded.  The audit checks both within-level
+    pairwise contrasts (the two edges that vary only ``factor``), requires
+    the resolved model config to differ only in that factor's flag, and
+    verifies one global recipe and one seed set across all four cells - a
+    main effect averaged over a cell with a different optimizer or epoch
+    budget would not be a factorial effect.
+    """
+    spec = _FACTORIAL_MAIN_EFFECTS[factor]
+    required = _CALIB_FACTORIAL_CELLS
+    missing = [c for c in required if not cells.get(c)]
+    if missing:
+        raise ValueError(
+            f"{factor} main effect needs all 2x2 cells; missing {missing}")
+    by_cell = {c: {r["seed"]: r for r in cells[c]} for c in required}
+    planned = sorted(set().union(*(set(m) for m in by_cell.values())))
+    diffs, used, dropped, unpaired, undefined = [], [], [], [], []
+    for seed in planned:
+        rs = [by_cell[c].get(seed) for c in required]
+        if any(r is None for r in rs):
+            dropped.append(seed)
+            unpaired.append(seed)
+            continue
+        vals = [r.get(metric) for r in rs]
+        finite = [_finite(v) for v in vals]
+        if not all(finite):
+            dropped.append(seed)
+            if any(finite):
+                unpaired.append(seed)
+            else:
+                undefined.append(seed)
+            continue
+        used.append(seed)
+        values = {c: float(by_cell[c][seed][metric]) for c in required}
+        diffs.append(
+            sum(values[c] for c in spec["on"]) / len(spec["on"])
+            - sum(values[c] for c in spec["off"]) / len(spec["off"]))
+    ci = paired_bootstrap_ci(diffs)
+    on_vals = [float(by_cell[c][s][metric])
+               for s in used for c in spec["on"]]
+    off_vals = [float(by_cell[c][s][metric])
+                for s in used for c in spec["off"]]
+    ci["arms"] = {"a": _mean_std(on_vals), "b": _mean_std(off_vals)}
+    ci["arms_note"] = (f"pooled {factor}-on vs {factor}-off cells on the "
+                       f"paired seeds")
+    ci["baseline_mean"] = ci["arms"]["b"]["mean"]
+    ci["seeds_used"] = sorted(used)
+    ci["seeds_dropped"] = sorted(dropped)
+    ci["seeds_unpaired"] = sorted(unpaired)
+    ci["seeds_undefined"] = sorted(undefined)
+
+    mismatches, factors = [], {}
+    for left, right in spec["pairs"]:
+        audit = _controlled_audit(cells[left], cells[right])
+        mismatches.extend(audit.get("mismatches", []))
+        factors.update(audit.get("varying_factors", {}))
+        diff_keys = set((audit.get("model_factor_diffs") or {}).keys())
+        if diff_keys:
+            if diff_keys != {spec["model_key"]}:
+                mismatches.append(
+                    f"{left} vs {right}: expected only "
+                    f"{spec['model_key']} to differ in the resolved model "
+                    f"config, got {sorted(diff_keys)}")
+        elif spec["model_key"] not in (audit.get("varying_factors") or {}):
+            mismatches.append(
+                f"{left} vs {right}: no audited {spec['model_key']} "
+                f"difference between the cells")
+    seed_sets = {c: frozenset(by_cell[c]) for c in required}
+    if len(set(seed_sets.values())) != 1:
+        mismatches.append(
+            "2x2 cells do not share one seed set: "
+            + ", ".join(f"{c}={sorted(s)}" for c, s in seed_sets.items()))
+    views = [(c, j, _recipe_view(r))
+             for c in required for j, r in enumerate(cells[c])]
+    if views:
+        first = views[0][2]
+        for cell, j, view in views[1:]:
+            diff = sorted(k for k, v in first.items() if view.get(k) != v)
+            if diff:
+                mismatches.append(
+                    f"factorial recipe differs in cell {cell} run {j}: "
+                    f"{diff}")
     ci["controlled"] = {"controlled": not mismatches,
                         "mismatches": mismatches,
                         "varying_factors": factors}
@@ -1611,6 +1830,11 @@ class ContrastLog:
         direction = (HYPOTHESES.get(hyp, {}).get("direction") or {}).get(metric)
         arms = ci.get("arms") or {}
         arm_a, arm_b = arms.get("a") or {}, arms.get("b") or {}
+        # Full-run levels are stored alongside the paired levels so a reader
+        # can see exactly how much the sample restriction moved an arm mean
+        # (the decision table itself always reads ``arms``).
+        arms_all = ci.get("arms_all") or {}
+        all_a, all_b = arms_all.get("a") or {}, arms_all.get("b") or {}
         self.rows.append({
             "rule": rule, "hypothesis": hyp, "metric": metric,
             "mean": ci.get("mean"), "lo": ci.get("lo"), "hi": ci.get("hi"),
@@ -1621,9 +1845,16 @@ class ContrastLog:
             "a_n": arm_a.get("n"),
             "b_mean": arm_b.get("mean"), "b_std": arm_b.get("std"),
             "b_n": arm_b.get("n"),
+            "a_all_mean": all_a.get("mean"), "a_all_n": all_a.get("n"),
+            "b_all_mean": all_b.get("mean"), "b_all_n": all_b.get("n"),
             "arms_note": ci.get("arms_note"),
             "sesoi": sesoi,
-            "direction": direction,
+            # An equivalence prediction has no directional alternative:
+            # whichever sign the small drift takes, the claim is "inside
+            # the bound".  Keeping the directional registry value here
+            # would let a later reader misread the row as a one-sided
+            # superiority test.
+            "direction": None if equiv else direction,
             "test": "equivalence" if equiv else "difference",
             "equivalence_bound": ci.get("bound") if equiv else None,
             "equivalent": ci.get("equivalent") if equiv else None,
@@ -1679,7 +1910,8 @@ class ContrastLog:
             for mismatch in audit["mismatches"]:
                 print(f"      CONTROL WARNING: {mismatch}")
 
-    def print_equivalence(self, rule, hyp, metric, diffs, warn="") -> None:
+    def print_equivalence(self, rule, hyp, metric, diffs, warn="",
+                          bound_metric=None) -> None:
         """Add a pre-registered *null-prediction* contrast (bootstrap TOST).
 
         ``bound`` is read from the hypothesis's registered SESOI and the
@@ -1687,16 +1919,37 @@ class ContrastLog:
         ``sesoi_test``; otherwise the call raises, because running a null
         prediction through the difference machinery would misread "CI
         includes 0" (which may merely mean "underpowered") as support.
+
+        ``bound_metric`` selects a separately registered bound key when
+        the displayed metric is also used by directional contrasts (e.g.
+        H2c's reverse check displays ``accuracy_at_longest`` but registers
+        its null prediction under ``calib_minus_len_only_...``).
         """
+        key = metric if bound_metric is None else bound_metric
         entry = HYPOTHESES.get(hyp, {})
-        bound = (entry.get("sesoi") or {}).get(metric)
-        if (entry.get("sesoi_test") or {}).get(metric) != "equivalence" \
+        bound = (entry.get("sesoi") or {}).get(key)
+        if (entry.get("sesoi_test") or {}).get(key) != "equivalence" \
                 or bound is None:
             raise ValueError(
-                f"{hyp}/{metric} has no pre-registered equivalence bound "
+                f"{hyp}/{key} has no pre-registered equivalence bound "
                 f"in HYPOTHESES; register it under 'sesoi_test' first")
-        self.print(rule, hyp, metric, equivalence_test(diffs, bound),
-                   warn=warn)
+        self.print_equivalence_ci(
+            rule, hyp, metric, equivalence_test(diffs, bound), warn=warn)
+
+    def print_equivalence_ci(self, rule, hyp, metric, ci, warn="") -> None:
+        """Register an already-computed equivalence CI.
+
+        The two-arm reverse check needs the same paired-seed accounting and
+        controlled-variable audit as a directional contrast.  Building the
+        CI through ``_paired_equivalence`` and registering it here keeps the
+        TOST decision rule while refusing to print a null claim whose arms
+        were not actually paired.
+        """
+        if ci.get("test") != "equivalence":
+            raise ValueError(
+                f"{hyp}/{metric}: print_equivalence_ci needs a CI from "
+                f"equivalence_test (got test={ci.get('test')!r})")
+        self.print(rule, hyp, metric, ci, warn=warn)
 
     def finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
         # TOST p-values of equivalence rows enter the same BH family as the
@@ -2862,12 +3115,19 @@ def _enforce_reproducibility(settings: Settings, out_dir: pathlib.Path,
     return audit
 
 
-def _curve_record(hist):
+def _curve_record(hist, early_stop_info=None):
     """Per-run learning-curve summary (monitor the curve, not just the end).
 
     Stores both the reduced verdict and the raw series (steps, train loss,
     validation loss, pre-clip gradient norm), so a run that is later read
     as overfitting/plateauing can be re-examined without retraining.
+    ``steps_run`` records the number of optimizer steps actually executed
+    (from ``train_model``'s ``early_stop_info``, or the logged history as a
+    fallback) and ``stopped_early``/``restored_best`` record whether the
+    fixed epoch budget was cut short.  The controlled audit reads these:
+    ``training_recipe.steps`` is the *intended* budget, so without this
+    stamp a future early-stop could compare runs trained for different
+    numbers of steps while every recipe field still matched.
 
     The staged non-finite triage (``diagnose_nonfinite``) is persisted too:
     the training loop prints it at the step it fires, but a console line is
@@ -2928,6 +3188,16 @@ def _curve_record(hist):
                      for h in train],
         "curve_verdict": verdict["verdict"],
         "curve_recommendation": verdict["recommendation"],
+        "steps_run": int(
+            (early_stop_info or {}).get("steps_run")
+            if (early_stop_info or {}).get("steps_run") is not None
+            else max((int(h["step"]) for h in hist), default=-1) + 1),
+        "early_stop_enabled": bool(
+            (early_stop_info or {}).get("enabled", False)),
+        "stopped_early": bool(
+            (early_stop_info or {}).get("stopped_early", False)),
+        "restored_best": bool(
+            (early_stop_info or {}).get("restored_best", False)),
     }
 
 
@@ -2962,15 +3232,18 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
     params = sum(p.numel() for p in model.parameters())
     eval_every = (max(1, settings.steps // settings.curve_points)
                   if settings.curve_points > 0 else 0)
+    early_stop_info = {}
     hist = train_model(model, steps=settings.steps, batch=settings.batch,
                        n_pairs=settings.n_pairs, lr=lr, vocab=settings.vocab,
                        device=settings.device, log_every=0, seed=seed,
                        eval_every=eval_every, val_batches=settings.val_batches,
-                       permute_labels=permute_labels)
+                       permute_labels=permute_labels,
+                       early_stop_info=early_stop_info)
     metrics = eval_metrics(model, settings.n_pairs, settings.vocab,
                            settings.device, batch=settings.eval_batch,
                            batches=settings.eval_batches, seed=eval_seed)
-    return model, params, metrics, _curve_record(hist), model_cfg
+    return model, params, metrics, _curve_record(hist, early_stop_info), \
+        model_cfg
 
 
 def tune_shared_recipe(settings: Settings):
@@ -4515,6 +4788,26 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         clog.print(f"calib - {label}", "H1d", "abs_gate_vs_entropy",
                    _paired_diff(by_gate["calib"], rs, "abs_gate_vs_entropy"),
                    warn=_curve_warn(("calib", by_gate["calib"]), (label, rs)))
+    # Full-factorial companion to the conditional leave-one-out rows: the
+    # concentration term's effect averaged over both levels of the length
+    # term.  The length main effect at a *fixed* training length is a
+    # constant absorbed by the gate bias (the hypothesis says so), so it is
+    # tested where it varies (H2c), not here.  These rows go through the
+    # same FDR family as the LOO contrasts.
+    factorial_cells = {"full": by_gate["calib"]}
+    for cell in _CALIB_FACTORIAL_CELLS:
+        if cell != "full":
+            factorial_cells[cell] = ablation_runs[cell]
+    factorial_warn = _curve_warn(
+        *[(cell, factorial_cells[cell]) for cell in _CALIB_FACTORIAL_CELLS])
+    print(f"\n[e1] H1d factorial main effect (concentration term): the "
+          f"average of full-vs-len_only and ent_only-vs-no_terms, i.e. the "
+          f"term's contribution averaged over both length-term levels (the "
+          f"LOO rows above are conditional on the other term being on):")
+    for metric in ("accuracy", "gate_margin", "abs_gate_vs_entropy"):
+        ci = _factorial_main_effect(factorial_cells, metric, "concentration")
+        clog.print("concentration main effect (2x2)", "H1d", metric, ci,
+                   warn=factorial_warn)
     print(f"\n[e1] H1f active-control (placebo) contrasts: full calib vs "
           f"the shuffled-entropy arm (identical architecture/parameters/"
           f"recipe; only the signal's link to the read row changes).  A "
@@ -4979,17 +5272,52 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
           f"removes additive terms from the full gate at identical recipe; "
           f"only the calibration-term flags vary, so the full 2x2 is "
           f"measured across the length sweep):")
-    for arm in ("calib_ent_only", "calib_len_only", "calib_no_terms"):
+    for arm in ("calib_ent_only", "calib_no_terms"):
         rs = by_variant[arm]
         warn = _curve_warn(("calib", calib_runs), (arm, rs))
         clog.print(f"calib - {arm}", "H2c", "accuracy_at_longest",
                    _paired_diff(calib_runs, rs, "accuracy_at_longest"),
                    warn=warn)
-    for arm in ("calib_ent_only", "calib_no_terms"):
         clog.print(f"calib - {arm}", "H2c", "accuracy_drop",
-                   _paired_diff(calib_runs, by_variant[arm], "accuracy_drop"),
-                   warn=_curve_warn(("calib", calib_runs),
-                                    (arm, by_variant[arm])))
+                   _paired_diff(calib_runs, rs, "accuracy_drop"),
+                   warn=warn)
+    # Reverse check: H2c predicts the length-only arm *stays close* to the
+    # full arm.  That is a null prediction, so a non-significant
+    # superiority test would not support it; use the pre-registered TOST
+    # bound on both the long-length level and the drop.  The contrast keeps
+    # the same pairing and controlled audit as the directional rows.
+    reverse_warn = _curve_warn(
+        ("calib", calib_runs), ("calib_len_only", by_variant["calib_len_only"]))
+    for metric, bound_key in (
+        ("accuracy_at_longest", "calib_minus_len_only_accuracy_at_longest"),
+        ("accuracy_drop", "calib_minus_len_only_accuracy_drop"),
+    ):
+        ci = _paired_equivalence(
+            calib_runs, by_variant["calib_len_only"], metric,
+            HYPOTHESES["H2c"]["sesoi"][bound_key])
+        clog.print_equivalence_ci(
+            "calib - calib_len_only (reverse check)", "H2c", metric, ci,
+            warn=reverse_warn)
+    # Full-factorial companion: the length term's effect averaged over both
+    # concentration-term levels, on the long-length level and on the
+    # base-to-long drop.  The LOO rows above are conditional on the
+    # concentration term being on; this row answers whether the length term
+    # carries an average contribution in the complete 2x2.
+    e2_factorial_cells = {"full": calib_runs}
+    for cell in _CALIB_FACTORIAL_CELLS:
+        if cell != "full":
+            e2_factorial_cells[cell] = by_variant[cell]
+    factorial_warn = _curve_warn(
+        *[(cell, e2_factorial_cells[cell])
+          for cell in _CALIB_FACTORIAL_CELLS])
+    print(f"\n[e2] H2c factorial main effect (length term): the average of "
+          f"full-vs-len_only and ent_only-vs-no_terms, i.e. the length "
+          f"term's contribution averaged over both concentration-term "
+          f"levels:")
+    for metric in ("accuracy_at_longest", "accuracy_drop"):
+        ci = _factorial_main_effect(e2_factorial_cells, metric, "length")
+        clog.print("length main effect (2x2)", "H2c", metric, ci,
+                   warn=factorial_warn)
     clog.finalize(out_dir, q=settings.fdr_q)
     _write_json(out_dir / "e2_summary.json",
                 {label: {str(L): _mean_std([r["accuracy_by_length"][L]
