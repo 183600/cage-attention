@@ -272,9 +272,7 @@ def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.T
     """``(B*h, 1, T)`` additive mask rows for the query positions ``pos``.
 
     Row ``b`` is 0 up to column ``pos[b]`` and ``-inf`` beyond it - exactly
-    row ``pos[b]`` of the cached causal mask, so the rows are gathered from
-    the cache and expanded over the heads instead of being rebuilt with a
-    compare/shift/fill pass over ``B*h*T`` elements.
+    row ``pos[b]`` of the cached causal mask, expanded over the heads.
     """
     B = pos.size(0)
     rows = _causal_mask(T, pos.device, dtype).index_select(0, pos)
@@ -405,10 +403,8 @@ def _release_scratch(*names: str) -> None:
 def _balanced_step(n: int, cap: int) -> int:
     """Balanced chunk size covering ``n`` units in ``ceil(n/cap)`` chunks.
 
-    A plain ``cap`` sized chunk leaves the tail chunk arbitrarily small
-    (``n % cap``), and the backward of a tiny tail GEMM is pure dispatch
-    overhead.  Splitting evenly keeps every chunk within the ``cap`` while
-    making all chunks the same size (within one unit).
+    Every chunk stays within ``cap`` and all chunks have the same size
+    (within one unit), including the tail chunk.
     """
     if n <= cap:
         return n
@@ -430,14 +426,9 @@ def _layer_norm_into(ln: nn.LayerNorm, x: torch.Tensor,
                      key: str = "ln_out") -> torch.Tensor:
     """``ln(x)`` for the no-grad forward path.
 
-    On CUDA the result is written into reusable buffers: the ``.out``
-    variant is a real out-of-place-free kernel there, so it keeps the
-    scratch stable across calls and the transient mean/rstd allocations
-    out of the caching allocator.  On CPU ``native_layer_norm.out`` is a
-    composite that runs the functional kernel and then copies all three
-    results into the buffers - three extra copies and three extra
-    temporaries per call - so the functional call is used directly (same
-    kernel, identical values, no copies).
+    On CUDA the result is written into the reusable buffers named ``key`` /
+    ``"ln_mean"`` / ``"ln_rstd"``; on CPU the functional call is used
+    directly (same kernel, identical values).
 
     ``key`` names a *disjoint* CUDA output buffer: callers whose input may
     be a view of the block-level ``"ln_out"`` scratch (the final
@@ -669,9 +660,8 @@ class _CalibAttn(torch.autograd.Function):
             d_s = _softmax_grad_from_p(d_p, p, ge,
                                        buf=None if gbuf is None else gbuf[:n],
                                        mbuf=None if mbuf is None else mbuf[:n])
-            # The reversed block order writes the widest block first; the
-            # later (narrower) blocks accumulate into a prefix slice of
-            # ``d_v`` / ``d_k``.
+            # The first block writes ``d_v`` / ``d_k`` outright; later
+            # blocks accumulate into their prefix slice.
             if first:
                 torch.bmm(p.transpose(1, 2), g, out=d_v)
                 torch.baddbmm(zero, d_s.transpose(1, 2), q[:, i0:i1],
@@ -893,9 +883,9 @@ class _NullAttn(torch.autograd.Function):
             d_s = d_u.mul_(p).mul_(scale)
             d_s0 = gu0.mul_(p0).mul_(scale)
             if multi:
-                # Reversed order: the widest block writes ``d_v`` / ``d_k``
-                # outright; the narrower ones add their ``(i1, dk)``
-                # contribution into the leading ``i1`` columns.
+                # The first block writes ``d_v`` / ``d_k`` outright; later
+                # blocks add their ``(i1, dk)`` contribution into the
+                # leading ``i1`` columns.
                 if first:
                     torch.bmm(p.transpose(1, 2), g, out=d_v)
                     torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)

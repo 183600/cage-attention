@@ -221,15 +221,10 @@ def validate_batch(idx, targets, meta, vocab) -> dict:
 def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
     """``validate_batch``'s invariants as one device-side predicate.
 
-    The strict checker below reads every condition back to the host
-    (``bool(...)`` per check, ~15 synchronization points per batch), which
-    the training loop pays on every step and every validation batch for a
-    batch that is essentially always valid.  Here the same conditions are
-    accumulated on the device and read back with a single ``bool()``.
-
-    Anything the fast path cannot evaluate (non-tensor inputs, unexpected
-    meta entries, wrong shapes, ...) reports ``False`` and is left to the
-    strict checker, which raises exactly as before.  The fast path never
+    The same conditions as the strict checker below, accumulated on the
+    device; anything that cannot be evaluated (non-tensor inputs,
+    unexpected meta entries, wrong shapes, ...) reports ``False`` and is
+    left to the strict checker, which raises.  The predicate never
     *accepts* a batch the strict checker would reject: every condition of
     the strict checker is mirrored here, shape-level conditions as host
     checks and value-level ones as device checks.
@@ -887,18 +882,18 @@ def _self_test() -> int:
     except ValueError:
         check("validate_rejects_reserved_answer", True)
 
-    # The single-sync fast path that guards every training batch must agree
-    # with the strict checker exactly: it may not accept a batch the strict
-    # checker rejects (that would silently disable the cleaning gate), and
-    # it may not reject a valid one.
+    # The predicate that guards every training batch must agree with the
+    # strict checker exactly: it may not accept a batch the strict checker
+    # rejects (that would silently disable the cleaning gate), and it may
+    # not reject a valid one.
     def gate_agrees(i_, t_, m_, vocab_):
-        fast = _batch_invariants_hold(i_, t_, m_, vocab_)
+        held = _batch_invariants_hold(i_, t_, m_, vocab_)
         try:
             _validate_batch_strict(i_, t_, m_, vocab_)
             strict = True
         except Exception:  # noqa: BLE001 - any raise is a rejection
             strict = False
-        return fast == strict
+        return held == strict
 
     nan_idx = sparse_idx.clone().float()
     nan_idx[0, 0] = float("nan")
@@ -931,7 +926,7 @@ def _self_test() -> int:
             "target_out_of_range": (sparse_idx, soft_tgt, sparse_meta),
             "final_target_wrong": (sparse_idx, final_tgt, sparse_meta),
     }.items():
-        check(f"fast_path_agrees_{name}", gate_agrees(i_, t_, m_, 64))
+        check(f"invariants_agree_{name}", gate_agrees(i_, t_, m_, 64))
 
     if failures:
         print("data self-test FAILED: " + ", ".join(failures))
