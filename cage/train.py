@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import math
+import os
+import threading
+import time
 
 import torch
 import torch.nn as nn
@@ -124,6 +127,20 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
     its best by more than ``rel_tol`` of that best, and the recommendation
     then names the early-stop point.
 
+    The window is only half the reading, so the *tail* is read too:
+    ``late_train_delta`` / ``late_val_delta`` refit the same relative
+    delta on the last third of the logged points, which separates "was
+    still improving when the budget ran out" (plateau verdict with a
+    falling tail -> more steps, not a broken pipeline) from a run whose
+    final regime matches the global slope.  ``val_loss_se_last`` is the
+    batch-sampling standard error of the last validation point (from
+    :func:`_validation_metrics`), and ``late_overfit_significant`` marks
+    whether ``val_regression_after_best`` exceeds two of those SEs - a
+    surface that is noisier than the regression is not evidence of
+    overfitting.  ``lr_first`` / ``lr_last`` let the reader check that the
+    cosine schedule actually ran (a flat tail can be an lr that never
+    annealed).
+
     Returns a dict with the verdict, the relative deltas, the best
     validation point and a human-readable ``recommendation``.
     """
@@ -144,6 +161,15 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
         "best_val_step": None,
         "val_regression_after_best": float("nan"),
         "late_overfit": False,
+        "late_overfit_significant": False,
+        "late_train_delta": float("nan"),
+        "late_val_delta": float("nan"),
+        "val_loss_se_last": float("nan"),
+        "val_change_abs": float("nan"),
+        "val_noise_2se": float("nan"),
+        "val_movement_significant": False,
+        "lr_first": float("nan"),
+        "lr_last": float("nan"),
         "grad_norm_max": float("nan"),
         "grad_norm_last": float("nan"),
         "grad_norm_explode_count": 0,
@@ -200,6 +226,40 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
                 > rel_tol * abs(out["best_val_loss"])):
             out["late_overfit"] = True
 
+    # Tail reading: the last third answers "was it still improving when the
+    # budget ran out?", which the window fit averages away.
+    if len(finite) >= 3:
+        k = max(2, int(math.ceil(len(finite) / 3.0)))
+        out["late_train_delta"] = rel_delta(finite[-k:], "train_loss")
+        if len(val) >= 3:
+            out["late_val_delta"] = rel_delta(val[-k:], "val_loss")
+    val_se = [float(h["val_loss_se"]) for h in val
+              if h.get("val_loss_se") is not None
+              and math.isfinite(float(h["val_loss_se"]))]
+    if val_se:
+        out["val_loss_se_last"] = val_se[-1]
+        if (out["late_overfit"] and out["val_loss_se_last"] > 0.0
+                and math.isfinite(out["val_regression_after_best"])):
+            out["late_overfit_significant"] = bool(
+                out["val_regression_after_best"] > 2.0 * out["val_loss_se_last"])
+    if len(val) >= 2 and val_se:
+        # Is the monitored validation *movement* (first -> last) larger than
+        # the batch-sampling noise of a single evaluation?  With only a
+        # couple of validation batches the SE can be a sizeable fraction of
+        # the loss, and a "flat" verdict read from a curve whose movement is
+        # inside 2 SE says more about the monitor's resolution than about
+        # the model.
+        out["val_change_abs"] = float(val[-1]["val_loss"] - val[0]["val_loss"])
+        out["val_noise_2se"] = float(2.0 * val_se[-1])
+        out["val_movement_significant"] = bool(
+            out["val_noise_2se"] > 0.0
+            and abs(out["val_change_abs"]) > out["val_noise_2se"])
+    lrs = [float(h["lr"]) for h in finite if h.get("lr") is not None
+           and math.isfinite(float(h["lr"]))]
+    if lrs:
+        out["lr_first"] = lrs[0]
+        out["lr_last"] = lrs[-1]
+
     td, vd = out["train_delta"], out["val_delta"]
     if unstable:
         pass
@@ -239,13 +299,32 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
         out["recommendation"] = (
             "neither curve moves: underfitting, wrong learning rate, or a "
             "data-pipeline problem - not convergence")
+        if (math.isfinite(out["late_train_delta"])
+                and out["late_train_delta"] < -rel_tol):
+            out["recommendation"] = (
+                "the window fit is flat but the last third of training is "
+                "still improving: the budget may simply be too short for "
+                "this recipe (raise steps before calling it underfit)")
+    if (not out["val_movement_significant"]
+            and math.isfinite(out["val_change_abs"])
+            and out["verdict"] not in ("numerical_instability",
+                                       "insufficient_points")):
+        out["recommendation"] = (
+            f"{out['recommendation']}; the validation movement "
+            f"({out['val_change_abs']:+.4f}) is within 2x the last "
+            f"validation-batch SE ({out['val_noise_2se']:.4f}), so the "
+            f"val-side read has the monitor's resolution, not the model's")
     if out["late_overfit"] and out["verdict"] not in (
             "overfitting", "numerical_instability"):
+        sig = ("the regression is real (larger than 2x the last validation "
+               "SE)" if out["late_overfit_significant"] else
+               "but the regression is within ~2x the validation-batch SE, "
+               "so it may be stream noise rather than overfitting")
         out["recommendation"] = (
             f"{out['recommendation']}; late overfitting: val loss is "
             f"{out['val_regression_after_best']:.4f} above its best "
             f"(@ step {out['best_val_step']}) - the global slope hides it, "
-            f"the early-stop point is best_val_step")
+            f"the early-stop point is best_val_step; {sig}")
     if out["grad_norm_explode_count"]:
         out["grad_note"] = (
             f"{out['grad_norm_explode_count']} logged step(s) had a pre-clip "
@@ -518,9 +597,11 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     checkpoint, and never the reported test stream.  Validation forwards
     run in eval mode, so they draw *no* RNG and do not perturb the training
     trajectory.  ``hist`` entries are dicts
-    ``{"step", "train_loss"[, "val_loss", "val_acc"]}``  to be fed to
-    :func:`training_curve_verdict` (monitoring the curve instead of only
-    the final number is what catches over/underfitting).
+    ``{"step", "train_loss", "lr"[, "val_loss", "val_acc", "val_loss_se"]}``
+    to be fed to :func:`training_curve_verdict` (monitoring the curve
+    instead of only the final number is what catches over/underfitting;
+    ``lr`` proves the cosine schedule actually annealed and ``val_loss_se``
+    gives the batch-sampling noise of each monitored point).
 
     ``early_stop_patience`` (opt-in, default off): stop once the monitored
     validation loss has not improved for that many consecutive evaluations.
@@ -572,7 +653,8 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         _, loss, _ = model(idx, tgt, sup_pos=sup_pos)
         loss.backward()
         lv = loss.item()
-        entry = {"step": step, "train_loss": lv}
+        entry = {"step": step, "train_loss": lv,
+                 "lr": float(opt.param_groups[0]["lr"])}
         if not math.isfinite(lv):
             diag = diagnose_nonfinite(model, idx, diag_tgt, meta, vocab,
                                       device=device, dense_lm=dense_lm)
@@ -622,11 +704,12 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         is_log = (log_every > 0 and step % log_every == 0) or step == steps - 1
         do_val = (eval_every > 0 and (step % eval_every == 0 or step == steps - 1))
         if do_val:
-            val_loss, val_acc, val_batch = _validation_metrics(
+            val_loss, val_acc, val_batch, val_loss_se = _validation_metrics(
                 model, val_gen, n_pairs, vocab, device, batch, val_batches,
                 dense_lm)
             entry["val_loss"] = val_loss
             entry["val_acc"] = val_acc
+            entry["val_loss_se"] = val_loss_se
             if not math.isfinite(val_loss):
                 # Run the staged triage on the exact validation batch that
                 # produced the value, so an eval-stream data problem can be
@@ -848,10 +931,14 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     unaffected by monitoring.  Every validation batch passes the shared
     data-cleaning gate, so monitoring never reads invalid data.
 
-    Returns ``(loss, accuracy, last_batch)`` where ``last_batch`` is the
-    ``(idx, targets, meta)`` of the final validation forward, so a
+    Returns ``(loss, accuracy, last_batch, loss_se)`` where ``last_batch``
+    is the ``(idx, targets, meta)`` of the final validation forward, so a
     non-finite validation loss can be run through the staged
-    ``diagnose_nonfinite`` triage on the exact batch that produced it.
+    ``diagnose_nonfinite`` triage *on the exact batch that produced it*.
+    ``loss_se`` is the standard error of the per-batch losses
+    (``std / sqrt(n_batches)``, sample std), i.e. the batch-sampling noise
+    of the monitored loss: a validation regression smaller than a couple
+    of SEs is not distinguishable from re-drawing the validation stream.
     """
     was_training = model.training
     model.eval()
@@ -859,6 +946,7 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
     last_batch = None
+    batch_losses = []
     val_gen.manual_seed(VAL_SEED)
     for i in range(max(1, batches)):
         # Batch construction stays outside inference_mode so the returned
@@ -871,6 +959,7 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
         with torch.inference_mode():
             logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
             total_loss.add_(loss.detach().to(torch.float64))
+            batch_losses.append(float(loss.detach()))
             if dense_lm:
                 # Dense training supervises every position, so the forward
                 # returns the full-sequence logits flattened row-major; the
@@ -884,9 +973,16 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
             total += idx.size(0)
     model.train(was_training)
     n_batches = max(1, batches)
+    if len(batch_losses) > 1:
+        mean_loss = sum(batch_losses) / len(batch_losses)
+        var = sum((x - mean_loss) ** 2 for x in batch_losses) \
+            / (len(batch_losses) - 1)
+        loss_se = math.sqrt(var / len(batch_losses))
+    else:
+        loss_se = float("nan")
     return (total_loss.item() / n_batches,
             correct.item() / total if total else float("nan"),
-            last_batch)
+            last_batch, loss_se)
 
 
 def estimate_forward_flops(model, seq_len: int) -> int:
@@ -915,6 +1011,159 @@ def estimate_forward_flops(model, seq_len: int) -> int:
     if cfg.norm == "seednorm":
         per_layer += 4 * T * C * C   # two dynamic scale projections
     return int(L * per_layer + 2 * T * C * V)
+
+
+def estimate_attention_peak_mb(model, seq_len, batch=1, bytes_per=4):
+    """Deterministic attention-buffer peak of the fixed chunked kernel (MB).
+
+    The fixed design materialises one query block of the ``(B*H, rows, T)``
+    score matrix at a time (``_query_blocks`` of ``cage/model.py``, D3:
+    ``max_rows = max(32, (1 << 20) // (bh * T))``), so the attention path's
+    transient memory is *bounded* independent of ``T`` - the property behind
+    the recompute-not-store kernels (D6).  This returns the two-block bound
+    the forward holds (the score block ``calib_s`` plus the entropy temp
+    ``calib_f``), in MB, computed through ``_query_blocks`` itself so the
+    number cannot drift from the pinned formula.  Returns NaN if the helper
+    is unavailable.
+    """
+    try:
+        from .model import _query_blocks  # local: pinned helper, no cycle
+        cfg = model.cfg
+        bh = int(batch) * int(cfg.n_heads)
+        T = int(seq_len)
+        rows = max(r - s for s, r in _query_blocks(bh, T))
+        return 2.0 * bh * rows * T * float(bytes_per) / (1024.0 * 1024.0)
+    except Exception:  # noqa: BLE001 - a cost probe must not break a run
+        return float("nan")
+
+
+def _rss_bytes():
+    """Current resident set size in bytes, or ``None`` where unavailable.
+
+    Linux exposes it cheaply through ``/proc/self/statm`` (second field =
+    resident pages); other platforms return ``None`` and the memory probe
+    degrades to a NaN instead of inventing a number.
+    """
+    try:
+        with open("/proc/self/statm", "r", encoding="ascii") as fh:
+            resident_pages = int(fh.read().split()[1])
+        return resident_pages * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError, AttributeError):
+        return None
+
+
+def efficiency_profile(model, seq_len, device="cpu", reps=5, warmup=2):
+    """Measured cost of one inference forward at ``seq_len``.
+
+    Accuracy alone is half of a result: a +0.5% accuracy at 10x forward
+    cost is a different finding from +0.5% at equal cost, and the fixed
+    experiment contract compares variants that differ in *computation*
+    (the gate projection, the entropy readout, the two dynamic-scale
+    projections of seednorm), so the trade-off has to be measured on the
+    same instance that produced the metrics.  Returns
+
+    * ``params``         - trainable parameter count (capacity);
+    * ``flops_forward``  - analytic matmul-only FLOPs of one full-sequence
+      forward (:func:`estimate_forward_flops`); elementwise work is
+      excluded, so it is a lower bound;
+    * ``latency_ms``     - median wall-clock time of ``reps`` timed
+      forwards after ``warmup`` warmups, with ``latency_ms_min/_max``
+      companions (a shared runner makes single timings noisy; the min/max
+      bracket shows how noisy);
+    * ``attn_peak_mb``   - deterministic peak of the fixed chunked
+      attention buffers (:func:`estimate_attention_peak_mb`); the memory
+      term that grows with ``T`` and is bounded by the D3 block formula;
+    * ``host_mem_delta_mb`` - peak growth of this process' RSS while the
+      timed forwards run (sampled from ``/proc/self/statm``).  This is a
+      coarse *process-level* high-water mark: allocator caches mean it
+      only reads the extra pages this model's forwards needed beyond the
+      process' current footprint, so it is comparable within one
+      measurement session but not across processes; NaN where the probe
+      is unavailable;
+    * ``device_mem_mb``  - peak CUDA memory allocated during the timed
+      forwards; NaN on CPU.
+
+    The latency column is the only place the elementwise work that the
+    analytic FLOPs exclude (softmax, entropy, normalisation) shows up, and
+    the memory column is the only place the recompute-not-store kernels'
+    footprint shows up - which is exactly where the fixed kernel design
+    trades compute for memory.
+
+    Measurement never raises: every probe degrades to NaN on failure, so
+    a cost readout can never invalidate a training run.  The model's
+    train/eval mode is restored and timing runs under ``inference_mode``
+    so nothing accumulates.
+    """
+    seq_len = int(seq_len)
+    out = {
+        "cost_seq_len": seq_len,
+        "params": int(sum(p.numel() for p in model.parameters())),
+        "flops_forward": float(estimate_forward_flops(model, seq_len)),
+        "attn_peak_mb": estimate_attention_peak_mb(model, seq_len),
+        "latency_ms": float("nan"),
+        "latency_ms_min": float("nan"),
+        "latency_ms_max": float("nan"),
+        "host_mem_delta_mb": float("nan"),
+        "device_mem_mb": float("nan"),
+    }
+    try:
+        x = torch.zeros((1, seq_len), dtype=torch.long, device=device)
+    except Exception:  # noqa: BLE001 - a cost probe must not break a run
+        return out
+    cuda = str(device).startswith("cuda") and torch.cuda.is_available()
+    was_training = model.training
+    model.eval()
+    times = []
+    try:
+        with torch.inference_mode():
+            if cuda:
+                torch.cuda.synchronize()
+                torch.cuda.reset_peak_memory_stats()
+            # The high-water mark is taken from *before* the warmup so the
+            # allocator's cached blocks from the first forwards (the real
+            # activation footprint) are counted, not hidden by reuse.
+            baseline = _rss_bytes()
+            stop = threading.Event()
+            peak = [baseline if baseline is not None else 0]
+            sampler = None
+            if baseline is not None:
+                def _sample():
+                    while not stop.is_set():
+                        rss = _rss_bytes()
+                        if rss is not None and rss > peak[0]:
+                            peak[0] = rss
+                        time.sleep(0.0005)
+                sampler = threading.Thread(target=_sample, daemon=True)
+                sampler.start()
+            for _ in range(max(0, int(warmup))):
+                model(x)
+            for _ in range(max(1, int(reps))):
+                if cuda:
+                    torch.cuda.synchronize()
+                t0 = time.perf_counter()
+                model(x)
+                if cuda:
+                    torch.cuda.synchronize()
+                times.append((time.perf_counter() - t0) * 1e3)
+            if sampler is not None:
+                stop.set()
+                sampler.join(timeout=1.0)
+            if baseline is not None:
+                out["host_mem_delta_mb"] = max(
+                    0.0, (peak[0] - baseline) / (1024.0 * 1024.0))
+            if cuda:
+                out["device_mem_mb"] = (
+                    torch.cuda.max_memory_allocated() / (1024.0 * 1024.0))
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        model.train(was_training)
+    if times:
+        times.sort()
+        out["latency_ms"] = times[len(times) // 2]
+        out["latency_ms_min"] = times[0]
+        out["latency_ms_max"] = times[-1]
+    return out
 
 
 def _label_audit(idx, meta):
@@ -964,6 +1213,11 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     * ``attn_mass_on_key``          - mean attention mass on the correct
       key position in the last block: did the model fail to *find* the
       right key, or did it find it and then *read out* the wrong value?
+    * ``attn_mass_on_key_by_layer`` - the same mass at *every* block, so
+      a last-layer miss can be told apart from a key that was found in an
+      intermediate block and lost again (the fixed readout composes
+      match-then-shift, so a mid-stack hit that does not survive to the
+      last block is a distinct failure mode);
     * ``pred_in_context``           - prediction is one of the visible
       values (retrieval confusion) vs an out-of-context token (readout
       failure);
@@ -975,8 +1229,10 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     * ``label_ok`` / ``error_type`` - whether the annotation of *this*
       sample is valid (``_label_audit``) and a mutually-exclusive bucket:
       ``label_error`` > ``hard_structural`` > ``retrieval_miss``
-      (attention mass < 0.5 on the correct key) > ``readout_wrong``
-      (key found, wrong value read out);
+      (attention mass < 0.5 on the correct key in *every* block) >
+      ``found_then_lost`` (mass >= 0.5 in some block but < 0.5 in the
+      last one) > ``readout_wrong`` (key still found in the last block,
+      wrong value read out);
     * ``key_pair_idx``              - position of the matching pair;
       aggregated into early/mid/late error rates (long-range retrieval).
 
@@ -1031,13 +1287,17 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
                      for k in ("high", "low", "in_ctx", "naive", "repeat")}
     taxonomy = {k: torch.zeros((), dtype=i64, device=device)
                 for k in ("label_error", "hard_structural",
-                          "retrieval_miss", "readout_wrong")}
+                          "retrieval_miss", "found_then_lost",
+                          "readout_wrong")}
     n_err = torch.zeros((), dtype=i64, device=device)
     n_label_err = torch.zeros((), dtype=i64, device=device)
     mass_err = torch.zeros((), dtype=torch.float64, device=device)
     mass_err_n = torch.zeros((), dtype=i64, device=device)
     mass_corr = torch.zeros((), dtype=torch.float64, device=device)
     mass_corr_n = torch.zeros((), dtype=i64, device=device)
+    layer_mass_err = None   # per-layer sums over error samples (float64)
+    layer_mass_corr = None
+    n_layers_seen = 0
     tertile_n = torch.zeros(3, dtype=i64, device=device)
     tertile_err = torch.zeros(3, dtype=i64, device=device)
     key_wrong_total = torch.zeros((), dtype=torch.float64, device=device)
@@ -1078,6 +1338,11 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
             layered = torch.stack(
                 [per_layer_mass[i] for i in sorted(per_layer_mass)], dim=0)
             mass_last, mass_mean = layered[-1], layered.mean(0)
+            if layer_mass_err is None:
+                layer_mass_err = torch.zeros(
+                    layered.size(0), dtype=torch.float64, device=device)
+                layer_mass_corr = torch.zeros_like(layer_mass_err)
+                n_layers_seen = layered.size(0)
             probs = logits.squeeze(1).softmax(-1)
             conf, pred = probs.max(-1)
             top2 = probs.topk(2, dim=-1).values
@@ -1099,6 +1364,8 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
             mass_err_n += m_e.numel()
             mass_corr += m_c.sum().double()
             mass_corr_n += m_c.numel()
+            layer_mass_err += layered[:, wrong].sum(dim=1).double()
+            layer_mass_corr += layered[:, ~wrong].sum(dim=1).double()
 
             flags = _error_case_flags(idx, meta, pred, n_pairs)
             flags_summary["high"] += (wrong & (conf >= 0.9)).sum()
@@ -1107,6 +1374,10 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
             flags_summary["naive"] += (wrong & flags["naive_confusable"]).sum()
             flags_summary["repeat"] += (wrong & flags["value_repeats"]).sum()
             key_right = mass_last >= 0.5
+            # A key that clears the mass threshold in *some* block but not
+            # in the last one was found mid-stack and lost again; calling
+            # that a plain retrieval miss would hide where retrieval broke.
+            found_any = (layered >= 0.5).any(dim=0)
             key_wrong_total += mass_last[wrong & ~key_right].sum().double()
             key_wrong_n += (wrong & ~key_right).sum()
             key_right_total += mass_last[wrong & key_right].sum().double()
@@ -1114,11 +1385,15 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
 
             ambiguous = flags["naive_confusable"] | flags["value_repeats"]
             key_missed = ~key_right
+            lost = key_missed & found_any
+            never_found = key_missed & ~found_any
             taxonomy["label_error"] += (wrong & ~label_ok).sum()
             taxonomy["hard_structural"] += (
                 wrong & label_ok & ambiguous).sum()
             taxonomy["retrieval_miss"] += (
-                wrong & label_ok & ~ambiguous & key_missed).sum()
+                wrong & label_ok & ~ambiguous & never_found).sum()
+            taxonomy["found_then_lost"] += (
+                wrong & label_ok & ~ambiguous & lost).sum()
             taxonomy["readout_wrong"] += (
                 wrong & label_ok & ~ambiguous & ~key_missed).sum()
 
@@ -1131,12 +1406,14 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
                     margin_l = margin.tolist()
                     mass_last_l = mass_last.tolist()
                     mass_mean_l = mass_mean.tolist()
+                    mass_layers_l = layered.transpose(0, 1).tolist()
                     pred_l = pred.tolist()
                     answer_l = answer.tolist()
                     kp_l = key_pair_idx.tolist()
                     label_ok_l = label_ok.tolist()
                     ambiguous_l = ambiguous.tolist()
                     key_missed_l = key_missed.tolist()
+                    never_found_l = never_found.tolist()
                     pic_l = flags["pred_in_context"].tolist()
                     nc_l = flags["naive_confusable"].tolist()
                     vr_l = flags["value_repeats"].tolist()
@@ -1150,7 +1427,8 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
                         elif ambiguous_l[b]:
                             etype = "hard_structural"
                         elif key_missed_l[b]:
-                            etype = "retrieval_miss"
+                            etype = ("retrieval_miss" if never_found_l[b]
+                                     else "found_then_lost")
                         else:
                             etype = "readout_wrong"
                         context = [int(t) for t in idx[b].tolist()]
@@ -1166,6 +1444,8 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
                             "margin": float(margin_l[b]),
                             "attn_mass_on_key": float(mass_last_l[b]),
                             "attn_mass_on_key_mean_layers": float(mass_mean_l[b]),
+                            "attn_mass_on_key_by_layer": [
+                                float(v) for v in mass_layers_l[b]],
                             "pred_in_context": bool(pic_l[b]),
                             "naive_confusable": bool(nc_l[b]),
                             "value_repeats": bool(vr_l[b]),
@@ -1192,6 +1472,9 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     tertile_err = [int(v) for v in tertile_err.tolist()]
     key_wrong_total, key_wrong_n = float(key_wrong_total), int(key_wrong_n)
     key_right_total, key_right_n = float(key_right_total), int(key_right_n)
+    if layer_mass_err is not None:
+        layer_mass_err = [float(v) for v in layer_mass_err.tolist()]
+        layer_mass_corr = [float(v) for v in layer_mass_corr.tolist()]
 
     def _share(count):
         return count / n_err if n_err else float("nan")
@@ -1205,6 +1488,7 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
         "taxonomy_label_error": _share(taxonomy["label_error"]),
         "taxonomy_hard_structural": _share(taxonomy["hard_structural"]),
         "taxonomy_retrieval_miss": _share(taxonomy["retrieval_miss"]),
+        "taxonomy_found_then_lost": _share(taxonomy["found_then_lost"]),
         "taxonomy_readout_wrong": _share(taxonomy["readout_wrong"]),
         "share_high_conf": _share(flags_summary["high"]),
         "share_low_conf": _share(flags_summary["low"]),
@@ -1224,6 +1508,17 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     }
     summary["attn_mass_gap"] = summary["attn_mass_on_key_correct"] - \
         summary["attn_mass_on_key_error"]
+    if layer_mass_err is not None:
+        summary["attn_mass_on_key_error_by_layer"] = [
+            (v / mass_err_n) if mass_err_n else float("nan")
+            for v in layer_mass_err]
+        summary["attn_mass_on_key_correct_by_layer"] = [
+            (v / mass_corr_n) if mass_corr_n else float("nan")
+            for v in layer_mass_corr]
+        summary["attn_mass_on_key_layer_gap"] = [
+            c - e for c, e in zip(summary["attn_mass_on_key_correct_by_layer"],
+                                  summary["attn_mass_on_key_error_by_layer"])]
+        summary["n_layers_seen"] = int(n_layers_seen)
     return stats, {"cases": cases, "summary": summary}
 
 
