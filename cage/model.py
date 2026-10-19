@@ -1182,23 +1182,18 @@ class Attention(nn.Module):
                 y4 = y.view(B, h, T, dk)
                 ent = None if ent is None else ent.view(B, h, T)
             else:
-                # No-grad: ungated variants have the kernel write into the
-                # ``(B, T, H, dk)`` projection input.  Gated variants keep
-                # the kernel's head-major output and fold the gate into the
-                # layout conversion below.
-                if is_null or self.gate is None:
-                    ybt = _get_scratch(("attn_y",), x.device, x.dtype,
-                                       B * T * C).view(B, T, h, dk)
-                    if is_null:
-                        _NullAttn.apply(packed, self.null_k, self.null_v,
-                                        self.inv_scale, B, False, ybt)
-                    else:
-                        _, ent = _CalibAttn.apply(packed, self.inv_scale,
-                                                  _EPS, calc_ent, ybt)
+                # No-grad: the kernel writes each block straight into the
+                # ``(B, T, H, dk)`` projection input, so no full head-major
+                # activation is materialised and no transposed fold-in is
+                # needed; a gate, if any, is applied to it in place below.
+                ybt = _get_scratch(("attn_y",), x.device, x.dtype,
+                                   B * T * C).view(B, T, h, dk)
+                if is_null:
+                    _NullAttn.apply(packed, self.null_k, self.null_v,
+                                    self.inv_scale, B, False, ybt)
                 else:
-                    y, ent = _CalibAttn.apply(packed, self.inv_scale, _EPS,
-                                              calc_ent)
-                    y4 = y.view(B, h, T, dk)
+                    _, ent = _CalibAttn.apply(packed, self.inv_scale,
+                                              _EPS, calc_ent, ybt)
                 ent = None if ent is None else ent.view(B, h, T)
             if need_stats:
                 stats = self._row_stats_at(
