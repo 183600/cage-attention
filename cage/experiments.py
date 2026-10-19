@@ -156,6 +156,7 @@ from .metrics import (
 from .model import GATES, NORMS, build
 from .repro import seed_everything, stream_generator
 from .train import (
+    _ERROR_TYPES,
     collect_stats,
     collect_stats_and_errors,
     efficiency_profile,
@@ -2104,6 +2105,32 @@ def _format_case(case) -> str:
             f"flags=[{','.join(flags) or 'plain'}] pairs=[{pairs}]")
 
 
+def _print_conf_by_error_type(named_runs, title="[e1]"):
+    """Mean confidence inside each error bucket, per arm / grid cell.
+
+    The bucket shares say what failed; this table says whether the model
+    was confident while failing.  A high-confidence ``retrieval_miss`` is a
+    systematic blind spot worth a mechanism change, while a low-confidence
+    ``hard_structural`` error is ambiguity the task imposes and no
+    architecture fix will remove.
+    """
+    print(f"\n{title} mean answer confidence inside each error bucket "
+          f"(high = confident blind spot; low = ambiguous sample); 'n/a' "
+          f"where the bucket is empty:")
+    width = max(16, max(len(t) for t in _ERROR_TYPES) + 1)
+    print(f"{'arm':>{width}}" + "".join(f"{t:>{width}}" for t in _ERROR_TYPES))
+    for label, rs in named_runs:
+        cells = []
+        for etype in _ERROR_TYPES:
+            vals = [
+                float((r.get("err_conf_by_error_type") or {}).get(etype))
+                for r in rs
+                if _finite((r.get("err_conf_by_error_type") or {}).get(etype))]
+            cells.append(f"{sum(vals) / len(vals):.3f}"
+                         if vals else "n/a")
+        print(f"{label:>{width}}" + "".join(f"{c:>{width}}" for c in cells))
+
+
 def _announce(hyp_ids):
     for hid in hyp_ids:
         h = HYPOTHESES[hid]
@@ -2932,6 +2959,7 @@ def _curve_record(hist):
         "val_regression_after_best": verdict["val_regression_after_best"],
         "late_overfit": verdict["late_overfit"],
         "late_overfit_significant": verdict["late_overfit_significant"],
+        "overfitting_significant": verdict["overfitting_significant"],
         "late_train_delta": verdict["late_train_delta"],
         "late_val_delta": verdict["late_val_delta"],
         "val_loss_se_last": verdict["val_loss_se_last"],
@@ -2944,6 +2972,9 @@ def _curve_record(hist):
         "grad_norm_explode_count": verdict["grad_norm_explode_count"],
         "curve_steps": [int(h["step"]) for h in train],
         "curve_train_loss": [float(h["train_loss"]) for h in train],
+        "curve_train_loss_window": [
+            None if h.get("train_loss_window") is None
+            else float(h["train_loss_window"]) for h in train],
         "curve_val_loss": [None if h.get("val_loss") is None
                            else float(h["val_loss"]) for h in train],
         "curve_val_loss_se": [None if h.get("val_loss_se") is None
@@ -4571,7 +4602,10 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
           f"{VAL_SEED}; verdict -> recommendation; gradmax = max pre-clip "
           f"gradient norm; vreg = val loss regression past its best point; "
           f"late = U-shaped val curves where the global slope hides the "
-          f"regression; tail_train/tail_val = relative change over the last "
+          f"regression; overfit_sig = overfitting verdicts that also exceed "
+          f"the validation-noise tolerance (window-averaged train loss, see "
+          f"train_loss_window in e1_runs.jsonl); tail_train/tail_val = "
+          f"relative change over the last "
           f"third (a falling tail under a plateau verdict means the budget, "
           f"not the pipeline, is the limit); vse = last validation point's "
           f"batch-sampling SE (vreg within ~2x vse is stream noise); "
@@ -4581,6 +4615,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         late = sum(1 for r in by_gate[gate] if r.get("late_overfit"))
         late_sig = sum(1 for r in by_gate[gate]
                        if r.get("late_overfit_significant"))
+        overfit_sig = sum(1 for r in by_gate[gate]
+                          if r.get("overfitting_significant"))
         gap = _mean_std([r["generalization_gap"] for r in by_gate[gate]])
         gmax = _mean_std([r["grad_norm_max"] for r in by_gate[gate]])
         vreg = _mean_std([r["val_regression_after_best"] for r in by_gate[gate]])
@@ -4605,7 +4641,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"gap={gap['mean']:.4f}  gradmax={gmax_s}  vreg={vreg_s}  "
               f"tail_train={ttail_s}  tail_val={vtail_s}  vse={vse_s}  "
               f"lr={lr_s}  invalid={invalid}/{len(by_gate[gate])}  "
-              f"late={late} (sig={late_sig})  verdicts={verdicts}")
+              f"late={late} (sig={late_sig})  overfit_sig={overfit_sig}  "
+              f"verdicts={verdicts}")
         for label, count in verdicts.items():
             rec = next(r["curve_recommendation"] for r in by_gate[gate]
                        if r["curve_verdict"] == label)
@@ -4735,6 +4772,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                                        and math.isfinite(last)) else float("nan")
             drift_s = f"{drift:+.3f}" if math.isfinite(drift) else "n/a"
             print(f"{gate:>6}{cells}{drift_s:>11}")
+    _print_conf_by_error_type([(g, by_gate[g]) for g in GATES], title="[e1]")
     print("  most confident wrong samples per gate (systematic blind spots "
           "are the most informative):")
     for gate in GATES:
@@ -5043,6 +5081,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{ecell('err_taxonomy_readout_wrong'):>8} "
               f"{ecell('err_errors_key_missed_share'):>9} "
               f"{ecell('err_attn_mass_on_key_error'):>13}")
+    _print_conf_by_error_type([(label, by_variant[label])
+                               for label, *_ in _E2_VARIANTS], title="[e2]")
     print("  most confident wrong samples per arm at the longest length:")
     for label, *_ in _E2_VARIANTS:
         for case in examples.get(label, (0, []))[1]:
@@ -5165,6 +5205,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     print(f"[e3] grid gate x norm x layer_scale at lr={lr:g}, "
           f"test seed {TEST_SEED}, stats seed {STATS_SEED}")
     runs = []
+    examples = {}
     eval_seed, stats_seed = TEST_SEED, STATS_SEED
     for gate in ("query", "calib"):
         for norm in NORMS:
@@ -5173,12 +5214,30 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                     model, params, metrics, curve, model_cfg = _train_and_eval(
                         settings, seed, lr, eval_seed=eval_seed, gate=gate,
                         norm=norm, layer_scale=layer_scale)
-                    stats = collect_stats(model, settings.n_pairs,
-                                          settings.vocab, settings.device,
-                                          batch=settings.stats_batch,
-                                          batches=settings.stats_batches,
-                                          seed=stats_seed)
+                    # The same diagnostic pass feeds the mechanism
+                    # statistics and the bad-case mining, so the E3 grid
+                    # gets the same error attribution (label error vs
+                    # structural ambiguity vs retrieval miss vs readout)
+                    # as E1/E2 instead of residual-norm readouts alone.
+                    stats, errors = collect_stats_and_errors(
+                        model, settings.n_pairs, settings.vocab,
+                        settings.device, batch=settings.stats_batch,
+                        batches=settings.stats_batches, seed=stats_seed,
+                        max_cases=settings.max_error_cases)
                     resid = stats["resid_norm"].mean(dim=0)
+                    cell = (gate, norm, layer_scale)
+                    if cell not in examples or \
+                            errors["summary"]["n_errors"] > examples[cell][0]:
+                        ranked = sorted(errors["cases"],
+                                        key=lambda c: -float(c["confidence"]))
+                        examples[cell] = (errors["summary"]["n_errors"],
+                                          ranked[:1])
+                    for case in errors["cases"]:
+                        _write_result(out_dir / "e3_error_cases.jsonl",
+                                      {"experiment": "e3", "gate": gate,
+                                       "norm": norm,
+                                       "layer_scale": layer_scale,
+                                       "seed": seed, "lr": lr, **case})
                     rec = {
                         "experiment": "e3",
                         "hypotheses": ["H3a", "H3b", "H3c"],
@@ -5194,6 +5253,8 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                         "resid_norm_by_layer": resid.tolist(),
                         "resid_norm_last_over_first": float(
                             resid[-1] / resid[0].clamp_min(1e-12)),
+                        **{f"err_{k}": v
+                           for k, v in errors["summary"].items()},
                         **_training_record(settings, lr),
                         **curve,
                         **_run_context(settings),
@@ -5234,6 +5295,43 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                       f"{lat['mean']:>8.2f} "
                       f"{invalid}/{len(rs)} {tail_s:>7} "
                       f"{'/'.join(verdicts):>10}")
+
+    # Same bad-case attribution as E1/E2 (raw records in
+    # e3_error_cases.jsonl): the residual/gate readouts of H3a/H3b say
+    # *where* the write happens, the error taxonomy says *what* failed
+    # there (never found the key / found then lost it / read the wrong
+    # value / label or structural ambiguity), which is what a follow-up
+    # mechanism change has to act on.
+    print(f"\n[e3] bad cases per grid cell (stats seed {STATS_SEED}, batch "
+          f"{settings.stats_batch}x{settings.stats_batches}; raw cases in "
+          f"e3_error_cases.jsonl):")
+    print(f"{'gate':>5} {'norm':>9} {'ls':>5} {'err_rate':>9} "
+          f"{'label':>7} {'struct':>7} {'retrieval':>10} {'lost':>7} "
+          f"{'readout':>8} {'key_miss':>9} {'high_conf':>10}")
+    for cell, rs in index.items():
+        gate, norm, layer_scale = cell
+
+        def ecell(key, fmt="{:.3f}"):
+            m = _mean_std([r.get(key) for r in rs])
+            return "n/a" if not _finite(m["mean"]) else fmt.format(m["mean"])
+
+        ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
+        print(f"{gate:>5} {norm:>9} {ls_label:>5} "
+              f"{ecell('err_error_rate'):>9} "
+              f"{ecell('err_taxonomy_label_error'):>7} "
+              f"{ecell('err_taxonomy_hard_structural'):>7} "
+              f"{ecell('err_taxonomy_retrieval_miss'):>10} "
+              f"{ecell('err_taxonomy_found_then_lost'):>7} "
+              f"{ecell('err_taxonomy_readout_wrong'):>8} "
+              f"{ecell('err_errors_key_missed_share'):>9} "
+              f"{ecell('err_share_high_conf'):>10}")
+    print("  most confident wrong sample per cell:")
+    for cell, (_n_err_cell, ranked) in examples.items():
+        if not ranked:
+            continue
+        gate, norm, layer_scale = cell
+        ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
+        print(f"  [{gate}/{norm}/ls={ls_label}] {_format_case(ranked[0])}")
 
     _report_design_coverage(
         out_dir, "e3", runs, "grid",

@@ -89,9 +89,14 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
                            grad_norm_explode: float = 100.0):
     """Read the *curve*, not just the final number (over/underfit triage).
 
-    ``hist`` is the list of dicts returned by :func:`train_model`.  The
-    train and (optionally monitored) validation losses are reduced to a
-    least-squares relative change over the logged window:
+    ``hist`` is the list of dicts returned by :func:`train_model`.  When a
+    point carries ``train_loss_window`` (the mean over all finite update
+    steps since the previous logged/evaluated point) that smoothed value
+    is used for the train curve instead of the single-batch
+    ``train_loss``: one batch's loss is noisy enough to flip a 5% verdict
+    at small batch sizes.  The train and (optionally monitored)
+    validation losses are reduced to a least-squares relative change over
+    the logged window:
     ``delta = (fitted_last - fitted_first) / mean(loss)`` - scale-free and
     robust to the absolute loss level.  The verdict follows the standard
     learning-curve reading:
@@ -143,7 +148,18 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
 
     Returns a dict with the verdict, the relative deltas, the best
     validation point and a human-readable ``recommendation``.
+    ``overfitting_significant`` mirrors ``late_overfit_significant`` for
+    the global verdict: it is set only when the train/val divergence is
+    larger than the validation-batch noise, so a noisy flat validation
+    curve cannot be sold as overfitting.
     """
+    # Work on copies so the caller's history keeps the raw single-batch
+    # losses; the smoothed window value only changes the verdict input.
+    hist = [dict(h) for h in hist]
+    for h in hist:
+        window = h.get("train_loss_window")
+        if window is not None and math.isfinite(float(window)):
+            h["train_loss"] = float(window)
     finite = [h for h in hist
               if math.isfinite(float(h.get("train_loss", float("nan"))))]
 
@@ -168,6 +184,7 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
         "val_change_abs": float("nan"),
         "val_noise_2se": float("nan"),
         "val_movement_significant": False,
+        "overfitting_significant": False,
         "lr_first": float("nan"),
         "lr_last": float("nan"),
         "grad_norm_max": float("nan"),
@@ -331,6 +348,8 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
             f"gradient norm above {grad_norm_explode:g}: lower the learning "
             f"rate or check for rare spiking batches")
         out["recommendation"] = f"{out['recommendation']}; {out['grad_note']}"
+    out["overfitting_significant"] = bool(
+        out["verdict"] == "overfitting" and out["val_movement_significant"])
     return out
 
 
@@ -344,6 +363,10 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     2. **Forward activations**: the first block whose output is non-finite,
        plus non-finite parameters and invalid calibrated temperatures
        (log(0)/div-by-zero/softmax-overflow surface here);
+    2b. **Attention statistics**: the kernel's own entropy / max-prob /
+       gate / null-mass readout is checked for finiteness and valid range,
+       so a log(0) or softmax overflow that stays inside the attention
+       block cannot be hidden by a finite hidden state;
     3. **Loss/logits**: whether the scalar itself or the logits are bad;
     4. **Gradients**: non-finite or exploding (max abs / total norm) - the
        gradient-explosion / lr-too-large branch;
@@ -378,12 +401,14 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     report = {
         "data": "ok",
         "activations": "ok",
+        "attention_stats": "ok",
         "loss": "ok",
         "gradients": "ok",
         "first_bad_stage": None,
         "grad_total_norm": float("nan"),
         "grad_max_abs": float("nan"),
         "nonfinite_params": [],
+        "nonfinite_attn_stats": [],
         "notes": [],
         "suggestions": [],
     }
@@ -454,6 +479,50 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
                 report["notes"].append(
                     f"layer {i}: effective calib temperature {eff} invalid")
 
+    # ---- 2b. attention statistics (kernel-internal log/softmax) ----------
+    # A non-finite entropy/max-probability can live entirely inside the
+    # attention kernel and still leave the block output finite (the gate
+    # multiplies by a saturated value, or the readout averages it away).
+    # The public stats path reads those tensors directly, so triage checks
+    # them rather than inferring kernel health from hidden states only.
+    if isinstance(meta, dict) and meta.get("query_pos") is not None:
+        stat_pos = meta["query_pos"]
+        stat_mode = model.training
+        try:
+            model.eval()
+            with torch.inference_mode():
+                _, _, layer_stats = model(idx, stat_pos=stat_pos)
+            for layer_idx, stat in enumerate(layer_stats or ()):
+                for key, value in stat.items():
+                    if not torch.is_tensor(value) or not value.numel():
+                        continue
+                    if not bool(torch.isfinite(value).all()):
+                        report["nonfinite_attn_stats"].append(
+                            f"layer {layer_idx}.{key}")
+                    elif key == "maxprob" and (
+                            float(value.min()) < 0.0
+                            or float(value.max()) > 1.0):
+                        report["notes"].append(
+                            f"layer {layer_idx}.maxprob outside [0, 1] "
+                            f"([{float(value.min()):.3g}, "
+                            f"{float(value.max()):.3g}]): softmax numerics "
+                            f"are invalid")
+                    elif key == "entropy" and float(value.min()) < 0.0:
+                        report["notes"].append(
+                            f"layer {layer_idx}.entropy is negative "
+                            f"({float(value.min()):.3g}): log/div-by-zero "
+                            f"inside the attention kernel")
+        except Exception as e:  # noqa: BLE001 - report, never raise from triage
+            mark("attention_stats", f"stats forward raised: {e}")
+        finally:
+            model.train(stat_mode)
+        if report["nonfinite_attn_stats"]:
+            mark("attention_stats",
+                 f"non-finite attention statistics at "
+                 f"{report['nonfinite_attn_stats'][:6]} "
+                 f"(check entropy log(0)/division and softmax overflow in "
+                 f"the kernel)")
+
     # ---- 3. loss / logits ------------------------------------------------
     loss_ok = torch.is_tensor(loss) and bool(torch.isfinite(loss))
     logits_ok = torch.is_tensor(logits) and bool(torch.isfinite(logits.float()).all())
@@ -520,7 +589,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
             "low-precision overflow (grad scaling, saturated logits) before "
             "blaming the architecture")
 
-    order = ("data", "activations", "loss", "gradients")
+    order = ("data", "activations", "attention_stats", "loss", "gradients")
     stage = report["first_bad_stage"]
     if stage is None:
         report["suggestions"].append(
@@ -537,6 +606,12 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
             report["suggestions"].append(
                 "inspect log(0)/division and softmax inputs (max-subtract "
                 "before exp) in the flagged layers")
+        if idx_stage >= order.index("attention_stats"):
+            report["suggestions"].append(
+                "the attention statistics are bad while the block output "
+                "may still be finite: inspect p.clamp_min(_EPS) before the "
+                "entropy log, row sums after masking, and the softmax "
+                "max-subtraction inside the fixed kernel")
         if idx_stage >= order.index("gradients"):
             report["suggestions"].append(
                 "reduce lr / rely on gradient clipping; check for rare "
@@ -563,7 +638,8 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                 device="cpu", log_every=250, seed=0, dense_lm=False,
                 eval_every=0, val_batches=2, early_stop_patience=None,
                 nonfinite="raise", grad_norm_explode=100.0,
-                permute_labels=False):
+                permute_labels=False, restore_best=True,
+                early_stop_info=None):
     """Train on the recall task with optional learning-curve monitoring.
 
     ``seed`` governs *all* run-to-run randomness: ``cage.repro.seed_everything``
@@ -607,7 +683,20 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     validation loss has not improved for that many consecutive evaluations.
     Off by default because the experiment contract compares runs at a fixed
     step count; ``training_curve_verdict`` reports ``best_val_step`` either
-    way.
+    way.  ``restore_best`` (default on) reloads the state at
+    ``best_val_step`` when early stopping fires - stopping on a patience
+    counter but keeping the overfit last-step weights would defeat the
+    purpose.  The optional ``early_stop_info`` dict is filled with
+    ``enabled`` / ``stopped_early`` / ``restored_best`` / ``best_val_*`` /
+    ``steps_run`` so callers can record what the run actually produced.
+
+    The training loss stored in each ``hist`` entry is the exact
+    pre-update loss of that step (``train_loss``); the mean over all
+    finite update steps since the previous logged/evaluated point is
+    stored alongside as ``train_loss_window``.  A single batch's loss is
+    noisy, so :func:`training_curve_verdict` prefers the window average
+    when it is present: over/underfit calls are then about the trend, not
+    about which batch happened to be drawn at the logging step.
 
     ``nonfinite`` (``"raise"`` | ``"skip"``): what to do when a training
     loss *or the pre-clip gradient norm* is not finite.  ``"raise"``
@@ -626,6 +715,10 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     not abort: clipping already bounds the update.
     """
     check_train_seed(seed)
+    if early_stop_patience is not None and eval_every <= 0:
+        raise ValueError(
+            "early_stop_patience requires eval_every > 0: there is no "
+            "validation curve to stop on otherwise")
     seed_everything(seed)
     gen = stream_generator(seed, device)
     # Labels are permuted from their own stream so the negative control
@@ -639,10 +732,16 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     hist = []
     best_val = float("inf")
     best_val_step = None
+    best_state = None
+    stopped_early = False
+    last_step = -1
     evals_since_improve = 0
+    window_loss_sum = 0.0
+    window_loss_n = 0
     printed_grad_spike = 0.0
     model.train()
     for step in range(steps):
+        last_step = step
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, dense_lm=dense_lm, gen=gen)
         validate_batch(idx, tgt, meta, vocab)
         diag_tgt = tgt
@@ -670,6 +769,8 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                     f"triage first_bad_stage={diag['first_bad_stage']!r}, "
                     f"suggestions={diag['suggestions']}")
             continue
+        window_loss_sum += lv
+        window_loss_n += 1
         grad_norm = torch.nn.utils.clip_grad_norm_(params, _GRAD_CLIP_MAX_NORM)
         gn = float(grad_norm)
         entry["grad_norm"] = gn
@@ -727,9 +828,17 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             if val_loss < best_val:
                 best_val, best_val_step = val_loss, step
                 evals_since_improve = 0
+                if early_stop_patience is not None and restore_best:
+                    best_state = {
+                        k: v.detach().cpu().clone()
+                        for k, v in model.state_dict().items()}
             else:
                 evals_since_improve += 1
         if is_log or do_val:
+            if window_loss_n:
+                entry["train_loss_window"] = window_loss_sum / window_loss_n
+                window_loss_sum = 0.0
+                window_loss_n = 0
             hist.append(entry)
         if is_log:
             line = f"  step {step:5d}  loss {lv:.4f}"
@@ -739,10 +848,29 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             print(line)
         if (early_stop_patience is not None and do_val
                 and evals_since_improve >= early_stop_patience):
+            stopped_early = True
             print(f"  early stop at step {step}: val loss has not improved "
                   f"for {evals_since_improve} evaluations "
                   f"(best {best_val:.4f} @ step {best_val_step})")
             break
+    restored = False
+    if stopped_early and restore_best and best_state is not None:
+        model.load_state_dict(best_state)
+        restored = True
+        print(f"  restored weights from best validation step "
+              f"{best_val_step} (val loss {best_val:.4f})")
+    if early_stop_info is not None:
+        early_stop_info.update({
+            "enabled": early_stop_patience is not None,
+            "patience": (None if early_stop_patience is None
+                         else int(early_stop_patience)),
+            "stopped_early": bool(stopped_early),
+            "restored_best": bool(restored),
+            "best_val_loss": (float(best_val) if math.isfinite(best_val)
+                              else float("nan")),
+            "best_val_step": best_val_step,
+            "steps_run": int(last_step + 1),
+        })
     return hist
 
 
@@ -1189,6 +1317,13 @@ def _label_audit(idx, meta):
     return match.sum(dim=1).eq(1) & paired.eq(meta["answer"])
 
 
+# Mutually exclusive bad-case buckets, in priority order (see
+# ``collect_stats_and_errors``).  Kept in one place so the per-type
+# accumulators, the summary keys and the report tables cannot drift.
+_ERROR_TYPES = ("label_error", "hard_structural", "retrieval_miss",
+                "found_then_lost", "readout_wrong")
+
+
 @torch.inference_mode()
 def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
                              batches=4, seed=STATS_SEED, max_cases=None):
@@ -1243,6 +1378,17 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     invalid batch aborts the analysis instead of being taxonomised as a
     model error.
 
+    The taxonomy is quantified, not just tabulated: each bucket carries
+    its sample count and a Wilson interval over the error population
+    (``taxonomy_<type>_count/_lo/_hi``), and the mean answer confidence
+    and top-2 margin *within* each bucket (``conf_by_error_type`` /
+    ``margin_by_error_type``).  A high-confidence ``retrieval_miss`` is a
+    systematic blind spot; a low-confidence ``hard_structural`` error is
+    task ambiguity; a confident ``label_error`` means the annotation is
+    wrong rather than the model.  The overall ``error_rate`` and
+    ``label_noise_rate`` also carry Wilson intervals, so small
+    differences between variants are not read off binomial noise.
+
     Returns ``(stats, errors)``; cases are capped at ``max_cases`` but the
     summary aggregates every evaluated sample.  ``stats`` matches the
     ``collect_stats`` return value exactly.
@@ -1286,9 +1432,18 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     flags_summary = {k: torch.zeros((), dtype=i64, device=device)
                      for k in ("high", "low", "in_ctx", "naive", "repeat")}
     taxonomy = {k: torch.zeros((), dtype=i64, device=device)
-                for k in ("label_error", "hard_structural",
-                          "retrieval_miss", "found_then_lost",
-                          "readout_wrong")}
+                for k in _ERROR_TYPES}
+    # Per-error-type confidence / margin sums: the taxonomy alone says
+    # *what* failed; the confidence attached to each bucket says whether
+    # the failure is a confident blind spot (high confidence on a wrong
+    # answer) or an ambiguous / label-noisy sample the model was unsure
+    # about - the distinction that drives the next improvement.
+    type_conf_sum = {k: torch.zeros((), dtype=torch.float64, device=device)
+                     for k in _ERROR_TYPES}
+    type_margin_sum = {k: torch.zeros((), dtype=torch.float64, device=device)
+                       for k in _ERROR_TYPES}
+    type_count = {k: torch.zeros((), dtype=i64, device=device)
+                  for k in _ERROR_TYPES}
     n_err = torch.zeros((), dtype=i64, device=device)
     n_label_err = torch.zeros((), dtype=i64, device=device)
     mass_err = torch.zeros((), dtype=torch.float64, device=device)
@@ -1387,15 +1542,18 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
             key_missed = ~key_right
             lost = key_missed & found_any
             never_found = key_missed & ~found_any
-            taxonomy["label_error"] += (wrong & ~label_ok).sum()
-            taxonomy["hard_structural"] += (
-                wrong & label_ok & ambiguous).sum()
-            taxonomy["retrieval_miss"] += (
-                wrong & label_ok & ~ambiguous & never_found).sum()
-            taxonomy["found_then_lost"] += (
-                wrong & label_ok & ~ambiguous & lost).sum()
-            taxonomy["readout_wrong"] += (
-                wrong & label_ok & ~ambiguous & ~key_missed).sum()
+            masks = {
+                "label_error": wrong & ~label_ok,
+                "hard_structural": wrong & label_ok & ambiguous,
+                "retrieval_miss": wrong & label_ok & ~ambiguous & never_found,
+                "found_then_lost": wrong & label_ok & ~ambiguous & lost,
+                "readout_wrong": wrong & label_ok & ~ambiguous & ~key_missed,
+            }
+            for etype, mask in masks.items():
+                taxonomy[etype] += mask.sum()
+                type_count[etype] += mask.sum()
+                type_conf_sum[etype] += conf[mask].sum().double()
+                type_margin_sum[etype] += margin[mask].sum().double()
 
             if case_count < max_cases:
                 rows = torch.nonzero(wrong, as_tuple=False).flatten().tolist()
@@ -1466,6 +1624,15 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     n_label_err = int(n_label_err)
     flags_summary = {k: int(v) for k, v in flags_summary.items()}
     taxonomy = {k: int(v) for k, v in taxonomy.items()}
+    type_count = {k: int(v) for k, v in type_count.items()}
+    type_conf_mean = {
+        k: (float(type_conf_sum[k]) / type_count[k]) if type_count[k]
+        else float("nan") for k in _ERROR_TYPES}
+    type_margin_mean = {
+        k: (float(type_margin_sum[k]) / type_count[k]) if type_count[k]
+        else float("nan") for k in _ERROR_TYPES}
+    err_ci = wilson_ci(n_err, n_total)
+    label_ci = wilson_ci(n_label_err, n_total)
     mass_err, mass_err_n = float(mass_err), int(mass_err_n)
     mass_corr, mass_corr_n = float(mass_corr), int(mass_corr_n)
     tertile_n = [int(v) for v in tertile_n.tolist()]
@@ -1483,8 +1650,14 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
         "n_samples": int(n_total),
         "n_errors": int(n_err),
         "error_rate": (n_err / n_total) if n_total else float("nan"),
+        "error_rate_lo": err_ci["lo"],
+        "error_rate_hi": err_ci["hi"],
         "n_label_errors": int(n_label_err),
         "label_noise_rate": (n_label_err / n_total) if n_total else float("nan"),
+        "label_noise_rate_lo": label_ci["lo"],
+        "label_noise_rate_hi": label_ci["hi"],
+        "conf_by_error_type": dict(type_conf_mean),
+        "margin_by_error_type": dict(type_margin_mean),
         "taxonomy_label_error": _share(taxonomy["label_error"]),
         "taxonomy_hard_structural": _share(taxonomy["hard_structural"]),
         "taxonomy_retrieval_miss": _share(taxonomy["retrieval_miss"]),
@@ -1506,6 +1679,11 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
         "attn_mass_on_key_error_key_missed": (
             key_wrong_total / key_wrong_n) if key_wrong_n else float("nan"),
     }
+    for etype in _ERROR_TYPES:
+        ci = wilson_ci(taxonomy[etype], n_err)
+        summary[f"taxonomy_{etype}_count"] = int(taxonomy[etype])
+        summary[f"taxonomy_{etype}_lo"] = ci["lo"]
+        summary[f"taxonomy_{etype}_hi"] = ci["hi"]
     summary["attn_mass_gap"] = summary["attn_mass_on_key_correct"] - \
         summary["attn_mass_on_key_error"]
     if layer_mass_err is not None:
