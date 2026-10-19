@@ -338,11 +338,8 @@ class _RowEntropy(torch.autograd.Function):
         d.log_()
         d.add_(1.0)
         torch.where(p > ctx.eps, d, _zero_scalar(p.device, p.dtype), out=d)
-        gn = _get_scratch(("rowent_bwd_g",), grad_out.device,
-                          grad_out.dtype, grad_out.numel())
-        gn = gn[:grad_out.numel()].view_as(grad_out)
-        torch.neg(grad_out, out=gn)
-        d.mul_(gn.unsqueeze(-1))
+        d.mul_(grad_out.unsqueeze(-1))
+        d.neg_()
         return d, None
 
 
@@ -947,26 +944,17 @@ class Attention(nn.Module):
         else:
             self.null_k = self.null_v = None
 
-    @staticmethod
-    def _pack(qkv: torch.Tensor, B: int, h: int, T: int, dk: int) -> torch.Tensor:
-        """``(B, T, 3*h*dk) -> (3, B*h, T, dk)`` head-major layout.
-
-        The three slices are handed to the attention kernel as a single
-        tensor.
-        """
-        return qkv.view(B, T, 3, h, dk).permute(2, 0, 3, 1, 4).contiguous().view(
-            3, B * h, T, dk)
-
     def _pack_qkv_grad(self, x: torch.Tensor, B: int, h: int, T: int,
                        dk: int) -> torch.Tensor:
-        """Gradient-tracking twin of ``_pack``.
+        """``(B, T, d_model) -> (3, B*h, T, dk)`` head-major layout.
 
-        ``(B, T, d_model) -> (3, B*h, T, dk)`` with the projection applied
-        per batch chunk straight into the target buffer.
+        The three slices are handed to the attention kernel as a single
+        tensor.  The projection runs per batch chunk and is permuted
+        straight into the target buffer, so the transient is capped at one
+        chunk (``_QKV_CHUNK_ROWS``) instead of the full ``(B*T, 3C)``
+        output plus a second full-size result.
         """
         step = _balanced_step(B, max(1, _QKV_CHUNK_ROWS // max(T, 1)))
-        if step >= B:
-            return self._pack(F.linear(x, self.qkv.weight), B, h, T, dk)
         packed = x.new_empty(3, B * h, T, dk)
         pv = packed.view(3, B, h, T, dk)
         for b0 in range(0, B, step):
@@ -1099,7 +1087,6 @@ class Attention(nn.Module):
             packed = _get_scratch(
                 ("packed",), x.device, x.dtype, 3 * bh * T * dk).view(3, bh, T, dk)
             pv = packed.view(3, B, h, T, dk)
-            x2 = x.reshape(B, T, C)
             # Row-capped staging buffer feeding the permute-copy.
             step = _balanced_step(B, max(1, _QKV_CHUNK_ROWS // max(T, 1)))
             qkv_buf = _get_scratch(("qkv_out",), x.device, x.dtype,
@@ -1108,7 +1095,7 @@ class Attention(nn.Module):
                 b1 = min(B, b0 + step)
                 rows = (b1 - b0) * T
                 qkv_b = qkv_buf[:rows]
-                _linear_into(x2[b0:b1].reshape(rows, C), self.qkv.weight,
+                _linear_into(x[b0:b1].reshape(rows, C), self.qkv.weight,
                              None, qkv_b)
                 pv[:, b0:b1].copy_(
                     qkv_b.view(b1 - b0, T, 3, h, dk).permute(2, 0, 3, 1, 4))

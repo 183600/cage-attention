@@ -1548,16 +1548,18 @@ def _attention_mass_on_key(x, weight, meta, n_heads, inv_scale, null_k):
     exactly as the kernel does, keeping the mass comparable across
     variants.
     """
+    from .model import _arange  # local: pinned helper, no cycle
+
     B, T, _ = x.shape
     C = weight.size(0) // 3
     dk = C // n_heads
     qp = meta["query_pos"]
     kp = meta["key_pos"]
-    rows = torch.arange(B, device=x.device)
+    rows = _arange(B, x.device)
     q_all = F.linear(x[rows, qp], weight[:C]).view(B, n_heads, dk)
     k_all = F.linear(x, weight[C:2 * C]).view(B, T, n_heads, dk)
     scores = torch.einsum("bhd,bthd->bth", q_all, k_all).mul_(inv_scale)
-    cols = torch.arange(T, device=x.device).view(1, T, 1)
+    cols = _arange(T, x.device).view(1, T, 1)
     scores.masked_fill_(cols > qp.view(B, 1, 1), float("-inf"))
     if null_k is not None:
         s0 = torch.einsum("bhd,hd->bh", q_all, null_k).mul_(inv_scale)
@@ -1572,8 +1574,10 @@ def _attention_mass_on_key(x, weight, meta, n_heads, inv_scale, null_k):
 
 def _error_case_flags(idx, meta, pred, n_pairs):
     """Per-sample structural flags used to classify an error's cause."""
+    from .model import _arange  # local: pinned helper, no cycle
+
     T = idx.size(1)
-    pos = torch.arange(T, device=idx.device).view(1, -1)
+    pos = _arange(T, idx.device).view(1, -1)
     visible = pos < meta["query_pos"].unsqueeze(1)
     query = idx.gather(1, meta["query_pos"].unsqueeze(1)).squeeze(1)
     answer = meta["answer"]
