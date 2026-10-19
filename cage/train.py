@@ -755,6 +755,8 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         lv = loss.item()
         entry = {"step": step, "train_loss": lv,
                  "lr": float(opt.param_groups[0]["lr"])}
+        is_log = (log_every > 0 and step % log_every == 0) or step == steps - 1
+        do_val = (eval_every > 0 and (step % eval_every == 0 or step == steps - 1))
         if not math.isfinite(lv):
             diag = diagnose_nonfinite(model, idx, diag_tgt, meta, vocab,
                                       device=device, dense_lm=dense_lm)
@@ -764,14 +766,17 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             hist.append(entry)
             opt.zero_grad(set_to_none=True)
             sched.step()
+            if is_log or do_val:
+                if window_loss_n:
+                    entry["train_loss_window"] = window_loss_sum / window_loss_n
+                    window_loss_sum = 0.0
+                    window_loss_n = 0
             if nonfinite == "raise":
                 raise RuntimeError(
                     f"non-finite training loss {lv} at step {step}; staged "
                     f"triage first_bad_stage={diag['first_bad_stage']!r}, "
                     f"suggestions={diag['suggestions']}")
             continue
-        window_loss_sum += lv
-        window_loss_n += 1
         grad_norm = torch.nn.utils.clip_grad_norm_(params, _GRAD_CLIP_MAX_NORM)
         gn = float(grad_norm)
         entry["grad_norm"] = gn
@@ -786,6 +791,11 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             hist.append(entry)
             opt.zero_grad(set_to_none=True)
             sched.step()
+            if is_log or do_val:
+                if window_loss_n:
+                    entry["train_loss_window"] = window_loss_sum / window_loss_n
+                    window_loss_sum = 0.0
+                    window_loss_n = 0
             if nonfinite == "raise":
                 raise RuntimeError(
                     f"non-finite pre-clip gradient norm {gn} at step {step} "
@@ -793,6 +803,10 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                     f"first_bad_stage={diag['first_bad_stage']!r}, "
                     f"suggestions={diag['suggestions']}")
             continue
+        # Only finite steps that actually reach the optimizer update enter
+        # the window (a skipped non-finite-gradient step updates nothing).
+        window_loss_sum += lv
+        window_loss_n += 1
         if gn > grad_norm_explode:
             entry["grad_explode"] = True
             if gn > printed_grad_spike:
@@ -803,8 +817,6 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         opt.step()
         sched.step()
 
-        is_log = (log_every > 0 and step % log_every == 0) or step == steps - 1
-        do_val = (eval_every > 0 and (step % eval_every == 0 or step == steps - 1))
         if do_val:
             val_loss, val_acc, val_batch, val_loss_se = _validation_metrics(
                 model, val_gen, n_pairs, vocab, device, batch, val_batches,
@@ -1764,8 +1776,11 @@ def pearson(x, y):
     y = y.flatten().float()
     dx = x - x.mean()
     dy = y - y.mean()
-    if (dx.abs().max() <= 1e-6 * x.abs().max().clamp_min(1.0)
-            or dy.abs().max() <= 1e-6 * y.abs().max().clamp_min(1.0)):
+    # Constant-input guard relative to each vector's own magnitude.  The
+    # floor keeps an all-zero input degenerate without turning every
+    # small-valued vector (e.g. gates saturated near 0) into a false NaN.
+    if (dx.abs().max() <= 1e-12 + 1e-6 * x.abs().max()
+            or dy.abs().max() <= 1e-12 + 1e-6 * y.abs().max()):
         return torch.tensor(float("nan"))
     return (dx * dy).sum() / (dx.norm() * dy.norm())
 

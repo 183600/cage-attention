@@ -166,7 +166,7 @@ def make_batch(batch: int, n_pairs: int, vocab: int, device, dense_lm: bool = Fa
     key_pos = 2 * qi_idx
     query_pos = torch.full_like(qi_idx, width + 1)
     if dense_lm:
-        targets = tgt_full
+        targets = tgt_full.clone()
     else:
         targets = torch.full_like(tgt_full, -1)
         targets[b, query_pos] = answer

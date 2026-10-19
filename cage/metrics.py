@@ -179,7 +179,11 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
                 "precision": float("nan"), "lift": float("nan"),
                 "threshold": float("nan")}
     frac = min(max(float(frac), 0.0), 1.0)
-    k = max(1, int(math.ceil(frac * n)))
+    k = int(math.ceil(frac * n))
+    if k <= 0:
+        return {"frac": 0.0, "k": 0, "recall": float("nan"),
+                "precision": float("nan"), "lift": float("nan"),
+                "threshold": float("nan")}
     order = torch.argsort(s, descending=True)
     flagged = torch.zeros(n, dtype=torch.bool, device=s.device)
     flagged[order[:k]] = True
@@ -514,7 +518,7 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
     equivalence claim that is an artifact of one lucky seed or of
     percentile-interval bias is flagged at the decision point.
     """
-    bound = abs(float(bound))
+    bound = float(bound)
     d = _flatten_float(diffs)
     out = {
         "mean": float("nan"), "lo": float("nan"), "hi": float("nan"),

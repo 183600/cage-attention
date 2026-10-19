@@ -812,8 +812,8 @@ _CALIB_FACTORIAL_CELLS = ("full", "calib_len_only", "calib_ent_only",
 # model-config difference in each pair.
 _FACTORIAL_MAIN_EFFECTS = {
     "length": {
-        "on": ("full", "calib_ent_only"),
-        "off": ("calib_len_only", "calib_no_terms"),
+        "on": ("full", "calib_len_only"),
+        "off": ("calib_ent_only", "calib_no_terms"),
         # Within each concentration level, the pair that differs only in
         # the length flag: full-vs-ent_only (entropy on) and
         # len_only-vs-no_terms (entropy off).
@@ -822,8 +822,8 @@ _FACTORIAL_MAIN_EFFECTS = {
         "model_key": "calib_use_len",
     },
     "concentration": {
-        "on": ("full", "calib_len_only"),
-        "off": ("calib_ent_only", "calib_no_terms"),
+        "on": ("full", "calib_ent_only"),
+        "off": ("calib_len_only", "calib_no_terms"),
         # Within each length level, the pair that differs only in the
         # concentration flag: full-vs-len_only and ent_only-vs-no_terms.
         "pairs": (("full", "calib_len_only"),
@@ -1395,7 +1395,7 @@ def _factorial_main_effect(cells, metric, factor):
     ``cells`` maps the four ``_CALIB_FACTORIAL_CELLS`` to their run lists.
     The contrast is the factor-on mean minus the factor-off mean, where each
     arm averages over both levels of the other factor: for ``length`` this
-    is ``mean(full, calib_ent_only) - mean(calib_len_only, calib_no_terms)``.
+    is ``mean(full, calib_len_only) - mean(calib_ent_only, calib_no_terms)``.
     Unlike a leave-one-out contrast (which is conditional on the other term
     being on), this estimates the term's average contribution across the
     full factorial, so a component that only helps in one configuration is
@@ -5311,7 +5311,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         *[(cell, e2_factorial_cells[cell])
           for cell in _CALIB_FACTORIAL_CELLS])
     print(f"\n[e2] H2c factorial main effect (length term): the average of "
-          f"full-vs-len_only and ent_only-vs-no_terms, i.e. the length "
+          f"full-vs-ent_only and len_only-vs-no_terms, i.e. the length "
           f"term's contribution averaged over both concentration-term "
           f"levels:")
     for metric in ("accuracy_at_longest", "accuracy_drop"):
