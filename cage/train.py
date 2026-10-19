@@ -1442,6 +1442,9 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     finally:
         for hd in handles:
             hd.remove()
+        for blk in model.blocks:
+            blk.attn._capture_qk = False
+            blk.attn._qk_capture = None
         model.train(was_training)
 
     stats = {k: torch.cat(v).cpu() for k, v in stats_out.items() if v}
