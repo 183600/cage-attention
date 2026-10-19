@@ -3356,7 +3356,7 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seeds=None):
             idx, targets, meta = make_batch(batch, settings.n_pairs,
                                             settings.vocab,
                                             settings.device, gen=gen)
-            validate_batch(idx, targets, meta, settings.vocab)
+            validate_batch(idx, targets, meta, settings.vocab, diagnostics=False)
             counts += torch.bincount(meta["answer"].cpu(),
                                      minlength=settings.vocab)
             n_seed += meta["answer"].numel()
@@ -3758,7 +3758,7 @@ def _overfit_sanity_by_config(settings: Settings) -> dict:
     gen = stream_generator(SANITY_SEED, settings.device)
     sidx, stgt, smeta = make_batch(settings.overfit_batch, settings.n_pairs,
                                    settings.vocab, settings.device, gen=gen)
-    validate_batch(sidx, stgt, smeta, settings.vocab)
+    validate_batch(sidx, stgt, smeta, settings.vocab, diagnostics=False)
     by_config = {}
     for label, overrides in _SANITY_CONFIGS:
         seed_everything(SANITY_SEED)

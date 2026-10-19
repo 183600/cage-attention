@@ -189,7 +189,7 @@ def _count_duplicate_rows(idx) -> int:
     return int(idx.size(0)) - int(unique_rows)
 
 
-def validate_batch(idx, targets, meta, vocab) -> dict:
+def validate_batch(idx, targets, meta, vocab, diagnostics: bool = True) -> dict:
     """Data-cleaning gate for one freshly generated batch.
 
     Raises ``ValueError`` if any invariant is violated:
@@ -211,11 +211,16 @@ def validate_batch(idx, targets, meta, vocab) -> dict:
 
     Returns a small diagnostics dict (sample count, unique-key rate, number
     of exact duplicate rows inside the batch) used by the split audit.
+    ``diagnostics=False`` skips only the duplicate-row count (a
+    ``torch.unique`` pass plus host read-back) for callers that discard the
+    result; every cleaning invariant above still runs.
     """
     if not _batch_invariants_hold(idx, targets, meta, vocab):
         _validate_batch_strict(idx, targets, meta, vocab)
-    return {"n": int(idx.size(0)), "unique_key_rate": 1.0,
-            "n_duplicate_rows": _count_duplicate_rows(idx)}
+    out = {"n": int(idx.size(0)), "unique_key_rate": 1.0}
+    if diagnostics:
+        out["n_duplicate_rows"] = _count_duplicate_rows(idx)
+    return out
 
 
 def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:

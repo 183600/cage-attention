@@ -82,7 +82,7 @@ def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
     extra = {}
     for i in range(batches):
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        validate_batch(idx, tgt, meta, vocab)
+        validate_batch(idx, tgt, meta, vocab, diagnostics=False)
         pred, stats = predict(idx, meta)
         correct.add_((pred == meta["answer"]).sum())
         total += idx.size(0)
@@ -201,7 +201,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     model.train()
     for step in range(steps):
         idx, targets, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        validate_batch(idx, targets, meta, vocab)
+        validate_batch(idx, targets, meta, vocab, diagnostics=False)
         opt.zero_grad(set_to_none=True)
         loss = F.cross_entropy(model(idx), meta["answer"])
         if not bool(torch.isfinite(loss)):
@@ -239,7 +239,7 @@ def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
     total = 0
     for i in range(batches):
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        validate_batch(idx, tgt, meta, vocab)
+        validate_batch(idx, tgt, meta, vocab, diagnostics=False)
         pred = model(idx).argmax(dim=-1)
         correct.add_((pred == meta["answer"]).sum())
         total += idx.size(0)

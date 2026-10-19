@@ -645,9 +645,21 @@ class _CalibAttn(torch.autograd.Function):
         gbuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if grad_ent is not None else None
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
         # ``stg`` holds the block's ``d_v`` / ``d_k`` contribution and the
-        # narrow ``d_q`` block copy.
+        # narrow ``d_q`` block copy.  Only blocks narrower than the widest
+        # one read ``stg`` (the first block processed writes ``d_v`` /
+        # ``d_k`` outright), so its width is the second-widest block end,
+        # not ``T``.  The entropy ``log(p)`` buffer is dead after each
+        # ``_softmax_grad_from_p`` call and is large enough to serve as
+        # ``stg`` in the usual ``dk <= T`` case, so share the two instead
+        # of pinning one more large scratch.
         dk = q.size(-1)
-        stg = _get_scratch(("calib_bwd_stg",), q.device, q.dtype, bh * max_i1 * dk)
+        stg_i1 = blocks[-2][1] if len(blocks) > 1 else T
+        stg_numel = bh * stg_i1 * dk
+        if gbuf is not None and stg_numel <= gbuf.numel():
+            stg = gbuf
+        else:
+            stg = _get_scratch(("calib_bwd_stg",), q.device, q.dtype,
+                               stg_numel)
         zero = _zero_scalar(q.device, q.dtype)
         first = True
         for i0, i1 in reversed(blocks):
@@ -816,8 +828,12 @@ class _NullAttn(torch.autograd.Function):
                                     scale, sbuf)
                 yb = yblk[:bh * r * dv].view(bh, r, dv)
                 torch.bmm(p, v[:, :i1], out=yb)
+                # Fold the null-slot term into the contiguous block before
+                # the copy: the add runs on ``(B, h, r, dv)`` contiguous
+                # storage instead of a strided ``(B, h, r, dv)`` slice of
+                # the head-major output.
+                yb.view(B, h, r, dv).addcmul_(p0.view(B, h, r, 1), nv4)
                 y[:, i0:i1].copy_(yb)
-                y4[:, :, i0:i1].addcmul_(p0.view(B, h, r, 1), nv4)
         if need_grad:
             ctx.save_for_backward(qkv, null_k, null_v)
         ctx.scale = scale
@@ -859,8 +875,22 @@ class _NullAttn(torch.autograd.Function):
         dotb = _get_scratch(("null_bwd_dot",), q.device, q.dtype, bh * max_rows)
         acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk)
         acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk)
-        stg = (_get_scratch(("null_bwd_stg",), q.device, q.dtype,
-                            bh * max_i1 * dk) if multi else None)
+        # ``peb`` only holds ``p * e`` until its row sum is taken; afterwards
+        # it can serve as the ``d_v`` / ``d_k`` staging buffer instead of
+        # keeping a separate scratch alive.  As in the calibrated kernel,
+        # only the narrower (non-first processed) blocks use it, so its
+        # width is the second-widest block end.
+        if multi:
+            stg_i1 = blocks[-2][1]
+            stg_numel = bh * stg_i1 * dk
+            if stg_numel <= peb.numel():
+                stg = peb
+            else:
+                stg = _get_scratch(("null_bwd_stg",), q.device, q.dtype,
+                                   stg_numel)
+        else:
+            stg = None
+        zero = _zero_scalar(q.device, q.dtype)
         first = True
         first_null = True
         for i0, i1 in reversed(blocks):
@@ -880,37 +910,47 @@ class _NullAttn(torch.autograd.Function):
             dot.addcmul_(p0, gu0)
             d_u = e.sub_(dot)
             gu0.sub_(dot)
-            d_s = d_u.mul_(p).mul_(scale)
-            d_s0 = gu0.mul_(p0).mul_(scale)
+            # Keep the score gradients unscaled and apply ``scale`` in the
+            # GEMM epilogue (``alpha``), saving one elementwise pass over
+            # the full ``(B*H, r, i1)`` block per iteration.
+            d_s = d_u.mul_(p)
+            d_s0 = gu0.mul_(p0)
             if multi:
                 # The first block writes ``d_v`` / ``d_k`` outright; later
                 # blocks add their ``(i1, dk)`` contribution into the
                 # leading ``i1`` columns.
                 if first:
                     torch.bmm(p.transpose(1, 2), g, out=d_v)
-                    torch.bmm(d_s.transpose(1, 2), q_blk, out=d_k)
+                    torch.baddbmm(zero, d_s.transpose(1, 2), q_blk,
+                                  beta=0.0, alpha=scale, out=d_k)
                     first = False
                 else:
                     sv = stg[:bh * i1 * dk].view(bh, i1, dk)
                     torch.bmm(p.transpose(1, 2), g, out=sv)
                     d_v[:, :i1].add_(sv)
-                    torch.bmm(d_s.transpose(1, 2), q_blk, out=sv)
+                    torch.baddbmm(zero, d_s.transpose(1, 2), q_blk,
+                                  beta=0.0, alpha=scale, out=sv)
                     d_k[:, :i1].add_(sv)
                 dqblk = stg[:bh * r * dk].view(bh, r, dk)
-                torch.bmm(d_s, k[:, :i1], out=dqblk)
+                torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
+                              out=dqblk)
                 d_q[:, i0:i1].copy_(dqblk)
             else:
                 torch.bmm(p.transpose(1, 2), g, out=d_qkv[2])
-                torch.bmm(d_s.transpose(1, 2), q_blk, out=d_qkv[1])
-                torch.bmm(d_s, k[:, :i1], out=d_qkv[0])
-            d_q4[:, :, i0:i1].addcmul_(d_s0.view(B, h, r, 1), nk4)
+                torch.baddbmm(zero, d_s.transpose(1, 2), q_blk, beta=0.0,
+                              alpha=scale, out=d_qkv[1])
+                torch.baddbmm(zero, d_s, k[:, :i1], beta=0.0, alpha=scale,
+                              out=d_qkv[0])
+            d_q4[:, :, i0:i1].addcmul_(d_s0.view(B, h, r, 1), nk4,
+                                       value=scale)
             if first_null:
-                torch.bmm(d_s0.transpose(-2, -1), q_blk, out=acc_k)
+                torch.baddbmm(zero, d_s0.transpose(-2, -1), q_blk, beta=0.0,
+                              alpha=scale, out=acc_k)
                 torch.bmm(p0.transpose(-2, -1), g, out=acc_v)
                 first_null = False
             else:
                 torch.baddbmm(acc_k, d_s0.transpose(-2, -1), q_blk, beta=1.0,
-                              alpha=1.0, out=acc_k)
+                              alpha=scale, out=acc_k)
                 torch.baddbmm(acc_v, p0.transpose(-2, -1), g, beta=1.0,
                               alpha=1.0, out=acc_v)
         d_null_k = acc_k.view(B, h, dk).sum(0)

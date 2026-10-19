@@ -418,7 +418,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
 
     # ---- 1. data ---------------------------------------------------------
     try:
-        validate_batch(idx, tgt, meta, vocab)
+        validate_batch(idx, tgt, meta, vocab, diagnostics=False)
     except Exception as e:  # noqa: BLE001 - report, never raise from triage
         mark("data", f"invalid batch: {e}")
     if torch.is_tensor(idx) and idx.is_floating_point() \
@@ -744,7 +744,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     for step in range(steps):
         last_step = step
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, dense_lm=dense_lm, gen=gen)
-        validate_batch(idx, tgt, meta, vocab)
+        validate_batch(idx, tgt, meta, vocab, diagnostics=False)
         diag_tgt = tgt
         if permute_labels:
             tgt = _permute_batch_labels(tgt, perm_gen)
@@ -1082,7 +1082,7 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
         # last_batch remains usable by a grad-enabled triage/backward.
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
                                     dense_lm=dense_lm, gen=val_gen)
-        validate_batch(idx, tgt, meta, vocab)
+        validate_batch(idx, tgt, meta, vocab, diagnostics=False)
         last_batch = (idx, tgt, meta)
         sup_pos = None if dense_lm else meta["query_pos"]
         with torch.inference_mode():
@@ -1291,7 +1291,7 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     try:
         for i in range(batches):
             idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-            validate_batch(idx, tgt, meta, vocab)
+            validate_batch(idx, tgt, meta, vocab, diagnostics=False)
             per_layer_mass.clear()
             state["meta"] = meta
             logits, _, layer_stats = model(idx, stat_pos=meta["query_pos"])
@@ -1568,7 +1568,8 @@ def _attention_mass_on_key(x, weight, meta, n_heads, inv_scale, null_k):
     rows = _arange(B, x.device)
     q_all = F.linear(x[rows, qp], weight[:C]).view(B, n_heads, dk)
     k_all = F.linear(x, weight[C:2 * C]).view(B, T, n_heads, dk)
-    scores = torch.einsum("bhd,bthd->bth", q_all, k_all).mul_(inv_scale)
+    k_all = k_all.permute(0, 2, 1, 3)
+    scores = torch.einsum("bhd,bhtd->bth", q_all, k_all).mul_(inv_scale)
     cols = _arange(T, x.device).view(1, T, 1)
     scores.masked_fill_(cols > qp.view(B, 1, 1), float("-inf"))
     if null_k is not None:
@@ -1598,11 +1599,11 @@ def _attention_mass_from_qk(q, k, meta, n_heads, inv_scale, null_k):
     kp = meta["key_pos"]
     rows = _arange(B, q.device)
     q_all = q.view(B, h, T, dk)[rows, :, qp]
-    # Match the pre-hook's ``(B, T, H, dk)`` key layout exactly; with the
-    # same einsum contraction this makes the diagnostics bit-identical to
-    # the recomputed-key version.
-    k_all = k.view(B, h, T, dk).permute(0, 2, 1, 3).contiguous()
-    scores = torch.einsum("bhd,bthd->bth", q_all, k_all).mul_(inv_scale)
+    # Match the pre-hook's head-major key layout exactly, both to keep the
+    # diagnostics consistent with the recomputed-key path and to contract
+    # over ``(B, H, T, dk)`` without materialising a token-major copy.
+    k_all = k.view(B, h, T, dk)
+    scores = torch.einsum("bhd,bhtd->bth", q_all, k_all).mul_(inv_scale)
     cols = _arange(T, q.device).view(1, T, 1)
     scores.masked_fill_(cols > qp.view(B, 1, 1), float("-inf"))
     if null_k is not None:
@@ -1651,7 +1652,7 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     total = 0
     for i in range(batches):
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        validate_batch(idx, tgt, meta, vocab)
+        validate_batch(idx, tgt, meta, vocab, diagnostics=False)
         logits, _, _ = model(idx)
         pred = logits.squeeze(1).argmax(-1)
         correct.add_((pred == meta["answer"]).sum())
@@ -1694,7 +1695,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     logits_all, tgt_all = [], []
     for i in range(batches):
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        validate_batch(idx, tgt, meta, vocab)
+        validate_batch(idx, tgt, meta, vocab, diagnostics=False)
         logits, _, _ = model(idx)
         logits_all.append(logits.squeeze(1).float())
         tgt_all.append(meta["answer"])
