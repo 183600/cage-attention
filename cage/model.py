@@ -428,14 +428,27 @@ def _linear_into(x: torch.Tensor, weight: torch.Tensor,
 
 def _layer_norm_into(ln: nn.LayerNorm, x: torch.Tensor,
                      key: str = "ln_out") -> torch.Tensor:
-    """``ln(x)`` written into reusable buffers.
+    """``ln(x)`` for the no-grad forward path.
 
-    ``key`` names a *disjoint* output buffer: callers whose input may be a
-    view of the block-level ``"ln_out"`` scratch (the final normalization)
-    pass their own key so the layer-norm input and output never share
-    storage at different coordinates.
+    On CUDA the result is written into reusable buffers: the ``.out``
+    variant is a real out-of-place-free kernel there, so it keeps the
+    scratch stable across calls and the transient mean/rstd allocations
+    out of the caching allocator.  On CPU ``native_layer_norm.out`` is a
+    composite that runs the functional kernel and then copies all three
+    results into the buffers - three extra copies and three extra
+    temporaries per call - so the functional call is used directly (same
+    kernel, identical values, no copies).
+
+    ``key`` names a *disjoint* CUDA output buffer: callers whose input may
+    be a view of the block-level ``"ln_out"`` scratch (the final
+    normalization) pass their own key so the layer-norm input and output
+    never share storage at different coordinates.
     """
     shape = x.shape
+    if not x.is_cuda:
+        out, _, _ = torch.ops.aten.native_layer_norm(
+            x, [shape[-1]], ln.weight, ln.bias, ln.eps)
+        return out.view(shape)
     rows = x.numel() // shape[-1]
     out = _get_scratch((key,), x.device, x.dtype, x.numel())
     mean = _get_scratch(("ln_mean",), x.device, x.dtype, rows)
