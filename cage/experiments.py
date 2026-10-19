@@ -1008,15 +1008,15 @@ def _recipe_view(run):
     read from a different stream is an evaluation-protocol difference the
     audit must refuse exactly like a recipe difference.  Finally, the
     *executed* step count / early-stop state is included: the intended
-    budget in ``training_recipe.steps`` does not prove both sides actually
-    ran it.
+    step count in ``training_recipe.steps`` does not prove both sides
+    actually ran it.
     """
     cfg = run.get("config") or {}
     view = {k: cfg.get(k) for k in _AUDIT_RECIPE_KEYS}
     view["lr"] = run.get("lr")
     view["eval_seed"] = run.get("eval_seed")
     view["stats_seed"] = run.get("stats_seed")
-    # The intended step budget lives in ``training_recipe.steps``; these
+    # The intended step count lives in ``training_recipe.steps``; these
     # stamped fields are what the run *actually* executed.  Auditing them
     # keeps "same epochs" true even if early stopping is ever enabled, and
     # makes a short/diverged run visible as a confound rather than as a
@@ -1408,7 +1408,7 @@ def _factorial_main_effect(cells, metric, factor):
     the resolved model config to differ only in that factor's flag, and
     verifies one global recipe and one seed set across all four cells - a
     main effect averaged over a cell with a different optimizer or epoch
-    budget would not be a factorial effect.
+    step count would not be a factorial effect.
     """
     spec = _FACTORIAL_MAIN_EFFECTS[factor]
     required = _CALIB_FACTORIAL_CELLS
@@ -3124,8 +3124,8 @@ def _curve_record(hist, early_stop_info=None):
     ``steps_run`` records the number of optimizer steps actually executed
     (from ``train_model``'s ``early_stop_info``, or the logged history as a
     fallback) and ``stopped_early``/``restored_best`` record whether the
-    fixed epoch budget was cut short.  The controlled audit reads these:
-    ``training_recipe.steps`` is the *intended* budget, so without this
+    fixed epoch step count was cut short.  The controlled audit reads these:
+    ``training_recipe.steps`` is the *intended* step count, so without this
     stamp a future early-stop could compare runs trained for different
     numbers of steps while every recipe field still matched.
 
@@ -3404,8 +3404,8 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
     TV/floor pair stays in the report as a descriptive companion.
 
     The audit is deterministic for one ``Settings`` (fixed split seeds and
-    a fixed Monte Carlo seed), so the expensive computation runs once per
-    process and every experiment that depends on the protocol writes its
+    a fixed Monte Carlo seed), so the computation runs once per process
+    and every experiment that depends on the protocol writes its
     own copy.  ``enforce=True`` (baselines, E1/E2/E3 and the standalone
     pre-flight) turns a failed audit into a hard
     :class:`SplitAuditError`: a protocol with a shared sample or a

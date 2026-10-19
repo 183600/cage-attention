@@ -181,7 +181,7 @@ def _count_duplicate_rows(idx) -> int:
     whole-stream duplicate count in :func:`split_leakage_audit`: counting
     duplicates is a deterministic set operation, so it is safe on any
     split and needs no train-fitted statistics.  ``torch.unique(dim=0)``
-    keeps this cheap enough to run on every training/evaluation batch.
+    performs the same set operation on every training/evaluation batch.
     """
     if idx.numel() == 0:
         return 0

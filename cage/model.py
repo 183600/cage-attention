@@ -370,8 +370,8 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
                 buf = torch.empty(numel, device=device, dtype=dtype)
             _scratch_cache[ckey] = buf
             return buf
-        # Exact-size requests hand out the cached tensor itself; the slice
-        # view is only built for the (few) undersized requests.
+        # Exact-size requests hand out the cached tensor itself; undersized
+        # requests receive a slice view.
         return entry if entry.numel() == numel else entry[:numel]
     with torch.inference_mode(False):
         buf = torch.empty(numel, device=device, dtype=dtype)
@@ -380,9 +380,6 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
 
 
 # Buffers a dropout-free, gradient-free forward may hold when it returns.
-# Evaluation entry points release them after the whole pass so a long
-# sequence / large batch does not pin its high-water buffers for the rest of
-# the process; the per-forward scratch reuse is left untouched.
 _EVAL_SCRATCH = (
     "embed_out", "packed", "qkv_out", "ln_out", "ln_f_out", "ln_mean",
     "ln_rstd", "seed_scale", "mlp_up", "mlp_down", "mlp_down_big",
@@ -415,10 +412,8 @@ def _release_scratch(*names: str) -> None:
 def _balanced_step(n: int, cap: int) -> int:
     """Balanced chunk size covering ``n`` units in ``ceil(n/cap)`` chunks.
 
-    Every chunk stays within ``cap``; the evenly split size makes the tail
-    chunk at most ``ceil(n/cap) - 1`` units smaller than the full chunks
-    (equal when ``n`` divides evenly), instead of leaving the raw
-    ``n % cap`` remainder as an arbitrarily small tail.
+    Every chunk stays within ``cap`` and all chunks have the same size
+    (within one unit), including the tail chunk.
     """
     if n <= cap:
         return n
@@ -585,8 +580,7 @@ class _CalibAttn(torch.autograd.Function):
                    _get_scratch(("calib_ent",), q.device, q.dtype,
                                 bh * T).view(bh, T)) if need_ent else None
             ebuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
-            # Each block's result is built in a one-block-wide staging
-            # buffer and copied into its row slice of ``y``.
+            # Each block's result is copied into its row slice of ``y``.
             yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
                                 bh * max_rows * dv)
             for i0, i1 in blocks:
@@ -650,8 +644,8 @@ class _CalibAttn(torch.autograd.Function):
         s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
         gbuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if grad_ent is not None else None
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
-        # One scratch serves both uses below: the block's ``d_v`` / ``d_k``
-        # contribution and the narrow ``d_q`` block copy.
+        # ``stg`` holds the block's ``d_v`` / ``d_k`` contribution and the
+        # narrow ``d_q`` block copy.
         dk = q.size(-1)
         stg = _get_scratch(("calib_bwd_stg",), q.device, q.dtype, bh * max_i1 * dk)
         zero = _zero_scalar(q.device, q.dtype)
@@ -793,9 +787,8 @@ class _NullAttn(torch.autograd.Function):
                 yb = yblk[:bh * r * dv].view(bh, r, dv)
                 torch.bmm(p, v[:, :i1], out=yb)
                 dst = ybt[:, i0:i1]
-                # Fold the null-slot term into the transpose copy: one pass
-                # over the caller buffer instead of a copy followed by an
-                # in-place addcmul pass.
+                # Write the transposed block plus its null-slot term into
+                # the caller buffer.
                 torch.addcmul(yb.view(B, h, r, dv).transpose(1, 2),
                               p0.view(B, h, r, 1).transpose(1, 2),
                               nv4t, out=dst)
@@ -970,11 +963,10 @@ class Attention(nn.Module):
             self.null_v = nn.Parameter(torch.zeros(self.h, self.dk))
         else:
             self.null_k = self.null_v = None
-        # Error-mining diagnostics read the already-projected Q/K instead of
-        # recomputing the key projection for every layer (see
-        # ``collect_stats_and_errors``).  The capture is opt-in and only used
-        # by the inference-mode statistics pass; ``_qk_capture`` is cleared by
-        # the forward hook that consumes it.
+        # Error-mining diagnostics read the Q/K captured from the forward
+        # pass (see ``collect_stats_and_errors``).  The capture is opt-in and
+        # only used by the inference-mode statistics pass; ``_qk_capture`` is
+        # cleared by the forward hook that consumes it.
         self._capture_qk = False
         self._qk_capture = None
 
@@ -1118,7 +1110,7 @@ class Attention(nn.Module):
             packed = _get_scratch(
                 ("packed",), x.device, x.dtype, 3 * bh * T * dk).view(3, bh, T, dk)
             pv = packed.view(3, B, h, T, dk)
-            # Row-capped staging buffer feeding the permute-copy.
+            # Staging buffer feeding the permute-copy.
             step = _balanced_step(B, max(1, _QKV_CHUNK_ROWS // max(T, 1)))
             qkv_buf = _get_scratch(("qkv_out",), x.device, x.dtype,
                                    step * T * 3 * C).view(step * T, 3 * C)
@@ -1147,13 +1139,10 @@ class Attention(nn.Module):
                 y4 = y.view(B, h, T, dk)
                 ent = None if ent is None else ent.view(B, h, T)
             else:
-                # No-grad: ungated variants have the kernel write its blocks
-                # straight into the ``(B, T, H, dk)`` projection input.  A
-                # gated variant instead keeps the kernel's head-major output
-                # and folds the gate into the layout conversion below: one
-                # transpose pass writes the gate-multiplied ``(B, T, C)``
-                # input, instead of a transpose copy followed by an in-place
-                # multiply pass over the same buffer.
+                # No-grad: ungated variants have the kernel write into the
+                # ``(B, T, H, dk)`` projection input.  Gated variants keep
+                # the kernel's head-major output and fold the gate into the
+                # layout conversion below.
                 if is_null or self.gate is None:
                     ybt = _get_scratch(("attn_y",), x.device, x.dtype,
                                        B * T * C).view(B, T, h, dk)

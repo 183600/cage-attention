@@ -1586,9 +1586,8 @@ def _attention_mass_from_qk(q, k, meta, n_heads, inv_scale, null_k):
     """Attention mass on the correct key from already-projected ``q`` / ``k``.
 
     ``q`` / ``k`` are the ``(B*h, T, dk)`` tensors the fixed kernel just used
-    (``Attention._qk_capture``).  Reusing them removes the duplicate key
-    projection the error-mining hook would otherwise run for every layer;
-    the mass itself is computed exactly as in :func:`_attention_mass_on_key`.
+    (``Attention._qk_capture``).  The mass is computed exactly as in
+    :func:`_attention_mass_on_key`.
     """
     from .model import _arange  # local: pinned helper, no cycle
 
