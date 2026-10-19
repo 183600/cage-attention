@@ -176,11 +176,17 @@ def validate_batch(idx, targets, meta, vocab) -> dict:
     * integrity: 2-D integer ids, no NaN/Inf, all token ids in ``[0, vocab)``;
     * structure: exactly one SEP token per sequence and a valid query
       position, with ``meta`` agreeing with the sequence;
-    * label noise: the query key occurs exactly once among the keys and the
+    * label noise: the query key occurs exactly once among the keys, the
       recorded answer is the value paired with that key (a repeated key
-      would make the correct answer ambiguous);
-    * targets (when given): ids in ``[-1, vocab)`` and the supervised entry
-      at the query position equal to the answer.
+      would make the correct answer ambiguous) and the answer id is a
+      selectable token (ids 0=PAD and 1=SEP are reserved and never labels);
+    * targets (when given): ids in ``[-1, vocab)``, the supervised entry
+      at the query position equal to the answer, and *every* entry aligned
+      with its position (``-1`` or the true next-token label).  Checking
+      more than the single supervised entry catches the classic off-by-one
+      / foreign-label target bug: a label silently shifted onto the wrong
+      position passes the one-spot check whenever the shift happens not to
+      touch the query position, but fails the alignment check.
 
     Returns a small diagnostics dict (sample count, unique-key rate, number
     of exact duplicate rows inside the batch) used by the split audit.
@@ -199,6 +205,11 @@ def validate_batch(idx, targets, meta, vocab) -> dict:
     answer = meta["answer"].to(device=idx.device, dtype=torch.long)
     if answer.shape != (batch_size,):
         raise ValueError("meta['answer'] has the wrong shape")
+    if not bool((answer >= 2).all()) or not bool((answer < vocab).all()):
+        raise ValueError(
+            "label noise: answer ids must be selectable tokens in "
+            f"[2, {vocab}) (0=PAD and 1=SEP are reserved and never labels)"
+        )
     keys = idx[:, 0::2]
     match = keys.eq(query.unsqueeze(1))
     if not bool(match.sum(dim=1).eq(1).all()):
@@ -228,6 +239,25 @@ def validate_batch(idx, targets, meta, vocab) -> dict:
         sup = targets.gather(1, qp.unsqueeze(1)).squeeze(1)
         if not bool(sup.eq(answer).all()):
             raise ValueError("supervised target at query_pos != answer")
+        # Full label alignment, not only the supervised entry: every
+        # position must be unsupervised (``-1``) or carry the true
+        # next-token label of that position.  Both protocols pass - sparse
+        # targets are ``-1`` everywhere except the query position, dense
+        # targets are the next-token sequence with the final answer at the
+        # last position - while a shifted/foreign label is rejected.
+        nxt = targets[:, :-1]
+        cont = idx[:, 1:]
+        if not bool((nxt.eq(-1) | nxt.eq(cont)).all()):
+            raise ValueError(
+                "label alignment: a target entry is neither -1 nor the "
+                "true next-token continuation of its position"
+            )
+        if not bool((targets[:, -1].eq(-1)
+                     | targets[:, -1].eq(answer)).all()):
+            raise ValueError(
+                "label alignment: the final target entry is neither -1 nor "
+                "the sample's answer"
+            )
     return {"n": int(idx.size(0)), "unique_key_rate": 1.0,
             "n_duplicate_rows": _count_duplicate_rows(idx)}
 
@@ -516,9 +546,9 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
       unattainable tolerance.
     * **cleaning diagnostics** from :func:`validate_batch`, run on every
       batch of every split: NaN/Inf, out-of-range ids, structural
-      violations and ambiguous label noise raise; a whole-split exact
-      duplicate-row count and the unique-key rate are returned, plus the
-      subset of duplicates that occur *within* one batch (a stream-level
+      violations and ambiguous/misaligned label noise raise; a whole-split
+      exact duplicate-row count and the unique-key rate are returned, plus
+      the subset of duplicates that occur *within* one batch (a stream-level
       count above the within-batch count means the same sample was drawn
       in two different batches of the same stream; overlaps *between*
       streams are the leakage signal above).
@@ -704,6 +734,42 @@ def _self_test() -> int:
           _count_duplicate_rows(batch_a) == 0)
     check("stream_duplicates_counted",
           _count_duplicate_rows(torch.cat([batch_a, batch_a[:3], batch_b])) == 3)
+
+    # Label-alignment and reserved-id gates: freshly drawn sparse and dense
+    # batches pass the cleaning gate; a target that is neither ``-1`` nor
+    # the true continuation is rejected (off-by-one / foreign-label class
+    # of bug), and a reserved answer id (PAD/SEP) is rejected even when the
+    # paired value and the supervised entry agree with it.
+    gen = torch.Generator().manual_seed(22)
+    sparse_idx, sparse_tgt, sparse_meta = make_batch(8, 4, 64, "cpu", gen=gen)
+    check("validate_accepts_sparse_targets",
+          validate_batch(sparse_idx, sparse_tgt, sparse_meta, 64)["n"] == 8)
+    dense_idx, dense_tgt, dense_meta = make_batch(
+        8, 4, 64, "cpu", dense_lm=True, gen=torch.Generator().manual_seed(23))
+    check("validate_accepts_dense_targets",
+          validate_batch(dense_idx, dense_tgt, dense_meta, 64)["n"] == 8)
+
+    misaligned = sparse_tgt.clone()
+    misaligned[:, 0] = (sparse_idx[:, 1] + 1) % 64
+    try:
+        validate_batch(sparse_idx, misaligned, sparse_meta, 64)
+        check("validate_rejects_misaligned_target", False)
+    except ValueError:
+        check("validate_rejects_misaligned_target", True)
+
+    rows = torch.arange(8)
+    reserved_idx = sparse_idx.clone()
+    reserved_idx[rows, sparse_meta["key_pos"] + 1] = 0
+    reserved_meta = {"query_pos": sparse_meta["query_pos"],
+                     "key_pos": sparse_meta["key_pos"],
+                     "answer": torch.zeros(8, dtype=torch.long)}
+    reserved_tgt = torch.full_like(sparse_tgt, -1)
+    reserved_tgt[rows, reserved_meta["query_pos"]] = 0
+    try:
+        validate_batch(reserved_idx, reserved_tgt, reserved_meta, 64)
+        check("validate_rejects_reserved_answer", False)
+    except ValueError:
+        check("validate_rejects_reserved_answer", True)
 
     if failures:
         print("data self-test FAILED: " + ", ".join(failures))

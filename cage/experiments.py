@@ -3009,7 +3009,10 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seeds=None):
     separate sampling noise from a real shift at ~10 expected samples per
     class; the test can (see ``cage.data.answer_uniformity_test``).  When
     it fails, the verdict layer flags the balance premise and the
-    PR-AUC/F1 companions - not accuracy - carry the claims.
+    PR-AUC/F1 companions - not accuracy - carry the claims.  Every drawn
+    batch passes the shared ``validate_batch`` cleaning gate first, so the
+    balance decision is computed on the same validated data contract as
+    training and the reported metrics.
     """
     if seeds is None:
         seeds = tuple(settings.seeds) if settings.seeds else (0,)
@@ -3020,8 +3023,10 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seeds=None):
         gen = stream_generator(seed, settings.device)
         n_seed = 0
         for _ in range(batches):
-            _, _, meta = make_batch(batch, settings.n_pairs, settings.vocab,
-                                    settings.device, gen=gen)
+            idx, targets, meta = make_batch(batch, settings.n_pairs,
+                                            settings.vocab,
+                                            settings.device, gen=gen)
+            validate_batch(idx, targets, meta, settings.vocab)
             counts += torch.bincount(meta["answer"].cpu(),
                                      minlength=settings.vocab)
             n_seed += meta["answer"].numel()
