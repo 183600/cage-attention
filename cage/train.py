@@ -839,7 +839,15 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
             sup_pos = None if dense_lm else meta["query_pos"]
             logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
             total_loss.add_(loss.detach().to(torch.float64))
-            if not dense_lm:
+            if dense_lm:
+                # Dense training supervises every position, so the forward
+                # returns the full-sequence logits flattened row-major; the
+                # recall accuracy still lives at the query position only.
+                rows = torch.arange(idx.size(0), device=logits.device)
+                qlogits = logits.reshape(
+                    idx.size(0), idx.size(1), -1)[rows, meta["query_pos"]]
+                correct.add_((qlogits.argmax(-1) == meta["answer"]).sum())
+            else:
                 correct.add_((logits.argmax(-1) == meta["answer"]).sum())
             total += idx.size(0)
     model.train(was_training)
