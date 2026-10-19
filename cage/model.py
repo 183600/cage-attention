@@ -404,18 +404,6 @@ def _release_scratch(*names: str) -> None:
         del _scratch_cache[key]
 
 
-# Every buffer the dropout-free, gradient-free forward can hold at its end;
-# released once the forward returns.
-_NOGRAD_SCRATCH = (
-    "embed_out", "packed", "qkv_out", "ln_out", "ln_f_out", "ln_mean",
-    "ln_rstd", "seed_scale", "mlp_up", "mlp_down", "mlp_down_big",
-    "proj_out", "attn_y", "gate_out", "calib_s", "calib_y", "calib_yblk",
-    "calib_ent", "calib_ent_shuf", "calib_f", "calib_conc", "null_s",
-    "null_s0", "null_y", "null_yblk", "null_m", "rowent", "rowstats_att",
-    "rowstats_att_null", "rowstats_sum", "mask_rows", "mask_rows_b",
-)
-
-
 def _linear_into(x: torch.Tensor, weight: torch.Tensor,
                  bias: torch.Tensor | None, out: torch.Tensor) -> torch.Tensor:
     """``F.linear(x, weight, bias)`` written into ``out``."""
@@ -1508,8 +1496,6 @@ class CAGE(nn.Module):
             else:
                 logits = self.head(_norm_out(self.ln_f, last, "ln_f_out"))
             loss = None
-        if not torch.is_grad_enabled():
-            _release_scratch(*_NOGRAD_SCRATCH)
         return logits, loss, layer_stats
 
 
