@@ -185,7 +185,7 @@ def _count_duplicate_rows(idx) -> int:
     """
     if idx.numel() == 0:
         return 0
-    unique_rows = torch.unique(idx.detach().cpu(), dim=0).size(0)
+    unique_rows = torch.unique(idx.detach(), dim=0).size(0)
     return int(idx.size(0)) - int(unique_rows)
 
 
@@ -212,6 +212,89 @@ def validate_batch(idx, targets, meta, vocab) -> dict:
     Returns a small diagnostics dict (sample count, unique-key rate, number
     of exact duplicate rows inside the batch) used by the split audit.
     """
+    if not _batch_invariants_hold(idx, targets, meta, vocab):
+        _validate_batch_strict(idx, targets, meta, vocab)
+    return {"n": int(idx.size(0)), "unique_key_rate": 1.0,
+            "n_duplicate_rows": _count_duplicate_rows(idx)}
+
+
+def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
+    """``validate_batch``'s invariants as one device-side predicate.
+
+    The strict checker below reads every condition back to the host
+    (``bool(...)`` per check, ~15 synchronization points per batch), which
+    the training loop pays on every step and every validation batch for a
+    batch that is essentially always valid.  Here the same conditions are
+    accumulated on the device and read back with a single ``bool()``.
+
+    Anything the fast path cannot evaluate (non-tensor inputs, unexpected
+    meta entries, wrong shapes, ...) reports ``False`` and is left to the
+    strict checker, which raises exactly as before.  The fast path never
+    *accepts* a batch the strict checker would reject: every condition of
+    the strict checker is mirrored here, shape-level conditions as host
+    checks and value-level ones as device checks.
+    """
+    try:
+        if not torch.is_tensor(idx) or idx.dim() != 2:
+            return False
+        batch_size, width = idx.shape
+        checks = [(idx >= 0).all(), (idx < vocab).all()]
+        if idx.is_floating_point():
+            checks.append(torch.isfinite(idx).all())
+        qp = meta["query_pos"].to(device=idx.device, dtype=torch.long)
+        if qp.shape != (batch_size,):
+            return False
+        checks.append((qp >= 0).all())
+        checks.append((qp < width).all())
+        # Clamped only to keep the gathers below in range: the clamped
+        # positions are simultaneously rejected by the range checks above,
+        # so an invalid batch can never slip through on the clamped index.
+        safe_qp = qp.unsqueeze(1).clamp(0, max(width - 1, 0))
+        query = idx.gather(1, safe_qp).squeeze(1)
+        answer = meta["answer"].to(device=idx.device, dtype=torch.long)
+        answer_ok = answer.shape == (batch_size,)
+        checks.append((answer >= 2).all())
+        checks.append((answer < vocab).all())
+        # Key columns only: ``idx`` is ``[k1 v1 ... kn vn SEP query]``, so
+        # the last two columns (SEP at 2n, query at 2n+1) must be excluded.
+        keys = idx[:, :-2:2]
+        match = keys.eq(query.unsqueeze(1))
+        checks.append(match.sum(dim=1).eq(1).all())
+        key_pos = match.to(torch.int64).argmax(dim=1).mul(2)
+        paired_value = idx.gather(1, (key_pos + 1).unsqueeze(1)).squeeze(1)
+        checks.append(paired_value.eq(answer).all())
+        checks.append(idx.eq(SEP_ID).sum(dim=1).eq(1).all())
+        if "key_pos" in meta:
+            kp = meta["key_pos"].to(device=idx.device, dtype=torch.long)
+            if kp.shape != (batch_size,):
+                return False
+            checks.append(kp.eq(key_pos).all())
+        if targets is not None:
+            if targets.shape != idx.shape:
+                return False
+            if targets.is_floating_point():
+                checks.append(torch.isfinite(targets).all())
+            checks.append(((targets >= -1) & (targets < vocab)).all())
+            sup = targets.gather(1, safe_qp).squeeze(1)
+            checks.append(sup.eq(answer).all())
+            # Full label alignment, not only the supervised entry: every
+            # position must be unsupervised (``-1``) or carry the true
+            # next-token label of that position.
+            nxt = targets[:, :-1]
+            cont = idx[:, 1:]
+            checks.append((nxt.eq(-1) | nxt.eq(cont)).all())
+            checks.append((targets[:, -1].eq(-1)
+                           | targets[:, -1].eq(answer)).all())
+        acc = checks[0]
+        for c in checks[1:]:
+            acc = acc & c
+        return answer_ok and bool(acc)
+    except Exception:  # noqa: BLE001 - any unevaluable input is strict's job
+        return False
+
+
+def _validate_batch_strict(idx, targets, meta, vocab) -> dict:
+    """``validate_batch``'s checks, one host read-back per condition."""
     if not torch.is_tensor(idx) or idx.dim() != 2:
         raise ValueError(f"idx must be a (B, T) tensor, got {type(idx)}")
     if idx.is_floating_point() and not bool(torch.isfinite(idx).all()):
@@ -264,12 +347,6 @@ def validate_batch(idx, targets, meta, vocab) -> dict:
         sup = targets.gather(1, qp.unsqueeze(1)).squeeze(1)
         if not bool(sup.eq(answer).all()):
             raise ValueError("supervised target at query_pos != answer")
-        # Full label alignment, not only the supervised entry: every
-        # position must be unsupervised (``-1``) or carry the true
-        # next-token label of that position.  Both protocols pass - sparse
-        # targets are ``-1`` everywhere except the query position, dense
-        # targets are the next-token sequence with the final answer at the
-        # last position - while a shifted/foreign label is rejected.
         nxt = targets[:, :-1]
         cont = idx[:, 1:]
         if not bool((nxt.eq(-1) | nxt.eq(cont)).all()):
@@ -809,6 +886,52 @@ def _self_test() -> int:
         check("validate_rejects_reserved_answer", False)
     except ValueError:
         check("validate_rejects_reserved_answer", True)
+
+    # The single-sync fast path that guards every training batch must agree
+    # with the strict checker exactly: it may not accept a batch the strict
+    # checker rejects (that would silently disable the cleaning gate), and
+    # it may not reject a valid one.
+    def gate_agrees(i_, t_, m_, vocab_):
+        fast = _batch_invariants_hold(i_, t_, m_, vocab_)
+        try:
+            _validate_batch_strict(i_, t_, m_, vocab_)
+            strict = True
+        except Exception:  # noqa: BLE001 - any raise is a rejection
+            strict = False
+        return fast == strict
+
+    nan_idx = sparse_idx.clone().float()
+    nan_idx[0, 0] = float("nan")
+    bad_qp = sparse_meta["query_pos"] + 1
+    meta_qp = {"query_pos": bad_qp, "key_pos": sparse_meta["key_pos"],
+               "answer": sparse_meta["answer"]}
+    meta_kp = {"query_pos": sparse_meta["query_pos"],
+               "key_pos": sparse_meta["key_pos"] + 2,
+               "answer": sparse_meta["answer"]}
+    soft_tgt = sparse_tgt.clone()
+    soft_tgt[0, 0] = -2
+    final_tgt = sparse_tgt.clone()
+    final_tgt[:, -1] = sparse_meta["answer"] + 1
+    dup_key = sparse_idx.clone()
+    dup_key[:, 2] = sparse_idx[:, 0]
+    for name, (i_, t_, m_) in {
+            "valid_sparse": (sparse_idx, sparse_tgt, sparse_meta),
+            "valid_dense": (dense_idx, dense_tgt, dense_meta),
+            "misaligned_target": (sparse_idx, misaligned, sparse_meta),
+            "reserved_answer": (reserved_idx, reserved_tgt, reserved_meta),
+            "idx_out_of_range": (sparse_idx.clone().fill_(64), sparse_tgt,
+                                 sparse_meta),
+            "idx_not_2d": (sparse_idx.reshape(-1), sparse_tgt, sparse_meta),
+            "idx_with_nan": (nan_idx, sparse_tgt, sparse_meta),
+            "query_pos_out_of_range": (sparse_idx, sparse_tgt, meta_qp),
+            "key_pos_disagrees": (sparse_idx, sparse_tgt, meta_kp),
+            "key_not_unique": (dup_key, sparse_tgt, sparse_meta),
+            "target_shape_wrong": (sparse_idx, sparse_tgt.reshape(-1),
+                                   sparse_meta),
+            "target_out_of_range": (sparse_idx, soft_tgt, sparse_meta),
+            "final_target_wrong": (sparse_idx, final_tgt, sparse_meta),
+    }.items():
+        check(f"fast_path_agrees_{name}", gate_agrees(i_, t_, m_, 64))
 
     if failures:
         print("data self-test FAILED: " + ", ".join(failures))
