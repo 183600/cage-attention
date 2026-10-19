@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
-import threading
-import time
 
 import torch
 import torch.nn as nn
@@ -135,8 +132,8 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
     The window is only half the reading, so the *tail* is read too:
     ``late_train_delta`` / ``late_val_delta`` refit the same relative
     delta on the last third of the logged points, which separates "was
-    still improving when the budget ran out" (plateau verdict with a
-    falling tail -> more steps, not a broken pipeline) from a run whose
+    still improving when the step limit was reached" (plateau verdict with
+    a falling tail -> more steps, not a broken pipeline) from a run whose
     final regime matches the global slope.  ``val_loss_se_last`` is the
     batch-sampling standard error of the last validation point (from
     :func:`_validation_metrics`), and ``late_overfit_significant`` marks
@@ -244,7 +241,7 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
             out["late_overfit"] = True
 
     # Tail reading: the last third answers "was it still improving when the
-    # budget ran out?", which the window fit averages away.
+    # step limit was reached?", which the window fit averages away.
     if len(finite) >= 3:
         k = max(2, int(math.ceil(len(finite) / 3.0)))
         out["late_train_delta"] = rel_delta(finite[-k:], "train_loss")
@@ -320,7 +317,7 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
                 and out["late_train_delta"] < -rel_tol):
             out["recommendation"] = (
                 "the window fit is flat but the last third of training is "
-                "still improving: the budget may simply be too short for "
+                "still improving: the step count may simply be too low for "
                 "this recipe (raise steps before calling it underfit)")
     if (not out["val_movement_significant"]
             and math.isfinite(out["val_change_abs"])
@@ -1111,187 +1108,6 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     return (total_loss.item() / n_batches,
             correct.item() / total if total else float("nan"),
             last_batch, loss_se)
-
-
-def estimate_forward_flops(model, seq_len: int) -> int:
-    """Matmul-only FLOPs of one full-sequence forward pass at ``seq_len``.
-
-    Counts ``2 * m * n * k`` per matmul (a MAC is two FLOPs) for q/k/v, the
-    causal attention products, the output projection, both MLP projections,
-    the gate projection of ``query``/``calib`` and the two per-token scale
-    projections of ``seednorm``, plus the full-sequence head.  Elementwise
-    work (softmax, GELU, entropy, norms) is excluded, so the result is a
-    lower bound on the matmul work of the pass.
-    """
-    cfg = model.cfg
-    C, H, L, V = cfg.d_model, cfg.n_heads, cfg.n_layers, cfg.vocab_size
-    T = int(seq_len)
-    per_layer = (
-        2 * T * C * (3 * C)          # qkv projection
-        + T * (T + 1) * C            # attention scores (q k^T, causal)
-        + T * (T + 1) * C            # attention output (p v)
-        + 2 * T * C * C              # output projection
-        + 2 * T * C * (4 * C)        # MLP up
-        + 2 * T * (4 * C) * C        # MLP down
-    )
-    if cfg.gate in ("query", "calib"):
-        per_layer += 2 * T * C * C   # gate projection
-    if cfg.norm == "seednorm":
-        per_layer += 4 * T * C * C   # two dynamic scale projections
-    return int(L * per_layer + 2 * T * C * V)
-
-
-def estimate_attention_peak_mb(model, seq_len, batch=1, bytes_per=4):
-    """Deterministic attention-buffer peak of the fixed chunked kernel (MB).
-
-    The fixed design materialises one query block of the ``(B*H, rows, T)``
-    score matrix at a time (``_query_blocks`` of ``cage/model.py``, D3:
-    ``max_rows = max(32, (1 << 20) // (bh * T))``), so the attention path's
-    transient memory is *bounded* independent of ``T`` - the property behind
-    the recompute-not-store kernels (D6).  This returns the two-block bound
-    the forward holds (the score block ``calib_s`` plus the entropy temp
-    ``calib_f``), in MB, computed through ``_query_blocks`` itself so the
-    number cannot drift from the pinned formula.  Returns NaN if the helper
-    is unavailable.
-    """
-    try:
-        from .model import _query_blocks  # local: pinned helper, no cycle
-        cfg = model.cfg
-        bh = int(batch) * int(cfg.n_heads)
-        T = int(seq_len)
-        rows = max(r - s for s, r in _query_blocks(bh, T))
-        return 2.0 * bh * rows * T * float(bytes_per) / (1024.0 * 1024.0)
-    except Exception:  # noqa: BLE001 - a cost probe must not break a run
-        return float("nan")
-
-
-def _rss_bytes():
-    """Current resident set size in bytes, or ``None`` where unavailable.
-
-    Linux exposes it cheaply through ``/proc/self/statm`` (second field =
-    resident pages); other platforms return ``None`` and the memory probe
-    degrades to a NaN instead of inventing a number.
-    """
-    try:
-        with open("/proc/self/statm", "r", encoding="ascii") as fh:
-            resident_pages = int(fh.read().split()[1])
-        return resident_pages * os.sysconf("SC_PAGE_SIZE")
-    except (OSError, ValueError, IndexError, AttributeError):
-        return None
-
-
-def efficiency_profile(model, seq_len, device="cpu", reps=5, warmup=2):
-    """Measured cost of one inference forward at ``seq_len``.
-
-    Accuracy alone is half of a result: a +0.5% accuracy at 10x forward
-    cost is a different finding from +0.5% at equal cost, and the fixed
-    experiment contract compares variants that differ in *computation*
-    (the gate projection, the entropy readout, the two dynamic-scale
-    projections of seednorm), so the trade-off has to be measured on the
-    same instance that produced the metrics.  Returns
-
-    * ``params``         - trainable parameter count (capacity);
-    * ``flops_forward``  - analytic matmul-only FLOPs of one full-sequence
-      forward (:func:`estimate_forward_flops`); elementwise work is
-      excluded, so it is a lower bound;
-    * ``latency_ms``     - median wall-clock time of ``reps`` timed
-      forwards after ``warmup`` warmups, with ``latency_ms_min/_max``
-      companions (a shared runner makes single timings noisy; the min/max
-      bracket shows how noisy);
-    * ``attn_peak_mb``   - deterministic peak of the fixed chunked
-      attention buffers (:func:`estimate_attention_peak_mb`); the memory
-      term that grows with ``T`` and is bounded by the D3 block formula;
-    * ``host_mem_delta_mb`` - peak growth of this process' RSS while the
-      timed forwards run (sampled from ``/proc/self/statm``).  This is a
-      coarse *process-level* high-water mark: allocator caches mean it
-      only reads the extra pages this model's forwards needed beyond the
-      process' current footprint, so it is comparable within one
-      measurement session but not across processes; NaN where the probe
-      is unavailable;
-    * ``device_mem_mb``  - peak CUDA memory allocated during the timed
-      forwards; NaN on CPU.
-
-    The latency column is the only place the elementwise work that the
-    analytic FLOPs exclude (softmax, entropy, normalisation) shows up, and
-    the memory column is the only place the recompute-not-store kernels'
-    footprint shows up - which is exactly where the fixed kernel design
-    trades compute for memory.
-
-    Measurement never raises: every probe degrades to NaN on failure, so
-    a cost readout can never invalidate a training run.  The model's
-    train/eval mode is restored and timing runs under ``inference_mode``
-    so nothing accumulates.
-    """
-    seq_len = int(seq_len)
-    out = {
-        "cost_seq_len": seq_len,
-        "params": int(sum(p.numel() for p in model.parameters())),
-        "flops_forward": float(estimate_forward_flops(model, seq_len)),
-        "attn_peak_mb": estimate_attention_peak_mb(model, seq_len),
-        "latency_ms": float("nan"),
-        "latency_ms_min": float("nan"),
-        "latency_ms_max": float("nan"),
-        "host_mem_delta_mb": float("nan"),
-        "device_mem_mb": float("nan"),
-    }
-    try:
-        x = torch.zeros((1, seq_len), dtype=torch.long, device=device)
-    except Exception:  # noqa: BLE001 - a cost probe must not break a run
-        return out
-    cuda = str(device).startswith("cuda") and torch.cuda.is_available()
-    was_training = model.training
-    model.eval()
-    times = []
-    try:
-        with torch.inference_mode():
-            if cuda:
-                torch.cuda.synchronize()
-                torch.cuda.reset_peak_memory_stats()
-            # The high-water mark is taken from *before* the warmup so the
-            # allocator's cached blocks from the first forwards (the real
-            # activation footprint) are counted, not hidden by reuse.
-            baseline = _rss_bytes()
-            stop = threading.Event()
-            peak = [baseline if baseline is not None else 0]
-            sampler = None
-            if baseline is not None:
-                def _sample():
-                    while not stop.is_set():
-                        rss = _rss_bytes()
-                        if rss is not None and rss > peak[0]:
-                            peak[0] = rss
-                        time.sleep(0.0005)
-                sampler = threading.Thread(target=_sample, daemon=True)
-                sampler.start()
-            for _ in range(max(0, int(warmup))):
-                model(x)
-            for _ in range(max(1, int(reps))):
-                if cuda:
-                    torch.cuda.synchronize()
-                t0 = time.perf_counter()
-                model(x)
-                if cuda:
-                    torch.cuda.synchronize()
-                times.append((time.perf_counter() - t0) * 1e3)
-            if sampler is not None:
-                stop.set()
-                sampler.join(timeout=1.0)
-            if baseline is not None:
-                out["host_mem_delta_mb"] = max(
-                    0.0, (peak[0] - baseline) / (1024.0 * 1024.0))
-            if cuda:
-                out["device_mem_mb"] = (
-                    torch.cuda.max_memory_allocated() / (1024.0 * 1024.0))
-    except Exception:  # noqa: BLE001
-        pass
-    finally:
-        model.train(was_training)
-    if times:
-        times.sort()
-        out["latency_ms"] = times[len(times) // 2]
-        out["latency_ms_min"] = times[0]
-        out["latency_ms_max"] = times[-1]
-    return out
 
 
 def _label_audit(idx, meta):

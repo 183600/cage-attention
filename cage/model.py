@@ -949,10 +949,7 @@ class Attention(nn.Module):
         """``(B, T, d_model) -> (3, B*h, T, dk)`` head-major layout.
 
         The three slices are handed to the attention kernel as a single
-        tensor.  The projection runs per batch chunk and is permuted
-        straight into the target buffer, so the transient is capped at one
-        chunk (``_QKV_CHUNK_ROWS``) instead of the full ``(B*T, 3C)``
-        output plus a second full-size result.
+        tensor.
         """
         step = _balanced_step(B, max(1, _QKV_CHUNK_ROWS // max(T, 1)))
         packed = x.new_empty(3, B * h, T, dk)

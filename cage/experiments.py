@@ -159,10 +159,7 @@ from .train import (
     _ERROR_TYPES,
     collect_stats,
     collect_stats_and_errors,
-    efficiency_profile,
     error_detection_aucs,
-    estimate_attention_peak_mb,
-    estimate_forward_flops,
     eval_metrics,
     false_concentration_analysis,
     false_concentration_sweep,
@@ -2613,60 +2610,6 @@ def _model_cfg(settings: Settings, **overrides) -> dict:
     return cfg
 
 
-# Cost-side reading of an accuracy gain.  A variant earns its compute only
-# when the accuracy difference is distinguishable from 0 *and* the extra
-# cost is modest: a +0.5% accuracy sold at 10x forward cost is not the same
-# result as +0.5% at equal cost, and a noise-level delta bought with a large
-# compute multiple must be flagged rather than reported as progress.  The
-# thresholds are deliberately lenient - a real mechanism may legitimately
-# cost ~1.5x FLOPs - they exist to catch unearned compute, not to forbid
-# any overhead.
-_COST_FLOP_RATIO = 1.5
-_COST_LATENCY_RATIO = 2.0
-
-
-def _efficiency_record(model, settings: Settings, seq_len=None) -> dict:
-    """Measured cost block (params / FLOPs / latency / memory) for one run.
-
-    Every run record already stamps ``params``; accuracy alone cannot say
-    whether a variant is worth running, so the analytic matmul FLOPs, the
-    measured eval-forward latency and the memory probes from
-    ``cage.train.efficiency_profile`` travel with it.  ``seq_len`` defaults
-    to the evaluation length ``2 * n_pairs + 2`` of ``make_batch``.
-    """
-    length = (2 * settings.n_pairs + 2) if seq_len is None else int(seq_len)
-    return efficiency_profile(model, length, settings.device)
-
-
-def _cost_flag(ci, flops_ratio, latency_ratio):
-    """Flag compute-heavy arms whose accuracy gain is not established.
-
-    ``ci`` is the paired accuracy contrast of the arm against the ungated
-    reference.  If its 95% interval contains 0 the gain is not
-    distinguishable from noise; an arm that nevertheless costs more than
-    ``_COST_FLOP_RATIO`` x the FLOPs or ``_COST_LATENCY_RATIO`` x the
-    latency is bought with real compute for an unmeasured benefit.  Returns
-    ``(flag, reason)``; the flag is empty when the gain is established
-    (either side's CI excludes 0) or the cost is within bounds.
-    """
-    if not ci or not _finite(ci.get("mean")):
-        return "", ""
-    lo, hi = ci.get("lo", float("nan")), ci.get("hi", float("nan"))
-    established = _finite(lo) and _finite(hi) and (lo > 0.0 or hi < 0.0)
-    if established:
-        return "", ""
-    reasons = []
-    if _finite(flops_ratio) and flops_ratio > _COST_FLOP_RATIO:
-        reasons.append(f"{flops_ratio:.2f}x FLOPs")
-    if _finite(latency_ratio) and latency_ratio > _COST_LATENCY_RATIO:
-        reasons.append(f"{latency_ratio:.2f}x latency")
-    if not reasons:
-        return "", ""
-    return "COST", (
-        f"accuracy delta not distinguishable from 0 (paired 95% CI "
-        f"[{lo:+.4f}, {hi:+.4f}]) while costing " + " / ".join(reasons))
-
-
 # ---------------------------------------------------------------------------
 # Seed-determinism self-check: the "one seed pins one run" contract
 # ---------------------------------------------------------------------------
@@ -3361,14 +3304,12 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                 settings, seed, best["lr"], eval_seed=TEST_SEED, gate="none",
                 n_layers=depth)
             n = int(metrics["n"])
-            cost = _efficiency_record(model, settings)
             runs.append({
                 "seed": seed, "accuracy": metrics["accuracy"],
                 "accuracy_lo": metrics["accuracy_lo"],
                 "accuracy_hi": metrics["accuracy_hi"], "n": n,
                 "correct": int(round(metrics["accuracy"] * n)),
                 "params": params, "curve_verdict": curve["curve_verdict"],
-                **cost,
             })
             name = ("shallow_none_baseline" if depth == ladder[0]
                     else f"shallow_none_baseline_d{depth}")
@@ -3380,7 +3321,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                            "accuracy": metrics["accuracy"],
                            "accuracy_lo": metrics["accuracy_lo"],
                            "accuracy_hi": metrics["accuracy_hi"], "n": n,
-                           "params": params, **cost,
+                           "params": params,
                            **_training_record(settings, best["lr"]),
                            **_run_context(settings), **curve})
         pooled = wilson_ci(sum(r["correct"] for r in runs),
@@ -3426,16 +3367,13 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                       f"is not depth evidence")
         else:
             status = "below the ceiling"
-        cost = _mean_std([r.get("flops_forward") for r in runs])
-        lat = _mean_std([r.get("latency_ms") for r in runs])
         print(f"[baselines] HB6/HB7 depth={depth} tuned standard "
               f"transformer (lr={best['lr']:g} on val seed {VAL_SEED}, test "
               f"seed {TEST_SEED}): accuracy={summary['mean']:.4f} +- "
               f"{summary['std']:.4f} (pooled Wilson "
               f"[{pooled['lo']:.4f}, {pooled['hi']:.4f}], n={pooled['n']}); "
               f"chance={chance:.4f}; rule ceiling={ceiling_acc:.4f}, gap="
-              f"{payload['ceiling_gap']:.4f}; params={int(runs[0]['params'])} "
-              f"MFLOPs={cost['mean'] / 1e6:.2f} lat_ms={lat['mean']:.2f}; "
+              f"{payload['ceiling_gap']:.4f}; params={int(runs[0]['params'])}; "
               f"{status}")
         _write_json(out_dir / f"baselines_depth{depth}.json", payload)
 
@@ -4118,7 +4056,6 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
         "gate": gate, "seed": seed, "lr": lr,
         "eval_seed": eval_seed, "stats_seed": stats_seed,
         "params": params, "model_cfg": model_cfg,
-        **_efficiency_record(model, settings),
         **metrics, **corr, **fc,
         # ed's "n" is the stats-stream sample count; it must not overwrite
         # metrics' "n" (the eval stream the accuracy/Wilson CI come from).
@@ -4606,8 +4543,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
           f"the validation-noise tolerance (window-averaged train loss, see "
           f"train_loss_window in e1_runs.jsonl); tail_train/tail_val = "
           f"relative change over the last "
-          f"third (a falling tail under a plateau verdict means the budget, "
-          f"not the pipeline, is the limit); vse = last validation point's "
+          f"third (a falling tail under a plateau verdict means the step "
+          f"count, not the pipeline, is the limit); vse = last validation "
+          f"point's "
           f"batch-sampling SE (vreg within ~2x vse is stream noise); "
           f"lr = first->last logged learning rate):")
     for gate in GATES:
@@ -4658,47 +4596,6 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         warn = _curve_warn((gate, by_gate[gate]), ("none", by_gate["none"]))
         print(f"  {gate:>6}: {_fmt_ci(acc_ci)}"
               + (f"  [{warn}]" if warn else ""))
-
-    ref_flops = _mean_std([r.get("flops_forward")
-                           for r in by_gate["none"]])["mean"]
-    ref_lat = _mean_std([r.get("latency_ms")
-                         for r in by_gate["none"]])["mean"]
-    T_eval = 2 * settings.n_pairs + 2
-    print(f"\n[e1] efficiency vs `none` (params; analytic matmul FLOPs at the "
-          f"evaluation length T={T_eval}; latency = median of the timed eval "
-          f"forwards; x = ratio to `none`).  A COST flag means the accuracy "
-          f"delta vs `none` is not distinguishable from 0 (paired 95% CI "
-          f"includes 0) while the arm costs >{_COST_FLOP_RATIO:g}x the FLOPs "
-          f"or >{_COST_LATENCY_RATIO:g}x the latency - compute has to buy an "
-          f"established gain, not a noise-level one:")
-    print(f"{'gate':>6} {'params':>8} {'MFLOPs':>9} {'xFLOPs':>7} "
-          f"{'lat_ms':>8} {'xLat':>6} {'attn_MB':>8} {'acc_delta':>10} "
-          f"{'cost':>5}")
-    for gate in GATES:
-        fl = _mean_std([r.get("flops_forward") for r in by_gate[gate]])
-        lat = _mean_std([r.get("latency_ms") for r in by_gate[gate]])
-        peak = _mean_std([r.get("attn_peak_mb") for r in by_gate[gate]])
-        f_ratio = (fl["mean"] / ref_flops
-                   if _finite(ref_flops) and ref_flops > 0 else float("nan"))
-        l_ratio = (lat["mean"] / ref_lat
-                   if _finite(ref_lat) and ref_lat > 0 else float("nan"))
-        ci = (_paired_diff(by_gate[gate], by_gate["none"], "accuracy")
-              if gate != "none" else None)
-        flag, reason = _cost_flag(ci, f_ratio, l_ratio)
-
-        def _cell(v, fmt="{:.3f}"):
-            return "n/a" if not _finite(v) else fmt.format(v)
-
-        delta = _cell(ci["mean"], "{:+.4f}") if ci else "-"
-        print(f"{gate:>6} {int(by_gate[gate][0]['params']):>8} "
-              f"{_cell(fl['mean'] / 1e6, '{:.2f}'):>9} "
-              f"{_cell(f_ratio, '{:.2f}'):>7} "
-              f"{_cell(lat['mean'], '{:.2f}'):>8} "
-              f"{_cell(l_ratio, '{:.2f}'):>6} "
-              f"{_cell(peak['mean'], '{:.3f}'):>8} "
-              f"{delta:>10} {flag:>5}")
-        if reason:
-            print(f"       [{gate}] {reason}")
 
     print(f"\n[e1] bad cases (stats seed {STATS_SEED}; train batch: "
           f"{settings.stats_batch}x{settings.stats_batches}; raw cases in"
@@ -4862,11 +4759,6 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                    "gate": gate, "variant": label, "seed": seed, "lr": lr,
                    "eval_seed": eval_seed, "stats_seed": stats_seed,
                    "params": params, "model_cfg": model_cfg,
-                   **_efficiency_record(model, settings),
-                   "flops_by_length": {L: estimate_forward_flops(
-                       model, 2 * L + 2) for L in lengths},
-                   "attn_peak_mb_by_length": {L: estimate_attention_peak_mb(
-                       model, 2 * L + 2) for L in lengths},
                    "eval_n": int(base_metrics["n"]),
                    "accuracy_by_length": {}, "eval_n_by_length": {},
                    "entropy_by_length": {}, "entropy_norm_by_length": {},
@@ -4972,69 +4864,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     print(f"{'rule ceiling':>16}" + "".join(f"{c:>12}" for c in ceil_cells)
           + f"{'-':>10} {'(gap@long)':>10} {'-':>14}")
 
-    probe = by_variant["calib"][0]
-    base_len = lengths[0]
-    base_flops = probe["flops_by_length"][base_len]
-    print(f"\n[e2] cost by sweep length (representative `calib` arm; T=2*n_pairs"
-          f"+2; MFLOPs = analytic matmul count of one forward; x@base = ratio "
-          f"to n_pairs={base_len}; attn_MB = fixed chunked-attention buffer "
-          f"peak).  The causal score/output products grow ~T^2 in FLOPs.  "
-          f"The D3 chunk cap only engages past T~512 at this batch/head "
-          f"count, so within the swept range the buffer also grows with T; "
-          f"its purpose is the ceiling it imposes beyond that (one score "
-          f"block of ~max(32, floor(2^20/(bh*T))) rows, roughly 4 MB fp32 "
-          f"per head-block), not a smaller buffer at short T:")
-    print(f"{'n_pairs':>8} {'T':>5} {'MFLOPs':>10} {'x@base':>8} "
-          f"{'attn_MB':>9}")
-    for L in lengths:
-        fl = probe["flops_by_length"][L]
-        peak = probe["attn_peak_mb_by_length"][L]
-        ratio = (fl / base_flops
-                 if _finite(base_flops) and base_flops > 0 else float("nan"))
-        print(f"{L:>8} {2 * L + 2:>5} {fl / 1e6:>10.2f} "
-              f"{(ratio if _finite(ratio) else float('nan')):>8.2f} "
-              f"{peak:>9.3f}")
-
-    ref_flops = _mean_std([r.get("flops_forward")
-                           for r in by_variant["none"]])["mean"]
-    ref_lat = _mean_std([r.get("latency_ms")
-                         for r in by_variant["none"]])["mean"]
-    print(f"\n[e2] efficiency vs `none` at the base length (the arms differ "
-          f"only in the gate/calibration path, so their FLOPs are close; the "
-          f"interesting length scaling is the table above).  acc_delta@long "
-          f"is paired on the longest length; a COST flag means that delta is "
-          f"not distinguishable from 0 while the arm costs "
-          f">{_COST_FLOP_RATIO:g}x FLOPs or >{_COST_LATENCY_RATIO:g}x "
-          f"latency:")
-    print(f"{'arm':>16} {'MFLOPs':>9} {'xFLOPs':>7} {'lat_ms':>8} "
-          f"{'xLat':>6} {'acc_delta@long':>15} {'cost':>5}")
-    for label, *_ in _E2_VARIANTS:
-        fl = _mean_std([r.get("flops_forward") for r in by_variant[label]])
-        lat = _mean_std([r.get("latency_ms") for r in by_variant[label]])
-        f_ratio = (fl["mean"] / ref_flops
-                   if _finite(ref_flops) and ref_flops > 0 else float("nan"))
-        l_ratio = (lat["mean"] / ref_lat
-                   if _finite(ref_lat) and ref_lat > 0 else float("nan"))
-        ci = (_paired_diff(by_variant[label], by_variant["none"],
-                           "accuracy_at_longest")
-              if label != "none" else None)
-        flag, reason = _cost_flag(ci, f_ratio, l_ratio)
-        delta = (f"{ci['mean']:+.4f}" if ci and _finite(ci.get("mean"))
-                 else "-")
-
-        def _cell(v, fmt="{:.2f}"):
-            return "n/a" if not _finite(v) else fmt.format(v)
-
-        print(f"{label:>16} {_cell(fl['mean'] / 1e6):>9} "
-              f"{_cell(f_ratio):>7} {_cell(lat['mean']):>8} "
-              f"{_cell(l_ratio):>6} {delta:>15} {flag:>5}")
-        if reason:
-            print(f"       [{label}] {reason}")
-
     print(f"\n[e2] training-curve health (curve_ok = curve-valid runs / "
           f"all runs; late = U-shaped val curves; tail_train = relative "
           f"change over the last third - falling under a plateau verdict "
-          f"means the step budget is the limit; vse = last validation "
+          f"means the step count is the limit; vse = last validation "
           f"point's batch-sampling SE):")
     print(f"{'arm':>16} {'curve_ok':>8} {'late':>5} {'tail_train':>11} "
           f"{'vse':>8} {'curve':>10}")
@@ -5245,7 +5078,6 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                         "layer_scale": layer_scale, "seed": seed, "lr": lr,
                         "eval_seed": eval_seed, "stats_seed": stats_seed,
                         "params": params, "model_cfg": model_cfg,
-                        **_efficiency_record(model, settings),
                         "accuracy": metrics["accuracy"],
                         "eval_n": int(metrics["n"]),
                         "f1_macro": metrics["f1_macro"],
@@ -5264,7 +5096,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
 
     print(f"\n[e3] {'gate':>5} {'norm':>9} {'ls':>5} {'accuracy':>16} "
           f"{'gate_depth_ratio':>18} {'resid_growth':>14} "
-          f"{'params':>9} {'MFLOPs':>8} {'lat_ms':>8} "
+          f"{'params':>9} "
           f"{'curve_ok':>9} {'tail':>7} {'curve':>10}")
     index = {}
     for gate in ("query", "calib"):
@@ -5278,8 +5110,6 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                 ratio = _mean_std([r["gate_depth_ratio"] for r in rs])
                 growth = _mean_std([r["resid_norm_last_over_first"] for r in rs])
                 params = _mean_std([r["params"] for r in rs])
-                flops = _mean_std([r.get("flops_forward") for r in rs])
-                lat = _mean_std([r.get("latency_ms") for r in rs])
                 tail = _mean_std([r.get("late_train_delta") for r in rs])
                 verdicts = sorted({r["curve_verdict"] for r in rs})
                 _, invalid = _curve_health(rs)
@@ -5291,8 +5121,6 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                       f"{ratio['mean']:>9.4f}±{ratio['std']:<8.4f} "
                       f"{growth['mean']:>7.3f}±{growth['std']:<6.3f} "
                       f"{params['mean']:>9.0f} "
-                      f"{(flops['mean'] / 1e6 if _finite(flops['mean']) else float('nan')):>8.2f} "
-                      f"{lat['mean']:>8.2f} "
                       f"{invalid}/{len(rs)} {tail_s:>7} "
                       f"{'/'.join(verdicts):>10}")
 
