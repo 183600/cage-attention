@@ -640,7 +640,10 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                 eval_every=0, val_batches=2, early_stop_patience=None,
                 nonfinite="raise", grad_norm_explode=100.0,
                 permute_labels=False, restore_best=True,
-                early_stop_info=None):
+                early_stop_info=None, fixed_batch=None,
+                disable_regularization=False, grad_flow_info=None,
+                regularization_info=None, batch_metrics=False,
+                deterministic=False):
     """Train on the recall task with optional learning-curve monitoring.
 
     ``seed`` governs *all* run-to-run randomness: ``cage.repro.seed_everything``
@@ -667,6 +670,8 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     (``cage.data.RESERVED_EVAL_SEEDS``); every batch of the run passes the
     data-cleaning gate before its gradient step, so a generator defect
     that only appears after the first batch cannot be trained on.
+    ``seed=None`` is accepted only with ``fixed_batch`` (the caller has
+    already established the RNG state) and performs no re-seeding.
 
     Curve monitoring (``eval_every > 0``): every ``eval_every`` steps the
     model is scored on ``val_batches`` fresh batches drawn from the fixed
@@ -714,17 +719,41 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     misattributed to the next step's activations.  Finite norms above
     ``grad_norm_explode`` are flagged (``entry["grad_explode"]``) but do
     not abort: clipping already bounds the update.
+
+    Diagnostics/pre-flight options (defaults leave the training loop
+    unchanged):
+
+    * ``fixed_batch=(idx, tgt, meta)`` trains every step on the *same*
+      batch instead of drawing from the stream.  The data-cleaning gate
+      still runs, so the tiny-batch memorisation check exercises this real
+      loop rather than a parallel copy of it.
+    * ``disable_regularization`` turns dropout off after ``model.train()``
+      and zeroes weight decay on this optimizer only; the D5 factory and
+      its hyperparameters are untouched for real runs.  The effective
+      settings are copied into ``regularization_info`` when given.
+    * ``grad_flow_info`` receives the first-step ``_gradient_flow`` audit
+      (parameter connectivity and gradient finiteness).
+    * ``batch_metrics`` adds the pre-update fixed-batch accuracy to each
+      logged ``hist`` entry, which the overfit check samples as its
+      learning curve.
     """
-    check_train_seed(seed)
+    if seed is None:
+        if fixed_batch is None:
+            raise ValueError(
+                "seed=None is only valid with fixed_batch: a stream-drawn "
+                "run must pin its data seed")
+    else:
+        check_train_seed(seed)
+        seed_everything(seed, deterministic=deterministic)
     if early_stop_patience is not None and eval_every <= 0:
         raise ValueError(
             "early_stop_patience requires eval_every > 0: there is no "
             "validation curve to stop on otherwise")
-    seed_everything(seed)
-    gen = stream_generator(seed, device)
+    stream_seed = 0 if seed is None else int(seed)
+    gen = stream_generator(stream_seed, device)
     # Labels are permuted from their own stream so the negative control
     # draws the same data batches as the corresponding clean run.
-    perm_gen = stream_generator(seed, device)
+    perm_gen = stream_generator(stream_seed, device)
     val_gen = stream_generator(VAL_SEED, device)
     params = list(model.parameters())
     opt = _make_adamw(params, lr)
@@ -741,20 +770,47 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     window_loss_n = 0
     printed_grad_spike = 0.0
     model.train()
+    if disable_regularization:
+        info = _disable_dropout(model)
+        for group in opt.param_groups:
+            group["weight_decay"] = 0.0
+        info["weight_decay"] = 0.0
+        info["weight_decay_source"] = (
+            "zeroed on the diagnostic optimizer only; the D5 AdamW factory "
+            "hyperparameters are unchanged for real runs")
+        if regularization_info is not None:
+            regularization_info.update(info)
     for step in range(steps):
         last_step = step
-        idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, dense_lm=dense_lm, gen=gen)
+        if fixed_batch is None:
+            idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
+                                        dense_lm=dense_lm, gen=gen)
+        else:
+            idx, tgt, meta = fixed_batch
         validate_batch(idx, tgt, meta, vocab, diagnostics=False)
         diag_tgt = tgt
         if permute_labels:
             tgt = _permute_batch_labels(tgt, perm_gen)
         opt.zero_grad(set_to_none=True)
         sup_pos = None if dense_lm else meta["query_pos"]
-        _, loss, _ = model(idx, tgt, sup_pos=sup_pos)
+        logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
         loss.backward()
+        if grad_flow_info is not None and step == 0:
+            grad_flow_info.update(_gradient_flow(model))
         lv = loss.item()
         entry = {"step": step, "train_loss": lv,
                  "lr": float(opt.param_groups[0]["lr"])}
+        if batch_metrics:
+            with torch.no_grad():
+                if dense_lm:
+                    rows = torch.arange(idx.size(0), device=logits.device)
+                    qlogits = logits.reshape(
+                        idx.size(0), idx.size(1), -1)[rows, meta["query_pos"]]
+                else:
+                    qlogits = logits
+                entry["batch_acc"] = float(
+                    (qlogits.argmax(-1) == meta["answer"]).to(
+                        torch.float64).mean())
         is_log = (log_every > 0 and step % log_every == 0) or step == steps - 1
         do_val = (eval_every > 0 and (step % eval_every == 0 or step == steps - 1))
         if not math.isfinite(lv):
@@ -943,7 +999,8 @@ def _disable_dropout(model):
 
 
 def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
-                         target_loss=0.1, target_acc=1.0, seed=None):
+                         target_loss=0.1, target_acc=1.0, seed=None,
+                         vocab=512, deterministic=False):
     """Can the training loop fit a single tiny batch? (gradient/loss sanity)
 
     The classic pre-flight check: take one fixed batch, turn regularisation
@@ -992,36 +1049,28 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
     Trains ``model`` in place (pass a throwaway instance) and returns the
     sampled loss/accuracy curves plus the verdict.  Uses the sparse
     (query-position) supervision the experiment contract reports.
+
+    The check drives :func:`train_model` itself with ``fixed_batch`` and
+    ``disable_regularization`` instead of re-implementing the loop: label
+    wiring, the optimiser factory, clipping and the update order are then
+    the same code the grids run, so a regression in the real loop cannot
+    pass this pre-flight via a divergent copy.
     """
     if seed is not None:
         seed_everything(int(seed))
-    model.train()
-    regularization = _disable_dropout(model)
-    params = [p for p in model.parameters() if p.requires_grad]
-    opt = _make_adamw(params, lr)
-    for group in opt.param_groups:
-        group["weight_decay"] = 0.0
-    regularization["weight_decay"] = 0.0
-    regularization["weight_decay_source"] = (
-        "zeroed on the sanity-check optimizer only; the D5 AdamW factory "
-        "hyperparameters are unchanged for real runs")
     sample_every = max(1, steps // 10)
-    curve = []
-    grad_flow = None
-    for step in range(steps):
-        opt.zero_grad(set_to_none=True)
-        logits, loss, _ = model(idx, tgt, sup_pos=meta["query_pos"])
-        loss.backward()
-        if grad_flow is None:
-            grad_flow = _gradient_flow(model)
-        torch.nn.utils.clip_grad_norm_(params, _GRAD_CLIP_MAX_NORM)
-        opt.step()
-        if step % sample_every == 0 or step == steps - 1:
-            with torch.no_grad():
-                acc = float((logits.detach().argmax(-1)
-                             == meta["answer"]).to(torch.float64).mean())
-            curve.append({"step": step, "loss": float(loss.detach()), "acc": acc})
-
+    regularization = {}
+    grad_flow = {}
+    hist = train_model(
+        model, steps=steps, batch=int(idx.size(0)), lr=lr, vocab=vocab,
+        device=idx.device, log_every=sample_every,
+        seed=seed, dense_lm=False,
+        fixed_batch=(idx, tgt, meta), disable_regularization=True,
+        grad_flow_info=grad_flow, regularization_info=regularization,
+        batch_metrics=True, deterministic=deterministic)
+    curve = [{"step": int(row["step"]), "loss": float(row["train_loss"]),
+              "acc": float(row.get("batch_acc", float("nan")))}
+             for row in hist]
     with torch.no_grad():
         final_logits, final_loss, _ = model(idx, tgt, sup_pos=meta["query_pos"])
         final_acc = float((final_logits.argmax(-1)

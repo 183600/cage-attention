@@ -171,7 +171,8 @@ class LinearBagProbe(torch.nn.Module):
 
 
 def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
-                       lr=3e-4, seed=0, history: list | None = None):
+                       lr=3e-4, seed=0, history: list | None = None,
+                       deterministic=False):
     """Fit the probe with the same optimizer/schedule recipe pinned for the
     transformer (``_make_adamw``, cosine schedule, gradient clipping).
 
@@ -190,7 +191,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     as "the probe cannot do better".
     """
     check_train_seed(seed)
-    seed_everything(seed)
+    seed_everything(seed, deterministic=deterministic)
     gen = stream_generator(seed, device)
     model = LinearBagProbe(vocab).to(device)
     params = list(model.parameters())
@@ -248,7 +249,7 @@ def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
 
 def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
                       seeds=(0,), steps=400, batch=64, val_seed=123,
-                      val_batches=4, probe_batch=256):
+                      val_batches=4, probe_batch=256, deterministic=False):
     """Pick the probe learning rate by *mean validation accuracy* over the
     probe seeds.  Model selection happens on ``val_seed`` only; the chosen
     rate is then reported on a disjoint test seed by the caller.
@@ -280,7 +281,8 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
             history = []
             model = train_linear_probe(n_pairs, vocab, device, steps=steps,
                                        batch=batch, lr=lr, seed=seed,
-                                       history=history)
+                                       history=history,
+                                       deterministic=deterministic)
             run_diverged = any("nonfinite" in p or "nonfinite_grad" in p
                                for p in history)
             if run_diverged:

@@ -117,6 +117,7 @@ import random
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 
 import torch
@@ -155,7 +156,7 @@ from .metrics import (
     wilson_ci,
 )
 from .model import GATES, NORMS, build
-from .repro import seed_everything, stream_generator
+from .repro import configure_determinism, seed_everything, stream_generator
 from .train import (
     _ERROR_TYPES,
     collect_stats,
@@ -2585,6 +2586,39 @@ def _announce(hyp_ids):
                   f"includes 0 is not enough")
 
 
+def _run_event(settings: Settings, experiment: str, event: str, **details) -> None:
+    """Append one lifecycle row to ``run_index.jsonl``.
+
+    A results directory may accumulate many invocations (baselines, sanity,
+    E1..E3, retries).  The index records started/completed/aborted/failed
+    per invocation with the same ``run_id`` as its manifest and records, so
+    a half-finished grid can be told apart from a complete one; metadata
+    write failures are warnings rather than experiment failures.
+    """
+    try:
+        ctx = _run_context(settings)
+        record = {
+            "run_id": ctx["run_id"],
+            "run_started_utc": ctx["run_started_utc"],
+            "experiment": experiment,
+            "event": event,
+            "git_sha": ctx["git_sha"],
+            "git_dirty": ctx["git_dirty"],
+            "source_tree_sha256": ctx["source_tree_sha256"],
+            "setup_sha256": ctx["setup_sha256"],
+            "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            **details,
+        }
+        path = pathlib.Path(settings.out_dir) / "run_index.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False,
+                                sort_keys=True) + "\n")
+    except Exception as e:  # noqa: BLE001 - tracking must not kill a run
+        print(f"[runner] WARNING: could not write run_index event "
+              f"{event}: {e}")
+
+
 def _write_result(path: pathlib.Path, record: dict) -> None:
     """Append one JSONL run record, stamped with its creation time.
 
@@ -2628,6 +2662,48 @@ def _git_dirty() -> bool:
         return True
 
 
+_SOURCE_TREE_SHA: str | None = None
+_RUN_ID: str | None = None
+_RUN_STARTED_UTC: str | None = None
+
+
+def _source_tree_sha256() -> str:
+    """Content hash of the training package (cage/*.py).
+
+    ``git_sha`` identifies the committed revision, but a run from a dirty
+    tree is not rebuildable from that revision alone and the dirty flag does
+    not say *what* code ran.  Hashing the actual source files gives every
+    record a content-addressed code version that survives uncommitted
+    edits, so two runs can be compared (and a stale baseline verdict can be
+    refused) even when both report the same ``git_sha``.
+    """
+    global _SOURCE_TREE_SHA
+    if _SOURCE_TREE_SHA is None:
+        h = hashlib.sha256()
+        for path in sorted(pathlib.Path(__file__).resolve().parent.glob("*.py")):
+            h.update(path.name.encode("utf-8") + b"\0")
+            h.update(path.read_bytes())
+            h.update(b"\0")
+        _SOURCE_TREE_SHA = h.hexdigest()[:16]
+    return _SOURCE_TREE_SHA
+
+
+def _run_identity() -> tuple[str, str]:
+    """Per-process run id and start timestamp (excluded from setup hash).
+
+    One invocation can write many JSONL records; the run id groups them and
+    links the compact provenance stamp on error-case rows back to the full
+    manifest, so stale rows from an earlier invocation are never mistaken
+    for part of the current one.
+    """
+    global _RUN_ID, _RUN_STARTED_UTC
+    if _RUN_ID is None:
+        _RUN_ID = (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+                   + "-" + uuid.uuid4().hex[:8])
+        _RUN_STARTED_UTC = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return _RUN_ID, _RUN_STARTED_UTC
+
+
 def _hypotheses_sha() -> str:
     """Content hash of the pre-registered hypothesis registry.
 
@@ -2640,15 +2716,20 @@ def _hypotheses_sha() -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
-def _environment_record(settings: Settings) -> dict:
+def _environment_record(settings: Settings, git_dirty: bool | None = None) -> dict:
     """Software/hardware provenance for reproducibility.
 
     Beyond versions the record pins the numerical-behaviour switches a
     rerun must match: CPU thread count (parallel reductions change the
     summation order), cuDNN determinism/benchmark, whether deterministic
     algorithms are on, the cuBLAS workspace config and the NumPy version
-    when installed.
+    when installed.  The determinism switch is applied from
+    ``Settings.deterministic`` *before* it is read, so the recorded state is
+    the one this run will train under even when the context is built before
+    the first training call (a previous run in the same process may have
+    left the global flag in the other position).
     """
+    configure_determinism(settings.deterministic)
     env = {
         "python": platform.python_version(),
         "python_executable": sys.executable,
@@ -2664,7 +2745,7 @@ def _environment_record(settings: Settings) -> dict:
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
         "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
         "hash_randomization": bool(sys.flags.hash_randomization),
-        "git_dirty": _git_dirty(),
+        "git_dirty": (_git_dirty() if git_dirty is None else bool(git_dirty)),
     }
     cudnn = getattr(torch.backends, "cudnn", None)
     if cudnn is not None:
@@ -2689,6 +2770,10 @@ _SEEDING_POLICY = {
         "cage.repro.seed_everything(seed): python random + numpy (when "
         "installed) + torch CPU and all CUDA devices; deterministic kernels "
         "only when Settings.deterministic=True"),
+    "determinism_switch": (
+        "Settings.deterministic is applied by every seeding call, including "
+        "train_model; False explicitly restores non-deterministic kernels "
+        "so a prior deterministic run cannot leak into a later one"),
     "data_streams": (
         "each split and training seed owns a dedicated torch.Generator "
         "(DataLoader generator= equivalent; make_batch never reads the "
@@ -2710,11 +2795,13 @@ def _run_context(settings: Settings) -> dict:
     seeding policy and the data-stream fingerprints travel *with* each
     record, so a result file is traceable without relying on defaults that
     may have changed since.  The ``setup_sha256`` hash over exactly
-    {revision, hypotheses, config, data fingerprints} gives every record a
-    compact id for "same code + same recipe + same data":     records carrying
-    different ids were not produced by the same setup and cannot be pooled
-    silently.  Cached on the Settings object: the environment probe (and
-    git call) runs once per process.
+    {revision, source-tree hash, hypotheses, config, data fingerprints}
+    gives every record a compact id for "same code + same recipe + same
+    data": records carrying different ids were not produced by the same
+    setup and cannot be pooled silently.  ``run_id`` groups all records of
+    one invocation.  Cached on the Settings object and invalidated when the
+    resolved config changes, so a mutated Settings cannot reuse a stale
+    provenance block.
 
     The configured training-seed set is re-validated on every call (cheap,
     before the cache lookup): every official entry point builds the run
@@ -2723,11 +2810,14 @@ def _run_context(settings: Settings) -> dict:
     not duplicate-free / disjoint from the reserved evaluation streams.
     """
     _validate_training_seeds(settings.seeds)
-    ctx = getattr(settings, "_run_context_cache", None)
-    if ctx is not None:
-        return ctx
     config = {name: getattr(settings, name)
               for name in Settings.__dataclass_fields__ if name != "out_dir"}
+    cache_key = json.dumps(config, ensure_ascii=False, sort_keys=True,
+                           default=str)
+    ctx = getattr(settings, "_run_context_cache", None)
+    if ctx is not None and getattr(settings, "_run_context_cache_key", None) \
+            == cache_key:
+        return ctx
     # Fingerprint each stream at the geometry its consumer actually uses:
     # make_batch's draws are shape-dependent, so one seed at two batch
     # sizes is two realizations.  Training reads settings.batch; validation
@@ -2753,17 +2843,26 @@ def _run_context(settings: Settings) -> dict:
             batch=settings.batch, seed=seed)
         for seed in settings.seeds
     }
+    git_sha = _git_sha()
+    git_dirty = _git_dirty()
+    source_tree = _source_tree_sha256()
+    run_id, run_started_utc = _run_identity()
     payload = json.dumps({
-        "git_sha": _git_sha(),
+        "git_sha": git_sha,
+        "source_tree_sha256": source_tree,
         "hypotheses_sha256": _hypotheses_sha(),
         "config": config,
         "data_fingerprints": fingerprints,
     }, ensure_ascii=False, sort_keys=True, default=str)
     ctx = {
-        "git_sha": _git_sha(),
+        "run_id": run_id,
+        "run_started_utc": run_started_utc,
+        "git_sha": git_sha,
+        "git_dirty": bool(git_dirty),
+        "source_tree_sha256": source_tree,
         "hypotheses_sha256": _hypotheses_sha(),
         "setup_sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16],
-        "environment": _environment_record(settings),
+        "environment": _environment_record(settings, git_dirty),
         "config": config,
         "seeding": dict(_SEEDING_POLICY),
         "data_fingerprints": fingerprints,
@@ -2775,17 +2874,31 @@ def _run_context(settings: Settings) -> dict:
         "baseline_validity": getattr(settings, "_baseline_validity", None),
     }
     settings._run_context_cache = ctx
+    settings._run_context_cache_key = cache_key
     return ctx
+
+
+def _stamp(settings: Settings) -> dict:
+    """Compact provenance stamp for auxiliary/error-case records.
+
+    Full provenance lives in the run manifest; the stamp carries just the
+    ids needed to join a raw case row back to it without repeating the
+    environment and every hyperparameter on each row.
+    """
+    ctx = _run_context(settings)
+    return {key: ctx[key] for key in
+            ("run_id", "setup_sha256", "git_sha", "source_tree_sha256")}
 
 
 def _protocol_sha256(ctx: dict) -> str:
     """Hash over exactly the resolved config and data-stream fingerprints.
 
     Excludes the code revision, hypothesis registry and environment on
-    purpose: those do not change *which data* a check was run on, so a
-    verdict produced under the same protocol on an older revision is still
-    about the same splits.  Any config or stream-fingerprint change does
-    invalidate the stored HB marks.
+    purpose: those do not change *which data* a check was run on.  The
+    source-tree hash is checked separately by
+    :func:`_verdict_provenance_note`, because the gate *implementation*
+    must also match.  Any config or stream-fingerprint change invalidates
+    the stored HB marks.
     """
     payload = json.dumps({"config": ctx["config"],
                           "data_fingerprints": ctx["data_fingerprints"]},
@@ -2799,7 +2912,10 @@ def _verdict_provenance_note(verdict: dict, settings: Settings) -> str | None:
     A verdict written under a different config/data protocol (or before
     the stamp existed) cannot annotate the current grids: its HB1/HB2/HB4/
     HB5/HB6/HB7 marks were measured on different streams or a different
-    recipe.
+    recipe.  The source-tree hash is checked separately: the gates are
+    implemented in this package, so a verdict produced by older code is not
+    evidence about the current code even when config and data match (a
+    dirty tree with the same ``git_sha`` makes that distinction necessary).
     """
     stored = verdict.get("protocol_sha256")
     if stored is None:
@@ -2812,19 +2928,30 @@ def _verdict_provenance_note(verdict: dict, settings: Settings) -> str | None:
                 f"it was produced under a different config/data protocol, so "
                 f"its HB marks do not describe this run - re-run "
                 f"`--only baselines`")
+    stored_source = verdict.get("source_tree_sha256")
+    current_source = _source_tree_sha256()
+    if stored_source is None:
+        return ("baselines verdict predates source-tree stamping; re-run "
+                "`--only baselines` so its HB marks were produced by the "
+                "current gate code")
+    if stored_source != current_source:
+        return (f"baselines verdict source {stored_source} != current "
+                f"{current_source}; it was produced by older gate code, so "
+                f"its HB marks do not certify this run - re-run "
+                f"`--only baselines`")
     return None
 
 
 def _write_manifest(settings: Settings, out_dir: pathlib.Path, tag: str) -> dict:
     """Per-experiment provenance manifest, written before any training.
 
-    One ``<tag>_manifest.json`` per experiment pins the code revision
-    (plus dirty flag), the pre-registered hypotheses and their hash, every
-    hyperparameter and seed, the data-stream fingerprints (including each
-    training stream) and the software environment.  Run records repeat
-    this context inline; the manifest is the single artifact that makes a
-    results directory traceable back to a reproducible setup without
-    joining files by hand.
+    One ``<tag>_manifest.json`` per experiment pins the invocation run id,
+    the code revision (plus dirty flag and content hash), the
+    pre-registered hypotheses and their hash, every hyperparameter and
+    seed, the data-stream fingerprints (including each training stream) and
+    the software environment.  Run records repeat this context inline; the
+    manifest is the single artifact that makes a results directory
+    traceable back to a reproducible setup without joining files by hand.
     """
     manifest = {
         "experiment": tag,
@@ -2841,10 +2968,10 @@ def _load_baseline_verdict(out_dir: pathlib.Path):
     E1/E2/E3 read the learned model against the simple baselines, so a
     missing verdict file is surfaced as a note instead of silently
     treating the baseline check as passed.  A verdict file written by an
-    older version lacks the HB4/HB5 keys or the protocol stamp; the marks
-    are reported as ``n/a`` (not ``FAILED``) and a provenance warning asks
-    for a re-run, so neither a missing check nor a stale one is mistaken
-    for a pass.
+    older version lacks the HB4/HB5 keys or the protocol/source stamps; the
+    marks are reported as ``n/a`` (not ``FAILED``) and a provenance warning
+    asks for a re-run, so neither a missing check nor a stale one is
+    mistaken for a pass.
     """
     path = out_dir / "baselines_verdict.json"
     if not path.exists():
@@ -2917,8 +3044,9 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
     gate:
 
     * refuses a missing verdict (``--only baselines`` has to be certified
-      first) and a stale one (protocol hash mismatch: the marks were
-      measured on a different config/data protocol);
+      first) and a stale one (protocol hash or source-tree hash mismatch:
+      the marks were measured on a different config/data protocol or by
+      older gate code);
     * refuses when any blocking gate failed;
     * stamps the verdict's marks (HB1..HB7 + seed-floor eligibility) into
       ``settings._baseline_validity`` so every subsequent manifest and
@@ -3088,6 +3216,10 @@ _REPRO_AUDIT_KEYS = (
      "training path, which a dropout=0 run never exercises)"),
     ("trajectory_dropout_diff_seed_differs",
      "a different seed changes the dropout trajectory"),
+    ("determinism_flag_follows_request",
+     "the deterministic-kernel switch follows the requested setting (on "
+     "enables it, off restores the default instead of inheriting a "
+     "previous deterministic run)"),
 )
 
 
@@ -3204,6 +3336,16 @@ def _reproducibility_audit(settings: Settings) -> dict:
     rng_b = _rng_draws(seed)
     rng_other = _rng_draws(other)
 
+    det_on = seed_everything(seed, deterministic=True)
+    det_off = seed_everything(seed, deterministic=False)
+    determinism_toggle = bool(
+        det_on["deterministic_algorithms"]
+        and (det_on["cudnn"] is None
+             or det_on["cudnn"]["deterministic"])
+        and not det_off["deterministic_algorithms"]
+        and (det_off["cudnn"] is None
+             or not det_off["cudnn"]["deterministic"]))
+
     seed_everything(seed)
     init_same_a = _model_state_hash(build(cfg, compile=False))
     seed_everything(seed)
@@ -3216,14 +3358,15 @@ def _reproducibility_audit(settings: Settings) -> dict:
             torch.manual_seed(s + 777)
             random.seed(s + 777)
         with contextlib.redirect_stdout(io.StringIO()):
-            seed_everything(s)
+            seed_everything(s, deterministic=settings.deterministic)
             model = build(model_cfg if model_cfg is not None else cfg,
                           compile=False)
             hist = train_model(model, steps=_REPRO_AUDIT_STEPS,
                                batch=_REPRO_AUDIT_BATCH,
                                n_pairs=settings.n_pairs, lr=1e-3,
                                vocab=settings.vocab, device=device,
-                               log_every=1, seed=s)
+                               log_every=1, seed=s,
+                               deterministic=settings.deterministic)
         return [float(h["train_loss"]) for h in hist]
 
     traj_a = _trajectory(seed)
@@ -3262,6 +3405,9 @@ def _reproducibility_audit(settings: Settings) -> dict:
             traj_drop_a == traj_drop_replay),
         "trajectory_dropout_diff_seed_differs": bool(
             traj_drop_a != traj_drop_other),
+        "determinism_flag_follows_request": determinism_toggle,
+        "deterministic_on": det_on,
+        "deterministic_off": det_off,
         "deterministic_algorithms": bool(getattr(
             torch, "are_deterministic_algorithms_enabled", lambda: False)()),
         "scope": ("same machine + same PyTorch build; bit-exact reproduction "
@@ -3428,7 +3574,8 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
                        device=settings.device, log_every=0, seed=seed,
                        eval_every=eval_every, val_batches=settings.val_batches,
                        permute_labels=permute_labels,
-                       early_stop_info=early_stop_info)
+                       early_stop_info=early_stop_info,
+                       deterministic=settings.deterministic)
     metrics = eval_metrics(model, settings.n_pairs, settings.vocab,
                            settings.device, batch=settings.eval_batch,
                            batches=settings.eval_batches, seed=eval_seed)
@@ -4172,12 +4319,13 @@ def _overfit_sanity_by_config(settings: Settings) -> dict:
     validate_batch(sidx, stgt, smeta, settings.vocab, diagnostics=False)
     by_config = {}
     for label, overrides in _SANITY_CONFIGS:
-        seed_everything(SANITY_SEED)
+        seed_everything(SANITY_SEED, deterministic=settings.deterministic)
         tiny = build(_model_cfg(settings, d_model=48, n_layers=2, **overrides),
                      compile=False)
         by_config[label] = overfit_sanity_check(
             tiny, sidx, stgt, smeta, lr=settings.overfit_lr,
-            steps=settings.overfit_steps, seed=SANITY_SEED)
+            steps=settings.overfit_steps, seed=SANITY_SEED,
+            vocab=settings.vocab, deterministic=settings.deterministic)
     settings._overfit_sanity_cache = by_config
     return by_config
 
@@ -4350,7 +4498,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         seeds=settings.seeds[:max(1, len(settings.seeds))],
         steps=settings.probe_steps, batch=settings.probe_batch,
         val_seed=VAL_SEED, val_batches=settings.probe_eval_batches,
-        probe_batch=settings.probe_eval_batch)
+        probe_batch=settings.probe_eval_batch,
+        deterministic=settings.deterministic)
     probe_selection = _selection_reliability(table,
                                              grid=settings.probe_lr_grid)
     _write_json(out_dir / "baselines_probe_tuning.json",
@@ -4373,7 +4522,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         probe = train_linear_probe(settings.n_pairs, settings.vocab,
                                    settings.device, steps=settings.probe_steps,
                                    batch=settings.probe_batch, lr=best_lr,
-                                   seed=seed, history=probe_curve)
+                                   seed=seed, history=probe_curve,
+                                   deterministic=settings.deterministic)
         acc = linear_probe_accuracy(
             probe, settings.n_pairs, settings.vocab, settings.device,
             batch=settings.probe_eval_batch,
@@ -4508,6 +4658,10 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     verdict = {
         "protocol_sha256": _protocol_sha256(_run_context(settings)),
         "git_sha": _run_context(settings)["git_sha"],
+        "git_dirty": _run_context(settings)["git_dirty"],
+        "source_tree_sha256": _run_context(settings)["source_tree_sha256"],
+        "setup_sha256": _run_context(settings)["setup_sha256"],
+        "run_id": _run_context(settings)["run_id"],
         "train_seed": settings.seeds[0] if settings.seeds else None,
         "test_seed": TEST_SEED,
         "val_seed": VAL_SEED,
@@ -4827,7 +4981,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 examples[gate] = (errors["summary"]["n_errors"], ranked[:3])
             for case in errors["cases"]:
                 _write_result(out_dir / "e1_error_cases.jsonl",
-                              {"experiment": "e1", "gate": gate, "seed": seed,
+                              {"experiment": "e1", **_stamp(settings),
+                               "gate": gate, "seed": seed,
                                "lr": lr, **case})
             _write_result(out_dir / "e1_runs.jsonl", rec)
             runs.append(rec)
@@ -4838,9 +4993,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                                   {"calib_variant": label}, **overrides)
             for case in errors["cases"]:
                 _write_result(out_dir / "e1_error_cases.jsonl",
-                              {"experiment": "e1", "gate": "calib",
-                               "ablation": label, "seed": seed, "lr": lr,
-                               **case})
+                              {"experiment": "e1", **_stamp(settings),
+                               "gate": "calib", "ablation": label,
+                               "seed": seed, "lr": lr, **case})
             _write_result(out_dir / "e1_runs.jsonl", rec)
             ablation_runs.setdefault(label, []).append(rec)
     by_gate = {g: [r for r in runs if r["gate"] == g] for g in GATES}
@@ -5431,6 +5586,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     for gate in GATES:
         for case in examples.get(gate, (0, []))[1]:
             print(f"  [{gate}] {_format_case(case)}")
+    table["_provenance"] = _stamp(settings)
     _write_json(out_dir / "e1_summary.json", table)
 
 
@@ -5573,8 +5729,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             rec.update({f"err_{k}": v for k, v in errors["summary"].items()})
             for case in errors["cases"]:
                 _write_result(out_dir / "e2_error_cases.jsonl",
-                              {"experiment": "e2", "gate": gate,
-                               "variant": label, "seed": seed,
+                              {"experiment": "e2", **_stamp(settings),
+                               "gate": gate, "variant": label, "seed": seed,
                                "length": lengths[-1], "lr": lr, **case})
             if label not in examples or \
                     errors["summary"]["n_errors"] > examples[label][0]:
@@ -5782,10 +5938,13 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         clog.print("length main effect (2x2)", "H2c", metric, ci,
                    warn=factorial_warn)
     clog.finalize(out_dir, q=settings.fdr_q)
-    _write_json(out_dir / "e2_summary.json",
-                {label: {str(L): _mean_std([r["accuracy_by_length"][L]
-                                            for r in by_variant[label]])
-                         for L in lengths} for label, *_ in _E2_VARIANTS})
+    e2_summary = {
+        label: {str(L): _mean_std([r["accuracy_by_length"][L]
+                                   for r in by_variant[label]])
+                for L in lengths}
+        for label, *_ in _E2_VARIANTS}
+    e2_summary["_provenance"] = _stamp(settings)
+    _write_json(out_dir / "e2_summary.json", e2_summary)
 
 
 def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
@@ -5861,8 +6020,8 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                                           ranked[:1])
                     for case in errors["cases"]:
                         _write_result(out_dir / "e3_error_cases.jsonl",
-                                      {"experiment": "e3", "gate": gate,
-                                       "norm": norm,
+                                      {"experiment": "e3", **_stamp(settings),
+                                       "gate": gate, "norm": norm,
                                        "layer_scale": layer_scale,
                                        "seed": seed, "lr": lr, **case})
                     rec = {
@@ -6037,9 +6196,10 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                              ("calib/pre", cells[2]),
                              ("query/pre", cells[3])))
     clog.finalize(out_dir, q=settings.fdr_q)
-    _write_json(out_dir / "e3_summary.json",
-                {f"{g}|{n}|{ls}": _aggregate_runs(rs)
-                 for (g, n, ls), rs in index.items()})
+    e3_summary = {f"{g}|{n}|{ls}": _aggregate_runs(rs)
+                  for (g, n, ls), rs in index.items()}
+    e3_summary["_provenance"] = _stamp(settings)
+    _write_json(out_dir / "e3_summary.json", e3_summary)
 
 
 def run_sanity(settings: Settings, out_dir: pathlib.Path) -> None:
@@ -6111,8 +6271,13 @@ def main(argv=None) -> int:
     settings.fdr_q = args.fdr_q
     out_dir = pathlib.Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    settings.out_dir = out_dir
     _write_json(out_dir / "hypotheses.json", HYPOTHESES)
     _write_json(out_dir / "environment.json", _run_context(settings))
+    _run_event(settings, args.only, "started", quick=bool(args.quick),
+               seeds=list(settings.seeds), steps=settings.steps,
+               lr=settings.lr, device=settings.device,
+               fdr_q=settings.fdr_q)
 
     print(f"[runner] only={args.only} quick={args.quick} "
           f"seeds={settings.seeds} steps={settings.steps} "
@@ -6135,7 +6300,14 @@ def main(argv=None) -> int:
     except (OverfitSanityError, ReproducibilityError,
             SplitAuditError, BaselineVerdictError) as e:
         print(f"[runner] ABORTED before grid training: {e}")
+        _run_event(settings, args.only, "aborted",
+                   error=type(e).__name__, reason=str(e))
         return 3
+    except Exception as e:
+        _run_event(settings, args.only, "failed",
+                   error=type(e).__name__, reason=str(e))
+        raise
+    _run_event(settings, args.only, "completed")
     print(f"\n[runner] done; records in {out_dir}/")
     return 0
 

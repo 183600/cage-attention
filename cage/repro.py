@@ -38,6 +38,46 @@ import torch
 _HASHSEED_PINNED: str | None = None
 
 
+def configure_determinism(deterministic: bool) -> dict:
+    """Apply the *whole* determinism switch, including turning it off.
+
+    ``seed_everything`` used to only ever enable deterministic kernels, so
+    a process that ran one deterministic job and then a non-deterministic
+    one kept the global flag on while its records claimed the opposite.
+    This helper makes the flag follow the requested value on every call:
+    off restores PyTorch's default (non-deterministic kernels), while
+    cuDNN benchmark autotuning is always disabled because timing-based
+    algorithm selection is a run-to-run variance source even when kernels
+    themselves are otherwise deterministic.
+
+    ``CUBLAS_WORKSPACE_CONFIG`` is only ever *added* (via ``setdefault``)
+    before CUDA initialises; it cannot be unset safely afterwards, so the
+    resolved value is reported and recorded rather than pretending the
+    environment was restored.
+    """
+    deterministic = bool(deterministic)
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    try:
+        torch.use_deterministic_algorithms(deterministic, warn_only=True)
+    except (AttributeError, TypeError):
+        pass
+    cudnn = getattr(torch.backends, "cudnn", None)
+    if cudnn is not None:
+        cudnn.deterministic = deterministic
+        cudnn.benchmark = False
+    return {
+        "deterministic": deterministic,
+        "deterministic_algorithms": bool(getattr(
+            torch, "are_deterministic_algorithms_enabled", lambda: False)()),
+        "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+        "cudnn": None if cudnn is None else {
+            "deterministic": bool(cudnn.deterministic),
+            "benchmark": bool(cudnn.benchmark),
+        },
+    }
+
+
 def seed_everything(seed: int, deterministic: bool = False) -> dict:
     """Seed Python, NumPy (if present) and PyTorch CPU + all CUDA devices.
 
@@ -49,6 +89,9 @@ def seed_everything(seed: int, deterministic: bool = False) -> dict:
     pins cuDNN to deterministic kernels with benchmark autotuning off, and
     sets the cuBLAS workspace config *before* any CUDA call - cuBLAS reads
     that variable when it initialises, so setting it afterwards is a no-op.
+    Passing ``False`` explicitly restores the non-deterministic default, so
+    a previous deterministic run in the same process cannot leak its
+    global kernel flags into a later one.
 
     ``PYTHONHASHSEED`` is exported for child processes and recorded.  The
     hash seed of the *running* interpreter is fixed at launch, so a run
@@ -67,16 +110,12 @@ def seed_everything(seed: int, deterministic: bool = False) -> dict:
         "numpy": False,
         "torch": True,
         "cuda_devices": 0,
-        "deterministic": bool(deterministic),
     }
     current = os.environ.get("PYTHONHASHSEED")
     if current is None or current == _HASHSEED_PINNED:
         _HASHSEED_PINNED = str(seed)
         os.environ["PYTHONHASHSEED"] = _HASHSEED_PINNED
     info["pythonhashseed"] = os.environ.get("PYTHONHASHSEED")
-    if deterministic:
-        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-    info["cublas_workspace_config"] = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
     try:
         import numpy as np
     except ImportError:
@@ -88,20 +127,7 @@ def seed_everything(seed: int, deterministic: bool = False) -> dict:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
         info["cuda_devices"] = int(torch.cuda.device_count())
-    if deterministic:
-        try:
-            torch.use_deterministic_algorithms(True, warn_only=True)
-        except (AttributeError, TypeError):
-            pass
-        cudnn = getattr(torch.backends, "cudnn", None)
-        if cudnn is not None:
-            cudnn.deterministic = True
-            cudnn.benchmark = False
-    cudnn = getattr(torch.backends, "cudnn", None)
-    info["cudnn"] = None if cudnn is None else {
-        "deterministic": bool(cudnn.deterministic),
-        "benchmark": bool(cudnn.benchmark),
-    }
+    info.update(configure_determinism(deterministic))
     return info
 
 
