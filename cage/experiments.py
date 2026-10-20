@@ -1225,17 +1225,17 @@ def _controlled_audit(runs_a, runs_b):
             continue
         first = views[0]
         for j, other in enumerate(views[1:], start=1):
-            for key, val in first.items():
-                if other.get(key) != val:
+            for key in sorted(set(first) | set(other)):
+                if other.get(key) != first.get(key):
                     audit["mismatches"].append(
                         f"side {side} recipe differs between runs 0 and {j}: "
-                        f"{key}={val!r} vs {other.get(key)!r}")
+                        f"{key}={first.get(key)!r} vs {other.get(key)!r}")
     if runs_a and runs_b:
         va, vb = _recipe_view(runs_a[0]), _recipe_view(runs_b[0])
-        for key, val in va.items():
-            if vb.get(key) != val:
+        for key in sorted(set(va) | set(vb)):
+            if vb.get(key) != va.get(key):
                 audit["mismatches"].append(
-                    f"recipe differs across sides: {key}={val!r} vs "
+                    f"recipe differs across sides: {key}={va.get(key)!r} vs "
                     f"{vb.get(key)!r}")
         for key in _AUDIT_FACTOR_KEYS:
             in_a = any(key in r for r in runs_a)
@@ -3736,7 +3736,8 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     (``shallow_none_baseline`` records, ``baselines_shallow_none.json``)
     that E1's complexity readout reads from the verdict.
     """
-    ladder = tuple(dict.fromkeys(int(d) for d in settings.depth_ladder))
+    ladder = tuple(sorted(dict.fromkeys(
+        int(d) for d in settings.depth_ladder)))
     if not ladder or any(d < 1 for d in ladder):
         raise ValueError(
             f"depth_ladder must be non-empty positive ints, got "

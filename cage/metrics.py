@@ -137,10 +137,9 @@ def pr_auc(scores, positives) -> float:
     """Average precision (area under the precision-recall curve).
 
     Computed as ``sum_n (R_n - R_{n-1}) * P_n`` over the descending-score
-    ranking, i.e. the usual average precision.  Ties between a positive
-    and a negative score may be split by the arbitrary sort order, which
-    makes the result a lower bound on the tie-corrected value; on
-    continuous scores (entropy, gate values) this is immaterial.
+    ranking.  Equal scores are grouped and consume one precision/recall
+    point, so the result is the tie-corrected average precision and does
+    not depend on the arbitrary sort order within a tie.
     """
     s = _flatten_float(scores)
     y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
@@ -148,11 +147,21 @@ def pr_auc(scores, positives) -> float:
     if n_pos == 0:
         return float("nan")
     order = torch.argsort(s, descending=True)
+    s_sorted = s[order]
     y = y[order].to(torch.float64)
     tp = torch.cumsum(y, dim=0)
-    precision = tp / torch.arange(1, y.numel() + 1, dtype=torch.float64,
-                                  device=s.device)
-    return float((precision * y).sum() / n_pos)
+    new_group = torch.ones(y.numel(), dtype=torch.bool, device=s.device)
+    new_group[1:] = s_sorted[1:] != s_sorted[:-1]
+    starts = torch.nonzero(new_group, as_tuple=False).reshape(-1)
+    ends = torch.cat((
+        starts[1:] - 1,
+        torch.full((1,), y.numel() - 1, dtype=starts.dtype,
+                   device=starts.device),
+    ))
+    tp_end = tp[ends]
+    precision = tp_end / (ends + 1).to(torch.float64)
+    prev_tp = torch.cat((tp_end.new_zeros(1), tp_end[:-1]))
+    return float(((tp_end - prev_tp) / n_pos * precision).sum())
 
 
 def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:

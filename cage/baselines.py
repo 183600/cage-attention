@@ -398,6 +398,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
                 f"got {n_per_seed!r}")
     n = len(accs)
     sd_seed = float(ci.get("sd", float("nan")))
+    p_above_seed = bootstrap_upper_p(margins, chance, n_boot=n_boot, seed=seed)
     if n_per_seed is not None and n > 0:
         a = torch.tensor(accs, dtype=torch.float64)
         gen = torch.Generator(device=a.device).manual_seed(seed)
@@ -437,8 +438,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
                 "lo": float(ci.get("lo", float("nan"))),
                 "hi": float(ci.get("hi", float("nan"))),
                 "p_value": float(ci.get("p_value", float("nan"))),
-                "p_above_chance": float(ci.get("p_above_chance",
-                                               float("nan"))),
+                "p_above_chance": p_above_seed,
                 "sd": sd_seed,
                 "mde80": float(ci.get("mde80", float("nan"))),
             },
@@ -446,8 +446,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
             "lo_seed": float(ci.get("lo", float("nan"))),
             "hi_seed": float(ci.get("hi", float("nan"))),
             "p_value_seed": float(ci.get("p_value", float("nan"))),
-            "p_above_chance_seed": float(ci.get("p_above_chance",
-                                                float("nan"))),
+            "p_above_chance_seed": p_above_seed,
             "sd_seed": sd_seed,
             "sd_binomial": sd_binomial,
             "sd_effective": sd_effective,
@@ -460,8 +459,8 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
             "lo_seed": float(ci.get("lo", float("nan"))),
             "hi_seed": float(ci.get("hi", float("nan"))),
             "p_value_seed": float(ci.get("p_value", float("nan"))),
-            "p_above_chance_seed": float(ci.get("p_above_chance",
-                                                float("nan"))),
+            "p_above_chance": p_above_seed,
+            "p_above_chance_seed": p_above_seed,
             "sd_seed": sd_seed,
             "sd_binomial": float("nan"),
             "sd_effective": sd_seed,
@@ -481,9 +480,6 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     else:
         state = "inconclusive"
     ci["hb2_state"] = state
-    if not ci["measurement_noise_accounted"]:
-        ci["p_above_chance"] = bootstrap_upper_p(
-            margins, chance, n_boot=n_boot, seed=seed)
     margin = chance - float(ci["mean"])
     ci["seeds_for_certification"] = (
         float(seeds_for_power(ci.get("sd"), margin))

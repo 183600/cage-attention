@@ -20,6 +20,14 @@ import torch
 
 SEP_ID = 1
 PAD_ID = 0
+_INTEGER_DTYPES = (torch.uint8, torch.int8, torch.int16, torch.int32,
+                   torch.int64)
+
+
+def _is_integer_tensor(x) -> bool:
+    """Whether ``x`` is a tensor with an integer dtype."""
+    return torch.is_tensor(x) and x.dtype in _INTEGER_DTYPES
+
 
 # ---------------------------------------------------------------------------
 # Train / validation / test split protocol
@@ -234,12 +242,12 @@ def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
     checks and value-level ones as device checks.
     """
     try:
-        if not torch.is_tensor(idx) or idx.dim() != 2:
+        if not _is_integer_tensor(idx) or idx.dim() != 2:
             return False
         batch_size, width = idx.shape
         checks = [((idx >= 0) & (idx < vocab)).all()]
-        if idx.is_floating_point():
-            checks.append(torch.isfinite(idx).all())
+        if not _is_integer_tensor(meta["query_pos"]):
+            return False
         qp = meta["query_pos"].to(device=idx.device, dtype=torch.long)
         if qp.shape != (batch_size,):
             return False
@@ -249,6 +257,8 @@ def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
         # so an invalid batch can never slip through on the clamped index.
         safe_qp = qp.unsqueeze(1).clamp(0, max(width - 1, 0))
         query = idx.gather(1, safe_qp).squeeze(1)
+        if not _is_integer_tensor(meta["answer"]):
+            return False
         answer = meta["answer"].to(device=idx.device, dtype=torch.long)
         answer_ok = answer.shape == (batch_size,)
         checks.append(((answer >= 2) & (answer < vocab)).all())
@@ -262,15 +272,15 @@ def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
         checks.append(paired_value.eq(answer).all())
         checks.append(idx.eq(SEP_ID).sum(dim=1).eq(1).all())
         if "key_pos" in meta:
+            if not _is_integer_tensor(meta["key_pos"]):
+                return False
             kp = meta["key_pos"].to(device=idx.device, dtype=torch.long)
             if kp.shape != (batch_size,):
                 return False
             checks.append(kp.eq(key_pos).all())
         if targets is not None:
-            if targets.shape != idx.shape:
+            if not _is_integer_tensor(targets) or targets.shape != idx.shape:
                 return False
-            if targets.is_floating_point():
-                checks.append(torch.isfinite(targets).all())
             checks.append(((targets >= -1) & (targets < vocab)).all())
             sup = targets.gather(1, safe_qp).squeeze(1)
             checks.append(sup.eq(answer).all())
@@ -292,17 +302,20 @@ def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
 
 def _validate_batch_strict(idx, targets, meta, vocab) -> dict:
     """``validate_batch``'s checks, one host read-back per condition."""
-    if not torch.is_tensor(idx) or idx.dim() != 2:
-        raise ValueError(f"idx must be a (B, T) tensor, got {type(idx)}")
-    if idx.is_floating_point() and not bool(torch.isfinite(idx).all()):
-        raise ValueError("idx contains NaN/Inf")
+    if not _is_integer_tensor(idx) or idx.dim() != 2:
+        raise ValueError(
+            f"idx must be a (B, T) integer tensor, got {type(idx)}")
     if not bool((idx >= 0).all()) or not bool((idx < vocab).all()):
         raise ValueError(f"idx contains token ids outside [0, {vocab})")
     batch_size, width = idx.shape
+    if not _is_integer_tensor(meta["query_pos"]):
+        raise ValueError("meta['query_pos'] must have an integer dtype")
     qp = meta["query_pos"].to(device=idx.device, dtype=torch.long)
     if qp.shape != (batch_size,) or bool(qp.lt(0).any()) or bool(qp.ge(width).any()):
         raise ValueError("query_pos is missing or out of range")
     query = idx.gather(1, qp.unsqueeze(1)).squeeze(1)
+    if not _is_integer_tensor(meta["answer"]):
+        raise ValueError("meta['answer'] must have an integer dtype")
     answer = meta["answer"].to(device=idx.device, dtype=torch.long)
     if answer.shape != (batch_size,):
         raise ValueError("meta['answer'] has the wrong shape")
@@ -329,16 +342,17 @@ def _validate_batch_strict(idx, targets, meta, vocab) -> dict:
     if not bool(idx.eq(SEP_ID).sum(dim=1).eq(1).all()):
         raise ValueError("structure: expected exactly one SEP token per row")
     if "key_pos" in meta:
+        if not _is_integer_tensor(meta["key_pos"]):
+            raise ValueError("meta['key_pos'] must have an integer dtype")
         kp = meta["key_pos"].to(device=idx.device, dtype=torch.long)
         if kp.shape != (batch_size,):
             raise ValueError("meta['key_pos'] has the wrong shape")
         if not bool(kp.eq(key_pos).all()):
             raise ValueError("meta['key_pos'] disagrees with the sequence")
     if targets is not None:
-        if targets.shape != idx.shape:
-            raise ValueError("targets must have the same shape as idx")
-        if targets.is_floating_point() and not bool(torch.isfinite(targets).all()):
-            raise ValueError("targets contain NaN/Inf")
+        if not _is_integer_tensor(targets) or targets.shape != idx.shape:
+            raise ValueError(
+                "targets must have the same shape as idx and an integer dtype")
         if not bool(((targets >= -1) & (targets < vocab)).all()):
             raise ValueError(f"targets contain ids outside [-1, {vocab})")
         sup = targets.gather(1, qp.unsqueeze(1)).squeeze(1)
