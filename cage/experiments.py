@@ -4223,6 +4223,10 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
         outlier_txt = ", ".join(
             f"{name}={outlier['rate_by_split'][name]:.4f}"
             for name in ("val", "test", "stats")) if outlier else "n/a"
+        coverage = audit.get("answer_coverage", {})
+        cov_txt = ", ".join(
+            f"{name}={coverage['unseen_by_split'][name]['rate']:.4f}"
+            for name in ("val", "test", "stats")) if coverage else "n/a"
         actual = audit["actual_stream_overlap"]
         print(f"[{tag}] split audit (HB3, train seeds {list(train_seeds)}): "
               f"{detail}; pairwise overlap max="
@@ -4237,6 +4241,9 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
               f"(bound={outlier.get('rate_bound', float('nan')):.4f}) "
               f"[{outlier_txt}]; train stationarity min p="
               f"{audit.get('train_stationarity_min_p', 1.0):.3f}; "
+              f"unseen-answer rate [{cov_txt}] "
+              f"(train support {coverage.get('n_seen_train', 'n/a')}/"
+              f"{coverage.get('n_classes', 'n/a')}); "
               f"stream duplicates train="
               f"{audit['n_duplicate_rows_train']} ({dup_txt}); "
               f"unique_key_rate={audit['unique_key_rate']:.4f}")

@@ -1188,6 +1188,9 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
       systematically later keys or more ambiguous values has a different
       achievable accuracy, so an accuracy contrast against it would
       attribute a data difference to the mechanism.
+    * **answer-support coverage**: an answer class absent from the training
+      streams is unpredictable; the train support and each held-out split's
+      unseen-answer rate are reported as a bound on achievable accuracy.
     * **atypical-sample / difficulty-tail audit**: a per-sample typicality
       score (the train-fitted surprisal over the answer, key position,
       repeated-value and naive-confusable fields) is thresholded at the
@@ -1290,6 +1293,31 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
     stationarity = _train_stationarity(split_values, splits, train_names,
                                        categories)
 
+    # Data-sufficiency disclosure: an answer class that never occurs in the
+    # training streams is unpredictable by construction, so report the train
+    # support and the share of each held-out split's answers that fall
+    # outside it.  The support is fitted on train counts only and held-out
+    # values are merely looked up (transform-only); the rate is a bound on
+    # the accuracy any model can reach, not a leakage signal.
+    seen_answers = pooled_counts["answer"] > 0
+    seen_answers[:min(2, int(seen_answers.numel()))] = False
+    n_selectable = max(int(categories["answer"]) - 2, 1)
+    answer_coverage = {
+        "n_classes": n_selectable,
+        "n_seen_train": int(seen_answers.sum()),
+        "fraction_seen_train": float(seen_answers.sum()) / n_selectable,
+        "unseen_by_split": {},
+    }
+    for name in ("val", "test", "stats"):
+        values = split_values[(name, "answer")].reshape(-1).to(torch.long)
+        unseen = ~seen_answers[values]
+        answer_coverage["unseen_by_split"][name] = {
+            "n": int(unseen.sum()),
+            "rate": (float(unseen.to(torch.float64).mean())
+                     if unseen.numel() else 0.0),
+        }
+
+
     # Descriptive difficulty profile per split: the calibrated tests decide
     # *whether* a shift exists, these shares say *what* differs (mean pair
     # index of the matching key, repeated-answer rate, naive-confusable
@@ -1323,6 +1351,7 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
                        "smoothing": _AUDIT_SMOOTH},
         "difficulty_by_split": difficulty,
         "outlier_audit": outliers,
+        "answer_coverage": answer_coverage,
         "train_stationarity": stationarity,
         "train_stationarity_min_p": min(
             (v["p"] for v in stationarity.values()), default=1.0),
@@ -1705,6 +1734,26 @@ def _self_test() -> int:
             "final_target_wrong": (sparse_idx, final_tgt, sparse_meta),
     }.items():
         check(f"invariants_agree_{name}", gate_agrees(i_, t_, m_, 64))
+
+    # End-to-end wiring of the train-fitted sections: a small deterministic
+    # same-distribution audit must expose the atypical-tail, coverage and
+    # stationarity readouts and must not trip the tail gate.
+    e2e = split_leakage_audit(8, 32, "cpu", batch=32, batches=8,
+                              train_seeds=(0,))
+    check("audit_e2e_outlier_fields",
+          e2e["outlier_audit"]["fields"] == list(_OUTLIER_FIELDS))
+    check("audit_e2e_no_tail_shift",
+          not any(e2e["outlier_audit"]["shift_by_split"].values()))
+    check("audit_e2e_stationarity_present",
+          len(e2e["train_stationarity"]) == len(_STATIONARITY_FIELDS))
+    cov = e2e["answer_coverage"]
+    check("audit_e2e_coverage_sane",
+          0 <= cov["n_seen_train"] <= cov["n_classes"]
+          and all(0.0 <= cov["unseen_by_split"][name]["rate"] <= 1.0
+                  for name in ("val", "test", "stats")))
+    check("audit_e2e_outlier_rates_sane",
+          all(0.0 <= v <= 1.0
+              for v in e2e["outlier_audit"]["rate_by_split"].values()))
 
     if failures:
         print("data self-test FAILED: " + ", ".join(failures))
