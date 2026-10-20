@@ -4281,6 +4281,9 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         # freeze an unmeasured learning rate and manufacture a rung.
         finite_rows = [row for row in table
                        if _finite(row["val_accuracy_mean"])]
+        # Audit the full table for the unmeasured branch; the selected
+        # (curve-valid) pool is audited again below.
+        selection = _selection_reliability(table, grid=settings.lr_grid)
         if not finite_rows:
             print(f"[baselines] WARNING: depth={depth} tuning table has no "
                   f"finite validation accuracy (all {len(table)} lr "
