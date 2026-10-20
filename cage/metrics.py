@@ -667,8 +667,9 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
     denom = 1.0 + z2 / total
     center = (p + z2 / (2.0 * total)) / denom
     half = z * math.sqrt(p * (1.0 - p) / total + z2 / (4.0 * total * total)) / denom
-    return {"p": p, "lo": max(0.0, center - half),
-            "hi": min(1.0, center + half), "n": total}
+    lo = min(p, max(0.0, center - half))
+    hi = max(p, min(1.0, center + half))
+    return {"p": p, "lo": lo, "hi": hi, "n": total}
 
 
 def _self_test() -> int:
@@ -751,9 +752,11 @@ def _self_test() -> int:
     check("bh_keep_large", not adj[2]["reject"] and not adj[3]["reject"])
     check("bh_nan_untestable", adj[4]["p_adj"] != adj[4]["p_adj"])
 
-    # Wilson interval brackets the point estimate.
+    # Wilson interval brackets the point estimate, including exact endpoints.
     w = wilson_ci(60, 100)
     check("wilson_brackets", w["lo"] <= w["p"] <= w["hi"])
+    check("wilson_upper_exact", wilson_ci(4, 4)["hi"] == 1.0)
+    check("wilson_lower_exact", wilson_ci(0, 4)["lo"] == 0.0)
 
     if failures:
         print("metrics self-test FAILED: " + ", ".join(failures))
