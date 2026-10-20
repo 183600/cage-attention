@@ -911,7 +911,10 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
     writes nothing.  A shared sample or a gap above the noise floor
     invalidates the HB3 decision and every number reported above it.
     """
-    train_seeds = tuple(dict.fromkeys(int(s) for s in train_seeds))
+    unique = {}
+    for seed in train_seeds:
+        unique.setdefault(stream_seed_key(seed), int(seed))
+    train_seeds = tuple(unique.values())
     if not train_seeds:
         raise ValueError("train_seeds must contain at least one training seed")
     for seed in train_seeds:
