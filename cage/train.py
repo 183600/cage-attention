@@ -694,7 +694,9 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     counter but keeping the overfit last-step weights would defeat the
     purpose.  The optional ``early_stop_info`` dict is filled with
     ``enabled`` / ``stopped_early`` / ``restored_best`` / ``best_val_*`` /
-    ``steps_run`` so callers can record what the run actually produced.
+    ``steps_run`` so callers can record what the run actually produced;
+    ``steps_run`` counts only the iterations that reached ``opt.step()``, so
+    a skipped non-finite update is not mistaken for a trained step.
 
     The training loss stored in each ``hist`` entry is the exact
     pre-update loss of that step (``train_loss``); the mean over all
@@ -764,7 +766,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     best_val_step = None
     best_state = None
     stopped_early = False
-    last_step = -1
+    updates_run = 0
     evals_since_improve = 0
     window_loss_sum = 0.0
     window_loss_n = 0
@@ -781,7 +783,6 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         if regularization_info is not None:
             regularization_info.update(info)
     for step in range(steps):
-        last_step = step
         if fixed_batch is None:
             idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
                                         dense_lm=dense_lm, gen=gen)
@@ -872,6 +873,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                       f"bounds the update, watch for instability")
         opt.step()
         sched.step()
+        updates_run += 1
 
         if do_val:
             val_loss, val_acc, val_batch, val_loss_se = _validation_metrics(
@@ -938,7 +940,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             "best_val_loss": (float(best_val) if math.isfinite(best_val)
                               else float("nan")),
             "best_val_step": best_val_step,
-            "steps_run": int(last_step + 1),
+            "steps_run": int(updates_run),
         })
     return hist
 

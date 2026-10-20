@@ -3457,6 +3457,16 @@ def _enforce_reproducibility(settings: Settings, out_dir: pathlib.Path,
     return audit
 
 
+def _steps_run_from_hist(hist):
+    """Best-effort optimizer-step count when ``early_stop_info`` is absent."""
+    if not hist:
+        return 0
+    skipped = sum(1 for h in hist
+                  if isinstance(h.get("diagnosis"), dict)
+                  or not _finite(h.get("train_loss")))
+    return max(0, max(int(h["step"]) for h in hist) + 1 - skipped)
+
+
 def _curve_record(hist, early_stop_info=None):
     """Per-run learning-curve summary (monitor the curve, not just the end).
 
@@ -3544,7 +3554,7 @@ def _curve_record(hist, early_stop_info=None):
         "steps_run": int(
             (early_stop_info or {}).get("steps_run")
             if (early_stop_info or {}).get("steps_run") is not None
-            else max((int(h["step"]) for h in hist), default=-1) + 1),
+            else _steps_run_from_hist(hist)),
         "early_stop_enabled": bool(
             (early_stop_info or {}).get("enabled", False)),
         "stopped_early": bool(
