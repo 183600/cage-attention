@@ -1065,6 +1065,43 @@ def _outlier_audit(split_values, train_names, names, reference) -> dict:
     }
 
 
+def _support_coverage(pooled_counts, split_values, heldout_names, categories,
+                      fields) -> dict:
+    """Train-fitted category support and per-split unseen-value rates.
+
+    For each field, the pooled training counts define which selectable
+    categories were ever observed (ids 0=PAD and 1=SEP are never selectable
+    content).  A held-out value whose category is absent from that support
+    cannot be predicted (an answer) or meaningfully embedded (an input
+    token), so its rate is a transparent bound on achievable accuracy.
+    The support comes from training only; held-out values are looked up,
+    never used to define it.
+    """
+    out = {}
+    for field in fields:
+        counts = pooled_counts[field]
+        seen = counts > 0
+        seen[:min(2, int(seen.numel()))] = False
+        n_categories = max(int(categories[field]) - 2, 1)
+        entry = {
+            "n_categories": n_categories,
+            "n_seen_train": int(seen.sum()),
+            "fraction_seen_train": int(seen.sum()) / n_categories,
+            "unseen_by_split": {},
+        }
+        for name in heldout_names:
+            values = split_values[(name, field)].reshape(-1).to(torch.long)
+            values = values[values >= 2]
+            unseen = ~seen[values]
+            entry["unseen_by_split"][name] = {
+                "n": int(unseen.sum()),
+                "rate": (float(unseen.to(torch.float64).mean())
+                         if unseen.numel() else 0.0),
+            }
+        out[field] = entry
+    return out
+
+
 def _train_stationarity(split_values, splits, train_names, categories) -> dict:
     """First-half vs second-half drift inside each training stream.
 
@@ -1195,9 +1232,11 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
       systematically later keys or more ambiguous values has a different
       achievable accuracy, so an accuracy contrast against it would
       attribute a data difference to the mechanism.
-    * **answer-support coverage**: an answer class absent from the training
-      streams is unpredictable; the train support and each held-out split's
-      unseen-answer rate are reported as a bound on achievable accuracy.
+    * **category-support coverage**: an answer class absent from the
+      training streams is unpredictable and an input token absent from them
+      is unembedable; for the answer, token, key and value fields the train
+      support and each held-out split's unseen-value rate are reported as a
+      bound on achievable accuracy.
     * **atypical-sample / difficulty-tail audit**: a per-sample typicality
       score (the train-fitted surprisal over the answer, key position,
       repeated-value and naive-confusable fields) is thresholded at the
@@ -1300,30 +1339,16 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
     stationarity = _train_stationarity(split_values, splits, train_names,
                                        categories)
 
-    # Data-sufficiency disclosure: an answer class that never occurs in the
-    # training streams is unpredictable by construction, so report the train
-    # support and the share of each held-out split's answers that fall
-    # outside it.  The support is fitted on train counts only and held-out
-    # values are merely looked up (transform-only); the rate is a bound on
-    # the accuracy any model can reach, not a leakage signal.
-    seen_answers = pooled_counts["answer"] > 0
-    seen_answers[:min(2, int(seen_answers.numel()))] = False
-    n_selectable = max(int(categories["answer"]) - 2, 1)
-    answer_coverage = {
-        "n_classes": n_selectable,
-        "n_seen_train": int(seen_answers.sum()),
-        "fraction_seen_train": float(seen_answers.sum()) / n_selectable,
-        "unseen_by_split": {},
-    }
-    for name in ("val", "test", "stats"):
-        values = split_values[(name, "answer")].reshape(-1).to(torch.long)
-        unseen = ~seen_answers[values]
-        answer_coverage["unseen_by_split"][name] = {
-            "n": int(unseen.sum()),
-            "rate": (float(unseen.to(torch.float64).mean())
-                     if unseen.numel() else 0.0),
-        }
-
+    # Data-sufficiency disclosure: a category that never occurs in the
+    # training streams is unpredictable (an answer class) or unembedable (an
+    # input token), so report the train support and the share of each
+    # held-out split's values outside it.  The support is fitted on train
+    # counts only and held-out values are merely looked up
+    # (transform-only); the rate bounds the accuracy any model can reach,
+    # which the marginal shift tests do not report.
+    support_coverage = _support_coverage(
+        pooled_counts, split_values, ("val", "test", "stats"), categories,
+        ("answer", "token", "key", "value"))
 
     # Descriptive difficulty profile per split: the calibrated tests decide
     # *whether* a shift exists, these shares say *what* differs (mean pair
@@ -1358,7 +1383,7 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
                        "smoothing": _AUDIT_SMOOTH},
         "difficulty_by_split": difficulty,
         "outlier_audit": outliers,
-        "answer_coverage": answer_coverage,
+        "support_coverage": support_coverage,
         "train_stationarity": stationarity,
         "train_stationarity_min_p": min(
             (v["p"] for v in stationarity.values()), default=1.0),
@@ -1764,11 +1789,12 @@ def _self_test() -> int:
           not any(e2e["outlier_audit"]["shift_by_split"].values()))
     check("audit_e2e_stationarity_present",
           len(e2e["train_stationarity"]) == len(_STATIONARITY_FIELDS))
-    cov = e2e["answer_coverage"]
+    cov = e2e["support_coverage"]
     check("audit_e2e_coverage_sane",
-          0 <= cov["n_seen_train"] <= cov["n_classes"]
-          and all(0.0 <= cov["unseen_by_split"][name]["rate"] <= 1.0
-                  for name in ("val", "test", "stats")))
+          all(0 <= cov[field]["n_seen_train"] <= cov[field]["n_categories"]
+              and all(0.0 <= cov[field]["unseen_by_split"][name]["rate"] <= 1.0
+                      for name in ("val", "test", "stats"))
+              for field in ("answer", "token", "key", "value")))
     check("audit_e2e_outlier_rates_sane",
           all(0.0 <= v <= 1.0
               for v in e2e["outlier_audit"]["rate_by_split"].values()))
