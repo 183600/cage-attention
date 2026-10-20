@@ -1875,7 +1875,7 @@ def spearman(x, y):
     """
     x = x.flatten().float()
     y = y.flatten().float()
-    if x.numel() == 0:
+    if x.numel() == 0 or y.numel() != x.numel():
         return torch.tensor(float("nan"))
     rx = average_ranks(x)
     ry = average_ranks(y)
