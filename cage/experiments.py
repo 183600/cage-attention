@@ -4762,8 +4762,10 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
         batch=settings.stats_batch, batches=settings.stats_batches,
         seed=stats_seed, max_cases=settings.max_error_cases)
     corr = gate_stat_correlations(stats)
-    fc = false_concentration_analysis(stats)
     fc_sweep = false_concentration_sweep(stats)
+    # The sweep already contains the pre-registered 0.5 cut.
+    fc = (fc_sweep[0.5] if 0.5 in fc_sweep
+          else false_concentration_analysis(stats))
     ed = error_detection_aucs(stats)
     rec = {
         "experiment": "e1",

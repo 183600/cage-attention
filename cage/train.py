@@ -1579,19 +1579,21 @@ def _attention_mass_on_key(x, weight, meta, n_heads, inv_scale, null_k):
     rows = _arange(B, x.device)
     q_all = F.linear(x[rows, qp], weight[:C]).view(B, n_heads, dk)
     k_all = F.linear(x, weight[C:2 * C]).view(B, T, n_heads, dk)
-    k_all = k_all.permute(0, 2, 1, 3)
-    scores = torch.einsum("bhd,bhtd->bth", q_all, k_all).mul_(inv_scale)
-    cols = _arange(T, x.device).view(1, T, 1)
-    scores.masked_fill_(cols > qp.view(B, 1, 1), float("-inf"))
+    k_all = k_all.transpose(1, 2)
+    # Batched query-key GEMM in head-major layout (no ``bth`` transpose).
+    scores = torch.matmul(q_all.unsqueeze(2),
+                          k_all.transpose(-2, -1)).mul_(inv_scale)
+    cols = _arange(T, x.device).view(1, 1, 1, T)
+    scores.masked_fill_(cols > qp.view(B, 1, 1, 1), float("-inf"))
     if null_k is not None:
         s0 = torch.einsum("bhd,hd->bh", q_all, null_k).mul_(inv_scale)
-        scores = torch.cat([s0.unsqueeze(1), scores], dim=1)
-        tapped = torch.softmax(scores, dim=1).gather(
-            1, (kp + 1).view(B, 1, 1).expand(B, 1, n_heads))
+        scores = torch.cat([s0.view(B, n_heads, 1, 1), scores], dim=-1)
+        tapped = torch.softmax(scores, dim=-1).gather(
+            3, (kp + 1).view(B, 1, 1, 1).expand(B, n_heads, 1, 1))
     else:
-        tapped = torch.softmax(scores, dim=1).gather(
-            1, kp.view(B, 1, 1).expand(B, 1, n_heads))
-    return tapped.squeeze(1).mean(-1)
+        tapped = torch.softmax(scores, dim=-1).gather(
+            3, kp.view(B, 1, 1, 1).expand(B, n_heads, 1, 1))
+    return tapped.mean(dim=(1, 2, 3))
 
 
 def _attention_mass_from_qk(q, k, meta, n_heads, inv_scale, null_k):
@@ -1612,19 +1614,20 @@ def _attention_mass_from_qk(q, k, meta, n_heads, inv_scale, null_k):
     q_all = q.view(B, h, T, dk)[rows, :, qp]
     # Match the pre-hook's head-major key layout exactly so the diagnostics
     # stay consistent with the recomputed-key path.
-    k_all = k.view(B, h, T, dk)
-    scores = torch.einsum("bhd,bhtd->bth", q_all, k_all).mul_(inv_scale)
-    cols = _arange(T, q.device).view(1, T, 1)
-    scores.masked_fill_(cols > qp.view(B, 1, 1), float("-inf"))
+    k_all = k.view(B * h, T, dk)
+    scores = torch.bmm(q_all.reshape(B * h, 1, dk),
+                       k_all.transpose(1, 2)).view(B, h, 1, T).mul_(inv_scale)
+    cols = _arange(T, q.device).view(1, 1, 1, T)
+    scores.masked_fill_(cols > qp.view(B, 1, 1, 1), float("-inf"))
     if null_k is not None:
         s0 = torch.einsum("bhd,hd->bh", q_all, null_k).mul_(inv_scale)
-        scores = torch.cat([s0.unsqueeze(1), scores], dim=1)
-        tapped = torch.softmax(scores, dim=1).gather(
-            1, (kp + 1).view(B, 1, 1).expand(B, 1, h))
+        scores = torch.cat([s0.view(B, h, 1, 1), scores], dim=-1)
+        tapped = torch.softmax(scores, dim=-1).gather(
+            3, (kp + 1).view(B, 1, 1, 1).expand(B, h, 1, 1))
     else:
-        tapped = torch.softmax(scores, dim=1).gather(
-            1, kp.view(B, 1, 1).expand(B, 1, h))
-    return tapped.squeeze(1).mean(-1)
+        tapped = torch.softmax(scores, dim=-1).gather(
+            3, kp.view(B, 1, 1, 1).expand(B, h, 1, 1))
+    return tapped.mean(dim=(1, 2, 3))
 
 
 def _error_case_flags(idx, meta, pred, n_pairs):
@@ -1848,6 +1851,21 @@ def gate_stat_correlations(stats):
     return r
 
 
+def _false_concentration_at(mp, corr, gm, maxprob_thresh):
+    """Threshold-specific readout over precomputed per-sample vectors."""
+    high = mp > maxprob_thresh
+    r = {
+        "n_high_maxprob": int(high.sum()),
+        "false_conc_rate": 1.0 - corr[high].float().mean().item() if high.any() else float("nan"),
+        "overall_acc": corr.float().mean().item(),
+    }
+    if gm is not None:
+        fc = high & ~corr
+        r["gate_on_false_conc"] = gm[fc].mean().item() if fc.any() else float("nan")
+        r["gate_on_correct"] = gm[corr & high].mean().item() if (corr & high).any() else float("nan")
+    return r
+
+
 def false_concentration_analysis(stats, maxprob_thresh=0.5):
     """'False concentration': max attention prob high but answer wrong.
 
@@ -1857,20 +1875,10 @@ def false_concentration_analysis(stats, maxprob_thresh=0.5):
     when concentration is false.
     """
     mp = stats["maxprob"].max(dim=1)[0]
-    high = mp > maxprob_thresh
     corr = stats["correct"].bool()
-    r = {
-        "n_high_maxprob": int(high.sum()),
-        "false_conc_rate": 1.0 - corr[high].float().mean().item() if high.any() else float("nan"),
-        "overall_acc": corr.float().mean().item(),
-    }
     g = stats.get("gate")
-    if g is not None:
-        gm = g.mean(1)
-        fc = high & ~corr
-        r["gate_on_false_conc"] = gm[fc].mean().item() if fc.any() else float("nan")
-        r["gate_on_correct"] = gm[corr & high].mean().item() if (corr & high).any() else float("nan")
-    return r
+    gm = g.mean(1) if g is not None else None
+    return _false_concentration_at(mp, corr, gm, maxprob_thresh)
 
 
 def false_concentration_sweep(stats, thresholds=(0.3, 0.5, 0.7, 0.9)) -> dict:
@@ -1886,7 +1894,11 @@ def false_concentration_sweep(stats, thresholds=(0.3, 0.5, 0.7, 0.9)) -> dict:
 
     Returns ``{threshold: false_concentration_analysis(stats, thr)}``.
     """
-    return {float(thr): false_concentration_analysis(stats, maxprob_thresh=thr)
+    mp = stats["maxprob"].max(dim=1)[0]
+    corr = stats["correct"].bool()
+    g = stats.get("gate")
+    gm = g.mean(1) if g is not None else None
+    return {float(thr): _false_concentration_at(mp, corr, gm, thr)
             for thr in thresholds}
 
 

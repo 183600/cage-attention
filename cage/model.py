@@ -383,10 +383,15 @@ def _get_scratch(key: tuple, device: torch.device, dtype: torch.dtype, numel: in
 _EVAL_SCRATCH = (
     "embed_out", "packed", "qkv_out", "ln_out", "ln_f_out", "ln_mean",
     "ln_rstd", "seed_scale", "mlp_up", "mlp_down", "mlp_down_big",
-    "proj_out", "attn_y", "gate_out", "calib_s", "calib_y", "calib_yblk",
-    "calib_ent", "calib_ent_shuf", "calib_f", "calib_conc", "null_s",
+    "proj_out", "attn_y", "gate_out", "calib_s", "calib_y", "calib_ent", "calib_ent_shuf", "calib_f", "calib_conc", "null_s",
     "null_s0", "null_y", "null_yblk", "null_m", "rowent", "rowstats_att",
     "rowstats_att_null", "rowstats_sum", "mask_rows", "mask_rows_b",
+    # Backward-only buffers: kept across training steps, but dead once an
+    # evaluation pass has run; release them too so retained scratch does
+    # not hold training-sized work buffers after scoring.
+    "calib_bwd_work", "calib_dp", "calib_rowsum", "rowent_bwd_d",
+    "softmax_rowsum", "null_bwd_e", "null_bwd_gu", "null_bwd_dot",
+    "null_bwd_ak", "null_bwd_av",
 )
 
 
@@ -544,13 +549,11 @@ class _CalibAttn(torch.autograd.Function):
             B, _, h, dv = ybt.shape
             ent = (_get_scratch(("calib_ent",), q.device, q.dtype,
                                 bh * T).view(bh, T)) if need_ent else None
-            ebuf = _get_scratch(("calib_f",), q.device, q.dtype,
-                                bh * max_rows * max_i1) if need_ent else None
-            if ebuf is not None and ebuf.numel() >= bh * max_rows * dv:
-                yblk = ebuf
-            else:
-                yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
-                                    bh * max_rows * dv)
+            # One work buffer serves both the block output (copied out
+            # before the entropy pass) and the entropy log-term.
+            work_numel = bh * max_rows * (max(max_i1, dv) if need_ent else dv)
+            yblk = _get_scratch(("calib_f",), q.device, q.dtype, work_numel)
+            ebuf = yblk if need_ent else None
             for i0, i1 in blocks:
                 r = i1 - i0
                 p = _softmax_inplace(torch.baddbmm(
@@ -587,21 +590,22 @@ class _CalibAttn(torch.autograd.Function):
             ent = (q.new_empty(bh, T) if grad_needed else
                    _get_scratch(("calib_ent",), q.device, q.dtype,
                                 bh * T).view(bh, T)) if need_ent else None
-            ebuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if need_ent else None
+            # One work buffer serves both the entropy log-term (written
+            # before the block output) and the compact block output.
+            work_numel = bh * max_rows * (max(max_i1, dv) if need_ent else dv)
+            work = _get_scratch(("calib_f",), q.device, q.dtype, work_numel)
             # Each block's result is copied into its row slice of ``y``.
-            yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
-                                bh * max_rows * dv)
             for i0, i1 in blocks:
                 r = i1 - i0
                 p = _softmax_inplace(torch.baddbmm(
                     mask[i0:i1, :i1], q[:, i0:i1], kt[:, :, :i1],
                     beta=1.0, alpha=scale,
                     out=s[:bh * r * i1].view(bh, r, i1)))
-                yb = yblk[:bh * r * dv].view(bh, r, dv)
+                if need_ent:
+                    _row_entropy(p, eps, out=ent[:, i0:i1], buf=work)
+                yb = work[:bh * r * dv].view(bh, r, dv)
                 torch.bmm(p, v[:, :i1], out=yb)
                 y[:, i0:i1].copy_(yb)
-                if need_ent:
-                    _row_entropy(p, eps, out=ent[:, i0:i1], buf=ebuf)
         if any(ctx.needs_input_grad):
             ctx.save_for_backward(qkv)
         ctx.scale = scale
@@ -1309,7 +1313,7 @@ class Attention(nn.Module):
                          out.view(B * T, C))
         if x.is_cuda and not grad_on:
             _release_scratch(
-                "qkv_out", "packed", "calib_y", "calib_yblk", "calib_s",
+                "qkv_out", "packed", "calib_y", "calib_s",
                 "calib_f", "calib_ent", "calib_ent_shuf", "calib_conc",
                 "null_y", "null_s", "null_s0",
                 "null_m", "rowstats_att", "rowstats_att_null", "rowstats_sum",

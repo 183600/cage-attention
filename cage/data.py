@@ -295,10 +295,9 @@ def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
             checks.append((nxt.eq(-1) | nxt.eq(cont)).all())
             checks.append((targets[:, -1].eq(-1)
                            | targets[:, -1].eq(answer)).all())
-        acc = checks[0]
-        for c in checks[1:]:
-            acc.logical_and_(c)
-        return answer_ok and bool(acc)
+        # One reduction over the stacked predicates instead of one host
+        # decision per check (same conjunction, fewer sync points).
+        return answer_ok and bool(torch.stack(checks).all())
     except Exception:  # noqa: BLE001 - any unevaluable input is strict's job
         return False
 
@@ -458,8 +457,9 @@ def _row_keys(idx):
     """
     out = []
     for row in idx.tolist():
-        forward = tuple(int(t) for t in row)
-        weighted = tuple((i + 1) * int(t) for i, t in enumerate(row))
+        ints = [int(t) for t in row]
+        forward = tuple(ints)
+        weighted = tuple((i + 1) * t for i, t in enumerate(ints))
         out.append((hash(forward), hash(weighted)))
     return out
 
@@ -665,9 +665,13 @@ def _counts(values, n_categories):
                           minlength=n_categories).to(torch.int64)
 
 
-def _distribution(values, n_categories):
-    counts = _counts(values, n_categories).to(torch.float64)
+def _distribution_from_counts(counts):
+    counts = counts.to(torch.float64)
     return counts / counts.sum().clamp_min(1.0)
+
+
+def _distribution(values, n_categories):
+    return _distribution_from_counts(_counts(values, n_categories))
 
 
 def _total_variation(p, q):
@@ -689,20 +693,27 @@ def _noise_floor(stream_values, n_categories):
     All inputs are fitted on training data only.
     """
     if len(stream_values) >= 2:
+        counts = [_counts(values, n_categories) for values in stream_values]
+        dists = [_distribution_from_counts(count) for count in counts]
+        total = counts[0].clone()
+        for count in counts[1:]:
+            total.add_(count)
         floors = []
-        for j, values in enumerate(stream_values):
-            others = [v for i, v in enumerate(stream_values) if i != j]
-            reference = _distribution(torch.cat(others), n_categories)
+        for j in range(len(counts)):
+            # Leave-one-out reference from the cached counts instead of
+            # re-binning the concatenation of all other streams.
             floors.append(
-                _total_variation(_distribution(values, n_categories),
-                                 reference))
+                _total_variation(dists[j],
+                                 _distribution_from_counts(total - counts[j])))
         return sum(floors) / len(floors)
     values = stream_values[0]
     if values.numel() < 2:
         return float("nan")
     half = values.numel() // 2
-    floor = _total_variation(_distribution(values[:half], n_categories),
-                             _distribution(values[half:], n_categories))
+    lo = _counts(values[:half], n_categories)
+    hi = _counts(values[half:], n_categories)
+    floor = _total_variation(_distribution_from_counts(lo),
+                             _distribution_from_counts(hi))
     return floor / math.sqrt(2.0)
 
 
@@ -833,7 +844,8 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
 
 
 def _fingerprints(idx):
-    return {tuple(int(t) for t in row) for row in idx.tolist()}
+    # ``tolist`` already yields Python ints; no per-token conversion needed.
+    return {tuple(row) for row in idx.tolist()}
 
 
 def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
@@ -903,30 +915,44 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
         for b in names[i + 1:]:
             pairwise[f"{a}|{b}"] = len(fingerprints[a] & fingerprints[b])
 
-    # Reference statistics are fitted on the training streams only.
+    # Reference statistics are fitted on the training streams only.  The
+    # structural difficulty covariates are derived once per split and the
+    # per-field values / counts are reused by the floor, shift and TV
+    # readouts instead of being recomputed for every threshold/test.
     train_names = [f"train:{seed}" for seed in train_seeds]
     categories = {field: _field_categories(field, vocab, n_pairs)
                   for field in _AUDIT_FIELDS}
-    pooled = {field: torch.cat([_field_values(splits[name], n_pairs, field)
+    features = {name: _difficulty_features(split, n_pairs)
+                for name, split in splits.items()}
+
+    def values(name, field):
+        if field in _AUDIT_DERIVED_FIELDS:
+            return features[name][field]
+        return _field_values(splits[name], n_pairs, field)
+
+    split_values = {(name, field): values(name, field)
+                    for name in names for field in _AUDIT_FIELDS}
+    pooled = {field: torch.cat([split_values[(name, field)]
                                 for name in train_names])
               for field in _AUDIT_FIELDS}
     pooled_counts = {field: _counts(pooled[field], categories[field])
                      for field in _AUDIT_FIELDS}
-    reference = {field: _distribution(pooled[field], categories[field])
+    reference = {field: _distribution_from_counts(pooled_counts[field])
                  for field in _AUDIT_FIELDS}
     floors = {
-        field: _noise_floor([_field_values(splits[name], n_pairs, field)
+        field: _noise_floor([split_values[(name, field)]
                              for name in train_names], categories[field])
         for field in _AUDIT_FIELDS
     }
+    observed_counts = {
+        (name, field): _counts(split_values[(name, field)], categories[field])
+        for name in ("val", "test", "stats") for field in _AUDIT_FIELDS}
     shift_p = {field: {} for field in _AUDIT_FIELDS}
     shift_chi2 = {field: {} for field in _AUDIT_FIELDS}
     for field in _AUDIT_FIELDS:
         for name in ("val", "test", "stats"):
             p_value, chi2 = _distribution_shift_p(
-                _counts(_field_values(splits[name], n_pairs, field),
-                        categories[field]),
-                pooled_counts[field])
+                observed_counts[(name, field)], pooled_counts[field])
             shift_p[field][name] = p_value
             shift_chi2[field][name] = chi2
 
@@ -936,15 +962,15 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
     # rate), all computed without any held-out-fitted statistic.
     difficulty = {}
     for name, split in splits.items():
-        features = _difficulty_features(split, n_pairs)
+        feat = features[name]
         n = max(int(split["idx"].size(0)), 1)
         difficulty[name] = {
-            "mean_key_pos": float(features["key_pos"].to(torch.float64)
+            "mean_key_pos": float(feat["key_pos"].to(torch.float64)
                                   .mean()) if split["idx"].size(0) else
             float("nan"),
-            "value_repeat_rate": float(features["value_repeats"].sum()) / n,
+            "value_repeat_rate": float(feat["value_repeats"].sum()) / n,
             "naive_confusable_rate": (
-                float(features["naive_confusable"].sum()) / n),
+                float(feat["naive_confusable"].sum()) / n),
         }
 
     out = {
@@ -983,8 +1009,7 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
         for field in _AUDIT_FIELDS:
             out[f"{field}_tv_train_{name}"] = _total_variation(
                 reference[field],
-                _distribution(_field_values(splits[name], n_pairs, field),
-                              categories[field]))
+                _distribution_from_counts(observed_counts[(name, field)]))
     return out
 
 
