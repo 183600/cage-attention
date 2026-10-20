@@ -1123,8 +1123,10 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
 
     Uses eval mode + ``inference_mode`` (no dropout, no RNG consumption), so
     the training RNG stream - and therefore the training trajectory - is
-    unaffected by monitoring.  Every validation batch passes the shared
-    data-cleaning gate, so monitoring never reads invalid data.
+    unaffected by monitoring.  Each module's previous training/eval flag is
+    restored afterwards, so a diagnostic run with dropout force-disabled
+    does not have it silently re-enabled.  Every validation batch passes the
+    shared data-cleaning gate, so monitoring never reads invalid data.
 
     Returns ``(loss, accuracy, triage_batch, loss_se)`` where
     ``triage_batch`` is the ``(idx, targets, meta)`` of the first
@@ -1136,7 +1138,7 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     noise of the monitored loss: a validation regression smaller than a couple
     of SEs is not distinguishable from re-drawing the validation stream.
     """
-    was_training = model.training
+    training_states = {module: module.training for module in model.modules()}
     model.eval()
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
@@ -1169,7 +1171,8 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
             else:
                 correct.add_((logits.argmax(-1) == meta["answer"]).sum())
             total += idx.size(0)
-    model.train(was_training)
+    for module, training in training_states.items():
+        module.train(training)
     n_batches = max(1, batches)
     losses = [float(x) for x in batch_losses]
     if len(losses) > 1:
