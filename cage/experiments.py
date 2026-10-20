@@ -699,7 +699,9 @@ HYPOTHESES = {
         "hypothesis": "seednorm (per-token dynamic scale) raises the "
                       "deep/early gate ratio relative to pre-LN.",
         "prediction": "gate_depth_ratio(seednorm) > gate_depth_ratio(pre) "
-                      "and deep residual norms grow more; the registered "
+                      "and the deep/early residual-norm ratio "
+                      "resid_norm_last_over_first is larger under seednorm "
+                      "than under pre-LN; the registered "
                       "accuracy companion (calib - query within each norm "
                       "and LayerScale level) is one-sided: the calibrated "
                       "gate must not lose "
@@ -710,8 +712,12 @@ HYPOTHESES = {
         "decision": "paired bootstrap 95% CI excludes 0 after "
                     "Benjamini-Hochberg FDR control across the E3 contrasts "
                     "(q=0.05)",
-        "sesoi": {"gate_depth_ratio": 0.05, "accuracy": 0.01},
-        "direction": {"gate_depth_ratio": "+", "accuracy": "+"},
+        "sesoi": {"gate_depth_ratio": 0.05,
+                  "resid_norm_last_over_first": 0.05,
+                  "accuracy": 0.01},
+        "direction": {"gate_depth_ratio": "+",
+                      "resid_norm_last_over_first": "+",
+                      "accuracy": "+"},
     },
     "H3b": {
         "experiment": "e3",
@@ -6882,11 +6888,14 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
         for layer_scale in (None, 1e-2):
             a = index[(gate, "seednorm", layer_scale)]
             b = index[(gate, "pre", layer_scale)]
-            clog.print(f"{gate}: seednorm - pre (ls={layer_scale})",
-                       "H3a", "gate_depth_ratio",
-                       _paired_diff(a, b, "gate_depth_ratio"),
-                       warn=_curve_warn((f"{gate}/seednorm", a),
-                                        (f"{gate}/pre", b)))
+            ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
+            for metric in ("gate_depth_ratio",
+                           "resid_norm_last_over_first"):
+                clog.print(f"{gate}: seednorm - pre (ls={ls_label})",
+                           "H3a", metric,
+                           _paired_diff(a, b, metric),
+                           warn=_curve_warn((f"{gate}/seednorm", a),
+                                            (f"{gate}/pre", b)))
     for gate in ("query", "calib"):
         for norm in NORMS:
             a = index[(gate, norm, 1e-2)]
