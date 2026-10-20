@@ -1,0 +1,13 @@
+# CI-only dependency set (CPU, Python 3.12).
+#
+# 本仓库没有 requirements.txt / pyproject.toml；ci_gate.py 的冒烟测试依赖 CPU 版 torch
+# （continuous-loop.yml 里既有的 “Setup Python and PyTorch (gate dependency)” 步骤也只装 torch），
+# 因此这里只固定这一个真实用到的包。
+# 用途：
+#   - continuous-loop.yml 的 setup-python `cache: pip` 以本文件为缓存键；
+#   - run 开始时预热安装，测试门直接复用（安装失败不致命，后续 step 会重装）。
+#
+# 安装方式（CPU wheel）：
+#   python3 -m pip install -r requirements-ci.txt \
+#     --extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1
