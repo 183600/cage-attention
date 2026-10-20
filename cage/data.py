@@ -347,6 +347,36 @@ def _sample_keys(batch: int, n_pairs: int, vocab: int, gen, device) -> torch.Ten
     return noise.topk(n_pairs, dim=1).indices.add_(2)
 
 
+def check_data_geometry(n_pairs, vocab, max_len=None) -> None:
+    """Refuse a data configuration that cannot be realized.
+
+    The generator draws ``n_pairs`` distinct keys without replacement from
+    the ``vocab - 2`` selectable ids (0=PAD and 1=SEP are reserved), so
+    ``1 <= n_pairs <= vocab - 2`` is required.  The sequence is
+    ``[k1 v1 ... kn vn SEP query]`` and needs ``2*n_pairs + 2`` positions.
+    Checking this at construction turns a shape-dependent ``topk`` failure
+    into an explicit configuration error instead of aborting mid-run.
+    """
+    n_pairs = int(n_pairs)
+    vocab = int(vocab)
+    if n_pairs < 1:
+        raise ValueError(f"n_pairs must be >= 1, got {n_pairs}")
+    if vocab < 4:
+        raise ValueError(
+            f"vocab must be >= 4 (two reserved ids plus at least two "
+            f"selectable ids), got {vocab}")
+    if n_pairs > vocab - 2:
+        raise ValueError(
+            f"n_pairs={n_pairs} needs {n_pairs} distinct key ids but only "
+            f"{vocab - 2} selectable ids exist (vocab={vocab})")
+    if max_len is not None:
+        needed = 2 * n_pairs + 2
+        if int(max_len) < needed:
+            raise ValueError(
+                f"max_len={int(max_len)} cannot hold the sequence: "
+                f"2*n_pairs + 2 = {needed} positions are required")
+
+
 def make_batch(batch: int, n_pairs: int, vocab: int, device, dense_lm: bool = False, gen: torch.Generator | None = None):
     """Returns idx, targets, eval_meta.
 
@@ -1262,6 +1292,7 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
     writes nothing.  A shared sample or a gap above the noise floor
     invalidates the HB3 decision and every number reported above it.
     """
+    check_data_geometry(n_pairs, vocab)
     unique = {}
     for seed in train_seeds:
         unique.setdefault(stream_seed_key(seed), int(seed))
@@ -1578,6 +1609,21 @@ def _self_test() -> int:
         check("group_nonfinite_rejected", False)
     except ValueError:
         check("group_nonfinite_rejected", True)
+
+    # Data-geometry contract: too many keys for the selectable ids, or a
+    # position budget that cannot hold the sequence, must fail explicitly.
+    check("geometry_valid_accepted",
+          check_data_geometry(3, 5, max_len=8) is None)
+    try:
+        check_data_geometry(5, 6)
+        check("geometry_too_many_keys_rejected", False)
+    except ValueError:
+        check("geometry_too_many_keys_rejected", True)
+    try:
+        check_data_geometry(16, 512, max_len=33)
+        check("geometry_max_len_rejected", False)
+    except ValueError:
+        check("geometry_max_len_rejected", True)
 
     # Outlier/tail audit: a same-distribution held-out draw must not be
     # flagged, while a held-out draw pushed into the rare tail of the same

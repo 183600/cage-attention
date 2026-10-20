@@ -140,6 +140,7 @@ from .data import (
     actual_stream_overlap_audit,
     answer_uniformity_test,
     batch_fingerprint,
+    check_data_geometry,
     check_eval_seed,
     check_train_seed,
     length_sweep_lengths,
@@ -821,6 +822,7 @@ class Settings:
         # runner entry point re-checks (see ``_validate_training_seeds``)
         # because ``--seeds`` is applied to the attribute afterwards.
         self.seeds = _validate_training_seeds(self.seeds)
+        check_data_geometry(self.n_pairs, self.vocab, self.max_len)
 
     @classmethod
     def quick(cls, device: str = "cpu") -> "Settings":
@@ -4718,6 +4720,9 @@ def _overfit_sanity_by_config(settings: Settings) -> dict:
     cached = getattr(settings, "_overfit_sanity_cache", None)
     if cached is not None:
         return cached
+    # The sanity batch is trained on, so it must never alias a held-out
+    # stream even though it is a single non-reported batch.
+    check_train_seed(SANITY_SEED)
     gen = stream_generator(SANITY_SEED, settings.device)
     sidx, stgt, smeta = make_batch(settings.overfit_batch, settings.n_pairs,
                                    settings.vocab, settings.device, gen=gen)
