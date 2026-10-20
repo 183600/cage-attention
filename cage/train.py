@@ -1294,7 +1294,7 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     dk = C // H
     inv_scale = dk ** -0.5
     gen = torch.Generator(device=device).manual_seed(seed)
-    was_training = model.training
+    training_states = {module: module.training for module in model.modules()}
     model.eval()
 
     with_errors = max_cases is not None
@@ -1521,7 +1521,8 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
         for blk in model.blocks:
             blk.attn._capture_qk = False
             blk.attn._qk_capture = None
-        model.train(was_training)
+        for module, training in training_states.items():
+            module.train(training)
 
     stats = {k: torch.cat(v).cpu() for k, v in stats_out.items() if v}
     release_eval_scratch()
@@ -1724,7 +1725,7 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     structurally invalid or label-noisy data.
     """
     gen = torch.Generator(device=device).manual_seed(seed)
-    was_training = model.training
+    training_states = {module: module.training for module in model.modules()}
     model.eval()
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
@@ -1735,7 +1736,8 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
         pred = logits.squeeze(1).argmax(-1)
         correct.add_((pred == meta["answer"]).sum())
         total += idx.size(0)
-    model.train(was_training)
+    for module, training in training_states.items():
+        module.train(training)
     release_eval_scratch()
     return correct.item() / total
 
@@ -1768,7 +1770,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     same integrity/label invariants as training.
     """
     gen = torch.Generator(device=device).manual_seed(seed)
-    was_training = model.training
+    training_states = {module: module.training for module in model.modules()}
     model.eval()
     logits_all, tgt_all = [], []
     for i in range(batches):
@@ -1777,7 +1779,8 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         logits, _, _ = model(idx)
         logits_all.append(logits.squeeze(1).float())
         tgt_all.append(meta["answer"])
-    model.train(was_training)
+    for module, training in training_states.items():
+        module.train(training)
     logits_cat = torch.cat(logits_all, dim=0).cpu()
     tgt_cat = torch.cat(tgt_all, dim=0).cpu()
     # Reported metrics must be as traceable as training: if any evaluation
