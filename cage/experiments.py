@@ -146,6 +146,7 @@ from .data import (
     make_batch,
     split_leakage_audit,
     stream_fingerprint,
+    stream_seed_key,
     validate_batch,
 )
 from .metrics import (
@@ -716,6 +717,11 @@ def _validate_training_seeds(seeds):
       would fit the model on the validation/test/statistics streams, so
       the reported numbers stop being held-out.
 
+    Comparisons use :func:`cage.data.stream_seed_key`, the 32-bit key the
+    CPU stream generators actually consume: ``0`` and ``2**32`` are the
+    same stream and count as duplicates, and a reserved-seed alias is
+    refused exactly like the reserved seed itself.
+
     Checked both at ``Settings`` construction and from ``_run_context``
     (which every runner reaches before training), so a post-construction
     attribute assignment - the CLI applies ``--seeds`` that way - cannot
@@ -729,18 +735,23 @@ def _validate_training_seeds(seeds):
         raise ValueError(
             f"training seeds must be plain integers, got {seeds!r}")
     seeds = tuple(int(s) for s in seeds)
-    seen, duplicates = set(), []
+    seen, duplicates = {}, []
     for s in seeds:
-        if s in seen and s not in duplicates:
-            duplicates.append(s)
-        seen.add(s)
+        key = stream_seed_key(s)
+        if key in seen:
+            duplicates.extend((seen[key], s))
+        else:
+            seen[key] = s
     if duplicates:
         raise ValueError(
-            f"duplicate training seeds {sorted(duplicates)} in {list(seeds)}: "
-            f"a repeated seed is the same run twice, so paired contrasts "
-            f"would double-count it (inflated n, too-narrow CI) and the "
-            f"seed-level Mean +- Std would not average independent runs")
-    reserved = sorted(set(seeds) & set(RESERVED_EVAL_SEEDS))
+            f"duplicate training seeds/streams {sorted(set(duplicates))} in "
+            f"{list(seeds)}: a repeated seed is the same run twice, so paired "
+            f"contrasts would double-count it (inflated n, too-narrow CI) and "
+            f"the seed-level Mean +- Std would not average independent runs")
+    reserved = sorted(
+        s for s in seeds
+        if any(stream_seed_key(s) == stream_seed_key(r)
+               for r in RESERVED_EVAL_SEEDS))
     if reserved:
         raise ValueError(
             f"training seeds {reserved} are reserved held-out evaluation "

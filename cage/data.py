@@ -62,7 +62,7 @@ STATS_SEED = 7      # held-out mechanism statistics (collect_stats default)
 RESERVED_EVAL_SEEDS = (VAL_SEED, TEST_SEED, STATS_SEED)
 
 
-def _stream_seed_key(seed) -> int:
+def stream_seed_key(seed) -> int:
     """The low 32 bits consumed by torch's CPU stream generators.
 
     ``torch.Generator.manual_seed`` keeps only these bits on CPU, so a seed
@@ -73,9 +73,9 @@ def _stream_seed_key(seed) -> int:
 
 
 _RESERVED_EVAL_SEED_KEYS = frozenset(
-    _stream_seed_key(seed) for seed in RESERVED_EVAL_SEEDS)
+    stream_seed_key(seed) for seed in RESERVED_EVAL_SEEDS)
 _SEALED_EVAL_SEED_KEYS = frozenset(
-    _stream_seed_key(seed) for seed in (TEST_SEED, STATS_SEED))
+    stream_seed_key(seed) for seed in (TEST_SEED, STATS_SEED))
 
 # Sealing semantics, stated precisely because the short label "sealed" has
 # been read as "never touched again".  Sealed means **no model,
@@ -108,7 +108,7 @@ def check_train_seed(seed) -> None:
     reusing a reserved evaluation seed makes training consume exactly the
     batches that belong to a held-out split.
     """
-    if _stream_seed_key(seed) in _RESERVED_EVAL_SEED_KEYS:
+    if stream_seed_key(seed) in _RESERVED_EVAL_SEED_KEYS:
         raise ValueError(
             f"seed {seed} is reserved for held-out evaluation "
             f"{RESERVED_EVAL_SEEDS}; training on it would fit the model on "
@@ -129,7 +129,7 @@ def check_eval_seed(seed, selection: bool = False) -> None:
     reported numbers and for the fixed, pre-registered gate rules (never
     for a choice); STATS_SEED only for the mechanism-statistics readout.
     """
-    if selection and _stream_seed_key(seed) in _SEALED_EVAL_SEED_KEYS:
+    if selection and stream_seed_key(seed) in _SEALED_EVAL_SEED_KEYS:
         raise ValueError(
             f"stream seed {seed} is sealed (TEST_SEED={TEST_SEED} or "
             f"STATS_SEED={STATS_SEED}): it may be read only for the final "
