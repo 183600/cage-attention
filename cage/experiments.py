@@ -3169,11 +3169,13 @@ class BaselineVerdictError(RuntimeError):
 
 
 # Validity gates whose failure invalidates every grid result (the
-# pre-registered "invalidate everything above it" semantics of HB1/HB4,
-# plus the split and loop gates).  HB2 is deliberately not in this set:
-# its registered semantics invalidate the *simple-baseline comparison*,
-# so its state is stamped and displayed (certified/inconclusive/violated)
-# instead of blocking the grid.
+# pre-registered "invalidate everything above it" semantics of HB1/HB3,
+# plus the loop gate).  HB2 is deliberately not in this set: its
+# registered semantics invalidate the *simple-baseline comparison*, so its
+# state is stamped and displayed (certified/inconclusive/violated) instead
+# of blocking the grid.  HB4 is also special-cased below: only a
+# *violated* negative control blocks, while an inconclusive one is
+# stamped (with a finite stream, "not shown" is not "leakage shown").
 _BLOCKING_VERDICT_GATES = ("hb1_supported", "hb3_supported",
                            "hb5_supported")
 
@@ -3212,10 +3214,10 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
                               tag: str) -> dict:
     """Read and enforce ``baselines_verdict.json`` before a grid trains.
 
-    The pre-registered semantics of HB1/HB3/HB4/HB5 are "failure
-    invalidates everything above it", so the E1/E2/E3 runners must not
-    keep training and writing result files when those gates fail.  This
-    gate:
+    The pre-registered semantics of HB1/HB3/HB5 are "failure invalidates
+    everything above it", and HB4 blocks only in its *violated* state, so
+    the E1/E2/E3 runners must not keep training and writing result files
+    when those gates fail.  This gate:
 
     * refuses a missing verdict (``--only baselines`` has to be certified
       first) and a stale one (protocol hash or source-tree hash mismatch:
@@ -4884,8 +4886,9 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         if math.isfinite(hb2["seeds_for_certification"]):
             need_s = (f"needs ~"
                       f"{math.ceil(hb2['seeds_for_certification'])} "
-                      f"independent seeds at the observed paired SD for 80% "
-                      f"power at this margin")
+                      f"independent seeds at the observed seed spread plus "
+                      f"the common-stream noise floor for 80% power at this "
+                      f"margin")
         else:
             need_s = ("the observed margin cannot clear the irreducible "
                       "common-stream noise floor (or the point estimate is "
