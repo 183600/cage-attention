@@ -1438,9 +1438,15 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
     out["unique_key_rate"] = min(
         d["unique_key_rate"] for s in splits.values()
         for d in s["diagnostics"])
+    # A held-out row can match any training stream, not just the first
+    # seed's stream; count the overlap against the union so a multi-seed
+    # protocol cannot hide leakage behind seed order.
+    train_fingerprints = set()
+    for train_name in train_names:
+        train_fingerprints.update(fingerprints[train_name])
     for name in ("val", "test", "stats"):
-        out[f"duplicate_overlap_train_{name}"] = pairwise[
-            f"{train_names[0]}|{name}"]
+        out[f"duplicate_overlap_train_{name}"] = len(
+            fingerprints[name] & train_fingerprints)
         out[f"n_duplicate_rows_{name}"] = stream_dup[name]
         out[f"n_duplicate_rows_within_batch_{name}"] = per_split_dup[name]
         for field in _AUDIT_FIELDS:
