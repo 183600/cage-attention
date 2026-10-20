@@ -1746,7 +1746,7 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     for module, training in training_states.items():
         module.train(training)
     release_eval_scratch()
-    return correct.item() / total
+    return correct.item() / total if total else float("nan")
 
 
 @torch.inference_mode()
@@ -1788,8 +1788,12 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         tgt_all.append(meta["answer"])
     for module, training in training_states.items():
         module.train(training)
-    logits_cat = torch.cat(logits_all, dim=0).cpu()
-    tgt_cat = torch.cat(tgt_all, dim=0).cpu()
+    if logits_all:
+        logits_cat = torch.cat(logits_all, dim=0).cpu()
+        tgt_cat = torch.cat(tgt_all, dim=0).cpu()
+    else:
+        logits_cat = torch.empty((0, vocab))
+        tgt_cat = torch.empty((0,), dtype=torch.long)
     # Reported metrics must be as traceable as training: if any evaluation
     # row carries non-finite logits, its accuracy/NLL/calibration values are
     # meaningless.  Stamp the finite fraction on every metric record and say

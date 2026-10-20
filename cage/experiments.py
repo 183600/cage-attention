@@ -4031,8 +4031,10 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seeds=None):
         "n_samples": int(counts.sum()),
         "n_classes_possible": settings.vocab - 2,
         "n_classes_present": int(present.sum()),
-        "min_class_share": float(shares.min()),
-        "max_class_share": float(shares.max()),
+        "min_class_share": (float(shares.min()) if shares.numel()
+                            else float("nan")),
+        "max_class_share": (float(shares.max()) if shares.numel()
+                            else float("nan")),
         "expected_uniform_share": 1.0 / (settings.vocab - 2),
         "uniformity": uniformity,
     }

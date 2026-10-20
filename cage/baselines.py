@@ -95,7 +95,8 @@ def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
             acc.add_(torch.as_tensor(value, dtype=torch.float64))
     n_correct = correct.item()
     ci = wilson_ci(n_correct, total)
-    out = {"accuracy": n_correct / max(total, 1), "n": total,
+    out = {"accuracy": n_correct / total if total else float("nan"),
+           "n": total,
            "accuracy_lo": ci["lo"], "accuracy_hi": ci["hi"]}
     out.update({key: value.item() / max(batches, 1)
                 for key, value in extra.items()})
@@ -245,7 +246,7 @@ def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
         pred = model(idx).argmax(dim=-1)
         correct.add_((pred == meta["answer"]).sum())
         total += idx.size(0)
-    return correct.item() / max(total, 1)
+    return correct.item() / total if total else float("nan")
 
 
 def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
