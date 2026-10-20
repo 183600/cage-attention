@@ -493,6 +493,13 @@ def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
         answer = meta["answer"].to(device=idx.device, dtype=torch.long)
         answer_ok = answer.shape == (batch_size,)
         checks.append(((answer >= 2) & (answer < vocab)).all())
+        # 0=PAD and 1=SEP are reserved: SEP appears only at the fixed
+        # separator slot, so every other position (keys, values, query) must
+        # be a selectable content id in [2, vocab).  Without this a PAD
+        # query/key would pass the label checks and enter training/eval as a
+        # token the generator never emits.
+        checks.append((idx[:, :-2] >= 2).all())
+        checks.append((idx[:, -1] >= 2).all())
         # Key columns only: ``idx`` is ``[k1 v1 ... kn vn SEP query]``, so
         # the last two columns (SEP at 2n, query at 2n+1) must be excluded.
         keys = idx[:, :-2:2]
@@ -547,6 +554,16 @@ def _validate_batch_strict(idx, targets, meta, vocab) -> dict:
     if not bool(qp.eq(width - 1).all()):
         raise ValueError(
             "structure: query_pos must be the final sequence position")
+    # 0=PAD and 1=SEP are reserved: SEP appears only at the fixed separator
+    # slot, so every key/value position and the query must be a selectable
+    # content id in [2, vocab).  The generator never emits PAD; accepting it
+    # here would let a malformed batch bypass the cleaning gate and be
+    # trained/evaluated as if it were valid task data.
+    if not bool((idx[:, :-2] >= 2).all()) or not bool((idx[:, -1] >= 2).all()):
+        raise ValueError(
+            "structure: ids 0=PAD and 1=SEP are reserved; all key/value "
+            f"positions and the query must be selectable ids in [2, {vocab})"
+        )
     query = idx.gather(1, qp.unsqueeze(1)).squeeze(1)
     if not _is_integer_tensor(meta["answer"]):
         raise ValueError("meta['answer'] must have an integer dtype")
@@ -1787,6 +1804,28 @@ def _self_test() -> int:
     except ValueError:
         check("validate_rejects_reserved_answer", True)
 
+    # PAD is equally reserved on the input side: a PAD query/key or a PAD
+    # value is not produced by the generator and must not pass the cleaning
+    # gate merely because the answer pairing still happens to agree.
+    pad_query_idx = sparse_idx.clone()
+    pad_query_idx[rows, sparse_meta["query_pos"]] = 0
+    pad_query_idx[rows, sparse_meta["key_pos"]] = 0
+    try:
+        validate_batch(pad_query_idx, sparse_tgt, sparse_meta, 64)
+        check("validate_rejects_pad_query_key", False)
+    except ValueError:
+        check("validate_rejects_pad_query_key", True)
+
+    pad_value_idx = sparse_idx.clone()
+    pad_value_col = torch.where(sparse_meta["key_pos"] != 0,
+                                torch.ones_like(rows), torch.full_like(rows, 3))
+    pad_value_idx[rows, pad_value_col] = 0
+    try:
+        validate_batch(pad_value_idx, sparse_tgt, sparse_meta, 64)
+        check("validate_rejects_pad_value", False)
+    except ValueError:
+        check("validate_rejects_pad_value", True)
+
     # The predicate that guards every training batch must agree with the
     # strict checker exactly: it may not accept a batch the strict checker
     # rejects (that would silently disable the cleaning gate), and it may
@@ -1822,6 +1861,8 @@ def _self_test() -> int:
             "valid_dense": (dense_idx, dense_tgt, dense_meta),
             "misaligned_target": (sparse_idx, misaligned, sparse_meta),
             "reserved_answer": (reserved_idx, reserved_tgt, reserved_meta),
+            "pad_query_key": (pad_query_idx, sparse_tgt, sparse_meta),
+            "pad_value": (pad_value_idx, sparse_tgt, sparse_meta),
             "idx_out_of_range": (sparse_idx.clone().fill_(64), sparse_tgt,
                                  sparse_meta),
             "idx_not_2d": (sparse_idx.reshape(-1), sparse_tgt, sparse_meta),
