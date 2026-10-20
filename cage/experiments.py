@@ -6355,7 +6355,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             model, params, base_metrics, curve, model_cfg = _train_and_eval(
                 settings, seed, lr, eval_seed=eval_seed, gate=gate,
                 **model_overrides)
-            rec = {"experiment": "e2", "hypotheses": ["H2a", "H2b", "H2c"],
+            rec = {"experiment": "e2",
+                   "hypotheses": ["H2a", "H2b", "H2c", "H2d", "H2e"],
                    "gate": gate, "variant": label, "seed": seed, "lr": lr,
                    "eval_seed": eval_seed, "stats_seed": stats_seed,
                    "params": params, "model_cfg": model_cfg,
