@@ -150,6 +150,7 @@ from .data import (
 )
 from .metrics import (
     benjamini_hochberg,
+    clustered_proportion_ci,
     equivalence_test,
     paired_bootstrap_ci,
     seeds_for_power,
@@ -220,15 +221,19 @@ HYPOTHESES = {
                       "'no difference' or 'depth needed' readings for "
                       "reasons unrelated to the mechanism.",
         "prediction": "at least one trained arm (a ladder rung in "
-                      "baselines, or a grid arm in E1/E2/E3) has a pooled "
-                      "Wilson 95% lower bound above chance "
+                      "baselines, or a grid arm in E1/E2/E3) has a "
+                      "seed-clustered one-sided 95% family-wise lower bound "
+                      "(Bonferroni over arms) above chance "
                       "1/(vocab - 2) on the sealed test stream",
         "decision": "the competence prerequisite is a precondition, not a "
                     "mechanism test: when no arm clears chance, every "
                     "mechanism contrast in that family is marked "
                     "claim-ineligible (no claim may be read from an "
                     "underfit grid) and the depth requirement (HB7) is "
-                    "'not determinable' rather than 'required'",
+                    "'not determinable' rather than 'required'.  The lower "
+                    "bound resamples training seeds and keeps the shared "
+                    "evaluation-stream measurement error, so re-scoring more "
+                    "seeds on the same test stream cannot buy precision",
     },
     "HB1": {
         "experiment": "baselines",
@@ -295,12 +300,15 @@ HYPOTHESES = {
                       "during training, no true answer can be learned, so "
                       "accuracy on the unchanged test stream must stay at "
                       "chance.",
-        "prediction": "the upper bound of the 95% bootstrap CI of "
-                      "(control accuracy - chance) stays below the "
+        "prediction": "the upper bound of the seed-clustered 95% bootstrap "
+                      "CI of (control accuracy - chance) stays below the "
                       "pre-registered absolute tolerance "
                       "(Settings.negative_control_tol, default 0.02); the "
-                      "pooled Wilson interval is reported for the "
-                      "finite-stream uncertainty",
+                      "clustered interval resamples training seeds and keeps "
+                      "the shared finite-stream measurement error, so the "
+                      "control cannot pass by scoring a lucky small test "
+                      "stream (the seed-only and pooled Wilson intervals are "
+                      "descriptive companions)",
         "decision": "a control clearly above chance means answer "
                     "information leaks through the data/pipeline (or a "
                     "shortcut exists) and every accuracy reported above it "
@@ -332,21 +340,21 @@ HYPOTHESES = {
                       "1-layer transformer should stay clearly below the "
                       "parameter-free rule ceiling.",
         "prediction": "the tuned 1-layer standard transformer is competent "
-                      "(pooled Wilson 95% lower bound above chance) and its "
-                      "pooled Wilson 95% *upper* bound on the test stream "
+                      "(seed-clustered 95% lower bound above chance) and its "
+                      "seed-clustered 95% *upper* bound on the test stream "
                       "lies at least the pre-registered SESOI (0.01 "
                       "accuracy) below the rule-ceiling point estimate - "
                       "i.e. the plausible gap is practically meaningful, "
                       "not merely statistically non-zero",
         "decision": "the baseline is a complexity control, not a pipeline "
                     "validity gate.  The rung is read as *practically at the "
-                    "ceiling* when its pooled Wilson 95% *lower* bound lies "
-                    "within SESOI of the ceiling (one-sided equivalence: the "
+                    "ceiling* when its seed-clustered 95% *lower* bound "
+                    "lies within SESOI of the ceiling (one-sided equivalence: the "
                     "whole interval sits inside the practically-saturated "
                     "band), in which case every depth-based motivation (E3) "
                     "must be annotated that a 1-layer model suffices at this "
                     "scale.  By contrast, 'depth measurably required' needs "
-                    "the pooled Wilson 95% *upper* bound to stay at least "
+                    "the seed-clustered 95% *upper* bound to stay at least "
                     "SESOI below the ceiling: a statistically detectable but "
                     "practically negligible gap does not earn the complexity. "
                     "The bare 'CI includes the ceiling point estimate' "
@@ -369,8 +377,8 @@ HYPOTHESES = {
                       "layers) can only test what depth unlocks, not whether "
                       "depth is needed.",
         "prediction": "the ladder's saturation depth d* - the smallest "
-                      "*competent* depth whose pooled Wilson 95% lower bound "
-                      "lies within the pre-registered SESOI (0.01 accuracy) "
+                      "*competent* depth whose seed-clustered 95% lower "
+                      "bound lies within the pre-registered SESOI (0.01 accuracy) "
                       "of the rule-ceiling point estimate (one-sided "
                       "equivalence: the whole interval is inside the "
                       "practically-saturated band) - is reported (None when "
@@ -379,7 +387,7 @@ HYPOTHESES = {
                       "equivalence checks against the same SESOI show where "
                       "the gain stops being practically meaningful; the depth "
                       "demand is only readable when at least one rung is "
-                      "competent (HB0: pooled Wilson 95% lower bound above "
+                      "competent (HB0: seed-clustered 95% lower bound above "
                       "chance)",
         "decision": "pre-registered readout: depth beyond two layers is "
                     "'measurably required' only when d* is None or d* > 2 "
@@ -1412,6 +1420,8 @@ def _paired_diff(runs_a, runs_b, metric):
     # Raw per-seed differences: lets an equivalence companion reuse the
     # identical pairing instead of re-deriving it (and drifting from it).
     ci["diffs"] = list(diffs)
+    ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(
+        used, (by_a, by_seed))
     # The paired sample is only the seeds where *both* sides carry a
     # finite value for this metric: recording which seeds actually entered
     # makes a silently shrunken sample visible (and the finalize layer
@@ -1492,6 +1502,9 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     # the difference between the two b-levels, which is a different
     # quantity and can be near zero even when the interaction is real.
     ci["baseline_mean"] = arms["b"]["mean"]
+    ci["diffs"] = list(diffs)
+    ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(
+        used, (m1a, m1b, m2a, m2b))
     ci["seeds_used"] = sorted(used)
     ci["seeds_dropped"] = sorted(dropped)
     ci["seeds_unpaired"] = sorted(unpaired)
@@ -1537,8 +1550,9 @@ def _paired_equivalence(runs_a, runs_b, metric, bound):
     paired = _paired_diff(runs_a, runs_b, metric)
     ci = equivalence_test(paired.get("diffs") or [], bound)
     for key in ("arms", "arms_all", "arms_note", "baseline_mean",
-                "seeds_used", "seeds_dropped", "seeds_unpaired",
-                "seeds_undefined", "controlled"):
+                "diffs", "curve_invalid_seeds", "seeds_used",
+                "seeds_dropped", "seeds_unpaired", "seeds_undefined",
+                "controlled"):
         if key in paired:
             ci[key] = paired[key]
     return ci
@@ -1603,6 +1617,9 @@ def _factorial_main_effect(cells, metric, factor):
     ci["arms_note"] = (f"pooled {factor}-on vs {factor}-off cells on the "
                        f"paired seeds")
     ci["baseline_mean"] = ci["arms"]["b"]["mean"]
+    ci["diffs"] = list(diffs)
+    ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(
+        used, tuple(by_cell[c] for c in required))
     ci["seeds_used"] = sorted(used)
     ci["seeds_dropped"] = sorted(dropped)
     ci["seeds_unpaired"] = sorted(unpaired)
@@ -1715,6 +1732,25 @@ def _fmt_ci(ci) -> str:
 
 CURVE_INVALID_VERDICTS = (
     "plateau", "diverging", "numerical_instability", "insufficient_points")
+
+
+def _curve_invalid_seeds_for(used, run_maps):
+    """Seeds whose paired contrast is contaminated by a curve-invalid run.
+
+    A contrast seed is only usable for the sensitivity readout when *every*
+    side/cell entering that seed's difference has a claim-valid curve.  The
+    returned list is stored with the contrast so the decision layer can
+    recompute the effect without those seeds.
+    """
+    bad = set()
+    for seed in used:
+        for runs in run_maps:
+            run = runs.get(seed)
+            if run is not None and run.get("curve_verdict") in \
+                    CURVE_INVALID_VERDICTS:
+                bad.add(seed)
+                break
+    return sorted(bad)
 
 
 def _curve_health(runs):
@@ -1863,6 +1899,30 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
                 "diverged_runs_best": diverged_best,
                 "best_at_grid_boundary": boundary, "reliable": reliable})
     return out
+
+
+def _curve_valid_selection_rows(table):
+    """Split a tuning table into rows eligible for selection.
+
+    A tuner must not freeze a recipe because its winning runs were
+    curve-invalid (plateau/diverging/instability): those accuracies measure
+    an optimizer failure, not the learning rate's merit.  Rows with no
+    curve-invalid run are preferred; when every finite row is invalid the
+    tuner falls back to all finite rows (and says so) rather than refusing
+    to select at all.  Returns a dict with the eligible ``rows``, the
+    ``n_invalid`` count among finite rows, the ``n_excluded`` count actually
+    removed, and the selection ``pool`` label.
+    """
+    finite = [row for row in table if _finite(row.get("val_accuracy_mean"))]
+    valid = [row for row in finite if not row.get("curve_invalid_runs")]
+    if valid:
+        return {"rows": valid, "n_finite": len(finite),
+                "n_invalid": len(finite) - len(valid),
+                "n_excluded": len(finite) - len(valid),
+                "pool": "curve-valid"}
+    return {"rows": finite, "n_finite": len(finite),
+            "n_invalid": len(finite), "n_excluded": 0,
+            "pool": "all-finite (no curve-valid row)"}
 
 
 def _selection_warn(label, selection) -> str:
@@ -2049,6 +2109,12 @@ class ContrastLog:
             "seeds_dropped": ci.get("seeds_dropped"),
             "seeds_unpaired": ci.get("seeds_unpaired"),
             "seeds_undefined": ci.get("seeds_undefined"),
+            # Per-seed paired differences and the seeds contaminated by a
+            # curve-invalid run: finalize() drops the latter and checks
+            # whether the supported effect survives (sensitivity, not a
+            # replacement for the pre-registered decision rule).
+            "diffs": list(ci.get("diffs") or []),
+            "curve_invalid_seeds": list(ci.get("curve_invalid_seeds") or []),
         })
         line = f"  [{hyp}] {rule} ({metric}): {_fmt_ci(ci)}"
         if audit is not None:
@@ -2182,6 +2248,52 @@ class ContrastLog:
             row["claim_eligible"] = bool(
                 (row.get("n") or 0) >= self.min_seeds
                 and row["competence_passed"] is not False)
+            # Curve-invalid sensitivity: a supported effect that rests on
+            # seeds whose run never learned (plateau/diverging/...) is not
+            # evidence about the mechanism.  Drop those seeds and recompute
+            # the same effect; if the support disappears (or the surviving
+            # sample falls below the pre-registered seed floor), the row is
+            # marked ineligible.  This is a sensitivity gate, not a second
+            # decision rule: rows without curve-invalid seeds are unchanged.
+            bad_seeds = set(row.get("curve_invalid_seeds") or [])
+            row["curve_invalid_n"] = len(bad_seeds)
+            row["curve_valid_n"] = row.get("n")
+            row["curve_invalid_removes_support"] = False
+            if bad_seeds:
+                paired = list(zip(row.get("seeds_used") or [],
+                                  row.get("diffs") or []))
+                valid_diffs = [d for seed, d in paired
+                               if seed not in bad_seeds]
+                row["curve_valid_n"] = len(valid_diffs)
+                if row["test"] == "equivalence":
+                    sens = equivalence_test(
+                        valid_diffs, row.get("equivalence_bound"))
+                    sens_ok = bool(sens.get("equivalent"))
+                else:
+                    sens = paired_bootstrap_ci(valid_diffs)
+                    direction = row.get("direction")
+                    if direction == "+":
+                        sign_ok = bool(sens["mean"] > 0.0 and sens["lo"] > 0.0)
+                    elif direction == "-":
+                        sign_ok = bool(sens["mean"] < 0.0 and sens["hi"] < 0.0)
+                    else:
+                        sign_ok = bool(sens["lo"] > 0.0 or sens["hi"] < 0.0)
+                    row_sesoi = row.get("sesoi")
+                    magnitude_ok = (
+                        row_sesoi is None
+                        or (math.isfinite(sens["mean"])
+                            and abs(sens["mean"]) >= float(row_sesoi)))
+                    sens_ok = bool(sign_ok and magnitude_ok)
+                row["curve_valid_mean"] = sens.get("mean")
+                row["curve_valid_lo"] = sens.get("lo")
+                row["curve_valid_hi"] = sens.get("hi")
+                row["curve_valid_p"] = sens.get("p_value")
+                if (row["claim_eligible"] and row["fdr_reject"]
+                        and row["practically_relevant"]
+                        and (len(valid_diffs) < self.min_seeds
+                             or not sens_ok)):
+                    row["claim_eligible"] = False
+                    row["curve_invalid_removes_support"] = True
             row["supports_hypothesis"] = bool(
                 row["fdr_reject"] and row["practically_relevant"]
                 and row["claim_eligible"])
@@ -2262,6 +2374,10 @@ class ContrastLog:
                 verdict = ("INELIGIBLE (HB0 competence prerequisite failed: "
                            "no arm above chance, so the contrast cannot be "
                            "read as a mechanism statement)")
+            elif r.get("curve_invalid_removes_support"):
+                verdict = ("INELIGIBLE (supported effect disappears after "
+                           "dropping curve-invalid seeds: the claim rests "
+                           "on runs that did not learn)")
             elif not r.get("claim_eligible", True):
                 verdict = (f"INELIGIBLE (n={r['n']} < pre-registered "
                            f"minimum {self.min_seeds} seeds: too few "
@@ -2368,7 +2484,7 @@ class ContrastLog:
                              if r.get("competence_passed") is False]
         if self.competence is not None and not self.competence.get("passed"):
             print(f"[{self.tag}] WARNING: HB0 competence prerequisite "
-                  f"FAILED: no trained arm has a pooled Wilson 95% lower "
+                  f"FAILED: no trained arm has a seed-clustered 95% lower "
                   f"bound above chance {self.competence.get('chance', float('nan')):.4g} "
                   f"(best: {self.competence.get('best_arm') or 'none'}), so "
                   f"the grid did not demonstrably solve the task at this "
@@ -2376,9 +2492,12 @@ class ContrastLog:
                   f"marked claim-ineligible and may not be read as mechanism "
                   f"statements; raise the step count and "
                   f"re-run before interpreting any contrast")
+        curve_invalid_gated = [r for r in testable
+                               if r.get("curve_invalid_removes_support")]
         low_seed = [r for r in testable
                     if not r.get("claim_eligible", True)
-                    and r.get("competence_passed") is not False]
+                    and r.get("competence_passed") is not False
+                    and not r.get("curve_invalid_removes_support")]
         if low_seed:
             print(f"[{self.tag}] WARNING: {len(low_seed)}/{len(testable)} "
                   f"testable contrast(s) rest on fewer than "
@@ -2387,6 +2506,15 @@ class ContrastLog:
                   f"seed-level claim is {self.min_seeds} seeds, so their "
                   f"p-values cannot support a decision (replicated runs "
                   f"with >=3 seeds needed)")
+        if curve_invalid_gated:
+            names = ", ".join(
+                f"{r['hypothesis']}/{r['rule']}" for r in curve_invalid_gated)
+            print(f"[{self.tag}] WARNING: {len(curve_invalid_gated)} "
+                  f"supported contrast(s) lose support when curve-invalid "
+                  f"seeds are dropped ({names}): they are marked "
+                  f"claim-ineligible, because a difference produced by runs "
+                  f"that never learned is not measured evidence for the "
+                  f"mechanism")
         coverage_loss = [r for r in self.rows if r.get("seeds_dropped")]
         unpaired_rows = [r for r in coverage_loss if r.get("seeds_unpaired")]
         undefined_rows = [r for r in coverage_loss if r.get("seeds_undefined")]
@@ -2470,8 +2598,11 @@ class ContrastLog:
                    "n_audited": len(audited),
                    "n_control_passed": len(controlled_pass),
                    "n_low_seed": len(low_seed),
+                   "n_curve_invalid_gated": len(curve_invalid_gated),
                    "n_claim_ineligible_competence": len(competence_failed),
-                   "n_claim_ineligible": len(low_seed) + len(competence_failed),
+                   "n_claim_ineligible": (len(low_seed)
+                                          + len(competence_failed)
+                                          + len(curve_invalid_gated)),
                    "competence": self.competence,
                    "n_seed_coverage_loss": len(coverage_loss),
                    "n_seed_unpaired": len(unpaired_rows),
@@ -2483,6 +2614,9 @@ class ContrastLog:
                    "direction_reversed_contrasts": [
                        f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                        for r in reversed_effects],
+                   "curve_invalid_gated_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in curve_invalid_gated],
                    "seed_coverage_loss_contrasts": [
                        f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                        for r in coverage_loss],
@@ -3007,7 +3141,7 @@ class BaselineVerdictError(RuntimeError):
 # so its state is stamped and displayed (certified/inconclusive/violated)
 # instead of blocking the grid.
 _BLOCKING_VERDICT_GATES = ("hb1_supported", "hb3_supported",
-                           "hb4_supported", "hb5_supported")
+                           "hb5_supported")
 
 
 def _verdict_seed_floor(verdict: dict, settings: Settings) -> dict:
@@ -3078,6 +3212,18 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
             f"{tag}: {stale}; refusing to train on an uncertified protocol")
     failed = [key for key in _BLOCKING_VERDICT_GATES
               if not verdict.get(key)]
+    # HB4 is a three-state validity gate: only a *violated* control (the
+    # whole interval above tolerance) invalidates the grid.  An
+    # inconclusive interval must not be read as leakage - with a finite
+    # test stream it can be underpowered - and is stamped for the reader.
+    hb4_state = verdict.get("hb4_state")
+    if hb4_state is None:
+        if verdict.get("hb4_supported") is not True:
+            failed.append("HB4 (missing/not certified)")
+    elif hb4_state == "violated":
+        failed.append("HB4 (violated: control interval above tolerance)")
+    elif hb4_state == "untestable":
+        failed.append("HB4 (untestable)")
     if failed:
         raise BaselineVerdictError(
             f"{tag}: baseline validity gate(s) {', '.join(failed)} failed "
@@ -3094,6 +3240,8 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
         "hb2_state": verdict.get("hb2_state"),
         "hb3_supported": verdict.get("hb3_supported"),
         "hb4_supported": verdict.get("hb4_supported"),
+        "hb4_violated": verdict.get("hb4_violated"),
+        "hb4_state": verdict.get("hb4_state"),
         "hb5_supported": verdict.get("hb5_supported"),
         "hb6_supported": verdict.get("hb6_supported"),
         "hb7_depth_required": verdict.get("hb7_depth_required"),
@@ -3129,21 +3277,28 @@ def _competence_check(named_runs, correct_and_n, chance, what="arm"):
     learned the task: an all-at-chance grid turns "no difference" into a
     statement about the step count, not the mechanism, and makes HB7 read
     "depth required" from pure underfit.  This is the one premise the
-    registry lacked (HB0), so it is checked *before* any claim: every
-    condition pools its runs' correct counts on the sealed test stream
-    through the Wilson interval, and the family passes only when the best
-    pooled lower bound clears chance ``1/(vocab - 2)``.
+    registry lacked (HB0), so it is checked *before* any claim.
+
+    Every run in an arm is one training seed evaluated on the *same*
+    sealed test stream.  Pooling the seeds' correct counts through a Wilson
+    interval treats those repeated evaluations as independent examples
+    (pseudo-replication) and shrinks the interval by roughly
+    ``sqrt(n_seeds)``.  We instead use the two-level (seed-clustered)
+    bootstrap in :func:`clustered_proportion_ci`, which resamples seeds and
+    keeps a shared finite-stream measurement error.  Because HB0 is a union
+    claim over arms, the lower quantile is Bonferroni-adjusted by the number
+    of arms before reading "at least one arm cleared chance"; the pooled
+    Wilson interval is retained as a descriptive companion only.
 
     ``named_runs`` is an iterable of ``(name, runs)``; ``correct_and_n``
     maps one run to ``(n_correct, n_total)``.  Returns the payload written
     to ``<tag>_competence.json`` and handed to :class:`ContrastLog`, which
     marks every contrast ``claim_eligible=False`` when it fails.
     """
-    arms = {}
-    best = None
+    raw = []
     for name, runs in named_runs:
-        correct = 0
-        total = 0
+        counts = []
+        sizes = []
         for run in runs:
             pair = correct_and_n(run)
             if pair is None:
@@ -3151,23 +3306,43 @@ def _competence_check(named_runs, correct_and_n, chance, what="arm"):
             n_correct, n_total = pair
             if n_correct is None or n_total is None or not int(n_total):
                 continue
-            correct += int(n_correct)
-            total += int(n_total)
-        pooled = wilson_ci(correct, total)
-        above = bool(total > 0 and _finite(pooled["lo"])
-                     and pooled["lo"] > float(chance))
-        arms[str(name)] = {
-            "correct": correct, "n": total,
-            "accuracy": pooled["p"], "wilson_lo": pooled["lo"],
-            "wilson_hi": pooled["hi"], "above_chance": above,
+            counts.append(int(n_correct))
+            sizes.append(int(n_total))
+        raw.append((str(name), counts, sizes, sum(sizes)))
+    n_arms = sum(1 for _, _, _, total in raw if total > 0)
+    alpha_per_arm = 0.05 / max(n_arms, 1)
+    arms = {}
+    best = None
+    for name, counts, sizes, total in raw:
+        pooled = wilson_ci(sum(counts), total)
+        cluster = clustered_proportion_ci(
+            counts, sizes, lower_alpha=alpha_per_arm)
+        above = bool(
+            cluster["valid"] and _finite(cluster["lo"])
+            and cluster["lo"] > float(chance))
+        arms[name] = {
+            "correct": sum(counts), "n": total,
+            "accuracy": cluster["mean"] if cluster["valid"] else pooled["p"],
+            "cluster_lo": cluster["lo"], "cluster_hi": cluster["hi"],
+            "wilson_lo": pooled["lo"], "wilson_hi": pooled["hi"],
+            "pooled_accuracy": pooled["p"], "above_chance": above,
+            "n_units": cluster["n"], "se": cluster["se"],
+            "valid": cluster["valid"], "reason": cluster["reason"],
         }
         if above and (best is None
-                      or pooled["p"] > arms[best]["accuracy"]):
-            best = str(name)
+                      or arms[name]["accuracy"] > arms[best]["accuracy"]):
+            best = name
     return {
-        "check": (f"at least one {what} has pooled Wilson 95% lower bound "
-                  f"above chance"),
+        "check": (f"at least one {what} has a seed-clustered one-sided "
+                  f"95% family-wise lower bound above chance "
+                  f"(Bonferroni over {n_arms} arms)"),
+        "method": ("two-level bootstrap: resample training seeds, shared "
+                   "binomial draw on the common evaluation stream; lower "
+                   "quantile Bonferroni-adjusted across arms"),
         "chance": float(chance),
+        "family_alpha": 0.05,
+        "n_arms": n_arms,
+        "alpha_per_arm": alpha_per_arm,
         "passed": best is not None,
         "best_arm": best,
         "arms": arms,
@@ -3648,7 +3823,9 @@ def tune_shared_recipe(settings: Settings):
                if len(accs) > 1 else 0.0)
         table.append({"lr": lr, "val_accuracy_mean": mean,
                       "val_accuracy_std": var ** 0.5, "n_seeds": len(accs),
-                      "curve_verdicts": verdicts})
+                      "curve_verdicts": verdicts,
+                      "curve_invalid_runs": sum(
+                          v in CURVE_INVALID_VERDICTS for v in verdicts)})
     # Same all-NaN guard as the depth ladder: ``max`` over an all-NaN key
     # returns an arbitrary row, which would freeze an unmeasured recipe for
     # every controlled contrast - refuse instead of fabricating a selection.
@@ -3661,8 +3838,23 @@ def tune_shared_recipe(settings: Settings):
             f"diverged or returned NaN, so no learning rate can be frozen "
             f"for the controlled grids (inspect the run records; no "
             f"downstream contrast from this run is interpretable)")
-    best = max(finite_rows, key=lambda row: row["val_accuracy_mean"])
-    selection = _selection_reliability(table, grid=settings.lr_grid)
+    pick = _curve_valid_selection_rows(table)
+    if pick["n_excluded"]:
+        print(f"[baselines] shared recipe selection excluded "
+              f"{pick['n_excluded']} of {pick['n_finite']} finite lr row(s) "
+              f"with curve-invalid runs; selecting among curve-valid rows "
+              f"only")
+    elif pick["n_invalid"]:
+        print(f"[baselines] WARNING: every finite lr row has curve-invalid "
+              f"runs; falling back to all {pick['n_finite']} finite row(s) - "
+              f"the frozen recipe is not validated by a healthy curve")
+    eligible = pick["rows"]
+    best = max(eligible, key=lambda row: row["val_accuracy_mean"])
+    selection = _selection_reliability(
+        eligible, grid=[row["lr"] for row in eligible])
+    selection["pool"] = pick["pool"]
+    selection["excluded_curve_invalid_rows"] = pick["n_excluded"]
+    selection["curve_invalid_rows"] = pick["n_invalid"]
     return best["lr"], table, selection
 
 
@@ -3976,19 +4168,19 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
 
     * each rung's gap to the parameter-free rule ceiling measures how much
       depth the recall readout actually requires - but only rungs whose
-      pooled Wilson 95% *lower* bound clears chance count as evidence:
+      seed-clustered 95% *lower* bound clears chance count as evidence:
       the HB0 competence premise separates "needs more depth" from "this
       step count did not learn the task", and with no competent rung the depth
       demand is reported as *not determinable* instead of "required";
-    * the saturation depth ``d*`` (smallest competent rung whose pooled
-      Wilson 95% *lower* bound lies within the pre-registered SESOI of the
-      ceiling estimate, i.e. a one-sided equivalence statement) is the
+    * the saturation depth ``d*`` (smallest competent rung whose
+      seed-clustered 95% *lower* bound lies within the pre-registered SESOI
+      of the ceiling estimate, i.e. a one-sided equivalence statement) is the
       reference the deep grids must justify themselves against (HB7): a
       gain a 2-layer standard transformer already matches is not evidence
       about depth.  The bare "the CI touches the ceiling" criterion is an
       *absence-of-evidence* reading and is kept only as the companion
       ``reaches_ceiling_ci``; the same SESOI is the minimum plausible gap
-      for "depth measurably required" (``ceiling - pooled_hi >= SESOI``),
+      for "depth measurably required" (``ceiling - clustered_hi >= SESOI``),
       so a statistically detectable but practically negligible gap cannot
       earn the complexity;
     * a complex model is only credited for what it does beyond the tuned
@@ -4045,14 +4237,16 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                     / (len(accs) - 1)) ** 0.5 if len(accs) > 1 else 0.0)
             table.append({"lr": lr, "val_accuracy_mean": mean,
                           "val_accuracy_std": std, "n_seeds": len(accs),
-                          "curve_verdicts": verdicts})
+                          "curve_verdicts": verdicts,
+                          "curve_invalid_runs": sum(
+                              v in CURVE_INVALID_VERDICTS
+                              for v in verdicts)})
         # An all-non-finite tuning table (every run diverged / produced no
         # finite validation accuracy) must not be silently read as an argmax:
         # NaN comparisons make ``max`` return an arbitrary row, which would
         # freeze an unmeasured learning rate and manufacture a rung.
         finite_rows = [row for row in table
                        if _finite(row["val_accuracy_mean"])]
-        selection = _selection_reliability(table, grid=settings.lr_grid)
         if not finite_rows:
             print(f"[baselines] WARNING: depth={depth} tuning table has no "
                   f"finite validation accuracy (all {len(table)} lr "
@@ -4068,6 +4262,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                 "accuracy_std": float("nan"), "accuracy_by_seed": {},
                 "pooled_wilson": {"p": float("nan"), "lo": float("nan"),
                                   "hi": float("nan"), "n": 0},
+                "cluster_ci": clustered_proportion_ci([], []),
                 "ceiling": ceiling_acc, "chance": chance,
                 "sesoi_accuracy": sesoi,
                 "above_chance": False, "ceiling_gap": float("nan"),
@@ -4080,7 +4275,24 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             _write_json(out_dir / f"baselines_depth{depth}.json",
                         depths[depth])
             continue
-        best = max(finite_rows, key=lambda row: row["val_accuracy_mean"])
+        pick = _curve_valid_selection_rows(table)
+        if pick["n_excluded"]:
+            print(f"[baselines] depth={depth} selection excluded "
+                  f"{pick['n_excluded']} of {pick['n_finite']} finite lr "
+                  f"row(s) with curve-invalid runs; selecting among "
+                  f"curve-valid rows only")
+        elif pick["n_invalid"]:
+            print(f"[baselines] WARNING: depth={depth} has no curve-valid "
+                  f"finite lr row; falling back to all {pick['n_finite']} "
+                  f"finite row(s) - the rung's recipe is not validated by a "
+                  f"healthy curve")
+        eligible = pick["rows"]
+        selection = _selection_reliability(
+            eligible, grid=[row["lr"] for row in eligible])
+        selection["pool"] = pick["pool"]
+        selection["excluded_curve_invalid_rows"] = pick["n_excluded"]
+        selection["curve_invalid_rows"] = pick["n_invalid"]
+        best = max(eligible, key=lambda row: row["val_accuracy_mean"])
         warn = _selection_warn(f"depth={depth} lr selection", selection)
         if warn:
             print(f"[baselines] {warn}: this rung's tuned accuracy may "
@@ -4113,14 +4325,19 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                            **_run_context(settings), **curve})
         pooled = wilson_ci(sum(r["correct"] for r in runs),
                            sum(r["n"] for r in runs))
+        # Seeds share one sealed evaluation stream, so the decision interval
+        # must resample seeds and keep a shared finite-stream error; pooling
+        # the counts as independent examples would pseudo-replicate.
+        cluster = clustered_proportion_ci(
+            [r["correct"] for r in runs], [r["n"] for r in runs])
         summary = _mean_std([r["accuracy"] for r in runs])
         # HB0 competence premise for HB6/HB7: "below the ceiling" is only
         # evidence that depth is required when the rung demonstrably
         # learned the task.  A rung at chance is an underfit/step-count
         # statement, not a depth statement, so it can neither support HB6
         # ("depth measurably required") nor feed the saturation depth.
-        above_chance = bool(math.isfinite(pooled["lo"])
-                            and pooled["lo"] > chance)
+        above_chance = bool(cluster["valid"] and math.isfinite(cluster["lo"])
+                            and cluster["lo"] > chance)
         # The registered SESOI turns both depth readouts from
         # absence-of-evidence into practical claims:
         #   * reaches_ceiling (saturation): one-sided equivalence - even the
@@ -4132,21 +4349,21 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         #     merely a statistically detectable sliver.
         # The historical bare-CI readings are kept as companions only.
         within_sesoi = bool(
-            ceiling_known and above_chance and math.isfinite(pooled["lo"])
-            and ceiling_acc - pooled["lo"] <= sesoi)
+            ceiling_known and above_chance and math.isfinite(cluster["lo"])
+            and ceiling_acc - cluster["lo"] <= sesoi)
         reaches_ceiling_ci = bool(
-            ceiling_known and above_chance and math.isfinite(pooled["hi"])
-            and pooled["hi"] >= ceiling_acc)
+            ceiling_known and above_chance and math.isfinite(cluster["hi"])
+            and cluster["hi"] >= ceiling_acc)
         hb6_supported = bool(
-            ceiling_known and above_chance and math.isfinite(pooled["hi"])
-            and ceiling_acc - pooled["hi"] >= sesoi)
+            ceiling_known and above_chance and math.isfinite(cluster["hi"])
+            and ceiling_acc - cluster["hi"] >= sesoi)
         hb6_supported_ci = bool(
-            ceiling_known and above_chance and math.isfinite(pooled["hi"])
-            and pooled["hi"] < ceiling_acc)
+            ceiling_known and above_chance and math.isfinite(cluster["hi"])
+            and cluster["hi"] < ceiling_acc)
         ceiling_gap = (ceiling_acc - summary["mean"]
                        if ceiling_known else float("nan"))
-        ceiling_gap_lower = (ceiling_acc - pooled["hi"]
-                             if math.isfinite(pooled["hi"])
+        ceiling_gap_lower = (ceiling_acc - cluster["hi"]
+                             if math.isfinite(cluster["hi"])
                              and ceiling_known else float("nan"))
         payload = {
             "name": f"shallow_none_d{depth}", "n_layers": depth,
@@ -4156,7 +4373,8 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             "accuracy_mean": summary["mean"], "accuracy_std": summary["std"],
             "accuracy_by_seed": {str(r["seed"]): r["accuracy"]
                                  for r in runs},
-            "pooled_wilson": pooled, "ceiling": ceiling_acc,
+            "pooled_wilson": pooled, "cluster_ci": cluster,
+            "ceiling": ceiling_acc,
             "chance": chance, "above_chance": above_chance,
             "sesoi_accuracy": sesoi,
             "ceiling_gap": ceiling_gap,
@@ -4174,16 +4392,16 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         tuning_tables[depth] = table
         if within_sesoi:
             status = (f"within SESOI {sesoi:g} of the ceiling (saturated: "
-                      f"even the pooled lower bound is inside the "
+                      f"even the seed-clustered lower bound is inside the "
                       f"practical band, reach={ceiling_gap:+.4f})")
         elif not above_chance:
-            status = (f"at chance (pooled Wilson lower bound "
-                      f"{pooled['lo']:.4f} <= chance {chance:.4f}): this "
+            status = (f"at chance (seed-clustered lower bound "
+                      f"{cluster['lo']:.4f} <= chance {chance:.4f}): this "
                       f"rung did not learn the task at this step count, so it "
                       f"is not depth evidence")
         elif reaches_ceiling_ci:
-            status = (f"CI touches the ceiling but the pooled lower bound is "
-                      f"more than SESOI={sesoi:g} below it "
+            status = (f"CI touches the ceiling but the seed-clustered lower "
+                      f"bound is more than SESOI={sesoi:g} below it "
                       f"(reach={ceiling_gap:+.4f}): saturation not "
                       f"established")
         else:
@@ -4191,8 +4409,11 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         print(f"[baselines] HB6/HB7 depth={depth} tuned standard "
               f"transformer (lr={best['lr']:g} on val seed {VAL_SEED}, test "
               f"seed {TEST_SEED}): accuracy={summary['mean']:.4f} +- "
-              f"{summary['std']:.4f} (pooled Wilson "
-              f"[{pooled['lo']:.4f}, {pooled['hi']:.4f}], n={pooled['n']}); "
+              f"{summary['std']:.4f} (seed-clustered "
+              f"[{cluster['lo']:.4f}, {cluster['hi']:.4f}], "
+              f"n={cluster['n']} seeds/{cluster['n_examples']} examples; "
+              f"pooled Wilson companion "
+              f"[{pooled['lo']:.4f}, {pooled['hi']:.4f}]); "
               f"chance={chance:.4f}; rule ceiling={ceiling_acc:.4f}, gap="
               f"{ceiling_gap:.4f} (lower-bound gap="
               f"{ceiling_gap_lower:.4f}); params={int(runs[0]['params'])}; "
@@ -4251,8 +4472,8 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         "val_seed": VAL_SEED, "test_seed": TEST_SEED,
         "ladder": list(ladder), "ceiling": ceiling_acc,
         "sesoi_accuracy": sesoi,
-        "saturation_rule": ("smallest competent rung whose pooled Wilson 95% "
-                            "lower bound lies within SESOI of the rule "
+        "saturation_rule": ("smallest competent rung whose seed-clustered "
+                            "95% lower bound lies within SESOI of the rule "
                             "ceiling (one-sided equivalence); the bare "
                             "'interval reaches the ceiling' companion is "
                             "reaches_ceiling_ci only"),
@@ -4264,7 +4485,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         "hb7_depth_required": hb7_depth_required,
         "chance": chance,
         "competence": {
-            "criterion": ("at least one rung's pooled Wilson 95% lower "
+            "criterion": ("at least one rung's seed-clustered 95% lower "
                           "bound above chance"),
             "chance": chance,
             "ladder_competent": ladder_competent,
@@ -4681,28 +4902,68 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     hb4 = paired_bootstrap_ci(margins)
     pooled = wilson_ci(sum(r["correct"] for r in ctrl_runs),
                        sum(r["n"] for r in ctrl_runs))
+    ctrl_cluster = clustered_proportion_ci(
+        [r["correct"] for r in ctrl_runs], [r["n"] for r in ctrl_runs])
     ctrl_summary = _mean_std([r["accuracy"] for r in ctrl_runs])
-    hb4_supported = bool(hb4["n"] > 0
-                         and hb4["hi"] < settings.negative_control_tol)
+    # The control's per-seed accuracies are measured on the same sealed
+    # stream, so the seed-only bootstrap upper bound can be too narrow.
+    # The decision uses the seed-clustered (shared-stream) upper bound;
+    # the historical seed-only interval remains a companion.
+    hb4_measure = {
+        "mean": ctrl_cluster["mean"] - chance,
+        "lo": ctrl_cluster["lo"] - chance,
+        "hi": ctrl_cluster["hi"] - chance,
+        "n": ctrl_cluster["n"], "n_examples": ctrl_cluster["n_examples"],
+        "se": ctrl_cluster["se"],
+    }
+    hb4_supported = bool(
+        ctrl_cluster["valid"] and ctrl_cluster["n"] > 0
+        and hb4_measure["hi"] < settings.negative_control_tol)
+    hb4_violated = bool(
+        ctrl_cluster["valid"] and ctrl_cluster["n"] > 0
+        and hb4_measure["lo"] >= settings.negative_control_tol)
+    if not ctrl_cluster["valid"] or ctrl_cluster["n"] == 0:
+        hb4_state = "untestable"
+    elif hb4_supported:
+        hb4_state = "supported"
+    elif hb4_violated:
+        hb4_state = "violated"
+    else:
+        hb4_state = "inconclusive"
     hb4_claim_eligible = bool(hb4["n"] >= floor)
     hb4_note = ("" if not hb4_supported or hb4_claim_eligible else
                 f" [provisional: {hb4['n']} seed(s) < claim floor {floor}]")
+    hb4_status = {
+        "supported": "SUPPORTED (no label leakage detected)",
+        "violated": ("VIOLATED - the control interval is entirely above "
+                     "tolerance: answer information leaks into the pipeline"),
+        "inconclusive": ("INCONCLUSIVE - the interval straddles tolerance "
+                         "(not evidence of leakage; raise the seed count or "
+                         "widen the control stream)"),
+        "untestable": "untestable",
+    }[hb4_state]
     print(f"[baselines] HB4 negative control (labels permuted in training, "
           f"shared recipe lr={lr_shared:g}, test seed {TEST_SEED}): "
           f"accuracy={ctrl_summary['mean']:.4f} +- {ctrl_summary['std']:.4f} "
           f"over {ctrl_summary['n']} seeds; accuracy - chance = "
-          f"{hb4['mean']:+.4f} [{hb4['lo']:+.4f}, {hb4['hi']:+.4f}] "
-          f"(pooled Wilson [{pooled['lo']:.4f}, {pooled['hi']:.4f}], "
+          f"{hb4_measure['mean']:+.4f} "
+          f"[{hb4_measure['lo']:+.4f}, {hb4_measure['hi']:+.4f}] "
+          f"(seed-clustered, n={ctrl_cluster['n']} seeds/"
+          f"{ctrl_cluster['n_examples']} examples; seed-only companion "
+          f"{hb4['mean']:+.4f} [{hb4['lo']:+.4f}, {hb4['hi']:+.4f}]; "
+          f"pooled Wilson companion "
+          f"[{pooled['lo']:.4f}, {pooled['hi']:.4f}], "
           f"tol={settings.negative_control_tol:g}); "
-          f"{'SUPPORTED (no label leakage detected)' if hb4_supported else 'FAILED - the control beats chance: answer information leaks into the pipeline'}"
-          f"{hb4_note}")
+          f"{hb4_status}{hb4_note}")
     _write_json(out_dir / "baselines_negative_control.json", {
         "lr": lr_shared, "chance": chance,
         "tolerance": settings.negative_control_tol,
         "accuracy_mean": ctrl_summary["mean"],
         "accuracy_std": ctrl_summary["std"],
-        "margin": hb4, "pooled_wilson": pooled, "runs": ctrl_runs,
-        "hb4_supported": hb4_supported,
+        "margin": hb4_measure, "margin_seed_only": hb4,
+        "cluster_ci": ctrl_cluster, "pooled_wilson": pooled,
+        "runs": ctrl_runs, "hb4_supported": hb4_supported,
+        "hb4_violated": hb4_violated, "hb4_state": hb4_state,
     })
 
     verdict = {
@@ -4748,6 +5009,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "hb2_state": hb2["hb2_state"],
         "hb3_supported": bool(audit.get("hb3_supported")),
         "hb4_supported": hb4_supported,
+        "hb4_violated": hb4_violated,
+        "hb4_state": hb4_state,
         "hb5_supported": bool(hb5_supported),
         "hb6_supported": bool(shallow["hb6_supported"]),
         "hb6_supported_ci": bool(shallow["hb6_supported_ci"]),
@@ -4790,6 +5053,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                     "accuracy_std": payload["accuracy_std"],
                     "accuracy_by_seed": payload["accuracy_by_seed"],
                     "pooled_wilson": payload["pooled_wilson"],
+                    "cluster_ci": payload["cluster_ci"],
                     "above_chance": payload["above_chance"],
                     "unmeasured": payload["unmeasured"],
                     "sesoi_accuracy": payload["sesoi_accuracy"],
@@ -4823,6 +5087,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "accuracy_std": shallow["accuracy_std"],
             "accuracy_by_seed": shallow["accuracy_by_seed"],
             "pooled_wilson": shallow["pooled_wilson"],
+            "cluster_ci": shallow["cluster_ci"],
             "chance": chance,
             "above_chance": shallow["above_chance"],
             "unmeasured": shallow["unmeasured"],
@@ -4854,7 +5119,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "lr": lr_shared, "tolerance": settings.negative_control_tol,
             "accuracy_mean": ctrl_summary["mean"],
             "accuracy_std": ctrl_summary["std"],
-            "margin": hb4, "pooled_wilson": pooled,
+            "margin": hb4_measure, "margin_seed_only": hb4,
+            "pooled_wilson": pooled, "cluster_ci": ctrl_cluster,
         },
         "hb5_overfit_sanity": {
             "passed": bool(hb5_supported),
@@ -4905,11 +5171,16 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         f"; PROVISIONAL: {' '.join(provisional).upper()} rest on fewer than "
         f"{floor} seeds - raise Settings.seeds or downgrade the claim"
         if provisional else "")
+    hb4_verdict_txt = {
+        "supported": "ok", "violated": "VIOLATED",
+        "inconclusive": "INCONCLUSIVE", "untestable": "untestable",
+    }.get(verdict.get("hb4_state"),
+          "ok" if verdict["hb4_supported"] else "FAILED")
     print(f"[baselines] verdict: "
           f"HB1={'ok' if verdict['hb1_supported'] else 'FAILED'}"
           f" HB2={hb2_txt}"
           f" HB3={'ok' if verdict['hb3_supported'] else 'FAILED'}"
-          f" HB4={'ok' if verdict['hb4_supported'] else 'FAILED'}"
+          f" HB4={hb4_verdict_txt}"
           f" HB5={'ok' if verdict['hb5_supported'] else 'FAILED'}"
           f" HB6={'ok' if verdict['hb6_supported'] else 'FLAG'}"
           f" HB7={hb7_txt}"
@@ -5221,13 +5492,31 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             return "ok (provisional: below seed floor)"
         return "ok"
 
+    hb4_state = verdict.get("hb4_state")
+    if hb4_state == "inconclusive":
+        hb4_mark = "INCONCLUSIVE"
+    elif hb4_state == "violated":
+        hb4_mark = "VIOLATED"
+    elif hb4_state == "untestable":
+        hb4_mark = "untestable"
+    else:
+        hb4_mark = _mark("hb4_supported", "hb4")
     marks = "/".join(
-        _mark(k, c) for k, c in (("hb1_supported", None),
-                                 ("hb2_supported", "hb2"),
-                                 ("hb3_supported", None),
-                                 ("hb4_supported", "hb4"),
-                                 ("hb5_supported", None),
-                                 ("hb6_supported", "hb6")))
+        [_mark("hb1_supported"),
+         _mark("hb2_supported", "hb2"),
+         _mark("hb3_supported"),
+         hb4_mark,
+         _mark("hb5_supported"),
+         _mark("hb6_supported", "hb6")])
+    hb4_note = ""
+    if hb4_state == "inconclusive":
+        hb4_note = ("; HB4 INCONCLUSIVE - the negative-control interval "
+                    "straddles tolerance, so neither leakage nor its absence "
+                    "is certified (not a failure; raise the seed count or "
+                    "widen the control stream)")
+    elif hb4_state == "violated":
+        hb4_note = ("; HB4 VIOLATED - the permutation control is above "
+                    "tolerance: answer information leaks into the pipeline")
     hb2_state = verdict.get("hb2_state")
     if hb2_state in (None, "certified"):
         hb2_note = ""
@@ -5241,7 +5530,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     print(f"[e1] simple-baseline check (from --only baselines, enforced "
           f"before training): HB1/HB2/HB3/HB4/HB5/HB6={marks}, tuned linear "
           f"probe test accuracy={probe:.4f} vs chance "
-          f"{verdict.get('chance', float('nan')):.4f}{hb2_note} - the "
+          f"{verdict.get('chance', float('nan')):.4f}{hb2_note}{hb4_note} - the "
           f"transformer is only credited for what it does beyond this tuned "
           f"baseline and the rule ceiling (HB4 = no label leakage, HB5 = "
           f"loop can memorise a tiny batch, HB6 = the shallowest ladder rung "
@@ -5266,7 +5555,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 and not shallow.get("reaches_ceiling")):
             hb6_prov += (" [companion: the 95% CI touches the ceiling "
                          "(absence of evidence); saturation requires the "
-                         "pooled lower bound within SESOI]")
+                         "seed-clustered lower bound within SESOI]")
         print(f"[e1] complexity control (HB6): tuned {shallow_depth}-layer "
               f"standard transformer "
               f"(lr={shallow.get('lr', float('nan')):g}) test "
@@ -5369,7 +5658,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
 
     # HB0 competence prerequisite: "does the gate read entropy?" is only a
     # mechanism question when at least one trained condition demonstrably
-    # learned the task at this step count (pooled Wilson lower bound above
+    # learned the task at this step count (seed-clustered lower bound above
     # chance).  Written to e1_competence.json and handed to the ContrastLog,
     # which then marks every contrast claim-ineligible if it fails.
     competence = _competence_check(
@@ -5382,10 +5671,10 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 {**competence, **_run_context(settings)})
     if competence["passed"]:
         print(f"[e1] HB0 competence: ok (best arm {competence['best_arm']} "
-              f"has pooled Wilson 95% lower bound above chance "
+              f"has seed-clustered 95% lower bound above chance "
               f"{competence['chance']:.4f})")
     else:
-        print(f"[e1] HB0 competence: FAILED - no condition's pooled Wilson "
+        print(f"[e1] HB0 competence: FAILED - no condition's seed-clustered "
               f"95% lower bound is above chance {competence['chance']:.4f}; "
               f"the grid did not demonstrably learn the task at this step count, "
               f"so no contrast below may be read as a mechanism statement")
@@ -5898,10 +6187,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 {**competence, **_run_context(settings)})
     if competence["passed"]:
         print(f"[e2] HB0 competence: ok (best arm {competence['best_arm']} "
-              f"has pooled Wilson 95% lower bound above chance "
+              f"has seed-clustered 95% lower bound above chance "
               f"{competence['chance']:.4f} at the training length)")
     else:
-        print(f"[e2] HB0 competence: FAILED - no arm's pooled Wilson 95% "
+        print(f"[e2] HB0 competence: FAILED - no arm's seed-clustered 95% "
               f"lower bound is above chance {competence['chance']:.4f} at "
               f"the training length; the grid did not demonstrably learn the "
               f"task at this step count, so no contrast below may be read as a "
@@ -6019,7 +6308,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     if required is None:
         if verdict.get("ladder_competent") is False:
             print("[e3] HB7 NOT DETERMINABLE: no ladder rung (1/2/4 layers) "
-                  "had a pooled Wilson lower bound above chance, so the "
+                  "had a seed-clustered lower bound above chance, so the "
                   "ladder did not solve the task at this step count - the "
                   "depth-based framing of H3a/H3b is unverified (raise the "
                   "step count and re-run `--only baselines`)")
@@ -6189,10 +6478,10 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                 {**competence, **_run_context(settings)})
     if competence["passed"]:
         print(f"[e3] HB0 competence: ok (best cell "
-              f"{competence['best_arm']} has pooled Wilson 95% lower bound "
-              f"above chance {competence['chance']:.4f})")
+              f"{competence['best_arm']} has seed-clustered 95% lower "
+              f"bound above chance {competence['chance']:.4f})")
     else:
-        print(f"[e3] HB0 competence: FAILED - no grid cell's pooled Wilson "
+        print(f"[e3] HB0 competence: FAILED - no grid cell's seed-clustered "
               f"95% lower bound is above chance {competence['chance']:.4f}; "
               f"the grid did not demonstrably learn the task at this step count, "
               f"so no contrast below may be read as a mechanism statement")

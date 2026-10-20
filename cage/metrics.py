@@ -85,6 +85,7 @@ __all__ = [
     "paired_bootstrap_ci",
     "equivalence_test",
     "bootstrap_upper_p",
+    "clustered_proportion_ci",
     "selection_at_fraction",
     "seeds_for_power",
     "wilson_ci",
@@ -672,6 +673,89 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
     return {"p": p, "lo": lo, "hi": hi, "n": total}
 
 
+def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
+                            seed: int = 0, alpha: float = 0.05,
+                            lower_alpha: float | None = None) -> dict:
+    """Percentile interval for a mean of per-unit proportions.
+
+    ``successes[i] / n_per_unit[i]`` is one training seed's accuracy on the
+    sealed evaluation stream.  Seeds are independent units, but every seed
+    is scored on the *same* stream, so pooling the counts treats repeated
+    evaluations of identical examples as independent Bernoulli trials
+    (pseudo-replication): the pooled interval keeps shrinking with the
+    number of seeds even when their accuracies are identical.  Here seeds
+    are resampled (between-seed noise) and each replicate draws one *shared*
+    binomial measurement from the resampled mean accuracy on a stream of
+    ``min(n_per_unit)`` examples (finite-stream noise).  The shared draw does
+    not shrink with the number of seeds, so a five-seed grid cannot buy five
+    times the evaluation precision.  ``pooled_wilson`` is kept as a
+    descriptive companion only; decisions use the clustered bounds.
+
+    ``lower_alpha`` optionally sets the lower-tail probability directly
+    (e.g. ``0.05 / n_arms`` for a Bonferroni family-wise lower bound); the
+    upper bound stays at ``1 - alpha / 2``.  Degenerate inputs return a
+    ``valid=False`` payload instead of raising, so callers can abstain.
+    """
+    s = torch.as_tensor(successes, dtype=torch.float64).reshape(-1)
+    n = torch.as_tensor(n_per_unit, dtype=torch.float64).reshape(-1)
+    if n.numel() == 1 and s.numel() > 1:
+        n = n.expand_as(s).clone()
+    if s.numel() == 1 and n.numel() > 1:
+        s = s.expand_as(n).clone()
+    lo_q = alpha / 2.0 if lower_alpha is None else float(lower_alpha)
+    hi_q = 1.0 - alpha / 2.0
+    pooled = wilson_ci(0, 0)
+    empty = {
+        "mean": float("nan"), "lo": float("nan"), "hi": float("nan"),
+        "n": 0, "n_examples": 0,
+        "sd_between": float("nan"), "se_between": float("nan"),
+        "se_stream": float("nan"), "se": float("nan"),
+        "pooled_wilson": pooled, "alpha": alpha,
+        "lower_quantile": lo_q, "upper_quantile": hi_q,
+        "valid": False, "reason": "",
+    }
+    if s.numel() != n.numel() or s.numel() == 0:
+        empty["reason"] = "empty or mismatched inputs"
+        return empty
+    keep = torch.isfinite(s) & torch.isfinite(n) & (n > 0)
+    s, n = s[keep], n[keep]
+    if s.numel() == 0:
+        empty["reason"] = "no positive-length units"
+        return empty
+    if not bool(((s >= 0) & (s <= n)).all()):
+        empty["reason"] = "success count outside [0, n]"
+        return empty
+    p = s / n
+    units = int(s.numel())
+    mean_acc = float(p.mean())
+    sd_between = float(p.std(unbiased=True)) if units > 1 else 0.0
+    se_between = sd_between / math.sqrt(units)
+    n_stream = float(n.min())
+    se_stream = math.sqrt(max(mean_acc * (1.0 - mean_acc) / n_stream, 0.0))
+    gen = torch.Generator().manual_seed(int(seed))
+    idx = torch.randint(0, units, (int(n_boot), units), generator=gen)
+    mean_star = p[idx].mean(dim=1)
+    # One shared finite-stream draw per replicate, not one per seed: the
+    # evaluation examples are common to every training seed.
+    stream = torch.binomial(
+        torch.full_like(mean_star, n_stream), mean_star, generator=gen
+    ) / n_stream
+    lo = float(torch.quantile(stream, lo_q).item())
+    hi = float(torch.quantile(stream, hi_q).item())
+    total_success = int(round(float(s.sum().item())))
+    total_n = int(round(float(n.sum().item())))
+    return {
+        "mean": mean_acc, "lo": lo, "hi": hi,
+        "n": units, "n_examples": total_n,
+        "sd_between": sd_between, "se_between": se_between,
+        "se_stream": se_stream,
+        "se": math.sqrt(se_between ** 2 + se_stream ** 2),
+        "pooled_wilson": wilson_ci(total_success, total_n),
+        "alpha": alpha, "lower_quantile": lo_q, "upper_quantile": hi_q,
+        "valid": True, "reason": "",
+    }
+
+
 def _self_test() -> int:
     """Deterministic self-checks of the inference machinery.
 
@@ -757,6 +841,32 @@ def _self_test() -> int:
     check("wilson_brackets", w["lo"] <= w["p"] <= w["hi"])
     check("wilson_upper_exact", wilson_ci(4, 4)["hi"] == 1.0)
     check("wilson_lower_exact", wilson_ci(0, 4)["lo"] == 0.0)
+
+    # Seed-clustered proportion: identical seed accuracies evaluated on one
+    # shared stream must retain the stream's measurement noise; pooling the
+    # same examples as independent trials is pseudo-replication.
+    five = clustered_proportion_ci([50] * 5, [100] * 5, n_boot=4000, seed=0)
+    check("cluster_brackets", five["lo"] <= five["mean"] <= five["hi"])
+    pooled_width = (five["pooled_wilson"]["hi"]
+                    - five["pooled_wilson"]["lo"])
+    check("cluster_shared_stream_wider",
+          five["hi"] - five["lo"] > pooled_width)
+    again = clustered_proportion_ci([50] * 5, [100] * 5, n_boot=4000, seed=0)
+    check("cluster_deterministic", again["lo"] == five["lo"])
+    spread = clustered_proportion_ci([20, 80, 50, 50, 50], [100] * 5,
+                                     n_boot=4000, seed=0)
+    check("cluster_between_seed_widens",
+          spread["hi"] - spread["lo"] > five["hi"] - five["lo"])
+    one = clustered_proportion_ci([50], [100], n_boot=4000, seed=0)
+    check("cluster_single_unit", one["lo"] <= one["mean"] <= one["hi"])
+    family = clustered_proportion_ci([50] * 5, [100] * 5, n_boot=4000,
+                                     seed=0, lower_alpha=0.00625)
+    check("cluster_family_lower_more_conservative", family["lo"] < five["lo"])
+    empty_cluster = clustered_proportion_ci([], [])
+    check("cluster_empty_no_claim",
+          empty_cluster["n"] == 0 and not empty_cluster["valid"])
+    bad_cluster = clustered_proportion_ci([2, 1], [1, 1])
+    check("cluster_bad_counts_no_claim", not bad_cluster["valid"])
 
     if failures:
         print("metrics self-test FAILED: " + ", ".join(failures))
