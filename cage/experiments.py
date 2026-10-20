@@ -256,20 +256,22 @@ HYPOTHESES = {
                       "1/(vocab-2) even after tuning.",
         "prediction": "the 95% bootstrap CI of (tuned probe accuracy - chance) "
                       "stays below +chance, i.e. the probe is confidently "
-                      "below 2x chance; the CI resamples both seeds and the "
-                      "finite scoring stream (Binomial(n_per_seed) re-draws "
-                      "inside every replication), so the bound is certified "
-                      "against measurement noise, not just between-seed "
-                      "spread; the one-sided bootstrap p-value for H0: "
+                      "below 2x chance; the CI resamples seeds and adds one "
+                      "shared Binomial(n_per_seed) scoring draw per "
+                      "replication on the common evaluation stream (not one "
+                      "draw per seed), so the bound is certified against "
+                      "measurement noise without pseudo-replicating the "
+                      "stream; the one-sided bootstrap p-value for H0: "
                       "margin >= +chance certifies this at adequate power",
         "decision": "The quantitative near-chance test "
                     "(cage.baselines.probe_vs_chance_test) must be "
                     "*certified* (CI upper bound < +chance); a CI that "
                     "merely straddles the bound is 'inconclusive' - not "
                     "certified, possibly underpowered - and the reported "
-                    "seeds_for_certification (planned on the total per-seed "
-                    "SD: seed spread + scoring noise) says whether more "
-                    "seeds/the probe stream can settle it; only a CI "
+                    "seeds_for_certification (planned on seed spread plus "
+                    "the non-shrinking common-stream noise floor) says "
+                    "whether more seeds/the probe stream can settle it; only "
+                    "a CI "
                     "entirely at or above +chance (state 'violated') is "
                     "evidence that answer information leaks into the "
                     "bag-of-tokens features (or a shortcut exists), which "
@@ -4828,11 +4830,12 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     print(f"[baselines] HB2 near-chance test: accuracy - chance = "
           f"{hb2['mean']:+.4f} [{hb2['lo']:+.4f}, {hb2['hi']:+.4f}] "
           f"(seed-level [{hb2['lo_seed']:+.4f}, {hb2['hi_seed']:+.4f}]; "
-          f"two-level bootstrap: seeds x Binomial scoring noise with "
-          f"n_per_seed={hb2['n_per_seed']}; one-sided p(H0: margin >= "
-          f"+chance)={hb2['p_above_chance']:.3f}, MDE80={hb2['mde80']:.4f}, "
-          f"sd_seed={hb2['sd_seed']:.4f}, sd_scoring="
-          f"{hb2['sd_binomial']:.4f}, sd_total={hb2['sd_effective']:.4f})")
+          f"seed resampling + one shared Binomial scoring draw per replicate "
+          f"on the common stream, n_per_seed={hb2['n_per_seed']}; one-sided "
+          f"p(H0: margin >= +chance)={hb2['p_above_chance']:.3f}, "
+          f"MDE80={hb2['mde80']:.4f}, sd_seed={hb2['sd_seed']:.4f}, "
+          f"sd_scoring={hb2['sd_binomial']:.4f}, sd_per_seed="
+          f"{hb2['sd_effective']:.4f}, se_mean={hb2['se_effective']:.4f})")
     if hb2["hb2_state"] == "certified":
         print("  state: CERTIFIED - the tuned probe stays confidently below "
               "the 2x-chance bound")
@@ -4849,10 +4852,11 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                       f"independent seeds at the observed paired SD for 80% "
                       f"power at this margin")
         else:
-            need_s = ("the point estimate is not below the bound, so more "
-                      "seeds alone cannot certify it; 'not certified' is an "
-                      "open question about the probe, not evidence about "
-                      "the transformer")
+            need_s = ("the observed margin cannot clear the irreducible "
+                      "common-stream noise floor (or the point estimate is "
+                      "not below the bound), so more seeds alone cannot "
+                      "certify it; 'not certified' is an open question about "
+                      "the probe, not evidence about the transformer")
         print("  state: INCONCLUSIVE - near-chance NOT certified (the CI "
               "straddles the +chance bound); this is not evidence of "
               f"leakage: {need_s}; or widen the probe evaluation stream "
@@ -5112,6 +5116,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "sd_seed": hb2["sd_seed"],
             "sd_binomial": hb2["sd_binomial"],
             "sd_effective": hb2["sd_effective"],
+            "se_effective": hb2["se_effective"],
             "n_per_seed": hb2["n_per_seed"],
             "measurement_noise_accounted": hb2["measurement_noise_accounted"],
         },
