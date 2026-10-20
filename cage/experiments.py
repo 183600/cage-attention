@@ -136,6 +136,7 @@ from .data import (
     STATS_SEED,
     TEST_SEED,
     VAL_SEED,
+    actual_stream_overlap_audit,
     answer_uniformity_test,
     batch_fingerprint,
     check_eval_seed,
@@ -2727,15 +2728,29 @@ def _run_context(settings: Settings) -> dict:
         return ctx
     config = {name: getattr(settings, name)
               for name in Settings.__dataclass_fields__ if name != "out_dir"}
+    # Fingerprint each stream at the geometry its consumer actually uses:
+    # make_batch's draws are shape-dependent, so one seed at two batch
+    # sizes is two realizations.  Training reads settings.batch; validation
+    # monitoring reads settings.batch too (same fixed VAL stream), final
+    # val/test read eval_batch, and mechanism statistics read stats_batch.
     fingerprints = {
-        name: stream_fingerprint(settings.n_pairs, settings.vocab,
-                                 settings.device, seed=seed)
-        for name, seed in (("val", VAL_SEED), ("test", TEST_SEED),
-                           ("stats", STATS_SEED))
+        "val": stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.eval_batch, seed=VAL_SEED),
+        "val_monitor": stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.batch, seed=VAL_SEED),
+        "test": stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.eval_batch, seed=TEST_SEED),
+        "stats": stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.stats_batch, seed=STATS_SEED),
     }
     fingerprints["train"] = {
-        str(seed): stream_fingerprint(settings.n_pairs, settings.vocab,
-                                      settings.device, seed=seed)
+        str(seed): stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.batch, seed=seed)
         for seed in settings.seeds
     }
     payload = json.dumps({
@@ -3572,6 +3587,17 @@ class SplitAuditError(RuntimeError):
     """The HB3 split/disjointness audit failed; no grid may run on this data."""
 
 
+# Minimum samples per stream for the calibrated shift tests.  The audit is
+# not the evaluation stream: reusing a tiny quick-mode eval geometry (e.g.
+# 64 x 2 = 128 rows, ~21 per key position) leaves the tests noisy and
+# underpowered, so a legitimate random draw can land on the wrong side of
+# the decision boundary.  Drawing at least this many rows at the eval batch
+# size keeps the audit's decisions stable without touching the evaluation
+# data (the audit only reads additional samples from the same split
+# streams).
+_SPLIT_AUDIT_MIN_SAMPLES = 1024
+
+
 def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
                        tag: str = "baselines", enforce: bool = False) -> dict:
     """HB3: verify every stream pair is disjoint and field-wise IID before
@@ -3581,7 +3607,14 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
     between *any* two streams - validation vs test included - or a
     distribution gap between the training set and a held-out split
     invalidates every number reported afterwards, so the outcome is printed
-    and stored under ``<tag>_split_audit.json``.  Every configured training
+    and stored under ``<tag>_split_audit.json``.  Beyond the
+    ``split_leakage_audit`` prefix comparison, ``actual_stream_overlap_audit``
+    replays every stream at the geometry its consumer actually reads
+    (training at ``batch`` x ``steps``, eval at ``eval_batch`` x
+    ``eval_batches``, ...) and the gate also refuses any cross-split content
+    overlap found there: the prefix check alone cannot cover the full
+    training stream, which ``make_batch``'s shape-dependent draws make a
+    different realization from the eval-geometry prefix.  Every configured training
     seed enters the audit as its own stream and the exact-overlap check
     covers all stream pairs.  Each audit field's shift is decided by a Monte
     Carlo-calibrated Pearson chi-square against the pooled training
@@ -3607,9 +3640,13 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
     audit = getattr(settings, "_split_audit_cache", None)
     fresh = audit is None
     if fresh:
+        audit_batches = max(
+            int(settings.eval_batches),
+            math.ceil(_SPLIT_AUDIT_MIN_SAMPLES
+                      / max(int(settings.eval_batch), 1)))
         audit = split_leakage_audit(
             settings.n_pairs, settings.vocab, settings.device,
-            batch=settings.eval_batch, batches=settings.eval_batches,
+            batch=settings.eval_batch, batches=audit_batches,
             train_seeds=train_seeds)
         fields = audit["audit_fields"]
         family = [(field, name) for field in fields
@@ -3626,8 +3663,61 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
             for (field, name), item in zip(family, bh)
         }
         audit["shift_p_value_bh"] = shift_tests
+        # Prefix overlap is necessary but not sufficient: training reads
+        # settings.steps * settings.batch samples at its own geometry,
+        # which is a different realization from the eval-geometry prefix.
+        # Replay the exact streams each consumer reads (training, val
+        # monitoring, final val/test, stats, probe test) and refuse any
+        # content overlap between different splits.  Realizations of the
+        # same split (val monitoring vs final val) must remain allowed.
+        actual = actual_stream_overlap_audit(
+            settings.n_pairs, settings.vocab, settings.device,
+            train_specs={
+                f"train:{seed}": {
+                    "seed": int(seed), "batch": settings.batch,
+                    "steps": settings.steps, "group": "train",
+                }
+                for seed in train_seeds
+            } | {
+                f"probe_train:{seed}": {
+                    "seed": int(seed), "batch": settings.probe_batch,
+                    "steps": settings.probe_steps, "group": "train",
+                }
+                for seed in train_seeds
+            } | {
+                "overfit_sanity": {
+                    "seed": SANITY_SEED, "batch": settings.overfit_batch,
+                    "steps": 1, "group": "train",
+                },
+            },
+            heldout_specs={
+                "val_monitor": {
+                    "seed": VAL_SEED, "batch": settings.batch,
+                    "batches": settings.val_batches, "group": "val",
+                },
+                "val": {
+                    "seed": VAL_SEED, "batch": settings.eval_batch,
+                    "batches": settings.eval_batches, "group": "val",
+                },
+                "test": {
+                    "seed": TEST_SEED, "batch": settings.eval_batch,
+                    "batches": settings.eval_batches, "group": "test",
+                },
+                "stats": {
+                    "seed": STATS_SEED, "batch": settings.stats_batch,
+                    "batches": settings.stats_batches, "group": "stats",
+                },
+                "probe_test": {
+                    "seed": TEST_SEED, "batch": settings.probe_eval_batch,
+                    "batches": settings.probe_eval_batches,
+                    "group": "test",
+                },
+            })
+        audit["actual_stream_overlap"] = actual
+        audit["max_actual_stream_overlap"] = actual["max_overlap"]
         audit["hb3_supported"] = bool(
             audit["max_pairwise_duplicate_overlap"] == 0
+            and actual["max_overlap"] == 0
             and not any(item["reject"] for item in shift_tests.values()))
         settings._split_audit_cache = audit
 
@@ -3647,10 +3737,13 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
         dup_txt = ", ".join(
             f"{name}={audit[f'n_duplicate_rows_{name}']}"
             for name in ("val", "test", "stats"))
+        actual = audit["actual_stream_overlap"]
         print(f"[{tag}] split audit (HB3, train seeds {list(train_seeds)}): "
               f"{detail}; pairwise overlap max="
               f"{audit['max_pairwise_duplicate_overlap']} over "
               f"{len(audit['pairwise_duplicate_overlap'])} stream pairs; "
+              f"actual stream replay={actual['n_rows_total']} rows, "
+              f"cross-split overlap max={actual['max_overlap']}; "
               f"TV noise floor [{floor_txt}]; calibrated shift test "
               f"(BH q={settings.fdr_q:g}) adjusted p: [{adj_txt}]; "
               f"stream duplicates train="
@@ -3676,14 +3769,18 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
             "rejected_shift_tests": rejected,
             "max_pairwise_duplicate_overlap":
                 audit["max_pairwise_duplicate_overlap"],
+            "max_actual_stream_overlap":
+                audit.get("max_actual_stream_overlap"),
             "split_audit": audit,
             **_run_context(settings),
         })
         raise SplitAuditError(
             f"{tag}: HB3 failed (max pairwise duplicate overlap="
-            f"{audit['max_pairwise_duplicate_overlap']}, rejected shift "
-            f"tests={rejected or 'none'}); a data protocol with leakage or "
-            f"a held-out distribution shift cannot support any grid result")
+            f"{audit['max_pairwise_duplicate_overlap']}, max actual-stream "
+            f"overlap={audit.get('max_actual_stream_overlap')}, rejected "
+            f"shift tests={rejected or 'none'}); a data protocol with "
+            f"leakage or a held-out distribution shift cannot support any "
+            f"grid result")
     return audit
 
 

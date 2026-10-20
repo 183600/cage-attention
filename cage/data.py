@@ -203,8 +203,9 @@ def validate_batch(idx, targets, meta, vocab, diagnostics: bool = True) -> dict:
     Raises ``ValueError`` if any invariant is violated:
 
     * integrity: 2-D integer ids, no NaN/Inf, all token ids in ``[0, vocab)``;
-    * structure: exactly one SEP token per sequence and a valid query
-      position, with ``meta`` agreeing with the sequence;
+    * structure: exactly one SEP token, at the fixed separator slot, a
+      query at the final position, and ``meta`` agreeing with the
+      sequence;
     * label noise: the query key occurs exactly once among the keys, the
       recorded answer is the value paired with that key (a repeated key
       would make the correct answer ambiguous) and the answer id is a
@@ -252,6 +253,7 @@ def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
         if qp.shape != (batch_size,):
             return False
         checks.append(((qp >= 0) & (qp < width)).all())
+        checks.append(qp.eq(width - 1).all())
         # Clamped only to keep the gathers below in range: the clamped
         # positions are simultaneously rejected by the range checks above,
         # so an invalid batch can never slip through on the clamped index.
@@ -271,6 +273,7 @@ def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
         paired_value = idx.gather(1, (key_pos + 1).unsqueeze(1)).squeeze(1)
         checks.append(paired_value.eq(answer).all())
         checks.append(idx.eq(SEP_ID).sum(dim=1).eq(1).all())
+        checks.append(idx[:, -2].eq(SEP_ID).all())
         if "key_pos" in meta:
             if not _is_integer_tensor(meta["key_pos"]):
                 return False
@@ -313,6 +316,9 @@ def _validate_batch_strict(idx, targets, meta, vocab) -> dict:
     qp = meta["query_pos"].to(device=idx.device, dtype=torch.long)
     if qp.shape != (batch_size,) or bool(qp.lt(0).any()) or bool(qp.ge(width).any()):
         raise ValueError("query_pos is missing or out of range")
+    if not bool(qp.eq(width - 1).all()):
+        raise ValueError(
+            "structure: query_pos must be the final sequence position")
     query = idx.gather(1, qp.unsqueeze(1)).squeeze(1)
     if not _is_integer_tensor(meta["answer"]):
         raise ValueError("meta['answer'] must have an integer dtype")
@@ -341,6 +347,9 @@ def _validate_batch_strict(idx, targets, meta, vocab) -> dict:
         raise ValueError("label noise: answer != value paired with the query key")
     if not bool(idx.eq(SEP_ID).sum(dim=1).eq(1).all()):
         raise ValueError("structure: expected exactly one SEP token per row")
+    if not bool(idx[:, -2].eq(SEP_ID).all()):
+        raise ValueError(
+            "structure: SEP must occupy the fixed separator slot (T-2)")
     if "key_pos" in meta:
         if not _is_integer_tensor(meta["key_pos"]):
             raise ValueError("meta['key_pos'] must have an integer dtype")
@@ -397,11 +406,25 @@ def stream_fingerprint(n_pairs, vocab, device="cpu", batch=8, seed=TEST_SEED):
     deterministic summary of a stream that catches every protocol change
     (key/value draw order, SEP/query layout, reserved-id handling), and it
     is recorded with every experiment result next to the code revision.
+
+    The batch geometry is part of the digest, not only of the metadata:
+    ``make_batch`` consumes the stream through shape-dependent draws
+    (``torch.rand(batch, n_avail)`` / ``torch.randint(..., (batch,
+    n_pairs))``), so the same seed at ``batch=8`` and ``batch=64`` produces
+    a different first batch.  Hashing only the tensors would therefore
+    report the same fingerprint for two different realizations; including
+    ``(n_pairs, vocab, batch, seed)`` makes "same fingerprint" mean "same
+    protocol *and* same geometry", which is the claim run records rely on.
     """
     gen = torch.Generator(device=device).manual_seed(seed)
     idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+    geometry = (f"n_pairs={int(n_pairs)};vocab={int(vocab)};"
+                f"batch={int(batch)};seed={int(seed)};")
+    digest = hashlib.sha256(
+        (geometry + batch_fingerprint(idx, tgt, meta)).encode("ascii")
+    ).hexdigest()[:16]
     return {"seed": int(seed), "batch": int(batch), "n_pairs": int(n_pairs),
-            "vocab": int(vocab), "sha256": batch_fingerprint(idx, tgt, meta)}
+            "vocab": int(vocab), "sha256": digest}
 
 
 def _draw_split(n_pairs, vocab, device, batch, batches, seed):
@@ -423,15 +446,151 @@ def _draw_split(n_pairs, vocab, device, batch, batches, seed):
             "diagnostics": diagnostics}
 
 
+def _row_keys(idx):
+    """Per-row content fingerprints (two independent 64-bit tuple hashes).
+
+    ``hash(tuple(ints))`` is deterministic across processes because integer
+    hashing is not salted, so the same row gets the same key in every audit
+    run.  The second, position-weighted hash makes an accidental collision
+    of the first effectively impossible for the <1e6 rows an audit sees;
+    a collision would be reported as overlap (fail closed), never as
+    disjointness.
+    """
+    out = []
+    for row in idx.tolist():
+        forward = tuple(int(t) for t in row)
+        weighted = tuple((i + 1) * int(t) for i, t in enumerate(row))
+        out.append((hash(forward), hash(weighted)))
+    return out
+
+
+def _draw_stream_keys(seed, n_pairs, vocab, device, batch, units):
+    """Replay one stream exactly as its consumer reads it and hash the rows.
+
+    ``units`` is the number of batches the consumer draws (training steps
+    or evaluation batches) at its own batch size, in generator order.  Every
+    batch passes the shared cleaning gate, so a stream that would be
+    rejected during training/evaluation aborts the audit instead of being
+    hashed.
+    """
+    gen = torch.Generator(device=device).manual_seed(int(seed))
+    keys, n_rows = set(), 0
+    for _ in range(int(units)):
+        idx, tgt, meta = make_batch(int(batch), n_pairs, vocab, device,
+                                    gen=gen)
+        validate_batch(idx, tgt, meta, vocab, diagnostics=False)
+        batch_keys = _row_keys(idx)
+        keys.update(batch_keys)
+        n_rows += len(batch_keys)
+    return keys, n_rows
+
+
+def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
+                                train_specs=None, heldout_specs=None):
+    """Exact content overlap of the streams a run *actually* consumes.
+
+    ``split_leakage_audit`` checks the first ``batch * batches`` samples of
+    every seed at one fixed geometry.  Training, however, reads
+    ``settings.steps * settings.batch`` samples, and ``make_batch`` draws
+    through shape-dependent random calls, so the audited prefix is not the
+    training realization.  This audit replays each specified stream with
+    exactly the geometry its consumer uses:
+
+    * ``train_specs`` maps a stream name to ``{"seed", "batch", "steps"}``;
+    * ``heldout_specs`` maps a stream name to ``{"seed", "batch",
+      "batches"}`` (e.g. final eval, validation monitoring, stats).
+
+    A spec may carry ``"group"`` to name the split it belongs to (training
+    specs default to ``"train"``, held-out specs to the spec name).  Two
+    realizations of the *same* split (e.g. the validation stream at the
+    monitoring geometry and at the final-eval geometry) may legitimately
+    share samples; only overlaps between *different* groups - train vs
+    held-out, validation vs test, test vs statistics - are leakage.  The
+    full pairwise matrix is still reported, but ``max_overlap`` counts
+    cross-group pairs only, so re-reading one split at two geometries
+    cannot fail the gate.
+
+    It returns per-stream row/duplicate counts and the pairwise overlap
+    matrix over row-content fingerprints.  Any cross-group overlap is
+    leakage; the caller decides how to gate on it.
+    """
+    train_specs = dict(train_specs or {})
+    heldout_specs = dict(heldout_specs or {})
+    if not train_specs or not heldout_specs:
+        raise ValueError(
+            "actual_stream_overlap_audit needs at least one training and "
+            "one held-out stream spec")
+    key_sets, streams, groups = {}, {}, {}
+    all_specs = ([(name, spec, "train")
+                  for name, spec in train_specs.items()]
+                 + [(name, spec, "heldout")
+                    for name, spec in heldout_specs.items()])
+    for name, spec, kind in all_specs:
+        unit_key = "steps" if kind == "train" else "batches"
+        if spec.get(unit_key) is None:
+            raise ValueError(
+                f"{kind} spec {name!r} needs {unit_key!r}")
+        keys, n_rows = _draw_stream_keys(
+            spec["seed"], n_pairs, vocab, device, spec["batch"],
+            spec[unit_key])
+        key_sets[name] = keys
+        groups[name] = str(spec.get(
+            "group", "train" if kind == "train" else name))
+        streams[name] = {
+            "kind": kind, "group": groups[name],
+            "seed": int(spec["seed"]), "batch": int(spec["batch"]),
+            "units": int(spec[unit_key]),
+            "n_rows": int(n_rows), "n_unique_rows": int(len(keys)),
+            "n_duplicate_rows": int(n_rows - len(keys)),
+        }
+
+    names = list(key_sets)
+    pairwise = {}
+    cross_group = []
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            overlap = len(key_sets[a] & key_sets[b])
+            pairwise[f"{a}|{b}"] = overlap
+            if groups[a] != groups[b]:
+                cross_group.append(overlap)
+    train_names = list(train_specs)
+    heldout_names = list(heldout_specs)
+    train_vs_heldout = [
+        pairwise[f"{a}|{b}"] for a in train_names for b in heldout_names]
+    heldout_vs_heldout = [
+        pairwise[f"{a}|{b}"] for i, a in enumerate(heldout_names)
+        for b in heldout_names[i + 1:]]
+    return {
+        "train_specs": {k: dict(v) for k, v in train_specs.items()},
+        "heldout_specs": {k: dict(v) for k, v in heldout_specs.items()},
+        "streams": streams,
+        "pairwise_overlap": pairwise,
+        "train_vs_heldout_max": max(train_vs_heldout, default=0),
+        "heldout_vs_heldout_max": max(heldout_vs_heldout, default=0),
+        "max_overlap": max(cross_group, default=0),
+        "n_rows_total": int(sum(s["n_rows"] for s in streams.values())),
+    }
+
+
 # Audit fields: pooled tokens, the supervised answer distribution (the
-# quantity the accuracy / loss metrics are computed on) and the key / value
-# sub-populations.  All four are categorical token ids, so a distribution
-# shift shows up directly as a total-variation distance.
-_AUDIT_FIELDS = ("token", "answer", "key", "value")
+# quantity the accuracy / loss metrics are computed on), the key / value
+# sub-populations, and the *structural difficulty* covariates that decide
+# whether accuracy is comparable across splits: where the matching key sits
+# (retrieval distance), whether the answer value repeats in the context, and
+# whether a naive last-match rule would be misled by the query token
+# appearing later as a value.  Marginal token frequencies can match perfectly
+# while one split contains systematically later keys or more ambiguous
+# samples; such a shift changes the ceiling/accuracy of a split and would
+# otherwise be invisible to the audit.  All fields are categorical, so a
+# distribution shift shows up directly as a total-variation distance and a
+# calibrated chi-square.
+_AUDIT_FIELDS = ("token", "answer", "key", "value", "key_pos",
+                 "value_repeats", "naive_confusable")
+_AUDIT_DERIVED_FIELDS = ("key_pos", "value_repeats", "naive_confusable")
 
 # Calibration of the distribution-shift check.  ``_AUDIT_SIM`` Monte Carlo
 # replicates set the p-value resolution to ``1 / (_AUDIT_SIM + 1)`` (500
-# replicates resolve the 0.0042 rank-one threshold of a 12-test
+# replicates resolve the 0.0024 rank-one threshold of a 21-test
 # Benjamini-Hochberg family at q=0.05); the fixed seed keeps the audit
 # deterministic; ``_AUDIT_SMOOTH`` is the Haldane-Anscombe add-half count
 # that keeps unobserved classes testable instead of producing an infinite
@@ -439,6 +598,42 @@ _AUDIT_FIELDS = ("token", "answer", "key", "value")
 _AUDIT_SIM = 500
 _AUDIT_SIM_SEED = 90210
 _AUDIT_SMOOTH = 0.5
+
+
+def _difficulty_features(split, n_pairs):
+    """Per-sample structural difficulty covariates of one drawn split.
+
+    Derived from the validated ``[k1 v1 ... kn vn SEP query]`` layout (the
+    query is the last column of ``idx``; the answer is stored separately),
+    so no fitted statistic is involved:
+
+    * ``key_pos`` - pair index of the matching key (retrieval distance);
+    * ``value_repeats`` - the answer value occurs more than once among the
+      values, so a perfect key lookup does not uniquely determine it;
+    * ``naive_confusable`` - the query token occurs after the matching key
+      as a value, so the naive "last visible match wins" rule differs from
+      the exact pair lookup.
+
+    Mirrors ``cage.train._error_case_flags`` so the audit measures exactly
+    the difficulty factors used to explain errors downstream.
+    """
+    idx = split["idx"]
+    answer = split["answer"]
+    query = idx[:, -1]
+    keys = idx[:, :2 * n_pairs:2]
+    match = keys.eq(query.unsqueeze(1))
+    key_pos = match.to(torch.int64).argmax(dim=1)
+    values = idx[:, 1:2 * n_pairs:2]
+    value_repeats = (values.eq(answer.unsqueeze(1)).sum(dim=1)
+                     > 1).to(torch.int64)
+    positions = torch.arange(idx.size(1)).view(1, -1)
+    visible = positions < (idx.size(1) - 1)
+    last_match = torch.where(idx.eq(query.unsqueeze(1)) & visible,
+                             positions,
+                             torch.full_like(positions, -1)).max(dim=1).values
+    naive_confusable = last_match.ne(key_pos.mul(2)).to(torch.int64)
+    return {"key_pos": key_pos, "value_repeats": value_repeats,
+            "naive_confusable": naive_confusable}
 
 
 def _field_values(split, n_pairs, field):
@@ -451,16 +646,27 @@ def _field_values(split, n_pairs, field):
         return idx[:, :2 * n_pairs:2].reshape(-1)
     if field == "value":
         return idx[:, 1:2 * n_pairs:2].reshape(-1)
+    if field in _AUDIT_DERIVED_FIELDS:
+        return _difficulty_features(split, n_pairs)[field]
     raise ValueError(f"unknown audit field {field!r}")
 
 
-def _counts(values, vocab):
+def _field_categories(field, vocab, n_pairs):
+    """Number of possible categories for a categorical audit field."""
+    if field == "key_pos":
+        return max(int(n_pairs), 1)
+    if field in ("value_repeats", "naive_confusable"):
+        return 2
+    return int(vocab)
+
+
+def _counts(values, n_categories):
     return torch.bincount(values.reshape(-1).to(torch.long).cpu(),
-                          minlength=vocab).to(torch.int64)
+                          minlength=n_categories).to(torch.int64)
 
 
-def _distribution(values, vocab):
-    counts = _counts(values, vocab).to(torch.float64)
+def _distribution(values, n_categories):
+    counts = _counts(values, n_categories).to(torch.float64)
     return counts / counts.sum().clamp_min(1.0)
 
 
@@ -468,7 +674,7 @@ def _total_variation(p, q):
     return float(0.5 * (p - q).abs().sum())
 
 
-def _noise_floor(stream_values, vocab):
+def _noise_floor(stream_values, n_categories):
     """Same-size sampling-noise scale of one audit field.
 
     With at least two training streams the floor is the mean distance of
@@ -486,16 +692,17 @@ def _noise_floor(stream_values, vocab):
         floors = []
         for j, values in enumerate(stream_values):
             others = [v for i, v in enumerate(stream_values) if i != j]
-            reference = _distribution(torch.cat(others), vocab)
+            reference = _distribution(torch.cat(others), n_categories)
             floors.append(
-                _total_variation(_distribution(values, vocab), reference))
+                _total_variation(_distribution(values, n_categories),
+                                 reference))
         return sum(floors) / len(floors)
     values = stream_values[0]
     if values.numel() < 2:
         return float("nan")
     half = values.numel() // 2
-    floor = _total_variation(_distribution(values[:half], vocab),
-                             _distribution(values[half:], vocab))
+    floor = _total_variation(_distribution(values[:half], n_categories),
+                             _distribution(values[half:], n_categories))
     return floor / math.sqrt(2.0)
 
 
@@ -647,16 +854,22 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
       pairwise matrix is checked, not only train-vs-held-out, because the
       protocol's claim is pairwise disjointness.
     * **per-field distribution shift**: for pooled tokens, supervised
-      answers and key / value sub-populations, the total-variation distance
-      between each held-out split and the pooled training distribution is
-      reported against a same-size noise floor measured between disjoint
-      training streams (:func:`_noise_floor`), *and* the same-distribution
-      null is tested with a Monte Carlo-calibrated Pearson chi-square
+      answers, key / value sub-populations and the structural difficulty
+      covariates (key position, repeated answer values, naive-confusable
+      queries), the total-variation distance between each held-out split
+      and the pooled training distribution is reported against a same-size
+      noise floor measured between disjoint training streams
+      (:func:`_noise_floor`), *and* the same-distribution null is tested
+      with a Monte Carlo-calibrated Pearson chi-square
       (:func:`_distribution_shift_p`) whose null redraws both count vectors
       at their audit sizes - the TV/floor pair is descriptive, the
       calibrated p-value is what keeps a sparse field (a few hundred
       answer classes at ~1e3 samples) from hiding a real shift behind an
-      unattainable tolerance.
+      unattainable tolerance.  The difficulty fields matter because equal
+      marginals do not imply equal task difficulty: a held-out split with
+      systematically later keys or more ambiguous values has a different
+      achievable accuracy, so an accuracy contrast against it would
+      attribute a data difference to the mechanism.
     * **cleaning diagnostics** from :func:`validate_batch`, run on every
       batch of every split: NaN/Inf, out-of-range ids, structural
       violations and ambiguous/misaligned label noise raise; a whole-split
@@ -692,16 +905,18 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
 
     # Reference statistics are fitted on the training streams only.
     train_names = [f"train:{seed}" for seed in train_seeds]
+    categories = {field: _field_categories(field, vocab, n_pairs)
+                  for field in _AUDIT_FIELDS}
     pooled = {field: torch.cat([_field_values(splits[name], n_pairs, field)
                                 for name in train_names])
               for field in _AUDIT_FIELDS}
-    pooled_counts = {field: _counts(pooled[field], vocab)
+    pooled_counts = {field: _counts(pooled[field], categories[field])
                      for field in _AUDIT_FIELDS}
-    reference = {field: _distribution(pooled[field], vocab)
+    reference = {field: _distribution(pooled[field], categories[field])
                  for field in _AUDIT_FIELDS}
     floors = {
         field: _noise_floor([_field_values(splits[name], n_pairs, field)
-                             for name in train_names], vocab)
+                             for name in train_names], categories[field])
         for field in _AUDIT_FIELDS
     }
     shift_p = {field: {} for field in _AUDIT_FIELDS}
@@ -709,10 +924,28 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
     for field in _AUDIT_FIELDS:
         for name in ("val", "test", "stats"):
             p_value, chi2 = _distribution_shift_p(
-                _counts(_field_values(splits[name], n_pairs, field), vocab),
+                _counts(_field_values(splits[name], n_pairs, field),
+                        categories[field]),
                 pooled_counts[field])
             shift_p[field][name] = p_value
             shift_chi2[field][name] = chi2
+
+    # Descriptive difficulty profile per split: the calibrated tests decide
+    # *whether* a shift exists, these shares say *what* differs (mean pair
+    # index of the matching key, repeated-answer rate, naive-confusable
+    # rate), all computed without any held-out-fitted statistic.
+    difficulty = {}
+    for name, split in splits.items():
+        features = _difficulty_features(split, n_pairs)
+        n = max(int(split["idx"].size(0)), 1)
+        difficulty[name] = {
+            "mean_key_pos": float(features["key_pos"].to(torch.float64)
+                                  .mean()) if split["idx"].size(0) else
+            float("nan"),
+            "value_repeat_rate": float(features["value_repeats"].sum()) / n,
+            "naive_confusable_rate": (
+                float(features["naive_confusable"].sum()) / n),
+        }
 
     out = {
         "train_seeds": list(train_seeds),
@@ -721,12 +954,14 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
         "stats_seed": STATS_SEED,
         "n_per_split": int(batch) * int(batches),
         "audit_fields": list(_AUDIT_FIELDS),
+        "audit_field_categories": categories,
         "tv_noise_floor": floors,
         "token_tv_noise_floor": floors["token"],
         "shift_p_value": shift_p,
         "shift_chi2": shift_chi2,
         "shift_test": {"n_sim": _AUDIT_SIM, "seed": _AUDIT_SIM_SEED,
                        "smoothing": _AUDIT_SMOOTH},
+        "difficulty_by_split": difficulty,
         "pairwise_duplicate_overlap": pairwise,
         "max_pairwise_duplicate_overlap": max(pairwise.values(), default=0),
     }
@@ -749,7 +984,7 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
             out[f"{field}_tv_train_{name}"] = _total_variation(
                 reference[field],
                 _distribution(_field_values(splits[name], n_pairs, field),
-                              vocab))
+                              categories[field]))
     return out
 
 
@@ -838,6 +1073,86 @@ def _self_test() -> int:
           not degenerate["uniform_supported"]
           and math.isnan(degenerate["p_value"]))
 
+    # Structural difficulty covariates: hand-built sequences pin where the
+    # matching key sits, whether the answer value repeats, and whether the
+    # naive last-match rule is misled by the query token appearing later
+    # as a value.
+    feat_split = {
+        "idx": torch.tensor([[5, 10, 7, 7, 9, 12, SEP_ID, 7],
+                             [3, 20, 4, 20, 5, 9, SEP_ID, 4]]),
+        "answer": torch.tensor([7, 20]),
+    }
+    feat = _difficulty_features(feat_split, 3)
+    check("difficulty_key_pos",
+          feat["key_pos"].tolist() == [1, 1])
+    check("difficulty_value_repeats",
+          feat["value_repeats"].tolist() == [0, 1])
+    check("difficulty_naive_confusable",
+          feat["naive_confusable"].tolist() == [1, 0])
+
+    # A shift in retrieval distance must be detected by the same calibrated
+    # test used for the token marginals, even when only the *position*
+    # distribution changes.
+    gen = torch.Generator().manual_seed(41)
+    ref_kp = torch.bincount(torch.randint(0, 16, (4096,), generator=gen),
+                            minlength=16)
+    obs_kp = torch.bincount(torch.randint(0, 8, (1024,), generator=gen),
+                            minlength=16)
+    p_kp, _ = _distribution_shift_p(obs_kp, ref_kp, n_sim=400, seed=90210)
+    check("key_pos_shift_detected", p_kp <= 1.0 / 401.0)
+    same_kp = torch.bincount(torch.randint(0, 16, (1024,), generator=gen),
+                             minlength=16)
+    p_kp_same, _ = _distribution_shift_p(same_kp, ref_kp, n_sim=400,
+                                         seed=90210)
+    check("key_pos_same_source_not_flagged", p_kp_same > 0.05)
+
+    # Actual-stream replay: same seed and geometry is caught as overlap,
+    # two different seeds are disjoint, and re-reading one split at two
+    # geometries is same-group and must not fail the leakage gate.
+    train_spec = {"seed": 0, "batch": 8, "steps": 3, "group": "train"}
+    spec_overlap = actual_stream_overlap_audit(
+        4, 64, "cpu",
+        train_specs={"train:0": train_spec},
+        heldout_specs={
+            "val": {"seed": VAL_SEED, "batch": 8, "batches": 2,
+                    "group": "val"},
+            "test": {"seed": TEST_SEED, "batch": 8, "batches": 2,
+                     "group": "test"},
+        })
+    check("actual_overlap_zero_between_seeds",
+          spec_overlap["max_overlap"] == 0)
+    same_stream = actual_stream_overlap_audit(
+        4, 64, "cpu",
+        train_specs={"train:0": {"seed": 5, "batch": 8, "steps": 2,
+                                 "group": "train"}},
+        heldout_specs={"leaky": {"seed": 5, "batch": 8, "batches": 2,
+                                 "group": "val"}})
+    check("actual_overlap_detects_same_stream",
+          same_stream["max_overlap"]
+          == same_stream["streams"]["train:0"]["n_rows"] > 0)
+    same_split = actual_stream_overlap_audit(
+        4, 64, "cpu",
+        train_specs={"train:0": train_spec},
+        heldout_specs={
+            "val_monitor": {"seed": VAL_SEED, "batch": 8, "batches": 2,
+                            "group": "val"},
+            "val_final": {"seed": VAL_SEED, "batch": 8, "batches": 3,
+                          "group": "val"},
+        })
+    same_pair = same_split["pairwise_overlap"]["val_monitor|val_final"]
+    check("same_group_prefix_overlap_observed", same_pair > 0)
+    check("same_group_overlap_not_leakage",
+          same_split["max_overlap"] == 0 and same_pair > 0)
+
+    # Dataset-versioning fingerprint must depend on the batch geometry the
+    # stream is realized with, not only on the seed.
+    fp_a = stream_fingerprint(4, 64, "cpu", batch=4, seed=77)
+    fp_b = stream_fingerprint(4, 64, "cpu", batch=8, seed=77)
+    check("fingerprint_geometry_sensitive",
+          fp_a["sha256"] != fp_b["sha256"])
+    check("fingerprint_repeatable",
+          fp_a == stream_fingerprint(4, 64, "cpu", batch=4, seed=77))
+
     # Sealed-stream guard: selection may read the validation stream only.
     # Both the test and the statistics streams are held out, so using
     # either for a choice would turn it into an implicit validation set;
@@ -919,6 +1234,9 @@ def _self_test() -> int:
     meta_kp = {"query_pos": sparse_meta["query_pos"],
                "key_pos": sparse_meta["key_pos"] + 2,
                "answer": sparse_meta["answer"]}
+    meta_qp_at_key = {"query_pos": sparse_meta["key_pos"],
+                      "key_pos": sparse_meta["key_pos"],
+                      "answer": sparse_meta["answer"]}
     soft_tgt = sparse_tgt.clone()
     soft_tgt[0, 0] = -2
     final_tgt = sparse_tgt.clone()
@@ -935,6 +1253,7 @@ def _self_test() -> int:
             "idx_not_2d": (sparse_idx.reshape(-1), sparse_tgt, sparse_meta),
             "idx_with_nan": (nan_idx, sparse_tgt, sparse_meta),
             "query_pos_out_of_range": (sparse_idx, sparse_tgt, meta_qp),
+            "query_pos_not_final": (sparse_idx, None, meta_qp_at_key),
             "key_pos_disagrees": (sparse_idx, sparse_tgt, meta_kp),
             "key_not_unique": (dup_key, sparse_tgt, sparse_meta),
             "target_shape_wrong": (sparse_idx, sparse_tgt.reshape(-1),
@@ -951,7 +1270,9 @@ def _self_test() -> int:
           f"(same-source p={p_same:.3f}, half-range p={p_shift:.4f}, "
           f"chi2={chi2_shift:.1f}, tv={tv_shift:.3f} vs 3x floor="
           f"{3.0 * floor:.3f}; uniformity p={uni['p_value']:.3f} "
-          f"chi2={uni['chi2']:.1f}, skewed p={skewed['p_value']:.4f})")
+          f"chi2={uni['chi2']:.1f}, skewed p={skewed['p_value']:.4f}; "
+          f"key-pos shift p={p_kp:.4f} vs same-source "
+          f"p={p_kp_same:.3f})")
     return 0
 
 
