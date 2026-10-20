@@ -4065,6 +4065,16 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
     test - not an arbitrary constant - carries the decision.  The
     TV/floor pair stays in the report as a descriptive companion.
 
+    A second, train-fitted gate covers what the marginal tests cannot: an
+    *atypical-sample* tail.  ``split_leakage_audit`` scores every sample by
+    its training-fitted surprisal over the structural audit fields and
+    thresholds at the training tail quantile; a held-out split whose
+    atypical rate exceeds five times the training rate (and an absolute 5%
+    floor) fails HB3 even when every marginal passes.  Separately, a
+    train-only first-half/second-half comparison reports training-stream
+    non-stationarity (BH-adjusted within its own family); it warns rather
+    than blocks, since drift is a property to disclose.
+
     The audit is deterministic for one ``Settings`` (fixed split seeds and
     a fixed Monte Carlo seed), so the computation runs once per process
     and every experiment that depends on the protocol writes its
@@ -4154,10 +4164,43 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
             })
         audit["actual_stream_overlap"] = actual
         audit["max_actual_stream_overlap"] = actual["max_overlap"]
+        # Training-stationarity diagnostic (train-only halves): reported and
+        # BH-adjusted across its own family, but it warns rather than blocks,
+        # because a drifting training stream is a property to disclose, not
+        # a leakage failure of the split.
+        stationarity = audit.get("train_stationarity", {})
+        st_keys = sorted(stationarity)
+        st_bh = benjamini_hochberg(
+            [stationarity[key]["p"] for key in st_keys],
+            q=settings.fdr_q) if st_keys else []
+        audit["train_stationarity_bh"] = {
+            key: {"p": item["p"], "p_adj": item["p_adj"],
+                  "reject": item["reject"],
+                  "tv": stationarity[key]["tv"]}
+            for key, item in zip(st_keys, st_bh)
+        }
+        # Statistical rejection alone would fire on ~5% of same-distribution
+        # audits (a p-value family at q=0.05 must reject something that
+        # often).  Require the descriptive effect size as well: the
+        # first/second-half TV gap must clear the train-only noise floor by
+        # the historical 3x margin.  Drift is then disclosed only when it is
+        # both significant and materially larger than stream-to-stream noise.
+        audit["train_drift_suspected"] = bool(any(
+            item["reject"]
+            and item.get("tv", 0.0) > 3.0 * audit["tv_noise_floor"].get(
+                key.rsplit(":", 1)[-1], 0.0)
+            for key, item in audit["train_stationarity_bh"].items()))
+        outlier = audit.get("outlier_audit", {})
+        outlier_shift = outlier.get("shift_by_split", {})
+        audit["outlier_shift_detected"] = bool(any(outlier_shift.values()))
         audit["hb3_supported"] = bool(
             audit["max_pairwise_duplicate_overlap"] == 0
             and actual["max_overlap"] == 0
-            and not any(item["reject"] for item in shift_tests.values()))
+            and not any(item["reject"] for item in shift_tests.values())
+            # A held-out split whose difficulty *tail* has moved passes the
+            # marginal tests; the conservative train-fitted tail-rate bound
+            # catches it before it can masquerade as a mechanism effect.
+            and not audit["outlier_shift_detected"])
         settings._split_audit_cache = audit
 
     fields = audit["audit_fields"]
@@ -4176,6 +4219,10 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
         dup_txt = ", ".join(
             f"{name}={audit[f'n_duplicate_rows_{name}']}"
             for name in ("val", "test", "stats"))
+        outlier = audit.get("outlier_audit", {})
+        outlier_txt = ", ".join(
+            f"{name}={outlier['rate_by_split'][name]:.4f}"
+            for name in ("val", "test", "stats")) if outlier else "n/a"
         actual = audit["actual_stream_overlap"]
         print(f"[{tag}] split audit (HB3, train seeds {list(train_seeds)}): "
               f"{detail}; pairwise overlap max="
@@ -4185,6 +4232,11 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
               f"cross-split overlap max={actual['max_overlap']}; "
               f"TV noise floor [{floor_txt}]; calibrated shift test "
               f"(BH q={settings.fdr_q:g}) adjusted p: [{adj_txt}]; "
+              f"atypical-sample rate train="
+              f"{outlier.get('rate_train', float('nan')):.4f} "
+              f"(bound={outlier.get('rate_bound', float('nan')):.4f}) "
+              f"[{outlier_txt}]; train stationarity min p="
+              f"{audit.get('train_stationarity_min_p', 1.0):.3f}; "
               f"stream duplicates train="
               f"{audit['n_duplicate_rows_train']} ({dup_txt}); "
               f"unique_key_rate={audit['unique_key_rate']:.4f}")
@@ -4197,6 +4249,23 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
               f"{', '.join(rejected)}: held-out counts differ from the "
               f"pooled training distribution beyond same-stream sampling "
               f"noise")
+    if audit.get("outlier_shift_detected"):
+        flagged = [f"{name}={audit['outlier_audit']['rate_by_split'][name]:.4f}"
+                   for name, bad in
+                   audit["outlier_audit"]["shift_by_split"].items() if bad]
+        print(f"[{tag}] WARNING: atypical-sample tail rate exceeds the "
+              f"train-fitted bound (bound="
+              f"{audit['outlier_audit']['rate_bound']:.4f}): "
+              f"{', '.join(flagged)}; the held-out difficulty tail differs "
+              f"from training")
+    if audit.get("train_drift_suspected"):
+        drift = [key for key, item in
+                 audit.get("train_stationarity_bh", {}).items()
+                 if item["reject"]]
+        print(f"[{tag}] WARNING: training-stream non-stationarity suspected "
+              f"({', '.join(drift)}): first and second halves of the "
+              f"training stream differ beyond sampling noise, so a single "
+              f"held-out split may not represent the future")
     if not audit["hb3_supported"]:
         print(f"[{tag}] WARNING: HB3 split/disjointness audit failed; "
               f"all reported numbers are suspect")
@@ -4206,6 +4275,8 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
             "experiment": tag,
             "reason": "HB3 split/disjointness audit failed",
             "rejected_shift_tests": rejected,
+            "outlier_shift_detected": audit.get("outlier_shift_detected"),
+            "train_drift_suspected": audit.get("train_drift_suspected"),
             "max_pairwise_duplicate_overlap":
                 audit["max_pairwise_duplicate_overlap"],
             "max_actual_stream_overlap":

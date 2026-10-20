@@ -139,6 +139,182 @@ def check_eval_seed(seed, selection: bool = False) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Time-order and group split primitives
+# ---------------------------------------------------------------------------
+# The synthetic task is i.i.d., so its split is the seed-owned stream above.
+# Any future dataset with a time axis or with repeated entities must instead
+# use the primitives below *before* drawing/preprocessing: contiguous time
+# blocks (past -> train, newest -> test, never shuffled before the split) and
+# whole groups on exactly one side.  Both are pure index/assignment helpers
+# with self-tests, so the contract is executable instead of a comment.
+
+
+def time_ordered_split(n_samples: int, train_frac: float = 0.7,
+                       val_frac: float = 0.15) -> dict:
+    """Contiguous chronological split of time-ordered samples.
+
+    Samples are assumed to be sorted by time (row ``i`` is older than row
+    ``j`` for ``i < j``).  The returned slices are contiguous blocks in that
+    order: ``train`` is the oldest prefix, ``val`` the middle block and
+    ``test`` the newest suffix, so no future sample can teach the model and
+    no sample is shuffled across the boundary.  Every block is non-empty.
+
+    Batch-level shuffling *inside* the training block is a separate,
+    allowed operation performed by the training loop; this function only
+    decides the split.
+    """
+    n = int(n_samples)
+    if n < 3:
+        raise ValueError(
+            f"time_ordered_split needs at least 3 samples for three "
+            f"non-empty blocks, got {n_samples!r}")
+    if not (0.0 < float(train_frac) < 1.0):
+        raise ValueError(f"train_frac must be in (0, 1), got {train_frac!r}")
+    if not (0.0 < float(val_frac) < 1.0):
+        raise ValueError(f"val_frac must be in (0, 1), got {val_frac!r}")
+    if float(train_frac) + float(val_frac) >= 1.0:
+        raise ValueError(
+            f"train_frac + val_frac must leave a test block, got "
+            f"{train_frac!r} + {val_frac!r}")
+    n_val = max(1, int(n * float(val_frac)))
+    n_test = max(1, n - int(n * (float(train_frac) + float(val_frac))))
+    n_train = n - n_val - n_test
+    if n_train < 1:
+        # Extremely skewed fractions at a tiny n: keep one sample per block.
+        n_train = 1
+        n_val = 1
+        n_test = n - 2
+    return {
+        "train": slice(0, n_train),
+        "val": slice(n_train, n_train + n_val),
+        "test": slice(n_train + n_val, n),
+    }
+
+
+def group_disjoint_split(groups, train_frac: float = 0.7,
+                         val_frac: float = 0.15, seed: int = 0) -> dict:
+    """Assign **whole groups** to one split each; returns index tensors.
+
+    ``groups`` holds one group id per sample (e.g. a user id or an object
+    id).  All samples of a group land on exactly one side, so no entity is
+    seen in both training and evaluation - the requirement that a random
+    per-sample split violates.  Groups are shuffled with a dedicated
+    ``seed`` (the assignment is random over entities, never over samples)
+    and allocated by their sample mass so the requested fractions are met
+    approximately; every split is guaranteed non-empty when there are at
+    least three groups.
+
+    Use :func:`assert_group_disjoint` to verify the result, and
+    :func:`time_ordered_split` instead when the rows also have a time order.
+    """
+    if not (0.0 < float(train_frac) < 1.0) or not (
+            0.0 < float(val_frac) < 1.0) or (
+            float(train_frac) + float(val_frac) >= 1.0):
+        raise ValueError(
+            f"need 0 < train_frac, 0 < val_frac and train_frac + val_frac "
+            f"< 1, got {train_frac!r}, {val_frac!r}")
+    g = torch.as_tensor(groups).reshape(-1)
+    n = int(g.numel())
+    if n == 0:
+        raise ValueError("groups must contain at least one sample")
+    uniq, inverse = torch.unique(g, return_inverse=True)
+    n_groups = int(uniq.numel())
+    if n_groups < 3:
+        raise ValueError(
+            f"group_disjoint_split needs at least 3 groups for three "
+            f"non-empty splits, got {n_groups}")
+    # First-appearance order keeps the allocation deterministic across runs
+    # and independent of tensor hashing / dtype.
+    first = torch.full((n_groups,), n, dtype=torch.long)
+    first.scatter_reduce_(0, inverse,
+                          torch.arange(n, dtype=torch.long), reduce="amin")
+    order = torch.argsort(first)
+    perm = order[torch.randperm(
+        n_groups, generator=torch.Generator().manual_seed(int(seed)))]
+    counts = torch.bincount(inverse, minlength=n_groups).to(torch.float64)
+    cuts = (float(train_frac) * n, float(train_frac + val_frac) * n)
+    assigned = {"train": [], "val": [], "test": []}
+    cumulative = 0.0
+    for gid in perm.tolist():
+        mass = float(counts[gid])
+        mid = cumulative + mass / 2.0
+        if mid < cuts[0]:
+            name = "train"
+        elif mid < cuts[1]:
+            name = "val"
+        else:
+            name = "test"
+        assigned[name].append(gid)
+        cumulative += mass
+    for name in ("val", "test"):
+        if not assigned[name]:
+            donor = max(assigned, key=lambda k: len(assigned[k]))
+            if len(assigned[donor]) <= 1:
+                raise ValueError(
+                    f"cannot give every split a group at n_groups={n_groups}")
+            assigned[name].append(assigned[donor].pop())
+    out = {}
+    for name, gids in assigned.items():
+        mask = torch.isin(inverse, torch.tensor(gids, dtype=torch.long))
+        out[name] = torch.nonzero(mask, as_tuple=False).flatten()
+    return out
+
+
+def _as_indices(index, n: int) -> torch.Tensor:
+    """Normalize a split index container to a ``LongTensor`` of positions."""
+    if isinstance(index, slice):
+        return torch.arange(*index.indices(n), dtype=torch.long)
+    if isinstance(index, range):
+        return torch.tensor(list(index), dtype=torch.long)
+    return torch.as_tensor(index).reshape(-1).to(torch.long)
+
+
+def assert_group_disjoint(groups, splits) -> None:
+    """Raise if any group id occurs in more than one split."""
+    g = torch.as_tensor(groups).reshape(-1)
+    seen: dict = {}
+    for name in ("train", "val", "test"):
+        if name not in splits:
+            continue
+        idx = _as_indices(splits[name], int(g.numel()))
+        if idx.numel() == 0:
+            continue
+        for gid in torch.unique(g[idx]).tolist():
+            if gid in seen and seen[gid] != name:
+                raise ValueError(
+                    f"group {gid!r} crosses splits {seen[gid]!r} and "
+                    f"{name!r}: whole groups must stay on one side")
+            seen[gid] = name
+
+
+def assert_time_ordered(times, splits) -> None:
+    """Raise if the split blocks are not chronological past -> future.
+
+    The check is on the split *assignment*, not on the row order inside a
+    block: training may shuffle its own batches, but no sample in ``train``
+    may be newer than a validation sample, and no validation sample may be
+    newer than a test sample.
+    """
+    t = torch.as_tensor(times).reshape(-1).to(torch.float64)
+    spans = []
+    for name in ("train", "val", "test"):
+        if name not in splits:
+            continue
+        idx = _as_indices(splits[name], int(t.numel()))
+        if idx.numel() == 0:
+            continue
+        spans.append((float(t[idx].min()), float(t[idx].max()), name))
+    for (lo_a, hi_a, a), (lo_b, hi_b, b) in zip(spans, spans[1:]):
+        if hi_a > lo_b:
+            raise ValueError(
+                f"time leakage: {a} block ends at {hi_a} but {b} block "
+                f"starts at {lo_b} (older -> newer ordering violated)")
+        if lo_b < lo_a:
+            raise ValueError(
+                f"time leakage: {b} contains samples older than {a}")
+
+
 def _sample_keys(batch: int, n_pairs: int, vocab: int, gen, device) -> torch.Tensor:
     """Distinct keys per sequence (sampling without replacement).
 
@@ -796,6 +972,120 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
     return p_value, chi2
 
 
+# Outlier/tail audit.  The cleaning gate rejects invalid, label-noisy and
+# duplicated samples; the calibrated marginal tests above detect a shift in
+# each field separately.  Neither catches an *atypical sample* or a heavier
+# difficulty tail in a held-out split, so a train-fitted typicality score is
+# added here.  Every probability and the tail threshold are fitted on the
+# training streams only; held-out splits are only scored (transform-only).
+_OUTLIER_FIELDS = ("answer", "key_pos", "value_repeats", "naive_confusable")
+_OUTLIER_QUANTILE = 0.99
+# Conservative tail-rate bound: flag a held-out split only when its atypical
+# rate exceeds both a multiple of the training rate and an absolute floor.
+# At the default ~1% training rate this needs >5% of a held-out split to be
+# in the training tail - far beyond same-distribution sampling noise (a
+# Binomial(1024, 0.01) reaching 5% has probability ~1e-30), so the rule has
+# essentially no false-positive rate while still catching a real tail shift.
+_OUTLIER_RATE_MULTIPLIER = 5.0
+_OUTLIER_RATE_FLOOR = 0.05
+
+# Per-sample fields used by the training-stationarity diagnostic: each has
+# exactly one value per sample, so "first half of the stream" maps onto
+# whole samples (unlike pooled token fields, which are per-token).
+_STATIONARITY_FIELDS = ("answer", "key_pos", "value_repeats",
+                        "naive_confusable")
+
+
+def _typicality_scores(split_values, reference) -> torch.Tensor:
+    """Per-sample train-fitted surprisal over the structural audit fields.
+
+    ``split_values`` maps each :data:`_OUTLIER_FIELDS` name to that split's
+    per-sample values; ``reference`` holds Haldane-smoothed training
+    category probabilities.  The generator draws the fields independently,
+    so the joint negative log-likelihood is the sum of the per-field
+    surprisals.  A category unseen in training keeps a finite (smoothed)
+    probability, so the score is always finite; no held-out statistic enters
+    the reference.
+    """
+    total = None
+    for field in _OUTLIER_FIELDS:
+        values = split_values[field].reshape(-1).to(torch.long)
+        surprisal = -reference[field][values].log()
+        total = surprisal if total is None else total + surprisal
+    return total
+
+
+def _outlier_audit(split_values, train_names, names, reference) -> dict:
+    """Train-fitted atypical-sample rate per split.
+
+    The threshold is the training ``_OUTLIER_QUANTILE`` of the typicality
+    score (fit on the pooled training streams).  A split's outlier rate is
+    the share of samples beyond that threshold.  Held-out splits are flagged
+    only under the conservative rate rule documented above, so a genuine
+    same-distribution split cannot trip the gate while a split whose
+    difficulty tail has moved can.
+    """
+    def scores(name):
+        return _typicality_scores(
+            {field: split_values[(name, field)] for field in _OUTLIER_FIELDS},
+            reference)
+
+    train_scores = torch.cat([scores(name) for name in train_names])
+    threshold = torch.quantile(train_scores, _OUTLIER_QUANTILE)
+    flagged = {}
+    for name in names:
+        s = scores(name)
+        flagged[name] = int((s > threshold).sum())
+    rate = {name: flagged[name] / max(int(
+        split_values[(name, _OUTLIER_FIELDS[0])].numel()), 1)
+        for name in names}
+    n_train = sum(int(split_values[(name, _OUTLIER_FIELDS[0])].numel())
+                  for name in train_names)
+    train_rate = (sum(flagged[name] for name in train_names)
+                  / max(n_train, 1))
+    bound = max(_OUTLIER_RATE_MULTIPLIER * train_rate, _OUTLIER_RATE_FLOOR)
+    return {
+        "fields": list(_OUTLIER_FIELDS),
+        "quantile": float(_OUTLIER_QUANTILE),
+        "threshold_train": float(threshold),
+        "rate_train": float(train_rate),
+        "rate_by_split": rate,
+        "flagged_by_split": flagged,
+        "rate_bound": float(bound),
+        "shift_by_split": {
+            name: bool(rate[name] > bound)
+            for name in names if name not in train_names},
+    }
+
+
+def _train_stationarity(split_values, splits, train_names, categories) -> dict:
+    """First-half vs second-half drift inside each training stream.
+
+    The held-out comparison asks whether evaluation data matches training;
+    it cannot ask whether *training itself* is stationary.  If an early
+    training block differs from a late one, a single held-out split cannot
+    represent the future even with zero overlap.  Both halves come from the
+    training stream, so this fits and scores on training data only.
+    """
+    out = {}
+    for name in train_names:
+        n_rows = int(splits[name]["idx"].size(0))
+        half = n_rows // 2
+        if half < 2:
+            continue
+        for field in _STATIONARITY_FIELDS:
+            values = split_values[(name, field)].reshape(-1)
+            if values.numel() != n_rows:
+                continue
+            early = _counts(values[:half], categories[field])
+            late = _counts(values[half:], categories[field])
+            p_value, chi2 = _distribution_shift_p(late, early)
+            tv = _total_variation(_distribution_from_counts(late),
+                                  _distribution_from_counts(early))
+            out[f"{name}:{field}"] = {"p": p_value, "chi2": chi2, "tv": tv}
+    return out
+
+
 # Calibration of the answer-uniformity test (``answer_uniformity_test``):
 # the sample size enters the test, so only the simulation count and its
 # fixed seed are constants here.
@@ -898,6 +1188,18 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
       systematically later keys or more ambiguous values has a different
       achievable accuracy, so an accuracy contrast against it would
       attribute a data difference to the mechanism.
+    * **atypical-sample / difficulty-tail audit**: a per-sample typicality
+      score (the train-fitted surprisal over the answer, key position,
+      repeated-value and naive-confusable fields) is thresholded at the
+      training tail quantile, and the share of samples beyond that threshold
+      is reported for every split.  The reference and the threshold are fit
+      on the training streams only.  A held-out split whose *tail* moved can
+      pass every marginal test; it is flagged under a conservative rate
+      bound (:data:`_OUTLIER_RATE_MULTIPLIER`, :data:`_OUTLIER_RATE_FLOOR`).
+    * **training-stream stationarity**: the same calibrated shift test run
+      between the first and second halves of each training stream, so
+      non-stationary training is visible before a held-out split is trusted
+      to represent the future.  This uses training data only.
     * **cleaning diagnostics** from :func:`validate_batch`, run on every
       batch of every split: NaN/Inf, out-of-range ids, structural
       violations and ambiguous/misaligned label noise raise; a whole-split
@@ -975,6 +1277,19 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
             shift_p[field][name] = p_value
             shift_chi2[field][name] = chi2
 
+    # Train-fitted atypical-sample threshold and train-only stationarity.
+    # The reference is Haldane-smoothed so a category absent from training
+    # still yields a finite surprisal instead of an infinite score.
+    smoothed_reference = {
+        field: (pooled_counts[field].to(torch.float64) + _AUDIT_SMOOTH)
+        / (pooled_counts[field].sum()
+           + _AUDIT_SMOOTH * categories[field])
+        for field in _AUDIT_FIELDS}
+    outliers = _outlier_audit(split_values, train_names, names,
+                              smoothed_reference)
+    stationarity = _train_stationarity(split_values, splits, train_names,
+                                       categories)
+
     # Descriptive difficulty profile per split: the calibrated tests decide
     # *whether* a shift exists, these shares say *what* differs (mean pair
     # index of the matching key, repeated-answer rate, naive-confusable
@@ -1007,6 +1322,10 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
         "shift_test": {"n_sim": _AUDIT_SIM, "seed": _AUDIT_SIM_SEED,
                        "smoothing": _AUDIT_SMOOTH},
         "difficulty_by_split": difficulty,
+        "outlier_audit": outliers,
+        "train_stationarity": stationarity,
+        "train_stationarity_min_p": min(
+            (v["p"] for v in stationarity.values()), default=1.0),
         "pairwise_duplicate_overlap": pairwise,
         "max_pairwise_duplicate_overlap": max(pairwise.values(), default=0),
     }
@@ -1149,6 +1468,86 @@ def _self_test() -> int:
     p_kp_same, _ = _distribution_shift_p(same_kp, ref_kp, n_sim=400,
                                          seed=90210)
     check("key_pos_same_source_not_flagged", p_kp_same > 0.05)
+
+    # Time-order split contract: contiguous, chronological blocks with no
+    # future sample in train, and a crossing assignment must be rejected.
+    times = torch.arange(100, dtype=torch.float64)
+    t_split = time_ordered_split(100)
+    assert_time_ordered(times, t_split)
+    check("time_split_contiguous_chronological",
+          t_split["train"] == slice(0, 70)
+          and t_split["val"] == slice(70, 85)
+          and t_split["test"] == slice(85, 100))
+    try:
+        assert_time_ordered(
+            times, {"train": slice(0, 60), "val": slice(50, 80),
+                    "test": slice(80, 100)})
+        check("time_leakage_rejected", False)
+    except ValueError:
+        check("time_leakage_rejected", True)
+
+    # Group split contract: whole groups on one side, full coverage, and a
+    # per-sample crossing assignment must be rejected.
+    groups = torch.arange(200, dtype=torch.long) // 4
+    g_split = group_disjoint_split(groups, seed=3)
+    assert_group_disjoint(groups, g_split)
+    check("group_split_covers_every_sample",
+          sum(int(v.numel()) for v in g_split.values()) == 200)
+    check("group_split_nonempty",
+          all(int(v.numel()) > 0 for v in g_split.values()))
+    g_split_again = group_disjoint_split(groups, seed=3)
+    check("group_split_deterministic",
+          all(torch.equal(g_split[k], g_split_again[k]) for k in g_split))
+    try:
+        assert_group_disjoint(
+            groups, {"train": torch.arange(0, 100),
+                     "val": torch.arange(100, 150),
+                     "test": torch.arange(150, 200)})
+        check("group_crossing_rejected", False)
+    except ValueError:
+        check("group_crossing_rejected", True)
+
+    # Outlier/tail audit: a same-distribution held-out draw must not be
+    # flagged, while a held-out draw pushed into the rare tail of the same
+    # train-fitted reference must be.
+    rare_probs = {
+        "answer": torch.tensor(
+            [0.5, 0.2, 0.1, 0.07, 0.05, 0.04, 0.03, 0.01],
+            dtype=torch.float64),
+        "key_pos": torch.tensor([0.7, 0.2, 0.08, 0.02], dtype=torch.float64),
+        "value_repeats": torch.tensor([0.9, 0.1], dtype=torch.float64),
+        "naive_confusable": torch.tensor([0.8, 0.2], dtype=torch.float64),
+    }
+
+    def draw_rare_split(seed, n=2048):
+        gen = torch.Generator().manual_seed(seed)
+        return {field: torch.multinomial(p, n, replacement=True,
+                                         generator=gen)
+                for field, p in rare_probs.items()}
+
+    odd_values = {}
+    for i, name in enumerate(("train:0", "train:1")):
+        for field, vals in draw_rare_split(50 + i).items():
+            odd_values[(name, field)] = vals
+    for seed, name in ((60, "val"), (61, "test")):
+        for field, vals in draw_rare_split(seed).items():
+            odd_values[(name, field)] = vals
+    tail = draw_rare_split(62)
+    tail["answer"] = torch.full((2048,), 7, dtype=torch.long)
+    tail["key_pos"] = torch.full((2048,), 3, dtype=torch.long)
+    tail["value_repeats"] = torch.ones(2048, dtype=torch.long)
+    tail["naive_confusable"] = torch.ones(2048, dtype=torch.long)
+    for field, vals in tail.items():
+        odd_values[("stats", field)] = vals
+    odd_names = ["train:0", "train:1", "val", "test", "stats"]
+    odd = _outlier_audit(odd_values, ["train:0", "train:1"], odd_names,
+                         rare_probs)
+    check("outlier_threshold_is_train_tail", odd["rate_train"] <= 0.05)
+    check("outlier_same_source_not_flagged",
+          not any(odd["shift_by_split"][n] for n in ("val", "test")))
+    check("outlier_tail_shift_detected", odd["shift_by_split"]["stats"])
+    check("outlier_tail_rate_near_one",
+          odd["rate_by_split"]["stats"] > 0.9)
 
     # Actual-stream replay: same seed and geometry is caught as overlap,
     # two different seeds are disjoint, and re-reading one split at two
