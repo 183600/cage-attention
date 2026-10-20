@@ -2068,7 +2068,7 @@ class ContrastLog:
     """
 
     def __init__(self, tag: str, hypotheses=(), min_seeds: int = 3,
-                 competence: dict | None = None):
+                 competence: dict | None = None, coverage=()):
         self.tag = tag
         self.hypotheses = tuple(hypotheses)
         self.min_seeds = int(min_seeds)
@@ -2078,6 +2078,17 @@ class ContrastLog:
         # claim - an underfit grid's differences describe the step count, not
         # the mechanism.  ``None`` means "not assessed" and does not gate.
         self.competence = competence
+        # Factorial/design coverage payloads (``_report_ablation_coverage``
+        # / ``_report_design_coverage``).  A missing cell or a cell that
+        # trained only part of the planned seed set means the corresponding
+        # effect was never measured; a contrast from such a design cannot
+        # support a claim even when its own p-value is small.  A single
+        # payload and an iterable of payloads are both accepted.
+        if coverage is None:
+            coverage = ()
+        elif isinstance(coverage, dict):
+            coverage = (coverage,)
+        self.coverage = tuple(coverage)
 
     def print(self, rule, hyp, metric, ci, warn="") -> None:
         equiv = ci.get("test") == "equivalence"
@@ -2290,9 +2301,22 @@ class ContrastLog:
             row["competence_passed"] = (
                 None if self.competence is None
                 else bool(self.competence.get("passed")))
+            coverage_failures = []
+            for payload in self.coverage:
+                if payload.get("complete") is False:
+                    coverage_failures.append(
+                        f"{payload.get('tag', '?')}/{payload.get('design', 'design')} "
+                        f"missing cells {payload.get('missing_cells')}")
+                if payload.get("seed_balanced") is False:
+                    coverage_failures.append(
+                        f"{payload.get('tag', '?')}/{payload.get('design', 'design')} "
+                        f"seed-unbalanced cells {payload.get('unbalanced_cells')}")
+            row["coverage_gate_failed"] = bool(coverage_failures)
+            row["coverage_failures"] = coverage_failures
             row["claim_eligible"] = bool(
                 (row.get("n") or 0) >= self.min_seeds
-                and row["competence_passed"] is not False)
+                and row["competence_passed"] is not False
+                and not coverage_failures)
             # Curve-invalid sensitivity: a supported effect that rests on
             # seeds whose run never learned (plateau/diverging/...) is not
             # evidence about the mechanism.  Drop those seeds and recompute
