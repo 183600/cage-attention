@@ -441,18 +441,16 @@ def _layer_norm_into(ln: nn.LayerNorm, x: torch.Tensor,
                      key: str = "ln_out") -> torch.Tensor:
     """``ln(x)`` for the no-grad forward path.
 
-    On CUDA the result is written into the reusable buffers named ``key`` /
-    ``"ln_mean"`` / ``"ln_rstd"``; on CPU the functional call is used
-    directly (same kernel, identical values).
+    The result is written into the reusable buffers named ``key`` /
+    ``"ln_mean"`` / ``"ln_rstd"`` so evaluation does not allocate a fresh
+    normalization output per call.
 
-    ``key`` names a *disjoint* CUDA output buffer: callers whose input may
-    be a view of the block-level ``"ln_out"`` scratch (the final
-    normalization) pass their own key so the layer-norm input and output
-    never share storage at different coordinates.
+    ``key`` names a *disjoint* output buffer: callers whose input may be a
+    view of the block-level ``"ln_out"`` scratch (the final normalization)
+    pass their own key so the layer-norm input and output never share
+    storage at different coordinates.
     """
     shape = x.shape
-    if not x.is_cuda:
-        return torch.layer_norm(x, [shape[-1]], ln.weight, ln.bias, ln.eps)
     rows = x.numel() // shape[-1]
     out = _get_scratch((key,), x.device, x.dtype, x.numel())
     mean = _get_scratch(("ln_mean",), x.device, x.dtype, rows)
@@ -477,7 +475,9 @@ def _query_blocks(bh: int, T: int):
         max_rows = (1 << 20) // (bh * T)
         if max_rows < 32:
             max_rows = 32
-        rows = min(T, max_rows)
+        # Balance the blocks under D3's cap so a short tail does not cost a
+        # whole extra block; every block still stays within ``max_rows``.
+        rows = _balanced_step(T, max_rows)
         blocks = tuple((i, min(i + rows, T)) for i in range(0, T, rows))
     _query_blocks_cache[key] = blocks
     if len(_query_blocks_cache) > _QUERY_BLOCKS_CACHE_MAX:
@@ -547,8 +547,14 @@ class _CalibAttn(torch.autograd.Function):
                                 bh * T).view(bh, T)) if need_ent else None
             ebuf = _get_scratch(("calib_f",), q.device, q.dtype,
                                 bh * max_rows * max_i1) if need_ent else None
-            yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
-                                bh * max_rows * dv)
+            if ebuf is not None and ebuf.numel() >= bh * max_rows * dv:
+                # The entropy scratch is only read within a block after the
+                # output has been copied out, so it doubles as block staging
+                # when a block's output fits (T >= dk).
+                yblk = ebuf
+            else:
+                yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
+                                    bh * max_rows * dv)
             for i0, i1 in blocks:
                 r = i1 - i0
                 p = _softmax_inplace(torch.baddbmm(
@@ -648,18 +654,18 @@ class _CalibAttn(torch.autograd.Function):
         max_rows = rows0
         max_i1 = T
         s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
-        gbuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if grad_ent is not None else None
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
-        # ``stg`` is the staging buffer for the block's ``d_v`` / ``d_k``
-        # contribution and the ``d_q`` block copy.
         dk = q.size(-1)
-        stg_i1 = blocks[-2][1] if len(blocks) > 1 else T
-        stg_numel = bh * stg_i1 * dk
-        if gbuf is not None and stg_numel <= gbuf.numel():
-            stg = gbuf
-        else:
-            stg = _get_scratch(("calib_bwd_stg",), q.device, q.dtype,
-                               stg_numel)
+        stg_i1 = blocks[-2][1]
+        # One work buffer serves both the entropy log-term and the block
+        # staging: the log-term is dead before staging writes each block.
+        work_numel = bh * stg_i1 * dk
+        if grad_ent is not None:
+            work_numel = max(work_numel, bh * max_rows * max_i1)
+        work = _get_scratch(("calib_bwd_work",), q.device, q.dtype,
+                            work_numel)
+        gbuf = work if grad_ent is not None else None
+        stg = work
         zero = _zero_scalar(q.device, q.dtype)
         first = True
         for i0, i1 in reversed(blocks):
@@ -864,7 +870,9 @@ class _NullAttn(torch.autograd.Function):
         max_rows = rows0
         max_i1 = T
         sbuf = _get_scratch(("null_s",), q.device, q.dtype, bh * max_rows * max_i1)
-        peb = _get_scratch(("null_bwd_peb",), q.device, q.dtype, bh * max_rows * max_i1)
+        # Single full-size work buffer: the block's ``grad_y @ v^T`` is
+        # turned into ``d_s`` in place, so no separate ``p * e`` / staging
+        # copy is needed.
         eb = _get_scratch(("null_bwd_e",), q.device, q.dtype, bh * max_rows * max_i1)
         gub = _get_scratch(("null_bwd_gu",), q.device, q.dtype, bh * max_rows)
         dotb = _get_scratch(("null_bwd_dot",), q.device, q.dtype, bh * max_rows)
@@ -872,13 +880,8 @@ class _NullAttn(torch.autograd.Function):
         acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk)
         # Staging buffer for the ``d_v`` / ``d_k`` contribution.
         if multi:
-            stg_i1 = blocks[-2][1]
-            stg_numel = bh * stg_i1 * dk
-            if stg_numel <= peb.numel():
-                stg = peb
-            else:
-                stg = _get_scratch(("null_bwd_stg",), q.device, q.dtype,
-                                   stg_numel)
+            stg = _get_scratch(("null_bwd_stg",), q.device, q.dtype,
+                               bh * blocks[-2][1] * dk)
         else:
             stg = None
         zero = _zero_scalar(q.device, q.dtype)
@@ -894,10 +897,11 @@ class _NullAttn(torch.autograd.Function):
             e = torch.bmm(g, vt[:, :, :i1], out=eb[:n].view(bh, r, i1))
             gu0 = gub[:bh * r].view(bh, r, 1)
             torch.matmul(g.view(B, h, r, -1), nv4t, out=gu0.view(B, h, r, 1))
-            pe = peb[:n].view(bh, r, i1)
-            torch.mul(p, e, out=pe)
             dot = dotb[:bh * r].view(bh, r, 1)
-            torch.sum(pe, dim=-1, keepdim=True, out=dot)
+            # Row dot product via a tiny batched GEMM (no full-size p*e
+            # temporary).
+            torch.bmm(p.view(bh * r, 1, i1), e.view(bh * r, i1, 1),
+                      out=dot.view(bh * r, 1, 1))
             dot.addcmul_(p0, gu0)
             d_u = e.sub_(dot)
             gu0.sub_(dot)
@@ -1190,6 +1194,12 @@ class Attention(nn.Module):
                 stats = self._row_stats_at(
                     packed[0].view(B, h, T, dk), packed[1], B, h, T,
                     stat_pos, is_null, ent_full=ent)
+            if not grad_on and x.is_cuda:
+                # Q/K/V are dead once the kernel and the row statistics
+                # have read them; drop them before the gate/projection so
+                # the eval peak does not hold both ends of the stack.
+                del packed
+                _release_scratch("packed", "qkv_out")
         else:
             k_ = packed[1].view(B, h, T, dk)
             if is_null:
