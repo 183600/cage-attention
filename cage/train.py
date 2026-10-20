@@ -1610,9 +1610,8 @@ def _attention_mass_from_qk(q, k, meta, n_heads, inv_scale, null_k):
     kp = meta["key_pos"]
     rows = _arange(B, q.device)
     q_all = q.view(B, h, T, dk)[rows, :, qp]
-    # Match the pre-hook's head-major key layout exactly, both to keep the
-    # diagnostics consistent with the recomputed-key path and to contract
-    # over ``(B, H, T, dk)`` without materialising a token-major copy.
+    # Match the pre-hook's head-major key layout exactly so the diagnostics
+    # stay consistent with the recomputed-key path.
     k_all = k.view(B, h, T, dk)
     scores = torch.einsum("bhd,bhtd->bth", q_all, k_all).mul_(inv_scale)
     cols = _arange(T, q.device).view(1, T, 1)

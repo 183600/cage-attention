@@ -650,13 +650,8 @@ class _CalibAttn(torch.autograd.Function):
         s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
         gbuf = _get_scratch(("calib_f",), q.device, q.dtype, bh * max_rows * max_i1) if grad_ent is not None else None
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
-        # ``stg`` holds the block's ``d_v`` / ``d_k`` contribution and the
-        # narrow ``d_q`` block copy.  Only blocks narrower than the widest
-        # one read ``stg`` (the first block processed writes ``d_v`` /
-        # ``d_k`` outright), so its width is the second-widest block end,
-        # not ``T``.  The entropy ``log(p)`` buffer is dead after each
-        # ``_softmax_grad_from_p`` call, so it serves as ``stg`` in the
-        # ``dk <= T`` case.
+        # ``stg`` is the staging buffer for the block's ``d_v`` / ``d_k``
+        # contribution and the ``d_q`` block copy.
         dk = q.size(-1)
         stg_i1 = blocks[-2][1] if len(blocks) > 1 else T
         stg_numel = bh * stg_i1 * dk
@@ -875,10 +870,7 @@ class _NullAttn(torch.autograd.Function):
         dotb = _get_scratch(("null_bwd_dot",), q.device, q.dtype, bh * max_rows)
         acc_k = _get_scratch(("null_bwd_ak",), q.device, q.dtype, bh * dk).view(bh, 1, dk)
         acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk)
-        # ``peb`` only holds ``p * e`` until its row sum is taken; afterwards
-        # it serves as the ``d_v`` / ``d_k`` staging buffer.  Only the
-        # narrower (non-first processed) blocks use it, so its width is the
-        # second-widest block end.
+        # Staging buffer for the ``d_v`` / ``d_k`` contribution.
         if multi:
             stg_i1 = blocks[-2][1]
             stg_numel = bh * stg_i1 * dk
@@ -1182,10 +1174,9 @@ class Attention(nn.Module):
                 y4 = y.view(B, h, T, dk)
                 ent = None if ent is None else ent.view(B, h, T)
             else:
-                # No-grad: the kernel writes each block straight into the
-                # ``(B, T, H, dk)`` projection input, so no full head-major
-                # activation is materialised and no transposed fold-in is
-                # needed; a gate, if any, is applied to it in place below.
+                # No-grad: the kernel writes each block into the
+                # ``(B, T, H, dk)`` projection input; a gate, if any, is
+                # applied to it below.
                 ybt = _get_scratch(("attn_y",), x.device, x.dtype,
                                    B * T * C).view(B, T, h, dk)
                 if is_null:
