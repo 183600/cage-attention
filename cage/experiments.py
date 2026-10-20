@@ -3255,7 +3255,8 @@ def _verdict_seed_floor(verdict: dict, settings: Settings) -> dict:
     out = {"min_seeds_for_claim": floor, "n_seeds": int(n_seeds)}
     for key, n in (("hb2", stored.get("hb2_n_seeds", n_seeds)),
                    ("hb4", stored.get("hb4_n_seeds", n_seeds)),
-                   ("hb6", n_seeds), ("hb7", n_seeds)):
+                   ("hb6", stored.get("hb6_n_seeds", n_seeds)),
+                   ("hb7", stored.get("hb7_n_seeds", n_seeds))):
         out[f"{key}_n_seeds"] = int(n)
         out[f"{key}_claim_eligible"] = eligible(key, n)
     return out
@@ -5186,6 +5187,10 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "hb4_violated": hb4_violated, "hb4_state": hb4_state,
     })
 
+    hb6_n_seeds = len(shallow.get("curve_valid_seeds") or [])
+    hb7_n_seeds = min(
+        (len(ladder["depths"][d].get("curve_valid_seeds") or [])
+         for d in ladder["ladder"]), default=0)
     verdict = {
         "protocol_sha256": _protocol_sha256(_run_context(settings)),
         "git_sha": _run_context(settings)["git_sha"],
@@ -5249,10 +5254,10 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "hb2_claim_eligible": bool(hb2["n"] >= floor),
             "hb4_n_seeds": int(hb4["n"]),
             "hb4_claim_eligible": hb4_claim_eligible,
-            "hb6_n_seeds": n_seeds,
-            "hb6_claim_eligible": bool(n_seeds >= floor),
-            "hb7_n_seeds": n_seeds,
-            "hb7_claim_eligible": bool(n_seeds >= floor),
+            "hb6_n_seeds": hb6_n_seeds,
+            "hb6_claim_eligible": bool(hb6_n_seeds >= floor),
+            "hb7_n_seeds": hb7_n_seeds,
+            "hb7_claim_eligible": bool(hb7_n_seeds >= floor),
         },
         "answer_balance": balance,
         "depth_ladder": {
