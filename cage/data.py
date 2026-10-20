@@ -249,7 +249,7 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
             name = "test"
         assigned[name].append(gid)
         cumulative += mass
-    for name in ("val", "test"):
+    for name in ("train", "val", "test"):
         if not assigned[name]:
             donor = max(assigned, key=lambda k: len(assigned[k]))
             if len(assigned[donor]) <= 1:
