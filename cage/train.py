@@ -385,6 +385,8 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     different graph and can surface non-finite values the single-token
     loss never touches).
     """
+    training_states = {module: module.training for module in model.modules()}
+
     # Inference tensors cannot be saved for backward, so normalise the
     # inputs to ordinary tensors before the grad-enabled forward.
     def _normal(t):
@@ -447,7 +449,6 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
 
     for i, blk in enumerate(model.blocks):
         handles.append(blk.register_forward_hook(_make_hook(i)))
-    was_training = model.training
     model.train()
     logits = loss = None
     sup_pos = None
@@ -464,7 +465,8 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
         for blk in model.blocks:
             blk.attn._capture_qk = False
             blk.attn._qk_capture = None
-        model.train(was_training)
+        for module, training in training_states.items():
+            module.train(training)
     if bad_layers:
         mark("activations",
              f"non-finite block output at layer(s) {sorted(set(bad_layers))} "
@@ -491,7 +493,6 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     # them rather than inferring kernel health from hidden states only.
     if isinstance(meta, dict) and meta.get("query_pos") is not None:
         stat_pos = meta["query_pos"]
-        stat_mode = model.training
         try:
             model.eval()
             with torch.inference_mode():
@@ -519,7 +520,8 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
         except Exception as e:  # noqa: BLE001 - report, never raise from triage
             mark("attention_stats", f"stats forward raised: {e}")
         finally:
-            model.train(stat_mode)
+            for module, training in training_states.items():
+                module.train(training)
         if report["nonfinite_attn_stats"]:
             mark("attention_stats",
                  f"non-finite attention statistics at "
