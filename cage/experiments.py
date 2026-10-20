@@ -1436,6 +1436,38 @@ def _paired_diff(runs_a, runs_b, metric):
     return ci
 
 
+def _one_sample_contrast(runs, metric, bound=None):
+    """One-sample contrast against zero, with curve-invalid seed metadata.
+
+    Several pre-registered readouts (the null-arm error margin, the entropy
+    and gate drifts) are one-sample claims: the per-seed value is compared
+    with 0, not with another arm.  They still need the same seed accounting
+    and curve-invalid sensitivity as a paired contrast - a drift computed
+    on a run whose curve never learned cannot support a mechanism claim -
+    so this helper attaches ``diffs``/``seeds_used``/``curve_invalid_seeds``
+    in the form :meth:`ContrastLog.finalize` already consumes.  ``bound``
+    selects the bootstrap-TOST equivalence test instead of the directional
+    CI (the return value then carries ``test='equivalence'`` from
+    :func:`equivalence_test`).
+    """
+    by_seed = {r["seed"]: r for r in runs}
+    used, values = [], []
+    for seed in sorted(by_seed):
+        value = by_seed[seed].get(metric)
+        if _finite(value):
+            used.append(seed)
+            values.append(float(value))
+    ci = (equivalence_test(values, bound) if bound is not None
+          else paired_bootstrap_ci(values))
+    ci["diffs"] = list(values)
+    ci["seeds_used"] = used
+    ci["seeds_dropped"] = sorted(set(by_seed) - set(used))
+    ci["seeds_unpaired"] = []
+    ci["seeds_undefined"] = list(ci["seeds_dropped"])
+    ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(used, (by_seed,))
+    return ci
+
+
 def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     """Paired difference-in-differences ``(a1 - b1) - (a2 - b2)``.
 
@@ -5731,10 +5763,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                    _paired_diff(by_gate["calib"], by_gate["query"], metric),
                    warn=_curve_warn(("calib", by_gate["calib"]),
                                     ("query", by_gate["query"])))
-    null_margins = [r["null_mass_error_margin"] for r in by_gate["null"]
-                    if _finite(r.get("null_mass_error_margin"))]
     clog.print("null margin vs 0", "H1c", "null_mass_error_margin",
-               paired_bootstrap_ci(null_margins),
+               _one_sample_contrast(by_gate["null"],
+                                    "null_mass_error_margin"),
                warn=_curve_warn(("null", by_gate["null"])))
     print(f"\n[e1] H1d calibration-term ablation contrasts (removing a term "
           f"from the full gate; only the calib_variant factor varies, the "
@@ -6217,23 +6248,39 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                warn=_curve_warn(("calib", by_variant["calib"]),
                                 ("none", by_variant["none"])))
     clog.print("calib raw entropy drift vs 0", "H2b", "entropy_drift",
-               paired_bootstrap_ci([r["entropy_drift"] for r in calib_runs]),
+               _one_sample_contrast(calib_runs, "entropy_drift"),
                warn=calib_warn)
     # The H/log(T) drift and the gate drift are *null predictions*: the
     # decision rule is CI-within-bound (bootstrap TOST), not "CI excludes
     # 0" - support means "indistinguishable from length-stable within the
     # pre-registered bound", and a large drift must refute, not support,
     # the prediction.
-    clog.print_equivalence("calib normalised entropy drift vs 0", "H2b",
-                           "entropy_norm_drift",
-                           [r["entropy_norm_drift"] for r in calib_runs],
-                           warn=calib_warn)
+    clog.print_equivalence_ci(
+        "calib normalised entropy drift vs 0", "H2b", "entropy_norm_drift",
+        _one_sample_contrast(
+            calib_runs, "entropy_norm_drift",
+            bound=HYPOTHESES["H2b"]["sesoi"]["entropy_norm_drift"]),
+        warn=calib_warn)
     if calib_runs[0]["gate_by_length"]:
-        gate_drifts = [r["gate_by_length"][lengths[-1]]
-                       - r["gate_by_length"][settings.n_pairs]
-                       for r in calib_runs]
-        clog.print_equivalence("calib gate drift vs 0", "H2b", "gate_drift",
-                               gate_drifts, warn=calib_warn)
+        gate_by_seed = {r["seed"]: r for r in calib_runs}
+        gate_used, gate_drifts = [], []
+        for r in calib_runs:
+            value = (r["gate_by_length"][lengths[-1]]
+                     - r["gate_by_length"][settings.n_pairs])
+            if _finite(value):
+                gate_used.append(r["seed"])
+                gate_drifts.append(float(value))
+        gate_ci = equivalence_test(
+            gate_drifts, HYPOTHESES["H2b"]["sesoi"]["gate_drift"])
+        gate_ci["diffs"] = list(gate_drifts)
+        gate_ci["seeds_used"] = gate_used
+        gate_ci["seeds_dropped"] = sorted(set(gate_by_seed) - set(gate_used))
+        gate_ci["seeds_unpaired"] = []
+        gate_ci["seeds_undefined"] = list(gate_ci["seeds_dropped"])
+        gate_ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(
+            gate_used, (gate_by_seed,))
+        clog.print_equivalence_ci("calib gate drift vs 0", "H2b",
+                                  "gate_drift", gate_ci, warn=calib_warn)
     print(f"\n[e2] H2c length-term ablation contrasts (each ablation arm "
           f"removes additive terms from the full gate at identical recipe; "
           f"only the calibration-term flags vary, so the full 2x2 is "
