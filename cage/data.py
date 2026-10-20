@@ -218,6 +218,8 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
     n = int(g.numel())
     if n == 0:
         raise ValueError("groups must contain at least one sample")
+    if g.is_floating_point() and not bool(torch.isfinite(g).all()):
+        raise ValueError("group ids must be finite (no NaN/Inf)")
     uniq, inverse = torch.unique(g, return_inverse=True)
     n_groups = int(uniq.numel())
     if n_groups < 3:
@@ -273,6 +275,8 @@ def _as_indices(index, n: int) -> torch.Tensor:
 def assert_group_disjoint(groups, splits) -> None:
     """Raise if any group id occurs in more than one split."""
     g = torch.as_tensor(groups).reshape(-1)
+    if g.is_floating_point() and not bool(torch.isfinite(g).all()):
+        raise ValueError("group ids must be finite (no NaN/Inf)")
     seen: dict = {}
     for name in ("train", "val", "test"):
         if name not in splits:
@@ -297,6 +301,9 @@ def assert_time_ordered(times, splits) -> None:
     newer than a test sample.
     """
     t = torch.as_tensor(times).reshape(-1).to(torch.float64)
+    if not bool(torch.isfinite(t).all()):
+        raise ValueError("time values must be finite (no NaN/Inf): a "
+                         "non-finite timestamp makes the ordering undefined")
     spans = []
     for name in ("train", "val", "test"):
         if name not in splits:
@@ -1535,6 +1542,17 @@ def _self_test() -> int:
         check("group_crossing_rejected", False)
     except ValueError:
         check("group_crossing_rejected", True)
+    try:
+        assert_time_ordered(torch.tensor([0.0, float("nan"), 2.0]),
+                            time_ordered_split(3))
+        check("time_nonfinite_rejected", False)
+    except ValueError:
+        check("time_nonfinite_rejected", True)
+    try:
+        group_disjoint_split(torch.tensor([0.0, 1.0, float("nan"), 2.0, 3.0]))
+        check("group_nonfinite_rejected", False)
+    except ValueError:
+        check("group_nonfinite_rejected", True)
 
     # Outlier/tail audit: a same-distribution held-out draw must not be
     # flagged, while a held-out draw pushed into the rare tail of the same
