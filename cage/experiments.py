@@ -700,8 +700,9 @@ HYPOTHESES = {
                       "deep/early gate ratio relative to pre-LN.",
         "prediction": "gate_depth_ratio(seednorm) > gate_depth_ratio(pre) "
                       "and deep residual norms grow more; the registered "
-                      "accuracy companion (calib - query within each norm) "
-                      "is one-sided: the calibrated gate must not lose "
+                      "accuracy companion (calib - query within each norm "
+                      "and LayerScale level) is one-sided: the calibrated "
+                      "gate must not lose "
                       "accuracy to the query-only gate - a significant "
                       "accuracy loss refutes the co-design story rather "
                       "than supporting it, so the companion carries a "
@@ -6896,12 +6897,14 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                        warn=_curve_warn((f"{gate}/{norm}/ls", a),
                                         (f"{gate}/{norm}/off", b)))
     for norm in NORMS:
-        a = index[("calib", norm, None)]
-        b = index[("query", norm, None)]
-        clog.print(f"{norm}: calib - query", "H3a", "accuracy",
-                   _paired_diff(a, b, "accuracy"),
-                   warn=_curve_warn((f"calib/{norm}", a),
-                                    (f"query/{norm}", b)))
+        for layer_scale in (None, 1e-2):
+            a = index[("calib", norm, layer_scale)]
+            b = index[("query", norm, layer_scale)]
+            ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
+            clog.print(f"{norm}/ls={ls_label}: calib - query", "H3a",
+                       "accuracy", _paired_diff(a, b, "accuracy"),
+                       warn=_curve_warn((f"calib/{norm}/ls={ls_label}", a),
+                                        (f"query/{norm}/ls={ls_label}", b)))
     # H3c: the co-design interaction.  The marginal calib-vs-query
     # differences under seednorm and under pre-LN are differenced on the
     # same training seed, so the (large) between-seed variance cancels and
