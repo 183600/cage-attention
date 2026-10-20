@@ -2449,6 +2449,11 @@ class ContrastLog:
                 verdict = ("INELIGIBLE (supported effect disappears after "
                            "dropping curve-invalid seeds: the claim rests "
                            "on runs that did not learn)")
+            elif r.get("coverage_gate_failed"):
+                failures = "; ".join(r.get("coverage_failures") or [])
+                verdict = ("INELIGIBLE (design coverage gate failed: "
+                           f"{failures}: the contrasted design was not "
+                           "fully measured)")
             elif not r.get("claim_eligible", True):
                 verdict = (f"INELIGIBLE (n={r['n']} < pre-registered "
                            f"minimum {self.min_seeds} seeds: too few "
@@ -2568,7 +2573,8 @@ class ContrastLog:
         low_seed = [r for r in testable
                     if not r.get("claim_eligible", True)
                     and r.get("competence_passed") is not False
-                    and not r.get("curve_invalid_removes_support")]
+                    and not r.get("curve_invalid_removes_support")
+                    and not r.get("coverage_gate_failed")]
         if low_seed:
             print(f"[{self.tag}] WARNING: {len(low_seed)}/{len(testable)} "
                   f"testable contrast(s) rest on fewer than "
@@ -2577,6 +2583,14 @@ class ContrastLog:
                   f"seed-level claim is {self.min_seeds} seeds, so their "
                   f"p-values cannot support a decision (replicated runs "
                   f"with >=3 seeds needed)")
+        coverage_failed = [r for r in testable
+                           if r.get("coverage_gate_failed")]
+        if coverage_failed:
+            print(f"[{self.tag}] WARNING: {len(coverage_failed)}/"
+                  f"{len(testable)} testable contrast(s) are marked "
+                  f"claim-ineligible because the design coverage gate "
+                  f"failed (missing or seed-unbalanced cells): the effect "
+                  f"was not measured on the full planned grid")
         if curve_invalid_gated:
             names = ", ".join(
                 f"{r['hypothesis']}/{r['rule']}" for r in curve_invalid_gated)
@@ -4484,14 +4498,35 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                            "params": params,
                            **_training_record(settings, best["lr"]),
                            **_run_context(settings), **curve})
-        pooled = wilson_ci(sum(r["correct"] for r in runs),
-                           sum(r["n"] for r in runs))
-        # Seeds share one sealed evaluation stream, so the decision interval
-        # must resample seeds and keep a shared finite-stream error; pooling
-        # the counts as independent examples would pseudo-replicate.
-        cluster = clustered_proportion_ci(
-            [r["correct"] for r in runs], [r["n"] for r in runs])
-        summary = _mean_std([r["accuracy"] for r in runs])
+        # Curve-invalid final runs (plateau/diverging/instability) cannot
+        # support a depth claim: their accuracies measure an optimisation
+        # failure, not the depth's capacity.  The rung's decision statistics
+        # therefore read only the curve-valid seeds; every run stays in the
+        # record so the exclusion is visible.
+        curve_invalid_seeds = sorted(
+            int(r["seed"]) for r in runs
+            if r.get("curve_verdict") in CURVE_INVALID_VERDICTS)
+        valid_runs = [r for r in runs if r["seed"] not in curve_invalid_seeds]
+        if curve_invalid_seeds:
+            print(f"[baselines] WARNING: depth={depth} final runs "
+                  f"{curve_invalid_seeds} are curve-invalid and are excluded "
+                  f"from the rung's competence/saturation statistics")
+        if valid_runs:
+            pooled = wilson_ci(sum(r["correct"] for r in valid_runs),
+                               sum(r["n"] for r in valid_runs))
+            # Seeds share one sealed evaluation stream, so the decision
+            # interval must resample seeds and keep a shared finite-stream
+            # error; pooling the counts as independent examples would
+            # pseudo-replicate.
+            cluster = clustered_proportion_ci(
+                [r["correct"] for r in valid_runs],
+                [r["n"] for r in valid_runs])
+            summary = _mean_std([r["accuracy"] for r in valid_runs])
+        else:
+            pooled = {"p": float("nan"), "lo": float("nan"),
+                      "hi": float("nan"), "n": 0}
+            cluster = clustered_proportion_ci([], [])
+            summary = _mean_std([])
         # HB0 competence premise for HB6/HB7: "below the ceiling" is only
         # evidence that depth is required when the rung demonstrably
         # learned the task.  A rung at chance is an underfit/step-count
@@ -4534,6 +4569,9 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             "accuracy_mean": summary["mean"], "accuracy_std": summary["std"],
             "accuracy_by_seed": {str(r["seed"]): r["accuracy"]
                                  for r in runs},
+            "curve_invalid_seeds": curve_invalid_seeds,
+            "curve_valid_seeds": [int(r["seed"]) for r in valid_runs],
+            "n_curve_invalid": len(curve_invalid_seeds),
             "pooled_wilson": pooled, "cluster_ci": cluster,
             "ceiling": ceiling_acc,
             "chance": chance, "above_chance": above_chance,
@@ -4592,14 +4630,22 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     # not be read as "needs more depth").
     if not ceiling_known or not ladder_competent:
         hb7_depth_required = None
+    elif (saturation_depth is None
+          and any(depths[d].get("unmeasured") for d in ladder)):
+        # An unmeasured deeper rung could still saturate; without it the
+        # absence of a saturation point cannot be read as "depth required".
+        hb7_depth_required = None
     else:
         hb7_depth_required = bool(saturation_depth is None
                                   or saturation_depth > 2)
     adjacent = {}
     for a, b in zip(ladder, ladder[1:]):
-        by_seed_b = {r["seed"]: r for r in depths[b]["runs"]}
+        valid_a = [r for r in depths[a]["runs"]
+                   if r.get("curve_verdict") not in CURVE_INVALID_VERDICTS]
+        by_seed_b = {r["seed"]: r for r in depths[b]["runs"]
+                     if r.get("curve_verdict") not in CURVE_INVALID_VERDICTS}
         diffs = [r["accuracy"] - by_seed_b[r["seed"]]["accuracy"]
-                 for r in depths[a]["runs"] if r["seed"] in by_seed_b]
+                 for r in valid_a if r["seed"] in by_seed_b]
         if not diffs:
             adjacent[f"{a}->{b}"] = {
                 "n": 0, "sesoi_accuracy": sesoi,
@@ -4661,11 +4707,16 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                    f"{saturation_depth_ci} only touches the ceiling - "
                    f"absence of evidence, not saturation)")
     if hb7_depth_required is None:
-        depth_txt = ("not determinable - no rung is above chance, so the "
-                     "ladder did not solve the task at this step count "
-                     "(raise the step count before reading depth)"
-                     if not ladder_competent
-                     else "n/a (rule ceiling unavailable)")
+        if not ladder_competent:
+            depth_txt = ("not determinable - no rung is above chance, so "
+                         "the ladder did not solve the task at this step "
+                         "count (raise the step count before reading depth)")
+        elif not ceiling_known:
+            depth_txt = "n/a (rule ceiling unavailable)"
+        else:
+            depth_txt = ("not determinable - an unmeasured rung could still "
+                         "saturate, so the ladder cannot establish whether "
+                         "depth is required")
     elif hb7_depth_required:
         depth_txt = "measurably required"
     else:
@@ -5492,14 +5543,14 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             ablation_runs.setdefault(label, []).append(rec)
     by_gate = {g: [r for r in runs if r["gate"] == g] for g in GATES}
     table = {g: _aggregate_runs(rs) for g, rs in by_gate.items()}
-    _report_ablation_coverage(
+    ablation_coverage = _report_ablation_coverage(
         out_dir, "e1",
         runs + [r for rs in ablation_runs.values() for r in rs],
         cells=_CALIB_FACTORIAL_CELLS + (_CALIB_PLACEBO_CELL,),
         planned_seeds=settings.seeds,
         design=("calib_use_len x calib_use_ent (2x2) + shuffled-entropy "
                 "active control"))
-    _report_design_coverage(
+    design_coverage = _report_design_coverage(
         out_dir, "e1", runs, "gate",
         lambda r: r.get("gate"), tuple(GATES),
         planned_seeds=settings.seeds)
@@ -5850,7 +5901,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     clog = ContrastLog("e1",
                        hypotheses=("H1a", "H1b", "H1c", "H1d", "H1e", "H1f"),
                        min_seeds=settings.min_seeds_for_claim,
-                       competence=competence)
+                       competence=competence,
+                       coverage=(ablation_coverage, design_coverage))
     clog.print("calib - none", "H1a", "accuracy",
                _paired_diff(by_gate["calib"], by_gate["none"], "accuracy"),
                warn=_curve_warn(("calib", by_gate["calib"]),
@@ -6252,9 +6304,9 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     by_variant = {label: [r for r in runs if r["variant"] == label]
                   for label, *_ in _E2_VARIANTS}
     table = {label: _aggregate_runs(rs) for label, rs in by_variant.items()}
-    _report_ablation_coverage(out_dir, "e2", runs,
-                              planned_seeds=settings.seeds)
-    _report_design_coverage(
+    ablation_coverage = _report_ablation_coverage(
+        out_dir, "e2", runs, planned_seeds=settings.seeds)
+    design_coverage = _report_design_coverage(
         out_dir, "e2", runs, "variant",
         lambda r: r.get("variant"),
         tuple(label for label, *_ in _E2_VARIANTS),
@@ -6365,7 +6417,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     print("\n[e2] pre-registered contrasts:")
     clog = ContrastLog("e2", hypotheses=("H2a", "H2b", "H2c"),
                        min_seeds=settings.min_seeds_for_claim,
-                       competence=competence)
+                       competence=competence,
+                       coverage=(ablation_coverage, design_coverage))
     calib_runs = by_variant["calib"]
     calib_warn = _curve_warn(("calib", calib_runs))
     clog.print("calib - none", "H2a", "accuracy_at_longest",
@@ -6639,7 +6692,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
         ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
         print(f"  [{gate}/{norm}/ls={ls_label}] {_format_case(ranked[0])}")
 
-    _report_design_coverage(
+    design_coverage = _report_design_coverage(
         out_dir, "e3", runs, "grid",
         lambda r: (r.get("gate"), r.get("norm"), r.get("layer_scale")),
         tuple((gate, norm, ls)
@@ -6675,7 +6728,8 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
           "arm):")
     clog = ContrastLog("e3", hypotheses=("H3a", "H3b", "H3c"),
                        min_seeds=settings.min_seeds_for_claim,
-                       competence=competence)
+                       competence=competence,
+                       coverage=design_coverage)
     for gate in ("query", "calib"):
         for layer_scale in (None, 1e-2):
             a = index[(gate, "seednorm", layer_scale)]
