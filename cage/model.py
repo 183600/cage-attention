@@ -441,9 +441,8 @@ def _layer_norm_into(ln: nn.LayerNorm, x: torch.Tensor,
                      key: str = "ln_out") -> torch.Tensor:
     """``ln(x)`` for the no-grad forward path.
 
-    The result is written into the reusable buffers named ``key`` /
-    ``"ln_mean"`` / ``"ln_rstd"`` so evaluation does not allocate a fresh
-    normalization output per call.
+    The result is written into the buffers named ``key`` /
+    ``"ln_mean"`` / ``"ln_rstd"``.
 
     ``key`` names a *disjoint* output buffer: callers whose input may be a
     view of the block-level ``"ln_out"`` scratch (the final normalization)
@@ -475,8 +474,8 @@ def _query_blocks(bh: int, T: int):
         max_rows = (1 << 20) // (bh * T)
         if max_rows < 32:
             max_rows = 32
-        # Balance the blocks under D3's cap so a short tail does not cost a
-        # whole extra block; every block still stays within ``max_rows``.
+        # Balanced blocks under D3's cap; every block stays within
+        # ``max_rows``.
         rows = _balanced_step(T, max_rows)
         blocks = tuple((i, min(i + rows, T)) for i in range(0, T, rows))
     _query_blocks_cache[key] = blocks
@@ -548,9 +547,6 @@ class _CalibAttn(torch.autograd.Function):
             ebuf = _get_scratch(("calib_f",), q.device, q.dtype,
                                 bh * max_rows * max_i1) if need_ent else None
             if ebuf is not None and ebuf.numel() >= bh * max_rows * dv:
-                # The entropy scratch is only read within a block after the
-                # output has been copied out, so it doubles as block staging
-                # when a block's output fits (T >= dk).
                 yblk = ebuf
             else:
                 yblk = _get_scratch(("calib_yblk",), q.device, q.dtype,
@@ -657,8 +653,7 @@ class _CalibAttn(torch.autograd.Function):
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
         dk = q.size(-1)
         stg_i1 = blocks[-2][1]
-        # One work buffer serves both the entropy log-term and the block
-        # staging: the log-term is dead before staging writes each block.
+        # Work buffer for the entropy log-term and block staging.
         work_numel = bh * stg_i1 * dk
         if grad_ent is not None:
             work_numel = max(work_numel, bh * max_rows * max_i1)
@@ -870,9 +865,7 @@ class _NullAttn(torch.autograd.Function):
         max_rows = rows0
         max_i1 = T
         sbuf = _get_scratch(("null_s",), q.device, q.dtype, bh * max_rows * max_i1)
-        # Single full-size work buffer: the block's ``grad_y @ v^T`` is
-        # turned into ``d_s`` in place, so no separate ``p * e`` / staging
-        # copy is needed.
+        # Work buffer for the block score gradient.
         eb = _get_scratch(("null_bwd_e",), q.device, q.dtype, bh * max_rows * max_i1)
         gub = _get_scratch(("null_bwd_gu",), q.device, q.dtype, bh * max_rows)
         dotb = _get_scratch(("null_bwd_dot",), q.device, q.dtype, bh * max_rows)
@@ -898,8 +891,7 @@ class _NullAttn(torch.autograd.Function):
             gu0 = gub[:bh * r].view(bh, r, 1)
             torch.matmul(g.view(B, h, r, -1), nv4t, out=gu0.view(B, h, r, 1))
             dot = dotb[:bh * r].view(bh, r, 1)
-            # Row dot product via a tiny batched GEMM (no full-size p*e
-            # temporary).
+            # Row dot product via a batched GEMM.
             torch.bmm(p.view(bh * r, 1, i1), e.view(bh * r, i1, 1),
                       out=dot.view(bh * r, 1, 1))
             dot.addcmul_(p0, gu0)
@@ -1195,9 +1187,6 @@ class Attention(nn.Module):
                     packed[0].view(B, h, T, dk), packed[1], B, h, T,
                     stat_pos, is_null, ent_full=ent)
             if not grad_on and x.is_cuda:
-                # Q/K/V are dead once the kernel and the row statistics
-                # have read them; drop them before the gate/projection so
-                # the eval peak does not hold both ends of the stack.
                 del packed
                 _release_scratch("packed", "qkv_out")
         else:
