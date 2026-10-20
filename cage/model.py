@@ -1490,8 +1490,10 @@ class CAGE(nn.Module):
         if targets is not None:
             flat_t = targets.reshape(-1)
             if sup_pos is not None:
+                positions = sup_pos.reshape(-1)
                 sup = _arange(targets.size(0), targets.device).mul(
-                    targets.size(1)).add_(sup_pos)
+                    targets.size(1)).add_(positions.clamp_min(0))
+                sup = sup[positions >= 0]
             else:
                 sup = (flat_t != -1).nonzero(as_tuple=True)[0]
                 if sup.numel() == flat_t.numel():
