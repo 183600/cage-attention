@@ -250,7 +250,11 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
         k = max(2, int(math.ceil(len(finite) / 3.0)))
         out["late_train_delta"] = rel_delta(finite[-k:], "train_loss")
         if len(val) >= 3:
-            out["late_val_delta"] = rel_delta(val[-k:], "val_loss")
+            # Validation is monitored less often than training, so its
+            # curve is shorter: take its own last third rather than the
+            # train-point count (which can swallow the whole val curve).
+            k_val = max(2, int(math.ceil(len(val) / 3.0)))
+            out["late_val_delta"] = rel_delta(val[-k_val:], "val_loss")
     val_se = [float(h["val_loss_se"]) for h in val
               if h.get("val_loss_se") is not None
               and math.isfinite(float(h["val_loss_se"]))]
@@ -998,7 +1002,10 @@ def _disable_dropout(model):
     return {
         "dropout_modules": len(modules),
         "dropout_probs": sorted({float(m.p) for m in modules}),
-        "active_dropout": any(float(m.p) > 0.0 for m in modules),
+        # Dropout was configured but is switched off for the check; report
+        # the effective state, not the configured probability.
+        "active_dropout": any(m.training and float(m.p) > 0.0
+                              for m in modules),
         "augmentation": "none (cage.data is a synthetic generator, no "
                         "augmentation pipeline is applied)",
         "optimizer_recipe": "AdamW via train._make_adamw (D5 fixed factory)",
@@ -1844,6 +1851,8 @@ def gate_depth_ratio(stats, n_early=2):
 def pearson(x, y):
     x = x.flatten().float()
     y = y.flatten().float()
+    if x.numel() == 0 or y.numel() != x.numel():
+        return torch.tensor(float("nan"))
     dx = x - x.mean()
     dy = y - y.mean()
     # Constant-input guard relative to each vector's own magnitude.  The
