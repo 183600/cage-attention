@@ -1099,20 +1099,26 @@ def _support_coverage(pooled_counts, split_values, heldout_names, categories,
                       fields) -> dict:
     """Train-fitted category support and per-split unseen-value rates.
 
-    For each field, the pooled training counts define which selectable
-    categories were ever observed (ids 0=PAD and 1=SEP are never selectable
-    content).  A held-out value whose category is absent from that support
-    cannot be predicted (an answer) or meaningfully embedded (an input
-    token), so its rate is a transparent bound on achievable accuracy.
-    The support comes from training only; held-out values are looked up,
-    never used to define it.
+    For each content field, the pooled training counts define which
+    selectable categories were ever observed (ids 0=PAD and 1=SEP are never
+    selectable content).  A held-out value whose category is absent from
+    that support cannot be predicted (an answer) or meaningfully embedded
+    (an input token), so its rate is a transparent bound on achievable
+    accuracy.  Derived structural fields (key position, repeated value,
+    naive-confusable) use their full category range: their zero/one values
+    are measurements, not reserved ids.  The support comes from training
+    only; held-out values are looked up, never used to define it.
     """
     out = {}
     for field in fields:
         counts = pooled_counts[field]
         seen = counts > 0
-        seen[:min(2, int(seen.numel()))] = False
-        n_categories = max(int(categories[field]) - 2, 1)
+        content = field not in _AUDIT_DERIVED_FIELDS
+        if content:
+            seen[:min(2, int(seen.numel()))] = False
+            n_categories = max(int(categories[field]) - 2, 1)
+        else:
+            n_categories = max(int(categories[field]), 1)
         entry = {
             "n_categories": n_categories,
             "n_seen_train": int(seen.sum()),
@@ -1121,7 +1127,8 @@ def _support_coverage(pooled_counts, split_values, heldout_names, categories,
         }
         for name in heldout_names:
             values = split_values[(name, field)].reshape(-1).to(torch.long)
-            values = values[values >= 2]
+            if content:
+                values = values[values >= 2]
             unseen = ~seen[values]
             entry["unseen_by_split"][name] = {
                 "n": int(unseen.sum()),
