@@ -2202,7 +2202,9 @@ class ContrastLog:
         the pre-registered sign, which is needed when one metric carries
         both a directional main-effect row and a two-sided companion row
         (e.g. H2e's concentration main effect vs. its interaction): the
-        companion must not inherit the main effect's sign.
+        companion must not inherit the main effect's sign.  An explicit
+        ``direction_key`` that is not registered is rejected instead of
+        silently producing a two-sided row.
         """
         equiv = ci.get("test") == "equivalence"
         audit = ci.get("controlled")
@@ -2222,7 +2224,13 @@ class ContrastLog:
         # pre-registration).  ``None`` means the prediction is not
         # directional (e.g. H3b's "the readout shifts"), in which case a
         # non-zero effect of either sign is admissible.
-        direction = (HYPOTHESES.get(hyp, {}).get("direction") or {}).get(
+        direction_map = (HYPOTHESES.get(hyp, {}).get("direction") or {})
+        if direction_key is not None and direction_key not in direction_map:
+            raise ValueError(
+                f"{hyp} has no pre-registered direction under "
+                f"direction_key={direction_key!r}; registered keys: "
+                f"{sorted(direction_map)}")
+        direction = direction_map.get(
             metric if direction_key is None else direction_key)
         arms = ci.get("arms") or {}
         arm_a, arm_b = arms.get("a") or {}, arms.get("b") or {}
