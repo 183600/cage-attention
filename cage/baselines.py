@@ -46,7 +46,8 @@ import math
 import torch
 import torch.nn.functional as F
 
-from .data import check_eval_seed, check_train_seed, make_batch, validate_batch
+from .data import (check_eval_seed, check_train_seed, make_batch,
+                   stream_seed_key, validate_batch)
 from .metrics import bootstrap_upper_p, paired_bootstrap_ci, seeds_for_power, wilson_ci
 from .repro import seed_everything, stream_generator
 from .train import _make_adamw
@@ -266,7 +267,7 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
     be attributed to an under-tuned strawman.
     """
     check_eval_seed(val_seed, selection=True)
-    if val_seed in tuple(seeds):
+    if stream_seed_key(val_seed) in {stream_seed_key(s) for s in seeds}:
         raise ValueError(
             f"validation seed {val_seed} is also a probe training seed; "
             f"selection data must be disjoint from fitting data"

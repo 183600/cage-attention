@@ -3466,9 +3466,10 @@ def _model_state_hash(model) -> str:
 
 def _probe_seed(settings: Settings, start: int) -> int:
     """First seed >= ``start`` that is neither reserved nor a grid seed."""
-    seeds = {int(s) for s in settings.seeds}
+    seeds = {stream_seed_key(s) for s in settings.seeds}
+    reserved = {stream_seed_key(s) for s in RESERVED_EVAL_SEEDS}
     s = int(start)
-    while s in RESERVED_EVAL_SEEDS or s in seeds:
+    while stream_seed_key(s) in reserved or stream_seed_key(s) in seeds:
         s += 1
     return s
 
@@ -3805,7 +3806,8 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
     directly (ground truth) instead of trusting the hand-attached labels.
     """
     check_eval_seed(eval_seed, selection=selection)
-    if eval_seed in tuple(settings.seeds):
+    if stream_seed_key(eval_seed) in {
+            stream_seed_key(s) for s in settings.seeds}:
         raise ValueError(
             f"eval_seed={eval_seed} is also a configured training seed; "
             f"evaluation data must come from a stream that never trained "
