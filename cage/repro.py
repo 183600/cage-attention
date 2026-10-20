@@ -103,6 +103,7 @@ def seed_everything(seed: int, deterministic: bool = False) -> dict:
     """
     global _HASHSEED_PINNED
     seed = int(seed)
+    determinism_info = configure_determinism(deterministic)
     random.seed(seed)
     info = {
         "seed": seed,
@@ -127,7 +128,7 @@ def seed_everything(seed: int, deterministic: bool = False) -> dict:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
         info["cuda_devices"] = int(torch.cuda.device_count())
-    info.update(configure_determinism(deterministic))
+    info.update(determinism_info)
     return info
 
 
