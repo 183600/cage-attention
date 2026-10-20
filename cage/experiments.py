@@ -190,8 +190,8 @@ from .train import (
 
 HYPO_IDS = ("HB0", "HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7",
             "H1a", "H1b",
-            "H1c", "H1d", "H1e", "H1f", "H2a", "H2b", "H2c", "H3a", "H3b",
-            "H3c")
+            "H1c", "H1d", "H1e", "H1f", "H2a", "H2b", "H2c", "H2d", "H2e",
+            "H3a", "H3b", "H3c")
 
 # Every hypothesis entry may carry ``"sesoi"``: the smallest effect size of
 # interest per metric (same metric keys as the pre-registered contrasts).
@@ -640,6 +640,57 @@ HYPOTHESES = {
             "calib_minus_len_only_accuracy_at_longest": "equivalence",
             "calib_minus_len_only_accuracy_drop": "equivalence",
         },
+    },
+    "H2d": {
+        "experiment": "e2",
+        "question": "Does calib's length robustness exceed the closest "
+                    "simpler gate (query), not only the no-gate baseline?",
+        "hypothesis": "The length-robustness claim is only about the "
+                      "calibration terms if the calibrated gate degrades "
+                      "less than the query-only gate, which shares the same "
+                      "attention and gating architecture but lacks the "
+                      "length and concentration terms.  A gain over "
+                      "``none`` alone could be produced by the presence of "
+                      "any learned gate.",
+        "prediction": "accuracy_at_longest(calib) > "
+                      "accuracy_at_longest(query) and "
+                      "accuracy_drop(calib) < accuracy_drop(query)",
+        "decision": "paired bootstrap 95% CI excludes 0 in the "
+                    "pre-registered directions after Benjamini-Hochberg FDR "
+                    "control across the E2 contrasts (q=0.05)",
+        "sesoi": {"accuracy_at_longest": 0.01, "accuracy_drop": 0.01},
+        "direction": {"accuracy_at_longest": "+", "accuracy_drop": "-"},
+    },
+    "H2e": {
+        "experiment": "e2",
+        "question": "Does the concentration term carry an average "
+                    "contribution across the length sweep, and is the two-"
+                    "term design additive (full 2x2 over the length sweep)?",
+        "hypothesis": "With all four calibration-term cells trained on the "
+                      "same length sweep, the concentration term's effect "
+                      "averaged over both length-term levels must be "
+                      "measured as well as the length term's (H2c); the "
+                      "length x concentration interaction is the "
+                      "two-sided companion that checks the terms are not "
+                      "merely interchangeable.",
+        "prediction": "concentration main effect on accuracy_at_longest > 0 "
+                      "and on accuracy_drop < 0; the interaction "
+                      "(length effect under concentration on minus under "
+                      "concentration off) is reported as a two-sided "
+                      "readout, since the design tests additivity rather "
+                      "than a signed interaction",
+        "decision": "paired bootstrap 95% CIs through the same "
+                    "Benjamini-Hochberg family as the H2c rows (q=0.05): "
+                    "the concentration main effect carries a registered "
+                    "direction and SESOI; the interaction is two-sided "
+                    "(no registered direction) but must still exceed its "
+                    "SESOI to be practically meaningful",
+        "sesoi": {"accuracy_at_longest": 0.01, "accuracy_drop": 0.01},
+        # Direction is keyed separately from the display metric so the
+        # two-sided interaction rows (same metrics) do not inherit the
+        # directional prediction of the main-effect rows.
+        "direction": {"concentration_accuracy_at_longest": "+",
+                      "concentration_accuracy_drop": "-"},
     },
     "H3a": {
         "experiment": "e3",
@@ -1481,6 +1532,27 @@ def _one_sample_contrast(runs, metric, bound=None):
     return ci
 
 
+def _interaction_manipulation(audit: dict) -> dict:
+    """The factor a controlled contrast actually varies, in comparable form.
+
+    ``_controlled_audit`` reports two descriptions: ``varying_factors``
+    from the declared labels (always present) and ``model_factor_diffs``
+    from the resolved ``model_cfg`` (present when the records carry it).
+    The resolved one is ground truth for *which* factor a contrast varies,
+    but the label description mixes genuine factors with the
+    ``calib_variant`` cell label: two legitimate interaction marginals like
+    full-vs-ent_only and len_only-vs-no_terms manipulate the same
+    ``calib_use_len`` flag while carrying different cell labels, so
+    comparing the label sets would refuse a valid factorial contrast.
+    Prefer the resolved diffs; fall back to the labels only for records
+    that predate ``model_cfg``.
+    """
+    resolved = audit.get("model_factor_diffs") or {}
+    if resolved:
+        return {key: value for key, value in resolved.items()}
+    return dict(audit.get("varying_factors") or {})
+
+
 def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     """Paired difference-in-differences ``(a1 - b1) - (a2 - b2)``.
 
@@ -1493,9 +1565,14 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     The controlled audit is the conjunction of the four marginal audits:
     within each arm the recipe is fixed and only the intended factor
     varies, and all four cells share one recipe and one seed set.  Both
-    marginal contrasts must also vary the *same* declared factor with the
-    same level sets, otherwise the DiD mixes two different manipulations.
-    A contrast whose audit fails is refused downstream exactly like a
+    marginal contrasts must vary the *same* resolved factor with the same
+    level sets, and both cross-context edges (a1 vs a2, b1 vs b2) must
+    vary the same context factor, so the DiD cannot difference two
+    different manipulations; the marginal and context factors must also be
+    different, otherwise one factor varies on both axes and the row is not
+    a factorial interaction (see :func:`_interaction_manipulation` for why
+    the resolved ``model_cfg`` diff, not the cell label, is compared).  A
+    contrast whose audit fails is refused downstream exactly like a
     marginal one, and the effective paired seed set is recorded.  ``arms``
     carries each marginal difference (a = a1-b1, b = a2-b2) with its mean
     +- std over the interaction sample, so the row shows the levels it
@@ -1568,13 +1645,30 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     # calib - query under seednorm and under pre).  Otherwise the DiD
     # mixes two different manipulations and cannot be read as one
     # interaction.
-    marginal_factors = [audits[0].get("varying_factors") or {},
-                        audits[1].get("varying_factors") or {}]
+    marginal_factors = [_interaction_manipulation(a) for a in audits[:2]]
     if marginal_factors[0] != marginal_factors[1]:
         mismatches.append(
             "interaction marginals vary different factor(s): "
             f"{sorted(marginal_factors[0])} vs "
             f"{sorted(marginal_factors[1])}")
+    # The cross-context edges (a1 vs a2 and b1 vs b2) are what the
+    # interaction conditions on: both must vary the *same* context factor
+    # with the same level sets, otherwise the DiD differences two different
+    # context manipulations.  A marginal factor reappearing on the context
+    # axis is refused too: then the design varies one factor on both axes
+    # and the "interaction" is not a factorial contrast.
+    context_factors = [_interaction_manipulation(a) for a in audits[2:]]
+    if context_factors[0] != context_factors[1]:
+        mismatches.append(
+            "interaction contexts vary different factor(s): "
+            f"{sorted(context_factors[0])} vs "
+            f"{sorted(context_factors[1])}")
+    overlap = sorted(set(marginal_factors[0]) & set(context_factors[0]))
+    if overlap:
+        mismatches.append(
+            f"interaction marginal and context edges vary the same "
+            f"factor(s) {overlap}: a factorial interaction needs two "
+            f"different factors")
     factors = {}
     for audit in audits:
         factors.update(audit.get("varying_factors", {}))
@@ -2092,7 +2186,17 @@ class ContrastLog:
             coverage = (coverage,)
         self.coverage = tuple(coverage)
 
-    def print(self, rule, hyp, metric, ci, warn="") -> None:
+    def print(self, rule, hyp, metric, ci, warn="",
+              direction_key=None) -> None:
+        """Register one computed contrast in the family.
+
+        ``metric`` is the display/registry key used for the SESOI lookup.
+        ``direction_key`` optionally names a *different* registry key for
+        the pre-registered sign, which is needed when one metric carries
+        both a directional main-effect row and a two-sided companion row
+        (e.g. H2e's concentration main effect vs. its interaction): the
+        companion must not inherit the main effect's sign.
+        """
         equiv = ci.get("test") == "equivalence"
         audit = ci.get("controlled")
         sesoi = (HYPOTHESES.get(hyp, {}).get("sesoi") or {}).get(metric)
@@ -2111,7 +2215,8 @@ class ContrastLog:
         # pre-registration).  ``None`` means the prediction is not
         # directional (e.g. H3b's "the readout shifts"), in which case a
         # non-zero effect of either sign is admissible.
-        direction = (HYPOTHESES.get(hyp, {}).get("direction") or {}).get(metric)
+        direction = (HYPOTHESES.get(hyp, {}).get("direction") or {}).get(
+            metric if direction_key is None else direction_key)
         arms = ci.get("arms") or {}
         arm_a, arm_b = arms.get("a") or {}, arms.get("b") or {}
         # Full-run levels are stored alongside the paired levels so a reader
@@ -6192,7 +6297,7 @@ _E2_VARIANTS = (
 
 
 def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("H2a", "H2b", "H2c"))
+    _announce(("H2a", "H2b", "H2c", "H2d", "H2e"))
     # HB1/HB3/HB4/HB5 hard gate (see run_e1).
     _enforce_baseline_verdict(settings, out_dir, "e2")
     _write_manifest(settings, out_dir, "e2")
@@ -6422,7 +6527,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
               f"task at this step count, so no contrast below may be read as a "
               f"mechanism statement")
     print("\n[e2] pre-registered contrasts:")
-    clog = ContrastLog("e2", hypotheses=("H2a", "H2b", "H2c"),
+    clog = ContrastLog("e2", hypotheses=("H2a", "H2b", "H2c", "H2d", "H2e"),
                        min_seeds=settings.min_seeds_for_claim,
                        competence=competence,
                        coverage=(ablation_coverage, design_coverage))
@@ -6438,6 +6543,21 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                             "accuracy_drop"),
                warn=_curve_warn(("calib", by_variant["calib"]),
                                 ("none", by_variant["none"])))
+    # H2d: the same length-robustness read against the closest simpler
+    # gate.  ``query`` shares the attention/gating architecture and differs
+    # only in the calibration terms, so a calib-vs-query gain is the one
+    # that can be attributed to length/concentration calibration rather
+    # than to "having any learned gate".
+    clog.print("calib - query", "H2d", "accuracy_at_longest",
+               _paired_diff(by_variant["calib"], by_variant["query"],
+                            "accuracy_at_longest"),
+               warn=_curve_warn(("calib", by_variant["calib"]),
+                                ("query", by_variant["query"])))
+    clog.print("calib - query", "H2d", "accuracy_drop",
+               _paired_diff(by_variant["calib"], by_variant["query"],
+                            "accuracy_drop"),
+               warn=_curve_warn(("calib", by_variant["calib"]),
+                                ("query", by_variant["query"])))
     clog.print("calib raw entropy drift vs 0", "H2b", "entropy_drift",
                _one_sample_contrast(calib_runs, "entropy_drift"),
                warn=calib_warn)
@@ -6522,6 +6642,26 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         ci = _factorial_main_effect(e2_factorial_cells, metric, "length")
         clog.print("length main effect (2x2)", "H2c", metric, ci,
                    warn=factorial_warn)
+    print(f"\n[e2] H2e factorial companions: the concentration term's main "
+          f"effect (average of full-vs-len_only and ent_only-vs-no_terms, "
+          f"i.e. averaged over both length-term levels) and the two-term "
+          f"interaction (length effect under concentration on minus under "
+          f"concentration off).  Together with the length main effect these "
+          f"read the complete 2x2, so neither term nor their additivity is "
+          f"left unmeasured:")
+    for metric in ("accuracy_at_longest", "accuracy_drop"):
+        ci = _factorial_main_effect(e2_factorial_cells, metric,
+                                    "concentration")
+        clog.print("concentration main effect (2x2)", "H2e", metric, ci,
+                   direction_key=f"concentration_{metric}",
+                   warn=factorial_warn)
+    for metric in ("accuracy_at_longest", "accuracy_drop"):
+        ci = _paired_did(
+            e2_factorial_cells["full"], e2_factorial_cells["calib_ent_only"],
+            e2_factorial_cells["calib_len_only"],
+            e2_factorial_cells["calib_no_terms"], metric)
+        clog.print("length x concentration interaction (2x2)", "H2e", metric,
+                   ci, warn=factorial_warn)
     clog.finalize(out_dir, q=settings.fdr_q)
     e2_summary = {
         label: {str(L): _mean_std([r["accuracy_by_length"][L]
