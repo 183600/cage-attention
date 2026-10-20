@@ -152,11 +152,14 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
     curve cannot be sold as overfitting.
     """
     # Work on copies so the caller's history keeps the raw single-batch
-    # losses; the smoothed window value only changes the verdict input.
+    # losses; the smoothed window value only changes the verdict input when
+    # the raw value is finite, so a non-finite batch loss is never hidden.
     hist = [dict(h) for h in hist]
     for h in hist:
+        raw = h.get("train_loss")
         window = h.get("train_loss_window")
-        if window is not None and math.isfinite(float(window)):
+        if (window is not None and math.isfinite(float(window))
+                and (raw is None or math.isfinite(float(raw)))):
             h["train_loss"] = float(window)
     finite = [h for h in hist
               if math.isfinite(float(h.get("train_loss", float("nan"))))]
