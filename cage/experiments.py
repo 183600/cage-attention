@@ -4273,7 +4273,9 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
     if audit.get("train_drift_suspected"):
         drift = [key for key, item in
                  audit.get("train_stationarity_bh", {}).items()
-                 if item["reject"]]
+                 if item["reject"]
+                 and item.get("tv", 0.0) > 3.0 * audit["tv_noise_floor"].get(
+                     key.rsplit(":", 1)[-1], 0.0)]
         print(f"[{tag}] WARNING: training-stream non-stationarity suspected "
               f"({', '.join(drift)}): first and second halves of the "
               f"training stream differ beyond sampling noise, so a single "
