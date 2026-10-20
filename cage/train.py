@@ -1126,13 +1126,14 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     unaffected by monitoring.  Every validation batch passes the shared
     data-cleaning gate, so monitoring never reads invalid data.
 
-    Returns ``(loss, accuracy, last_batch, loss_se)`` where ``last_batch``
-    is the ``(idx, targets, meta)`` of the final validation forward, so a
-    non-finite validation loss can be run through the staged
-    ``diagnose_nonfinite`` triage *on the exact batch that produced it*.
-    ``loss_se`` is the standard error of the per-batch losses
-    (``std / sqrt(n_batches)``, sample std), i.e. the batch-sampling noise
-    of the monitored loss: a validation regression smaller than a couple
+    Returns ``(loss, accuracy, triage_batch, loss_se)`` where
+    ``triage_batch`` is the ``(idx, targets, meta)`` of the first
+    validation forward whose loss was non-finite, or the final forward when
+    every loss was finite, so a non-finite validation loss can be run
+    through the staged ``diagnose_nonfinite`` triage *on the exact batch
+    that produced it*.  ``loss_se`` is the standard error of the per-batch
+    losses (``std / sqrt(n_batches)``, sample std), i.e. the batch-sampling
+    noise of the monitored loss: a validation regression smaller than a couple
     of SEs is not distinguishable from re-drawing the validation stream.
     """
     was_training = model.training
@@ -1140,11 +1141,12 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
     last_batch = None
+    first_bad_batch = None
     batch_losses = []
     val_gen.manual_seed(VAL_SEED)
     for i in range(max(1, batches)):
         # Batch construction stays outside inference_mode so the returned
-        # last_batch remains usable by a grad-enabled triage/backward.
+        # triage batch remains usable by a grad-enabled triage/backward.
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
                                     dense_lm=dense_lm, gen=val_gen)
         validate_batch(idx, tgt, meta, vocab, diagnostics=False)
@@ -1153,6 +1155,9 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
         with torch.inference_mode():
             logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
             batch_losses.append(loss.detach())
+            if (first_bad_batch is None
+                    and not bool(torch.isfinite(loss))):
+                first_bad_batch = last_batch
             if dense_lm:
                 # Dense training supervises every position, so the forward
                 # returns the full-sequence logits flattened row-major; the
@@ -1176,7 +1181,8 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
         loss_se = float("nan")
     return (sum(losses) / n_batches,
             correct.item() / total if total else float("nan"),
-            last_batch, loss_se)
+            first_bad_batch if first_bad_batch is not None else last_batch,
+            loss_se)
 
 
 def _label_audit(idx, meta):
