@@ -125,6 +125,8 @@ def roc_auc(scores, positives) -> float:
     """
     s = _flatten_float(scores)
     y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
+    if y.numel() != s.numel():
+        return float("nan")
     n_pos = int(y.sum())
     n_neg = y.numel() - n_pos
     if n_pos == 0 or n_neg == 0:
@@ -144,6 +146,8 @@ def pr_auc(scores, positives) -> float:
     """
     s = _flatten_float(scores)
     y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
+    if y.numel() != s.numel():
+        return float("nan")
     n_pos = int(y.sum())
     if n_pos == 0:
         return float("nan")
@@ -184,7 +188,7 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
     s = _flatten_float(scores)
     y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
     n = s.numel()
-    if n == 0:
+    if n == 0 or y.numel() != n:
         return {"frac": float("nan"), "k": 0, "recall": float("nan"),
                 "precision": float("nan"), "lift": float("nan"),
                 "threshold": float("nan")}
@@ -227,7 +231,7 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     n, k = logits.shape
     keys = ["accuracy", "f1_micro", "f1_macro", "f1_weighted",
             "precision_macro", "recall_macro"]
-    if n == 0:
+    if n == 0 or targets.numel() != n:
         out = {"n": 0, "n_classes_present": 0}
         out.update({key: float("nan") for key in keys})
         out[f"top{min(int(topk), k)}_accuracy"] = float("nan")
@@ -293,7 +297,7 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     p = torch.as_tensor(probs).detach().reshape(-1).float().clamp(0.0, 1.0)
     c = torch.as_tensor(correct).detach().reshape(-1).to(p.device).float()
     n = p.numel()
-    if n == 0:
+    if n == 0 or c.numel() != n:
         return float("nan")
     bin_id = (p * n_bins).long().clamp(max=n_bins - 1)
     counts = torch.bincount(bin_id, minlength=n_bins).float()
@@ -308,7 +312,7 @@ def brier_score(probs, correct) -> float:
     """Brier score of the top-1 answer correctness prediction."""
     p = torch.as_tensor(probs).detach().reshape(-1).float()
     c = torch.as_tensor(correct).detach().reshape(-1).to(p.device).float()
-    if p.numel() == 0:
+    if p.numel() == 0 or c.numel() != p.numel():
         return float("nan")
     return float(((p - c) ** 2).mean())
 
@@ -663,6 +667,9 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
     if total <= 0:
         return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
                 "n": 0}
+    if successes < 0 or successes > total:
+        return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
+                "n": int(total)}
     p = successes / total
     z2 = z * z
     denom = 1.0 + z2 / total
@@ -829,6 +836,21 @@ def _self_test() -> int:
     bad_bound = equivalence_test([1.0, 2.0], 0.0)
     check("invalid_bound", bad_bound["equivalent"] is False)
 
+    # Mismatched rows must abstain rather than broadcast one side or raise
+    # an incidental indexing error.
+    check("mismatched_ranking_no_claim",
+          math.isnan(roc_auc([1.0, 2.0, 3.0], [False, True]))
+          and math.isnan(pr_auc([1.0, 2.0, 3.0], [False, True])))
+    sel = selection_at_fraction([1.0, 2.0, 3.0], [False, True])
+    check("mismatched_selection_no_claim",
+          sel["k"] == 0 and math.isnan(sel["precision"]))
+    check("mismatched_calibration_no_claim",
+          math.isnan(expected_calibration_error([0.1, 0.2], [True]))
+          and math.isnan(brier_score([0.1, 0.2], [True])))
+    mm_bad = multiclass_metrics(torch.randn(3, 5), torch.tensor([0]))
+    check("mismatched_multiclass_no_claim",
+          mm_bad["n"] == 0 and math.isnan(mm_bad["accuracy"]))
+
     # FDR: monotone adjusted p, small p-values survive, large ones do not,
     # NaN stays untestable.
     adj = benjamini_hochberg([0.001, 0.004, 0.2, 0.8, float("nan")], q=0.05)
@@ -841,6 +863,9 @@ def _self_test() -> int:
     check("wilson_brackets", w["lo"] <= w["p"] <= w["hi"])
     check("wilson_upper_exact", wilson_ci(4, 4)["hi"] == 1.0)
     check("wilson_lower_exact", wilson_ci(0, 4)["lo"] == 0.0)
+    check("wilson_invalid_counts_no_claim",
+          math.isnan(wilson_ci(5, 4)["p"])
+          and math.isnan(wilson_ci(-1, 4)["p"]))
 
     # Seed-clustered proportion: identical seed accuracies evaluated on one
     # shared stream must retain the stream's measurement noise; pooling the
