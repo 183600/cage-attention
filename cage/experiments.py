@@ -1363,26 +1363,32 @@ def _paired_diff(runs_a, runs_b, metric):
     false-concentration cases), so a shrunken sample is never silently
     read as if it were the full seed set.
     """
+    by_a = {r["seed"]: r for r in runs_a}
     by_seed = {r["seed"]: r for r in runs_b}
     diffs = []
     used, dropped, unpaired, undefined = [], [], [], []
-    for ra in runs_a:
-        rb = by_seed.get(ra["seed"])
-        va = ra.get(metric)
+    # Iterate the *union* of the two seed sets: a seed present only on one
+    # side is a pairing failure and must be recorded as dropped/unpaired,
+    # not silently absent from the accounting just because it happens to
+    # be missing on side a.
+    planned = sorted(set(by_a) | set(by_seed))
+    for seed in planned:
+        ra, rb = by_a.get(seed), by_seed.get(seed)
+        va = None if ra is None else ra.get(metric)
         vb = None if rb is None else rb.get(metric)
         finite_a, finite_b = _finite(va), _finite(vb)
-        if rb is not None and finite_a and finite_b:
-            used.append(ra["seed"])
+        if ra is not None and rb is not None and finite_a and finite_b:
+            used.append(seed)
             diffs.append(float(va) - float(vb))
-        elif rb is None or finite_a != finite_b:
-            dropped.append(ra["seed"])
-            unpaired.append(ra["seed"])
+        elif ra is None or rb is None or finite_a != finite_b:
+            dropped.append(seed)
+            unpaired.append(seed)
         else:
             # Metric undefined on both sides (e.g. no false-concentration
             # cases at this scale): not a pairing failure, but it still
             # shrinks the effective sample and must be visible.
-            dropped.append(ra["seed"])
-            undefined.append(ra["seed"])
+            dropped.append(seed)
+            undefined.append(seed)
     ci = paired_bootstrap_ci(diffs)
     # Levels are reported on exactly the seeds that entered the paired
     # difference.  Using all runs here would let a metric-undefined or
@@ -1390,7 +1396,6 @@ def _paired_diff(runs_a, runs_b, metric):
     # vice versa), making the printed levels and the contrast describe
     # different samples.  The full-run levels remain available as
     # ``arms_all`` for inspection.
-    by_a = {r["seed"]: r for r in runs_a}
     if used:
         side_a = _mean_std([by_a[s][metric] for s in used])
         base = _mean_std([by_seed[s][metric] for s in used])
@@ -1629,7 +1634,8 @@ def _factorial_main_effect(cells, metric, factor):
     if views:
         first = views[0][2]
         for cell, j, view in views[1:]:
-            diff = sorted(k for k, v in first.items() if view.get(k) != v)
+            diff = sorted(k for k in set(first) | set(view)
+                          if view.get(k) != first.get(k))
             if diff:
                 mismatches.append(
                     f"factorial recipe differs in cell {cell} run {j}: "
@@ -3485,6 +3491,14 @@ def _curve_record(hist, early_stop_info=None):
 
     diagnoses = _diagnoses("diagnosis")
     val_diagnoses = _diagnoses("val_diagnosis")
+    nonfinite_steps = sorted({int(h["step"]) for h in hist
+                              if isinstance(h.get("diagnosis"), dict)
+                              or isinstance(h.get("val_diagnosis"), dict)
+                              or not _finite(h.get("train_loss"))
+                              or (h.get("val_loss") is not None
+                                  and not _finite(h.get("val_loss")))
+                              or (h.get("grad_norm") is not None
+                                  and not _finite(h.get("grad_norm")))})
     return {
         "train_loss_first": train[0]["train_loss"] if train else float("nan"),
         "train_loss_last": train[-1]["train_loss"] if train else float("nan"),
@@ -3505,6 +3519,9 @@ def _curve_record(hist, early_stop_info=None):
         "val_change_abs": verdict["val_change_abs"],
         "val_noise_2se": verdict["val_noise_2se"],
         "val_movement_significant": verdict["val_movement_significant"],
+        "nonfinite_steps": nonfinite_steps,
+        "diagnoses": diagnoses,
+        "val_diagnoses": val_diagnoses,
         "lr_first": verdict["lr_first"],
         "lr_last": verdict["lr_last"],
         "grad_norm_max": verdict["grad_norm_max"],
@@ -4517,6 +4534,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
              f" ({n_diverged} diverged grid runs excluded from selection, "
              f"see baselines_probe_tuning.json)"))
     probe_accs = []
+    probe_diverged = []
     for seed in settings.seeds:
         probe_curve = []
         probe = train_linear_probe(settings.n_pairs, settings.vocab,
@@ -4528,18 +4546,40 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             probe, settings.n_pairs, settings.vocab, settings.device,
             batch=settings.probe_eval_batch,
             batches=settings.probe_eval_batches, seed=TEST_SEED)
-        probe_accs.append(acc)
+        diverged = bool(any("nonfinite" in p or "nonfinite_grad" in p
+                            for p in probe_curve))
+        # A diverged run stopped at an arbitrary step, so its accuracy is
+        # not a completed-run measurement: keep it in the raw record for
+        # transparency but exclude it from the HB2 mean/CI, exactly like
+        # ``tune_linear_probe`` excludes diverged grid runs from selection.
+        if diverged:
+            probe_diverged.append({"seed": seed, "accuracy": acc})
+        else:
+            probe_accs.append(acc)
         _write_result(out_dir / "baselines_runs.jsonl",
                       {**record, "name": "linear_bag_probe", "lr": best_lr,
                        "training_seed": seed, "accuracy": acc,
-                       "diverged": bool(any(
-                           "nonfinite" in p or "nonfinite_grad" in p
-                           for p in probe_curve)),
-                       "train_loss_first": probe_curve[0]["loss"],
-                       "train_loss_last": probe_curve[-1]["loss"],
+                       "diverged": diverged,
+                       "train_loss_first": (
+                           probe_curve[0]["loss"] if probe_curve
+                           else float("nan")),
+                       "train_loss_last": (
+                           probe_curve[-1]["loss"] if probe_curve
+                           else float("nan")),
                        "probe_curve": probe_curve,
                        "n": settings.probe_eval_batch
                             * settings.probe_eval_batches})
+    if probe_diverged:
+        print(f"[baselines] WARNING: {len(probe_diverged)} final probe "
+              f"run(s) diverged at lr={best_lr:g} and are excluded from "
+              f"HB2: seeds "
+              f"{[row['seed'] for row in probe_diverged]}")
+    if not probe_accs:
+        raise RuntimeError(
+            f"all {len(settings.seeds)} final linear-probe runs diverged "
+            f"at the selected lr={best_lr:g}: no completed test-seed "
+            f"measurement exists, so HB2 cannot be certified (inspect "
+            f"baselines_runs.jsonl and the probe training curves)")
     summary = _mean_std(probe_accs)
     chance = 1.0 / (settings.vocab - 2)
     probe_n_per_seed = settings.probe_eval_batch * settings.probe_eval_batches
@@ -4586,9 +4626,9 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
               "straddles the +chance bound); this is not evidence of "
               f"leakage: {need_s}; or widen the probe evaluation stream "
               "(Settings.probe_eval_batch/probe_eval_batches) and re-run")
-    if hb2["hb2_supported"] and n_seeds < floor:
-        print(f"  NOTE: HB2 is provisional: certified on {n_seeds} seed(s) "
-              f"< the pre-registered claim floor {floor} "
+    if hb2["hb2_supported"] and int(hb2["n"]) < floor:
+        print(f"  NOTE: HB2 is provisional: certified on {int(hb2['n'])} "
+              f"completed seed(s) < the pre-registered claim floor {floor} "
               f"(Settings.min_seeds_for_claim)")
 
     # HB6/HB7 complexity ladder: the simplest learned model must be tried --
@@ -4759,6 +4799,9 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "probe_tuning": {
             "lr_grid": list(settings.probe_lr_grid),
             "diverged_runs": n_diverged,
+            "final_diverged_seeds": [row["seed"] for row in probe_diverged],
+            "final_diverged_accuracy": {
+                str(row["seed"]): row["accuracy"] for row in probe_diverged},
             "selection": probe_selection,
             "by_lr": table,
         },
