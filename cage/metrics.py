@@ -312,7 +312,11 @@ def auc_paired_bootstrap_ci(scores_a, scores_b, positives, n_boot: int = 10000,
     """Paired bootstrap CI for difference of ROC/PR-AUC on same items."""
     sa = _flatten_float(scores_a)
     sb = _flatten_float(scores_b)
-    y = torch.as_tensor(positives).reshape(-1).bool()
+    # The three row-aligned inputs must live on one device: callers can
+    # legitimately pass CUDA scores with a CPU boolean mask (or vice versa),
+    # and the bootstrap indexes all three with one device-local index.
+    y = torch.as_tensor(positives).reshape(-1).to(sa.device).bool()
+    sb = sb.to(sa.device)
     if sa.numel() != sb.numel() or sa.numel() != y.numel() or sa.numel() == 0:
         return {"mean_diff": float("nan"), "lo": float("nan"), "hi": float("nan")}
     metric = metric.lower()
