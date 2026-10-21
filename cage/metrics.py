@@ -511,7 +511,15 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     of being excluded.  The existing definitions are left unchanged because
     the design notes pin them; the companions only make the convention
     visible.
+
+    ``topk`` must be a positive integer; values above the number of classes
+    are clamped to that count.
     """
+    raw_topk = topk
+    topk = _positive_integer(raw_topk)
+    if topk is None:
+        raise ValueError(
+            f"topk must be a positive integer, got {raw_topk!r}")
     logits = torch.as_tensor(logits).detach()
     targets = torch.as_tensor(targets).detach().reshape(-1).long()
     if logits.dim() == 1:
@@ -525,13 +533,13 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
             or bool((targets < 0).any()) or bool((targets >= k).any())):
         out = {"n": 0, "n_classes_present": 0, "nll": float("nan")}
         out.update({key: float("nan") for key in keys})
-        out[f"top{min(int(topk), k)}_accuracy"] = float("nan")
+        out[f"top{min(topk, k)}_accuracy"] = float("nan")
         return out
 
     pred = logits.argmax(dim=-1)
     correct = pred == targets
     acc = float(correct.to(torch.float64).mean())
-    topk_used = min(int(topk), k)
+    topk_used = min(topk, k)
     top = logits.topk(topk_used, dim=-1).indices
     topk_acc = float((top == targets.unsqueeze(1)).any(dim=1)
                      .to(torch.float64).mean())
@@ -1352,6 +1360,20 @@ def _self_test() -> int:
     mm_good = multiclass_metrics(torch.tensor([[0.0, 1.0], [1.0, 0.0]]),
                                  torch.tensor([1, 0]))
     check("multiclass_nll_reported", math.isfinite(mm_good["nll"]))
+    mm_clamped = multiclass_metrics(
+        torch.tensor([[0.0, 1.0], [1.0, 0.0]]), torch.tensor([1, 0]),
+        topk=99)
+    check("multiclass_topk_clamped_to_classes",
+          mm_clamped["top2_accuracy"] == 1.0)
+    bad_topk_rejected = True
+    for bad_topk in (0, -1, 2.5, None, True):
+        try:
+            multiclass_metrics(torch.randn(2, 4), torch.tensor([0, 1]),
+                               topk=bad_topk)
+        except ValueError:
+            continue
+        bad_topk_rejected = False
+    check("multiclass_invalid_topk_rejected", bad_topk_rejected)
     # Row 0 predicts target 0 correctly; row 1 predicts class 2 while the
     # target is class 1.  The pinned target-present macro-F1 ignores class 2
     # (mean of 2/3 and 0), while the label-union companion charges it as a
