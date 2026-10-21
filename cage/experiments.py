@@ -3172,6 +3172,7 @@ def _run_event(settings: Settings, experiment: str, event: str, **details) -> No
         ctx = _run_context(settings)
         record = {
             "run_id": ctx["run_id"],
+            "schema_version": ctx["schema_version"],
             "run_started_utc": ctx["run_started_utc"],
             "experiment": experiment,
             "event": event,
@@ -3187,6 +3188,7 @@ def _run_event(settings: Settings, experiment: str, event: str, **details) -> No
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False,
                                 sort_keys=True) + "\n")
+        _register_artifact(path)
     except Exception as e:  # noqa: BLE001 - tracking must not kill a run
         print(f"[runner] WARNING: could not write run_index event "
               f"{event}: {e}")
@@ -3204,12 +3206,14 @@ def _write_result(path: pathlib.Path, record: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    _register_artifact(path)
 
 
 def _write_json(path: pathlib.Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2,
                                sort_keys=True), encoding="utf-8")
+    _register_artifact(path)
 
 
 def _git_sha() -> str:
@@ -3238,6 +3242,103 @@ def _git_dirty() -> bool:
 _SOURCE_TREE_SHA: str | None = None
 _RUN_ID: str | None = None
 _RUN_STARTED_UTC: str | None = None
+_RECORD_SCHEMA = 1
+_RUN_ARTIFACTS: set[pathlib.Path] = set()
+
+
+def _register_artifact(path) -> None:
+    """Remember a file written by this invocation for the artifact index."""
+    try:
+        _RUN_ARTIFACTS.add(pathlib.Path(path).resolve())
+    except Exception:  # noqa: BLE001 - tracking must not kill a run
+        pass
+
+
+def _write_artifact_index(out_dir: pathlib.Path, settings: Settings,
+                          experiment: str, completed: bool,
+                          elapsed_seconds: float) -> dict:
+    """Hash every artifact this invocation wrote into one index file.
+
+    A results directory is append-only across invocations and can be
+    truncated or edited after the fact.  The index records the size,
+    line count and SHA-256 of each file written by *this* run together
+    with the usual provenance block, so a later reader can tell a complete
+    artifact set from a partial/corrupted one without trusting filenames
+    or timestamps.  The index itself is written last and is not listed.
+    """
+    root = pathlib.Path(out_dir).resolve()
+    entries = []
+    for path in sorted(p for p in _RUN_ARTIFACTS
+                       if p.exists() and p.parent == root):
+        data = path.read_bytes()
+        entry = {
+            "file": path.name,
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        if path.suffix == ".jsonl":
+            entry["records"] = data.count(b"\n")
+        entries.append(entry)
+    payload = {
+        "experiment": experiment,
+        "completed": bool(completed),
+        "elapsed_seconds": round(float(elapsed_seconds), 3),
+        "artifact_count": len(entries),
+        "artifacts": entries,
+        "schema_version": _RECORD_SCHEMA,
+        **_run_context(settings),
+    }
+    (root / "artifact_index.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8")
+    return payload
+
+
+def _verify_artifacts(out_dir) -> int:
+    """Check a results directory against its last artifact index.
+
+    Exit 0 when every listed file exists with the recorded size and hash,
+    1 when any file is missing/changed, 2 when no usable index exists.
+    """
+    root = pathlib.Path(out_dir)
+    index_path = root / "artifact_index.json"
+    if not index_path.exists():
+        print(f"[verify] no artifact index at {index_path}; nothing to check")
+        return 2
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+        artifacts = payload["artifacts"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print(f"[verify] unreadable artifact index {index_path}: {e}")
+        return 2
+    failures = []
+    for entry in artifacts:
+        path = root / str(entry.get("file", ""))
+        if not path.is_file():
+            failures.append(f"{path.name}: missing")
+            continue
+        data = path.read_bytes()
+        if len(data) != entry.get("bytes"):
+            failures.append(f"{path.name}: size {len(data)} != "
+                            f"{entry.get('bytes')}")
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != entry.get("sha256"):
+            failures.append(f"{path.name}: sha256 {digest[:12]} != "
+                            f"{str(entry.get('sha256'))[:12]}")
+        lines = data.count(b"\n")
+        if path.suffix == ".jsonl" and lines != entry.get("records"):
+            failures.append(f"{path.name}: line count {lines} != "
+                            f"{entry.get('records')}")
+    if failures:
+        print(f"[verify] FAILED ({len(failures)} issue(s)) for run "
+              f"{payload.get('run_id')} in {root}:")
+        for failure in failures:
+            print(f"    {failure}")
+        return 1
+    print(f"[verify] ok: {len(artifacts)} artifact(s) match run "
+          f"{payload.get('run_id')} (completed={payload.get('completed')}, "
+          f"schema={payload.get('schema_version')})")
+    return 0
 
 
 def _source_tree_sha256() -> str:
@@ -3429,6 +3530,7 @@ def _run_context(settings: Settings) -> dict:
     }, ensure_ascii=False, sort_keys=True, default=str)
     ctx = {
         "run_id": run_id,
+        "schema_version": _RECORD_SCHEMA,
         "run_started_utc": run_started_utc,
         "git_sha": git_sha,
         "git_dirty": bool(git_dirty),
@@ -3460,7 +3562,8 @@ def _stamp(settings: Settings) -> dict:
     """
     ctx = _run_context(settings)
     return {key: ctx[key] for key in
-            ("run_id", "setup_sha256", "git_sha", "source_tree_sha256")}
+            ("run_id", "schema_version", "setup_sha256", "git_sha",
+             "source_tree_sha256")}
 
 
 def _protocol_sha256(ctx: dict) -> str:
@@ -7445,7 +7548,12 @@ def main(argv=None) -> int:
                         help="Benjamini-Hochberg FDR level for the "
                              "pre-registered contrast families")
     parser.add_argument("--out", default="results")
+    parser.add_argument("--verify-artifacts", action="store_true",
+                        help="check files in --out against artifact_index.json "
+                             "and exit")
     args = parser.parse_args(argv)
+    if args.verify_artifacts:
+        return _verify_artifacts(args.out)
 
     settings = Settings.quick(args.device) if args.quick else Settings(
         device=args.device)
@@ -7492,6 +7600,9 @@ def main(argv=None) -> int:
     out_dir = pathlib.Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     settings.out_dir = out_dir
+    _RUN_ARTIFACTS.clear()
+    started = time.monotonic()
+    status = "failed"
     _write_json(out_dir / "hypotheses.json", HYPOTHESES)
     _write_json(out_dir / "environment.json", _run_context(settings))
     _run_event(settings, args.only, "started", quick=bool(args.quick),
@@ -7519,17 +7630,30 @@ def main(argv=None) -> int:
             run_all(settings, out_dir)
     except (OverfitSanityError, ReproducibilityError,
             SplitAuditError, BaselineVerdictError) as e:
+        status = "aborted"
         print(f"[runner] ABORTED before grid training: {e}")
         _run_event(settings, args.only, "aborted",
-                   error=type(e).__name__, reason=str(e))
+                   error=type(e).__name__, reason=str(e),
+                   elapsed_seconds=round(time.monotonic() - started, 3))
         return 3
     except Exception as e:
         _run_event(settings, args.only, "failed",
-                   error=type(e).__name__, reason=str(e))
+                   error=type(e).__name__, reason=str(e),
+                   elapsed_seconds=round(time.monotonic() - started, 3))
         raise
-    _run_event(settings, args.only, "completed")
-    print(f"\n[runner] done; records in {out_dir}/")
-    return 0
+    else:
+        status = "completed"
+        _run_event(settings, args.only, "completed",
+                   elapsed_seconds=round(time.monotonic() - started, 3))
+        print(f"\n[runner] done; records in {out_dir}/")
+        return 0
+    finally:
+        try:
+            _write_artifact_index(out_dir, settings, args.only,
+                                  completed=(status == "completed"),
+                                  elapsed_seconds=time.monotonic() - started)
+        except Exception as e:  # noqa: BLE001 - index failure is a warning
+            print(f"[runner] WARNING: could not write artifact index: {e}")
 
 
 if __name__ == "__main__":
