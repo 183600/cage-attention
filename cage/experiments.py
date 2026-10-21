@@ -6985,10 +6985,16 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                         for seed in sorted(shallow_by_seed, key=_seed_order)]
         reference_name = (f"tuned {shallow_depth}-layer standard "
                           f"transformer (lr={shallow.get('lr', float('nan')):g})")
+        reference_competent = bool(
+            shallow.get("above_chance", True)
+            and not shallow.get("unmeasured", False))
         print(f"\n[e1] complexity benchmark vs the tuned shallow rung "
               f"(paired over seeds; SESOI={benchmark_sesoi:g} accuracy; "
               f"each arm carries its own val-tuned lr, so this is a "
               f"benchmark, not a controlled mechanism contrast):")
+        if not reference_competent:
+            print(f"      reference rung is not above chance: rows are "
+                  f"diagnostics only and cannot justify complexity")
         print(f"{'arm':>6} {'arm_acc':>17} {'shallow_acc':>17} "
               f"{'paired_diff':>28} {'state':>18}")
         benchmark_by_arm = {}
@@ -6999,14 +7005,23 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 "mean", float("nan"))
             ref_mean = (bench.get("arms") or {}).get("b", {}).get(
                 "mean", float("nan"))
-            prov = ("" if int(bench.get("n") or 0) >= settings.min_seeds_for_claim
-                    else (f" [provisional: n={int(bench.get('n') or 0)} "
-                          f"< claim floor "
-                          f"{settings.min_seeds_for_claim}]"))
+            prov_parts = []
+            if int(bench.get("n") or 0) < settings.min_seeds_for_claim:
+                prov_parts.append(
+                    f"[provisional: n={int(bench.get('n') or 0)} "
+                    f"< claim floor {settings.min_seeds_for_claim}]")
+            if not reference_competent:
+                prov_parts.append(
+                    "[reference not above chance: not a complexity claim]")
+            prov = "".join(f" {part}" for part in prov_parts)
             claim_eligible = (int(bench.get("n") or 0)
-                              >= settings.min_seeds_for_claim)
+                              >= settings.min_seeds_for_claim
+                              and reference_competent)
             if bench["complexity_justified"]:
-                state = "beats" if claim_eligible else "beats (provisional)"
+                if not reference_competent:
+                    state = "beats (ref not competent)"
+                else:
+                    state = "beats" if claim_eligible else "beats (provisional)"
             elif bench["below_reference"]:
                 state = "below"
             else:
@@ -7027,6 +7042,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 "curve_invalid_excluded": bench.get("curve_invalid_excluded"),
                 "sesoi": benchmark_sesoi,
                 "state": state,
+                "reference_competent": reference_competent,
                 "claim_eligible": claim_eligible,
                 "complexity_justified": bench["complexity_justified"],
                 "below_reference": bench["below_reference"],
@@ -7045,8 +7061,12 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         # provisional observation into a claim by storage.
         justified = [g for g in above_sesoi
                      if benchmark_by_arm[g]["claim_eligible"]]
+        reference_incompetent = [
+            g for g in above_sesoi
+            if not benchmark_by_arm[g]["reference_competent"]]
         provisional = [g for g in above_sesoi
-                       if not benchmark_by_arm[g]["claim_eligible"]]
+                       if not benchmark_by_arm[g]["claim_eligible"]
+                       and benchmark_by_arm[g]["reference_competent"]]
         # ``none`` is the ungated deep baseline, not a gating arm: it can
         # justify the depth of the grid but says nothing about the gate's
         # capacity.  Keep the two readings separate so a depth win is not
@@ -7057,16 +7077,19 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             "reference_depth": shallow_depth,
             "reference_lr": shallow.get("lr"),
             "reference_accuracy_mean": shallow.get("accuracy_mean"),
+            "reference_competent": reference_competent,
             "sesoi_accuracy": benchmark_sesoi,
             "by_arm": benchmark_by_arm,
             "arms_above_sesoi": above_sesoi,
             "arms_justified": justified,
             "provisional_arms_above_sesoi": provisional,
+            "reference_incompetent_arms_above_sesoi": reference_incompetent,
             "gating_arms_justified": gating_justified,
             "provisional_gating_arms_above_sesoi": [
                 g for g in provisional if g != "none"],
             "deep_none_justified": "none" in justified,
             "deep_none_provisional": "none" in provisional,
+            "deep_none_reference_incompetent": "none" in reference_incompetent,
             "comparison": "benchmark",
             "note": ("paired benchmark, not a controlled mechanism "
                      "contrast: architecture/capacity and the val-tuned "
@@ -7088,6 +7111,12 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                   f"fewer paired seeds than the claim floor "
                   f"({settings.min_seeds_for_claim}); not recorded as "
                   f"complexity justified")
+        elif reference_incompetent:
+            print(f"      reference not competent: arm(s) "
+                  f"{', '.join(reference_incompetent)} exceed the tuned "
+                  f"shallow reference by SESOI, but the reference rung is "
+                  f"not above chance, so none is recorded as complexity "
+                  f"justified")
         else:
             print(f"      WARNING: no E1 arm beats the tuned shallow "
                   f"reference by the pre-registered SESOI="
