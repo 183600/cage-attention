@@ -6912,10 +6912,13 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     complexity_benchmark = None
     if shallow_by_seed:
         shallow_depth = int(shallow.get("n_layers", 1))
+        reference_competent = bool(
+            shallow.get("above_chance", True)
+            and not shallow.get("unmeasured", False))
         hb6_prov = ("" if not verdict.get("hb6_supported")
                     or floor.get("hb6_claim_eligible", True)
                     else " [provisional: below the pre-registered seed floor]")
-        if not shallow.get("above_chance", True):
+        if not reference_competent:
             hb6_prov += (" [HB6 not read as depth evidence: the rung is not "
                          "above chance, so this step count did not learn the "
                          "task]")
@@ -6966,13 +6969,17 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                               f"< the pre-registered claim floor "
                               f"{settings.min_seeds_for_claim}: too few "
                               f"runs for a depth claim]" + floor_note)
-            readout = (
-                "a supported gap means the depth of the E1/E3 grids is "
-                "measurably required, a gap including 0 means a gate "
-                "gain must be beyond what one layer already reaches"
-                if claim_floor_ok else
-                "a gap excluding 0 is a provisional observation, not a "
-                "depth claim")
+            if not reference_competent:
+                readout = ("the reference rung is not above chance, so "
+                           "this comparison cannot support a depth claim")
+            elif not claim_floor_ok:
+                readout = ("a gap excluding 0 is a provisional observation, "
+                           "not a depth claim")
+            else:
+                readout = ("a supported gap means the depth of the E1/E3 "
+                           "grids is measurably required, a gap including 0 "
+                           "means a gate gain must be beyond what one layer "
+                           "already reaches")
             print(f"      paired deep(none, "
                   f"{deep_layers} layers) - "
                   f"shallow({shallow_depth} layer) "
@@ -6993,9 +7000,6 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                         for seed in sorted(shallow_by_seed, key=_seed_order)]
         reference_name = (f"tuned {shallow_depth}-layer standard "
                           f"transformer (lr={shallow.get('lr', float('nan')):g})")
-        reference_competent = bool(
-            shallow.get("above_chance", True)
-            and not shallow.get("unmeasured", False))
         print(f"\n[e1] complexity benchmark vs the tuned shallow rung "
               f"(paired over seeds; SESOI={benchmark_sesoi:g} accuracy; "
               f"each arm carries its own val-tuned lr, so this is a "
