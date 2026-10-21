@@ -492,8 +492,17 @@ def check_data_geometry(n_pairs, vocab, max_len=None) -> None:
     Checking this at construction turns a shape-dependent ``topk`` failure
     into an explicit configuration error instead of aborting mid-run.
     """
-    n_pairs = int(n_pairs)
-    vocab = int(vocab)
+    def _geometry_int(value, name):
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be an integer, not bool")
+        try:
+            return operator.index(value)
+        except TypeError as exc:
+            raise ValueError(
+                f"{name} must be an integer, got {value!r}") from exc
+
+    n_pairs = _geometry_int(n_pairs, "n_pairs")
+    vocab = _geometry_int(vocab, "vocab")
     if n_pairs < 1:
         raise ValueError(f"n_pairs must be >= 1, got {n_pairs}")
     if vocab < 4:
@@ -505,10 +514,11 @@ def check_data_geometry(n_pairs, vocab, max_len=None) -> None:
             f"n_pairs={n_pairs} needs {n_pairs} distinct key ids but only "
             f"{vocab - 2} selectable ids exist (vocab={vocab})")
     if max_len is not None:
+        max_len = _geometry_int(max_len, "max_len")
         needed = 2 * n_pairs + 2
-        if int(max_len) < needed:
+        if max_len < needed:
             raise ValueError(
-                f"max_len={int(max_len)} cannot hold the sequence: "
+                f"max_len={max_len} cannot hold the sequence: "
                 f"2*n_pairs + 2 = {needed} positions are required")
 
 
@@ -2008,6 +2018,12 @@ def _self_test() -> int:
         check("geometry_max_len_rejected", False)
     except ValueError:
         check("geometry_max_len_rejected", True)
+    for geo in ((3.5, 64), (3, 64.0), (3, 64, 7.5)):
+        try:
+            check_data_geometry(*geo)
+            check(f"geometry_fractional_rejected_{geo}", False)
+        except ValueError:
+            check(f"geometry_fractional_rejected_{geo}", True)
     for args in ((2, 0, 64), (2, -1, 64), (2, 4.0, 64), (2, 4, -1)):
         try:
             make_batch(*args, device="cpu")
