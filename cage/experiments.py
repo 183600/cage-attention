@@ -3278,10 +3278,11 @@ def _fallback_context(error: Exception) -> dict:
     minimal block keeps the failure traceable instead of losing it just
     because the environment probe failed too.
     """
+    run_id, run_started_utc = _run_identity()
     return {
-        "run_id": _RUN_ID,
+        "run_id": run_id,
         "schema_version": _RECORD_SCHEMA,
-        "run_started_utc": _RUN_STARTED_UTC,
+        "run_started_utc": run_started_utc,
         "git_sha": _git_sha(),
         "git_dirty": _git_dirty(),
         "source_tree_sha256": _source_tree_sha256(),
