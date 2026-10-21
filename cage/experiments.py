@@ -4328,8 +4328,9 @@ def _curve_record(hist, early_stop_info=None):
     """Per-run learning-curve summary (monitor the curve, not just the end).
 
     Stores both the reduced verdict and the raw series (steps, train loss,
-    validation loss, pre-clip gradient norm), so a run that is later read
-    as overfitting/plateauing can be re-examined without retraining.
+    validation loss, validation accuracy, pre-clip gradient norm), so a run
+    that is later read as overfitting/plateauing can be re-examined without
+    retraining.
     ``steps_run`` records the number of optimizer steps actually executed
     (from ``train_model``'s ``early_stop_info``, or the logged history as a
     fallback) and ``stopped_early``/``restored_best`` record whether the
@@ -4351,6 +4352,8 @@ def _curve_record(hist, early_stop_info=None):
     train = [h for h in hist if _finite(h.get("train_loss"))]
     val = [h for h in hist if h.get("val_loss") is not None
            and _finite(h.get("val_loss"))]
+    val_acc = [h for h in hist if h.get("val_acc") is not None
+               and _finite(h.get("val_acc"))]
 
     def _diagnoses(key):
         return [{"step": int(h["step"]), **h[key]} for h in hist
@@ -4371,6 +4374,10 @@ def _curve_record(hist, early_stop_info=None):
         "train_loss_last": train[-1]["train_loss"] if train else float("nan"),
         "val_loss_first": val[0]["val_loss"] if val else float("nan"),
         "val_loss_last": val[-1]["val_loss"] if val else float("nan"),
+        "val_acc_first": val_acc[0]["val_acc"] if val_acc else float("nan"),
+        "val_acc_last": val_acc[-1]["val_acc"] if val_acc else float("nan"),
+        "best_val_acc": max(float(h["val_acc"]) for h in val_acc)
+        if val_acc else float("nan"),
         "train_delta": verdict["train_delta"],
         "val_delta": verdict["val_delta"],
         "generalization_gap": verdict["generalization_gap"],
@@ -4402,6 +4409,8 @@ def _curve_record(hist, early_stop_info=None):
                            else float(h["val_loss"]) for h in train],
         "curve_val_loss_se": [None if h.get("val_loss_se") is None
                               else float(h["val_loss_se"]) for h in train],
+        "curve_val_acc": [None if h.get("val_acc") is None
+                          else float(h["val_acc"]) for h in train],
         "curve_grad_norm": [None if h.get("grad_norm") is None
                             else float(h["grad_norm"]) for h in train],
         "curve_lr": [None if h.get("lr") is None else float(h["lr"])
@@ -6930,6 +6939,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         "experiment": "e2", "test_seed": TEST_SEED,
         "by_length": {str(L): stats
                       for L, stats in rule_ceiling_by_length.items()},
+        "_provenance": _stamp(settings),
     })
     print(f"[e2] training at n_pairs={settings.n_pairs}, sweep over {lengths} "
           f"(test seed {TEST_SEED}, stats seed {STATS_SEED})")
@@ -6952,6 +6962,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                    "eval_seed": eval_seed, "stats_seed": stats_seed,
                    "params": params, "model_cfg": model_cfg,
                    "eval_n": int(base_metrics["n"]),
+                   **{k: v for k, v in base_metrics.items() if k != "n"},
+                   "metrics_by_length": {},
                    "accuracy_by_length": {}, "eval_n_by_length": {},
                    "entropy_by_length": {}, "entropy_norm_by_length": {},
                    "maxprob_by_length": {}, "gate_by_length": {},
@@ -6980,6 +6992,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                     errors = last_errors
                 rec["accuracy_by_length"][length] = metrics["accuracy"]
                 rec["eval_n_by_length"][length] = int(metrics["n"])
+                rec["metrics_by_length"][length] = {
+                    k: v for k, v in metrics.items() if k != "n"}
                 rec["entropy_by_length"][length] = float(stats["entropy"].mean())
                 rec["entropy_norm_by_length"][length] = (
                     rec["entropy_by_length"][length]
@@ -7374,9 +7388,8 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                         "layer_scale": layer_scale, "seed": seed, "lr": lr,
                         "eval_seed": eval_seed, "stats_seed": stats_seed,
                         "params": params, "model_cfg": model_cfg,
-                        "accuracy": metrics["accuracy"],
                         "eval_n": int(metrics["n"]),
-                        "f1_macro": metrics["f1_macro"],
+                        **{k: v for k, v in metrics.items() if k != "n"},
                         "gate_depth_ratio": gate_depth_ratio(stats),
                         "resid_norm_by_layer": resid.tolist(),
                         "resid_norm_last_over_first": float(
