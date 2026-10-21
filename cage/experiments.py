@@ -5997,35 +5997,39 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
 
     print("\n[e1] H1a robustness: rank (Spearman) gate-entropy correlation "
           "alongside Pearson (a monotone effect must survive the change of "
-          "association measure):")
-    print(f"{'gate':>6} {'r_entropy':>10} {'rho_entropy':>12} "
-          f"{'r_maxprob':>10} {'rho_maxprob':>12}")
+          "association measure; mean±std over seeds - a difference smaller "
+          "than the seed spread is not a robustness conclusion):")
+    print(f"{'gate':>6} {'r_entropy':>17} {'rho_entropy':>19} "
+          f"{'r_maxprob':>17} {'rho_maxprob':>19}")
     for gate in GATES:
         t = table[gate]
+
         def rcell(key):
             m = t.get(key)
             if not m or not math.isfinite(m["mean"]):
-                return float("nan")
-            return m["mean"]
-        print(f"{gate:>6} {rcell('gate_vs_entropy'):>10.4f} "
-              f"{rcell('gate_vs_entropy_spearman'):>12.4f} "
-              f"{rcell('gate_vs_maxprob'):>10.4f} "
-              f"{rcell('gate_vs_maxprob_spearman'):>12.4f}")
+                return "n/a"
+            return f"{m['mean']:.4f}±{m['std']:.4f}"
+
+        print(f"{gate:>6} {rcell('gate_vs_entropy'):>17} "
+              f"{rcell('gate_vs_entropy_spearman'):>19} "
+              f"{rcell('gate_vs_maxprob'):>17} "
+              f"{rcell('gate_vs_maxprob_spearman'):>19}")
 
     print("\n[e1] H1b robustness: gate margin (correct - false-conc) across "
           "the high-maxprob threshold sweep (pre-registered decision point "
           "is thr=0.5; a sign flip at other cutoffs means the margin is a "
-          "property of the cutoff, not the mechanism):")
+          "property of the cutoff, not the mechanism; mean±std over seeds):")
     thresholds = sorted({float(t) for r in runs
                          for t in r.get("false_conc_thresholds", ())})
-    print(f"{'gate':>6}" + "".join(f"{f'thr={t:g}':>12}" for t in thresholds))
+    print(f"{'gate':>6}" + "".join(f"{f'thr={t:g}':>17}" for t in thresholds))
     for gate in GATES:
         cells = []
         for thr in thresholds:
             agg = table[gate].get(f"gate_margin_thr{thr:g}", {})
             m = agg.get("mean", float("nan"))
-            cells.append("n/a" if not math.isfinite(m) else f"{m:+.4f}")
-        print(f"{gate:>6}" + "".join(f"{c:>12}" for c in cells))
+            cells.append("n/a" if not math.isfinite(m)
+                         else f"{m:+.4f}±{agg.get('std', float('nan')):.4f}")
+        print(f"{gate:>6}" + "".join(f"{c:>17}" for c in cells))
 
     # HB0 competence prerequisite: "does the gate read entropy?" is only a
     # mechanism question when at least one trained condition demonstrably
