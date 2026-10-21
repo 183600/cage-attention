@@ -572,6 +572,68 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
     return out
 
 
+def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
+                        alpha: float = 0.05) -> dict:
+    """Bootstrap one-sided non-inferiority test for a *null prediction*.
+
+    A component-completeness claim such as "adding the null slot does not
+    cost accuracy relative to the no-gate arm" is neither a superiority
+    test (the effect is expected to be ~0) nor a symmetric equivalence test
+    (only *worse* than the bound matters, not *better*).  The pre-registered
+    ``bound`` (> 0) is the smallest material loss: H0 is
+    ``mean(diffs) <= -bound`` and the one-sided p-value is the bootstrap
+    mass at or below ``-bound`` with the same ``+1`` smoothing as the other
+    bootstrap p-values.  The decision rule, pre-registered in the
+    hypothesis registry, is the CI counterpart: ``noninferior`` is True
+    when the 95% percentile CI's *lower* bound lies strictly above
+    ``-bound`` (the whole plausible effect is at most a sub-bound loss).
+    A CI whose lower bound falls below ``-bound`` is a refutation (material
+    loss), not "inconclusive" - the difference from the two-sided
+    equivalence test, which needs both ends inside the bound.
+
+    ``diffs`` holds the paired per-seed values as in
+    :func:`paired_bootstrap_ci`; the usual ``lo``/``hi``/``sd``/``mde80``
+    and small-sample (jackknife/BCa) companions are attached.  Returns NaN
+    fields and ``noninferior=False`` for an empty input or a non-positive/
+    non-finite bound.
+    """
+    bound = float(bound)
+    d = _flatten_float(diffs)
+    out = {
+        "mean": float("nan"), "lo": float("nan"), "hi": float("nan"),
+        "n": 0, "sd": float("nan"), "half_width": float("nan"),
+        "mde80": float("nan"), "p_value": float("nan"),
+        "sign_consistency": float("nan"), "alpha": float(alpha),
+        "test": "noninferiority", "bound": -bound, "noninferior": False,
+        "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
+        "loo_above_bound": False, "lo_bca": float("nan"),
+        "hi_bca": float("nan"), "noninferior_bca": None,
+        "bca_agrees": None,
+    }
+    if d.numel() == 0 or not math.isfinite(bound) or bound <= 0.0:
+        return out
+    means = _bootstrap_means(d, n_boot, seed)
+    out.update(_bootstrap_summary(d, means, alpha))
+    p_below = float((means <= -bound).to(torch.float64).mean())
+    out["p_value"] = min(1.0, (p_below * n_boot + 1.0) / (n_boot + 1.0))
+    out["noninferior"] = bool(out["lo"] > -bound)
+    loo = _jackknife_means(d)
+    out["loo_mean_min"] = float(loo.min()) if loo.numel() else float("nan")
+    out["loo_mean_max"] = float(loo.max()) if loo.numel() else float("nan")
+    out["loo_above_bound"] = bool(
+        loo.numel() > 0 and bool(loo.min() > -bound))
+    bca = _bca_bounds(d, means, alpha)
+    if bca is None:
+        out["lo_bca"] = out["hi_bca"] = float("nan")
+        out["noninferior_bca"] = None
+        out["bca_agrees"] = None
+    else:
+        out["lo_bca"], out["hi_bca"] = bca
+        out["noninferior_bca"] = bool(out["lo_bca"] > -bound)
+        out["bca_agrees"] = bool(out["noninferior"] == out["noninferior_bca"])
+    return out
+
+
 def bootstrap_upper_p(diffs, bound, n_boot: int = 10000, seed: int = 0) -> float:
     """One-sided bootstrap p-value for ``H0: mean(diffs) >= bound``.
 

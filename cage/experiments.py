@@ -154,6 +154,7 @@ from .metrics import (
     benjamini_hochberg,
     clustered_proportion_ci,
     equivalence_test,
+    noninferiority_test,
     paired_bootstrap_ci,
     seeds_for_power,
     wilson_ci,
@@ -450,15 +451,35 @@ HYPOTHESES = {
     "H1c": {
         "experiment": "e1",
         "question": "Does the explicit null slot suppress writes when the "
-                    "model is wrong?",
+                    "model is wrong, and does the null arm stay at least as "
+                    "accurate as the no-gate baseline?",
         "hypothesis": "null_mass is higher on errors than on correct "
-                      "answers (the null slot absorbs the write).",
-        "prediction": "null_mass_error_margin > 0",
-        "decision": "paired bootstrap 95% CI excludes 0 after "
+                      "answers (the null slot absorbs the write).  Because "
+                      "the null arm claims a dedicated slot is a benign, "
+                      "useful addition (not an accuracy trade), its accuracy "
+                      "must not fall below the no-gate ``none`` arm - a "
+                      "significant accuracy loss would mean the null slot "
+                      "buys its suppression by breaking recall.",
+        "prediction": "null_mass_error_margin > 0; and the null arm's "
+                      "accuracy relative to ``none`` stays inside the "
+                      "pre-registered non-inferiority bound (null - none "
+                      ">= -SESOI, i.e. the 95% CI of null - none lies above "
+                      "the negative bound rather than materially below "
+                      "``none``)",
+        "decision": "paired bootstrap 95% CI excludes 0 for the margin after "
                     "Benjamini-Hochberg FDR control across the E1 contrasts "
-                    "(q=0.05)",
-        "sesoi": {"null_mass_error_margin": 0.02},
+                    "(q=0.05); the null-vs-none accuracy row is a *null* "
+                    "reverse check, read as a one-sided non-inferiority test: "
+                    "the lower bound of the CI of null - none must stay above "
+                    "the registered bound (-accuracy SESOI), so a confidence "
+                    "interval entirely below it refutes the claim rather than "
+                    "being read as a null result",
+        "sesoi": {"null_mass_error_margin": 0.02, "accuracy": 0.01},
         "direction": {"null_mass_error_margin": "+"},
+        # The accuracy companion is a null/non-inferiority prediction: its
+        # bound is the accuracy SESOI above, tested one-sided (CI above the
+        # negative bound), not a directional superiority claim.
+        "sesoi_test": {"accuracy": "noninferior"},
     },
     "H1d": {
         "experiment": "e1",
@@ -1685,18 +1706,23 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     return ci
 
 
-def _paired_equivalence(runs_a, runs_b, metric, bound):
-    """Paired bootstrap-TOST contrast with the full controlled audit.
+def _paired_equivalence(runs_a, runs_b, metric, bound, mode="equivalence"):
+    """Paired bootstrap-TOST (or non-inferiority) contrast with full audit.
 
-    A null prediction ("arm A stays close to arm B") still needs the same
-    seed pairing and recipe audit as a directional contrast: equivalence
-    computed on mispaired or recipe-confounded arms would certify the wrong
-    thing.  Reuses :func:`_paired_diff`'s exact pairing and copies its
-    audit/arm/seed metadata onto the TOST result, so the printed row and
-    the decision table carry the same sample the effect was computed on.
+    A null prediction ("arm A stays close to arm B", or "arm A is not
+    materially worse than arm B") still needs the same seed pairing and
+    recipe audit as a directional contrast: equivalence computed on
+    mispaired or recipe-confounded arms would certify the wrong thing.
+    ``mode`` selects the two-sided equivalence test or the one-sided
+    non-inferiority test.  Reuses :func:`_paired_diff`'s exact pairing and
+    copies its audit/arm/seed metadata onto the test result, so the printed
+    row and the decision table carry the same sample the effect was computed
+    on.
     """
     paired = _paired_diff(runs_a, runs_b, metric)
-    ci = equivalence_test(paired.get("diffs") or [], bound)
+    diffs = paired.get("diffs") or []
+    ci = (noninferiority_test(diffs, bound) if mode == "noninferior"
+          else equivalence_test(diffs, bound))
     for key in ("arms", "arms_all", "arms_note", "baseline_mean",
                 "diffs", "curve_invalid_seeds", "seeds_used",
                 "seeds_dropped", "seeds_unpaired", "seeds_undefined",
@@ -2206,11 +2232,14 @@ class ContrastLog:
         ``direction_key`` that is not registered is rejected instead of
         silently producing a two-sided row.
         """
-        equiv = ci.get("test") == "equivalence"
+        test = ci.get("test")
+        equiv = test == "equivalence"
+        noninf = test == "noninferiority"
+        null_test = equiv or noninf
         audit = ci.get("controlled")
         sesoi = (HYPOTHESES.get(hyp, {}).get("sesoi") or {}).get(metric)
-        if equiv:
-            # An equivalence row's decision bound is the CI's registered
+        if null_test:
+            # A null-prediction row's decision bound is the CI's registered
             # bound, which can live under a separate registry key when the
             # displayed metric is shared with directional rows (H2c's
             # reverse check).  ``sesoi`` above is keyed by the display
@@ -2258,18 +2287,24 @@ class ContrastLog:
             # the bound".  Keeping the directional registry value here
             # would let a later reader misread the row as a one-sided
             # superiority test.
-            "direction": None if equiv else direction,
-            "test": "equivalence" if equiv else "difference",
-            "equivalence_bound": ci.get("bound") if equiv else None,
+            "direction": None if null_test else direction,
+            "test": test if test in ("equivalence", "noninferiority")
+                    else "difference",
+            "equivalence_bound": ci.get("bound") if null_test else None,
+            "noninferiority_bound": (ci.get("bound") if noninf else None),
             "equivalent": ci.get("equivalent") if equiv else None,
+            "noninferior": ci.get("noninferior") if noninf else None,
             "sign_consistency": ci.get("sign_consistency"),
             "loo_mean_min": ci.get("loo_mean_min"),
             "loo_mean_max": ci.get("loo_mean_max"),
             "loo_sign_flip": ci.get("loo_sign_flip"),
             "loo_within_bound": ci.get("loo_within_bound"),
+            "loo_above_bound": ci.get("loo_above_bound"),
             "lo_bca": ci.get("lo_bca"),
             "hi_bca": ci.get("hi_bca"),
             "equivalent_bca": ci.get("equivalent_bca") if equiv else None,
+            "noninferior_bca": (ci.get("noninferior_bca") if noninf
+                                else None),
             "bca_agrees": ci.get("bca_agrees"),
             "baseline_mean": ci.get("baseline_mean"),
             "controlled": None if audit is None else audit["controlled"],
@@ -2304,9 +2339,13 @@ class ContrastLog:
                 line += (f"  [capacity: {cap['a']} vs {cap['b']} params, "
                          f"delta={cap['delta_b_minus_a']:+d}]")
         if sesoi is not None:
-            line += (f"  [equivalence bound={sesoi:g}]" if equiv
-                     else f"  [SESOI={sesoi:g}]")
-        if not equiv and direction is not None:
+            if equiv:
+                line += f"  [equivalence bound={sesoi:g}]"
+            elif noninf:
+                line += f"  [non-inferiority bound={-sesoi:g}]"
+            else:
+                line += f"  [SESOI={sesoi:g}]"
+        if not null_test and direction is not None:
             line += (f"  [prediction: effect "
                      f"{'>' if direction == '+' else '<'} 0]")
         dropped = ci.get("seeds_dropped") or []
@@ -2348,27 +2387,30 @@ class ContrastLog:
         key = metric if bound_metric is None else bound_metric
         entry = HYPOTHESES.get(hyp, {})
         bound = (entry.get("sesoi") or {}).get(key)
-        if (entry.get("sesoi_test") or {}).get(key) != "equivalence" \
-                or bound is None:
+        mode = (entry.get("sesoi_test") or {}).get(key)
+        if mode not in ("equivalence", "noninferior") or bound is None:
             raise ValueError(
-                f"{hyp}/{key} has no pre-registered equivalence bound "
-                f"in HYPOTHESES; register it under 'sesoi_test' first")
-        self.print_equivalence_ci(
-            rule, hyp, metric, equivalence_test(diffs, bound), warn=warn)
+                f"{hyp}/{key} has no pre-registered equivalence or "
+                f"non-inferiority bound in HYPOTHESES; register it under "
+                f"'sesoi_test' first")
+        ci = (noninferiority_test(diffs, bound) if mode == "noninferior"
+              else equivalence_test(diffs, bound))
+        self.print_equivalence_ci(rule, hyp, metric, ci, warn=warn)
 
     def print_equivalence_ci(self, rule, hyp, metric, ci, warn="") -> None:
-        """Register an already-computed equivalence CI.
+        """Register an already-computed equivalence/non-inferiority CI.
 
         The two-arm reverse check needs the same paired-seed accounting and
         controlled-variable audit as a directional contrast.  Building the
         CI through ``_paired_equivalence`` and registering it here keeps the
-        TOST decision rule while refusing to print a null claim whose arms
-        were not actually paired.
+        TOST (or one-sided non-inferiority) decision rule while refusing to
+        print a null claim whose arms were not actually paired.
         """
-        if ci.get("test") != "equivalence":
+        if ci.get("test") not in ("equivalence", "noninferiority"):
             raise ValueError(
                 f"{hyp}/{metric}: print_equivalence_ci needs a CI from "
-                f"equivalence_test (got test={ci.get('test')!r})")
+                f"equivalence_test or noninferiority_test "
+                f"(got test={ci.get('test')!r})")
         self.print(rule, hyp, metric, ci, warn=warn)
 
     def finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
@@ -2395,6 +2437,12 @@ class ContrastLog:
                 # bound rule, *not* |effect| >= SESOI (which would reward
                 # exactly the drift the prediction says should not occur).
                 row["practically_relevant"] = bool(row.get("equivalent"))
+            elif row["test"] == "noninferiority":
+                # One-sided null prediction ("the arm is not materially
+                # worse"): support is the CI's lower bound staying above the
+                # negative bound, so a loss beyond it is a refutation rather
+                # than "no significant difference".
+                row["practically_relevant"] = bool(row.get("noninferior"))
             else:
                 # Directional pre-registration: a prediction like
                 # "null_mass_error_margin > 0" is only confirmed by an
@@ -2460,6 +2508,10 @@ class ContrastLog:
                     sens = equivalence_test(
                         valid_diffs, row.get("equivalence_bound"))
                     sens_ok = bool(sens.get("equivalent"))
+                elif row["test"] == "noninferiority":
+                    sens = noninferiority_test(
+                        valid_diffs, row.get("noninferiority_bound"))
+                    sens_ok = bool(sens.get("noninferior"))
                 else:
                     sens = paired_bootstrap_ci(valid_diffs)
                     direction = row.get("direction")
@@ -2498,6 +2550,9 @@ class ContrastLog:
             if row["test"] == "equivalence":
                 row["loo_flips_decision"] = bool(
                     claim and row.get("loo_within_bound") is False)
+            elif row["test"] == "noninferiority":
+                row["loo_flips_decision"] = bool(
+                    claim and row.get("loo_above_bound") is False)
             else:
                 row["loo_flips_decision"] = bool(
                     claim and row.get("loo_sign_flip"))
@@ -2528,12 +2583,15 @@ class ContrastLog:
         below_sesoi = [r for r in surviving
                        if not r["practically_relevant"]
                        and not r.get("direction_reversed")
-                       and r["test"] != "equivalence"]
+                       and r["test"] not in ("equivalence",
+                                             "noninferiority")]
         equiv_rows = [r for r in testable if r["test"] == "equivalence"]
         equivalent = [r for r in equiv_rows if r.get("equivalent")]
         equiv_borderline = [r for r in surviving
                             if r["test"] == "equivalence"
                             and not r.get("equivalent")]
+        noninf_rows = [r for r in testable if r["test"] == "noninferiority"]
+        noninferior = [r for r in noninf_rows if r.get("noninferior")]
         confounded = [r for r in testable if r.get("confounded")]
         controlled_pass = [r for r in self.rows if r.get("controlled") is True]
         audited = [r for r in self.rows if r.get("controlled") is not None]
@@ -2557,8 +2615,10 @@ class ContrastLog:
                      if math.isfinite(r["rel_effect"]) else "")
             sesoi = r.get("sesoi")
             equiv = r["test"] == "equivalence"
-            sesoi_s = (f"{'bound' if equiv else 'SESOI'}={sesoi:g}"
-                       if sesoi is not None else "")
+            noninf = r["test"] == "noninferiority"
+            null_test = equiv or noninf
+            sesoi_s = (f"{'bound' if equiv else ('NI bound' if noninf else 'SESOI')}"
+                       f"={sesoi:g}" if sesoi is not None else "")
             if r.get("confounded"):
                 verdict = "REFUSED (confounded contrast)"
             elif r.get("competence_passed") is False:
@@ -2580,16 +2640,27 @@ class ContrastLog:
                            f"independent runs for a claim)")
             elif equiv and r.get("equivalent") and r["fdr_reject"]:
                 verdict = "EQUIVALENT (CI inside bound, null prediction holds)"
-            elif equiv and sesoi is not None and (
-                    r["lo"] > float(sesoi) or r["hi"] < -float(sesoi)):
-                verdict = ("REFUTED (CI entirely beyond the equivalence "
+            elif noninf and r.get("noninferior") and r["fdr_reject"]:
+                verdict = ("NON-INFERIOR (CI lower bound above the negative "
+                           "bound: no material loss, null prediction holds)")
+            elif null_test and sesoi is not None and (
+                    (equiv and (r["lo"] > float(sesoi)
+                                or r["hi"] < -float(sesoi)))
+                    or (noninf and r["lo"] <= -float(sesoi))):
+                verdict = ("REFUTED (CI entirely beyond the "
+                           f"{'equivalence' if equiv else 'non-inferiority'} "
                            "bound, null prediction fails)")
             elif not r["fdr_reject"]:
                 verdict = ("not significant (TOST)" if equiv
-                           else "not significant")
+                           else ("not significant (one-sided NI)" if noninf
+                                 else "not significant"))
             elif equiv:
                 verdict = ("TOST-significant but CI not fully inside bound "
                            "(borderline, not read as support)")
+            elif noninf:
+                verdict = ("NI false positive-guard: CI lower bound not above "
+                           "the negative bound (borderline, not read as "
+                           "support)")
             elif r.get("direction_reversed"):
                 verdict = ("REFUTED (FDR-significant effect opposite to the "
                            "pre-registered direction, no support)")
@@ -2602,7 +2673,7 @@ class ContrastLog:
             need_s = ""
             if math.isfinite(need) and r["n"] > 0 and need > r["n"]:
                 need_s = (f", needs ~{math.ceil(need)} seeds for "
-                          f"{'the bound' if equiv else 'SESOI'} at 80% "
+                          f"{'the bound' if null_test else 'SESOI'} at 80% "
                           f"power (has {r['n']})")
             dz = r.get("dz", float("nan"))
             dz_s = f", dz={dz:+.2f}" if math.isfinite(dz) else ""
@@ -2925,10 +2996,17 @@ def _announce(hyp_ids):
         for k in sorted(equiv):
             if k not in sesoi:
                 continue
-            print(f"    equivalence bound (null prediction, bootstrap TOST): "
-                  f"|{k}| <= {sesoi[k]:g} - supported only when the 95% CI "
-                  f"of the effect lies inside this bound; a CI that merely "
-                  f"includes 0 is not enough")
+            if equiv[k] == "noninferior":
+                print(f"    non-inferiority bound (one-sided null "
+                      f"prediction, bootstrap): {k} >= -{sesoi[k]:g} - "
+                      f"supported only when the 95% CI's lower bound lies "
+                      f"above the negative bound; a CI entirely below it is "
+                      f"a refutation, not an inconclusive result")
+            else:
+                print(f"    equivalence bound (null prediction, bootstrap "
+                      f"TOST): |{k}| <= {sesoi[k]:g} - supported only when "
+                      f"the 95% CI of the effect lies inside this bound; a "
+                      f"CI that merely includes 0 is not enough")
 
 
 def _run_event(settings: Settings, experiment: str, event: str, **details) -> None:
@@ -6108,6 +6186,31 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                _one_sample_contrast(by_gate["null"],
                                     "null_mass_error_margin"),
                warn=_curve_warn(("null", by_gate["null"])))
+    # H1c completeness companion: the null arm's *accuracy* relative to the
+    # no-gate baseline.  The within-arm margin above only shows the slot
+    # absorbs the write; a slot that also costs recall would make the null
+    # arm a bad component whatever the margin says.  This is a one-sided
+    # non-inferiority check (the registered null prediction "adding the null
+    # slot is not materially worse than no gate"), so it is routed through
+    # the same FDR family with its own pre-registered bound rather than left
+    # to the exploratory loop.
+    clog.print_equivalence_ci(
+        "null - none", "H1c", "accuracy",
+        _paired_equivalence(by_gate["null"], by_gate["none"], "accuracy",
+                            HYPOTHESES["H1c"]["sesoi"]["accuracy"],
+                            mode="noninferior"),
+        warn=_curve_warn(("null", by_gate["null"]), ("none", by_gate["none"])))
+    # H1a completeness companion: the query-only gate vs the no-gate
+    # baseline.  The registered `calib` contrasts credit calibration against
+    # the query and against `none`, but the query arm's own effect was only
+    # ever in the uncorrected exploratory loop; registering it gives the
+    # "does having a gate at all help" leg a pre-registered, FDR-controlled
+    # row (two-sided: the companion measures whether the simplest gate moves
+    # accuracy, not a signed claim).
+    clog.print("query - none", "H1a", "accuracy",
+               _paired_diff(by_gate["query"], by_gate["none"], "accuracy"),
+               warn=_curve_warn(("query", by_gate["query"]),
+                                ("none", by_gate["none"])))
     print(f"\n[e1] H1d calibration-term ablation contrasts (removing a term "
           f"from the full gate; only the calib_variant factor varies, the "
           f"recipe stays frozen - every contrast carries its "
