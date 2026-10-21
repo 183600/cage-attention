@@ -1990,6 +1990,9 @@ def small_n_flags(ci) -> str:
     if ci.get("test") == "equivalence":
         if n >= 2 and ci.get("loo_within_bound") is False:
             flags.append("LOO outside bound")
+    elif ci.get("test") == "noninferiority":
+        if n >= 2 and ci.get("loo_above_bound") is False:
+            flags.append("LOO below bound")
     elif ci.get("loo_sign_flip"):
         flags.append("LOO sign flip")
     if ci.get("bca_agrees") is False:
@@ -2013,6 +2016,18 @@ def _fmt_ci(ci) -> str:
             verdict = f"CI outside +-{bound:g} (prediction refuted)"
         else:
             verdict = f"CI not inside +-{bound:g} (inconclusive)"
+        return (f"{ci['mean']:+.4f} [{ci['lo']:+.4f}, {ci['hi']:+.4f}] "
+                f"n={ci['n']} {p_s}{verdict}")
+    if ci.get("test") == "noninferiority":
+        # One-sided null prediction: only the lower end matters, and the
+        # threshold is the *negative* of the registered positive bound.
+        bound = ci.get("bound", float("nan"))
+        if ci.get("noninferior"):
+            verdict = f"CI lower bound above -{bound:g} (prediction holds)"
+        elif ci["lo"] <= -bound:
+            verdict = f"CI lower bound below -{bound:g} (prediction refuted)"
+        else:
+            verdict = f"CI not above -{bound:g} (inconclusive)"
         return (f"{ci['mean']:+.4f} [{ci['lo']:+.4f}, {ci['hi']:+.4f}] "
                 f"n={ci['n']} {p_s}{verdict}")
     supported = (ci["lo"] > 0.0) or (ci["hi"] < 0.0)
@@ -2466,7 +2481,7 @@ class ContrastLog:
             if equiv:
                 line += f"  [equivalence bound={sesoi:g}]"
             elif noninf:
-                line += f"  [non-inferiority bound={-sesoi:g}]"
+                line += f"  [non-inferiority bound={sesoi:g}]"
             else:
                 line += f"  [SESOI={sesoi:g}]"
         if not null_test and direction is not None:

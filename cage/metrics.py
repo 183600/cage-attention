@@ -604,7 +604,7 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         "n": 0, "sd": float("nan"), "half_width": float("nan"),
         "mde80": float("nan"), "p_value": float("nan"),
         "sign_consistency": float("nan"), "alpha": float(alpha),
-        "test": "noninferiority", "bound": -bound, "noninferior": False,
+        "test": "noninferiority", "bound": bound, "noninferior": False,
         "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
         "loo_above_bound": False, "lo_bca": float("nan"),
         "hi_bca": float("nan"), "noninferior_bca": None,
@@ -891,6 +891,19 @@ def _self_test() -> int:
                            n_boot=2000, seed=0)
     check("equiv_outside", neq["equivalent"] is False)
     check("equiv_outside_loo", neq["loo_within_bound"] is False)
+
+    # Non-inferiority: the returned bound stays a positive magnitude (the
+    # decision threshold is its negation), so downstream consumers can pass
+    # it straight back in.  A clearly worse arm must be refuted.
+    ni = noninferiority_test([0.1, -0.05, 0.02, 0.0, 0.08], 0.5,
+                             n_boot=2000, seed=0)
+    check("noninf_inside", ni["noninferior"] is True)
+    check("noninf_bound_positive", ni["bound"] == 0.5)
+    check("noninf_loo_above", ni["loo_above_bound"] is True)
+    ni_bad = noninferiority_test([-2.0, -2.1, -1.9, -2.0, -2.05], 1.0,
+                                 n_boot=2000, seed=0)
+    check("noninf_outside", ni_bad["noninferior"] is False)
+    check("noninf_outside_loo", ni_bad["loo_above_bound"] is False)
 
     # Degenerate inputs must not raise and must not claim anything.
     empty = paired_bootstrap_ci([])
