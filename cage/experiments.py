@@ -2777,6 +2777,9 @@ class ContrastLog:
                             and not r.get("equivalent")]
         noninf_rows = [r for r in testable if r["test"] == "noninferiority"]
         noninferior = [r for r in noninf_rows if r.get("noninferior")]
+        noninf_borderline = [r for r in surviving
+                             if r["test"] == "noninferiority"
+                             and not r.get("noninferior")]
         confounded = [r for r in testable if r.get("confounded")]
         controlled_pass = [r for r in self.rows if r.get("controlled") is True]
         audited = [r for r in self.rows if r.get("controlled") is not None]
@@ -2932,6 +2935,17 @@ class ContrastLog:
                   f"equivalence contrast(s) pass the TOST FDR gate but their "
                   f"CI is not fully inside the bound (borderline); they do "
                   f"NOT count as confirming the null prediction")
+        if noninf_rows:
+            print(f"[{self.tag}] non-inferiority (one-sided null-prediction) "
+                  f"tests: {len(noninferior)}/{len(noninf_rows)} have their "
+                  f"95% CI lower bound above the negative pre-registered "
+                  f"bound")
+        if noninf_borderline:
+            print(f"[{self.tag}] WARNING: {len(noninf_borderline)} "
+                  f"non-inferiority contrast(s) pass the one-sided FDR gate "
+                  f"but their CI lower bound is not above the negative bound "
+                  f"(borderline); they do NOT count as confirming the null "
+                  f"prediction")
         competence_failed = [r for r in testable
                              if r.get("competence_passed") is False]
         if self.competence is not None and not self.competence.get("passed"):
@@ -3055,6 +3069,9 @@ class ContrastLog:
                    "n_equivalence": len(equiv_rows),
                    "n_equivalent": len(equivalent),
                    "n_equiv_borderline": len(equiv_borderline),
+                   "n_noninferiority": len(noninf_rows),
+                   "n_noninferior": len(noninferior),
+                   "n_noninf_borderline": len(noninf_borderline),
                    "n_confounded": len(confounded),
                    "n_audited": len(audited),
                    "n_control_passed": len(controlled_pass),
