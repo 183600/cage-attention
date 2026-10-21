@@ -520,6 +520,13 @@ def make_batch(batch: int, n_pairs: int, vocab: int, device, dense_lm: bool = Fa
       key_pos    (B,) index of the matching ki
       answer     (B,) correct value token
     """
+    for name, value in (("batch", batch), ("n_pairs", n_pairs),
+                        ("vocab", vocab)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be an integer, got {value!r}")
+    if batch < 0:
+        raise ValueError(f"batch must be non-negative, got {batch}")
+    check_data_geometry(n_pairs, vocab)
     width = 2 * n_pairs
     seq = torch.empty((batch, width + 3), device=device, dtype=torch.long)
     kv = seq[:, :width].view(batch, n_pairs, 2)
@@ -2001,6 +2008,12 @@ def _self_test() -> int:
         check("geometry_max_len_rejected", False)
     except ValueError:
         check("geometry_max_len_rejected", True)
+    for args in ((2, 0, 64), (2, -1, 64), (2, 4.0, 64), (2, 4, -1)):
+        try:
+            make_batch(*args, device="cpu")
+            check(f"batch_geometry_rejected_{args}", False)
+        except ValueError:
+            check(f"batch_geometry_rejected_{args}", True)
 
     # Length-sweep geometry: a one-point "sweep" would make the base-to-
     # longest drop and entropy drift identically zero, turning H2b's
