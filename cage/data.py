@@ -202,6 +202,38 @@ def time_ordered_split(n_samples: int, train_frac: float = 0.7,
     return out
 
 
+def _group_codes(groups) -> torch.Tensor:
+    """Encode group ids as stable integer codes.
+
+    Real group ids are often strings (user ids, document ids, object names),
+    which ``torch.as_tensor`` cannot consume.  Map any hashable id to a dense
+    integer code in first-appearance order; tensor inputs are kept as-is so
+    numeric ids retain their exact values.  Non-finite numeric ids and
+    unhashable ids are rejected rather than silently coerced.
+    """
+    if isinstance(groups, torch.Tensor):
+        g = groups.reshape(-1)
+        if g.is_complex():
+            raise ValueError("group ids must not be complex")
+        if g.is_floating_point() and not bool(torch.isfinite(g).all()):
+            raise ValueError("group ids must be finite (no NaN/Inf)")
+        return g
+    mapping, codes = {}, []
+    for value in groups:
+        try:
+            if value in mapping:
+                codes.append(mapping[value])
+            else:
+                mapping[value] = len(mapping)
+                codes.append(mapping[value])
+        except TypeError as exc:
+            raise ValueError(
+                f"group ids must be hashable, got {type(value).__name__}")                 from exc
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("group ids must be finite (no NaN/Inf)")
+    return torch.tensor(codes, dtype=torch.long)
+
+
 def group_disjoint_split(groups, train_frac: float = 0.7,
                          val_frac: float = 0.15, seed: int = 0) -> dict:
     """Assign **whole groups** to one split each; returns index tensors.
@@ -224,12 +256,10 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
         raise ValueError(
             f"need 0 < train_frac, 0 < val_frac and train_frac + val_frac "
             f"< 1, got {train_frac!r}, {val_frac!r}")
-    g = torch.as_tensor(groups).reshape(-1)
+    g = _group_codes(groups)
     n = int(g.numel())
     if n == 0:
         raise ValueError("groups must contain at least one sample")
-    if g.is_floating_point() and not bool(torch.isfinite(g).all()):
-        raise ValueError("group ids must be finite (no NaN/Inf)")
     uniq, inverse = torch.unique(g, return_inverse=True)
     n_groups = int(uniq.numel())
     if n_groups < 3:
@@ -359,15 +389,11 @@ def assert_split_partition(n_samples: int, splits, require_all: bool = True) -> 
 
 def assert_group_disjoint(groups, splits) -> None:
     """Raise if any group id occurs in more than one split."""
-    g = torch.as_tensor(groups).reshape(-1)
-    if g.is_floating_point() and not bool(torch.isfinite(g).all()):
-        raise ValueError("group ids must be finite (no NaN/Inf)")
+    g = _group_codes(groups)
     assert_split_partition(int(g.numel()), splits, require_all=False)
     seen: dict = {}
-    for name in ("train", "val", "test"):
-        if name not in splits:
-            continue
-        idx = _as_indices(splits[name], int(g.numel()))
+    for name, indices in splits.items():
+        idx = _as_indices(indices, int(g.numel()))
         if idx.numel() == 0:
             continue
         for gid in torch.unique(g[idx]).tolist():
@@ -386,7 +412,17 @@ def assert_time_ordered(times, splits) -> None:
     may be newer than a validation sample, and no validation sample may be
     newer than a test sample.
     """
-    t = torch.as_tensor(times).reshape(-1).to(torch.float64)
+    try:
+        raw = torch.as_tensor(times).reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "time values must be numeric timestamps, got a non-numeric "
+            "container") from exc
+    if raw.is_complex() or raw.dtype == torch.bool:
+        raise ValueError(
+            f"time values must be real numeric timestamps, got dtype "
+            f"{raw.dtype}")
+    t = raw.to(torch.float64)
     if not bool(torch.isfinite(t).all()):
         raise ValueError("time values must be finite (no NaN/Inf): a "
                          "non-finite timestamp makes the ordering undefined")
@@ -1825,12 +1861,42 @@ def _self_test() -> int:
         check("group_crossing_rejected", False)
     except ValueError:
         check("group_crossing_rejected", True)
+
+    # String group ids (user/document names) must be usable; the encoder
+    # maps them to dense codes and the assertion audits every named split.
+    str_groups = [f"user{i // 2}" for i in range(20)]
+    str_split = group_disjoint_split(str_groups, seed=5)
+    assert_group_disjoint(str_groups, str_split)
+    check("string_group_split_covers",
+          sum(len(str_split[name]) for name in ("train", "val", "test"))
+          == len(str_groups))
+    try:
+        assert_group_disjoint(
+            ["alice", "alice", "bob"],
+            {"train": [0], "holdout": [1, 2]})
+        check("group_crossing_arbitrary_name_rejected", False)
+    except ValueError:
+        check("group_crossing_arbitrary_name_rejected", True)
+    try:
+        group_disjoint_split([["unhashable"], ["group"], ["ids"]])
+        check("unhashable_group_rejected", False)
+    except ValueError:
+        check("unhashable_group_rejected", True)
+
     try:
         assert_time_ordered(torch.tensor([0.0, float("nan"), 2.0]),
                             time_ordered_split(3))
         check("time_nonfinite_rejected", False)
     except ValueError:
         check("time_nonfinite_rejected", True)
+    for bad_times in (["2020-01-01", "2020-01-02"],
+                      torch.tensor([True, False]),
+                      torch.tensor([0.0 + 0.0j, 1.0 + 0.0j])):
+        try:
+            assert_time_ordered(bad_times, {"train": [0], "test": [1]})
+            check("time_non_numeric_rejected", False)
+        except ValueError:
+            check("time_non_numeric_rejected", True)
 
     # Boolean split masks must select the masked rows, not be cast to 0/1
     # positions; duplicated or missing sample assignments must be rejected
