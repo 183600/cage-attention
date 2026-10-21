@@ -7016,6 +7016,23 @@ def main(argv=None) -> int:
     if args.n_layers is not None:
         settings.n_layers = args.n_layers
     settings.fdr_q = args.fdr_q
+    if settings.steps < 1:
+        print("[runner] --steps must be a positive integer; aborting")
+        return 2
+    if settings.lr is not None and (
+            not math.isfinite(settings.lr) or settings.lr <= 0.0):
+        print("[runner] --lr must be a finite positive number; aborting")
+        return 2
+    if not 0.0 < settings.fdr_q < 1.0:
+        print("[runner] --fdr-q must lie strictly between 0 and 1; aborting")
+        return 2
+    if settings.d_model < 1 or settings.d_model % settings.n_heads:
+        print(f"[runner] --d-model must be a positive multiple of n_heads="
+              f"{settings.n_heads}; aborting")
+        return 2
+    if settings.n_layers < 1:
+        print("[runner] --n-layers must be a positive integer; aborting")
+        return 2
     out_dir = pathlib.Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     settings.out_dir = out_dir

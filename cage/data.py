@@ -1481,13 +1481,20 @@ def length_sweep_lengths(base: int = 16, factor: int = 2, n: int = 4,
     so anything that does not fit into ``max_len`` positions cannot
     be run at all and is dropped instead of producing an out-of-range
     position embedding at evaluation time.
+
+    A sweep needs at least two fitted lengths: with a single point the
+    base-to-longest drop and entropy drift are identically zero, so H2a
+    and H2b would read a degenerate "no degradation" as evidence.  Raise
+    rather than return such a one-point grid so the caller cannot train a
+    full E2 grid that answers nothing.
     """
     lengths = [base * (factor ** i) for i in range(n)]
     fits = [L for L in lengths if 2 * L + 2 <= max_len]
-    if not fits:
+    if len(fits) < 2:
         raise ValueError(
-            f"no sweep length fits max_len={max_len}: needs >= {2 * base + 2} "
-            f"positions for base={base}"
+            f"length sweep needs at least two fitted lengths, got {fits} "
+            f"under max_len={max_len} (base={base}, factor={factor}, n={n}); "
+            f"raise max_len or reduce base/n"
         )
     return fits
 
@@ -1654,6 +1661,17 @@ def _self_test() -> int:
         check("geometry_max_len_rejected", False)
     except ValueError:
         check("geometry_max_len_rejected", True)
+
+    # Length-sweep geometry: a one-point "sweep" would make the base-to-
+    # longest drop and entropy drift identically zero, turning H2b's
+    # equivalence test into a tautology.  The helper must reject it.
+    check("length_sweep_default",
+          length_sweep_lengths(16, 2, 4, 256) == [16, 32, 64])
+    try:
+        length_sweep_lengths(16, 2, 4, 34)
+        check("length_sweep_single_point_rejected", False)
+    except ValueError:
+        check("length_sweep_single_point_rejected", True)
 
     # Outlier/tail audit: a same-distribution held-out draw must not be
     # flagged, while a held-out draw pushed into the rare tail of the same
