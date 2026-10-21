@@ -133,6 +133,12 @@ class Cfg:
                 f"d_model={self.d_model} is not a positive multiple of "
                 f"n_heads={self.n_heads}"
             )
+        if (not math.isfinite(float(self.calib_tau_init))
+                or float(self.calib_tau_init) <= 0.0):
+            raise ValueError(
+                f"calib_tau_init must be finite and > 0 so that "
+                f"log(expm1(calib_tau_init)) is defined, got "
+                f"{self.calib_tau_init!r}")
         if self.calib_shuffle_ent and (self.gate != "calib"
                                        or not self.calib_use_ent):
             raise ValueError(
