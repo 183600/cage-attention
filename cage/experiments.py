@@ -1703,10 +1703,12 @@ def _paired_diff(runs_a, runs_b, metric):
     # The shared finite evaluation stream is a second source of noise on
     # top of training-seed variance: every seed is scored on the same
     # items.
-    # Run the exact item-level paired test (McNemar) whenever both sides
-    # recorded their per-item correctness.  This cannot replace the
-    # seed-level decision, but it exposes a gain that is only an artifact
-    # of which items the stream happened to contain.
+    # Run the item-level paired test (McNemar) whenever both sides
+    # recorded their per-item correctness.  The pooled p is descriptive
+    # only: concatenating seeds repeats the same sealed items, so it cannot
+    # replace the seed-level decision.  Per-seed discordant counts and an
+    # independent-seed sign test travel alongside it, and the pooled item
+    # sign still catches a gain that is only an artifact of the stream.
     ci["stream_test"] = _paired_stream_test(
         by_a, by_seed, used, metric, ci.get("mean"))
     # Raw per-seed differences: lets an equivalence companion reuse the
