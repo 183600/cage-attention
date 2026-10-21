@@ -7166,8 +7166,10 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
         if stability:
             has_pos = any(v > 0.0 for v in stability)
             has_neg = any(v < 0.0 for v in stability)
+            has_zero = any(v == 0.0 for v in stability)
             sign_flip = has_pos and has_neg
-            same_sign = (not sign_flip) and (has_pos or has_neg)
+            same_sign = (not sign_flip) and (has_pos or has_neg) \
+                and not has_zero
             all_exclude = all(
                 row["ci_excludes_zero"] for row in rows
                 if row["rule"] == rule and row["metric"] == metric)
@@ -7177,6 +7179,9 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
             if sign_flip:
                 verdict = ("SIGN FLIP across learning rates: the effect is "
                            "recipe-specific")
+            elif has_zero and (has_pos or has_neg):
+                verdict = ("point estimate is exactly zero at some lrs: the "
+                           "effect is not stable across the recipe")
             elif not same_sign:
                 verdict = ("point estimate is zero at every lr: the design "
                            "resolves no directional effect")
