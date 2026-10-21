@@ -151,6 +151,7 @@ from .data import (
     validate_batch,
 )
 from .metrics import (
+    _positive_integer,
     benjamini_hochberg,
     mcnemar_test,
     clustered_proportion_ci,
@@ -5677,12 +5678,13 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     (``shallow_none_baseline`` records, ``baselines_shallow_none.json``)
     that E1's complexity readout reads from the verdict.
     """
-    ladder = tuple(sorted(dict.fromkeys(
-        int(d) for d in settings.depth_ladder)))
-    if not ladder or any(d < 1 for d in ladder):
+    raw_ladder = tuple(settings.depth_ladder)
+    depths = tuple(_positive_integer(d) for d in raw_ladder)
+    if not depths or any(d is None for d in depths):
         raise ValueError(
             f"depth_ladder must be non-empty positive ints, got "
-            f"{settings.depth_ladder!r}")
+            f"{raw_ladder!r}")
+    ladder = tuple(sorted(set(depths)))
     tune_seeds = settings.seeds[:max(1, min(settings.min_seeds_for_claim,
                                              len(settings.seeds)))]
     ceiling_acc = float(ceiling["accuracy"]) if ceiling else float("nan")
