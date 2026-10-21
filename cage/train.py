@@ -264,16 +264,18 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
             # train-point count (which can swallow the whole val curve).
             k_val = max(2, int(math.ceil(len(val) / 3.0)))
             out["late_val_delta"] = rel_delta(val[-k_val:], "val_loss")
-    val_se = [float(h["val_loss_se"]) for h in val
-              if h.get("val_loss_se") is not None
-              and math.isfinite(float(h["val_loss_se"]))]
-    if val_se:
-        out["val_loss_se_last"] = val_se[-1]
-        if (out["late_overfit"] and out["val_loss_se_last"] > 0.0
-                and math.isfinite(out["val_regression_after_best"])):
-            out["late_overfit_significant"] = bool(
-                out["val_regression_after_best"] > 2.0 * out["val_loss_se_last"])
-    if len(val) >= 2 and val_se:
+    last_val_se = float("nan")
+    if val and val[-1].get("val_loss_se") is not None:
+        candidate = float(val[-1]["val_loss_se"])
+        if math.isfinite(candidate):
+            last_val_se = candidate
+    out["val_loss_se_last"] = last_val_se
+    if (out["late_overfit"] and math.isfinite(last_val_se)
+            and last_val_se > 0.0
+            and math.isfinite(out["val_regression_after_best"])):
+        out["late_overfit_significant"] = bool(
+            out["val_regression_after_best"] > 2.0 * last_val_se)
+    if len(val) >= 2 and math.isfinite(last_val_se):
         # Is the monitored validation *movement* (first -> last) larger than
         # the batch-sampling noise of a single evaluation?  With only a
         # couple of validation batches the SE can be a sizeable fraction of
@@ -281,7 +283,7 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
         # inside 2 SE says more about the monitor's resolution than about
         # the model.
         out["val_change_abs"] = float(val[-1]["val_loss"] - val[0]["val_loss"])
-        out["val_noise_2se"] = float(2.0 * val_se[-1])
+        out["val_noise_2se"] = float(2.0 * last_val_se)
         out["val_movement_significant"] = bool(
             out["val_noise_2se"] > 0.0
             and abs(out["val_change_abs"]) > out["val_noise_2se"])
