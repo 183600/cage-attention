@@ -6156,7 +6156,9 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             "tost_n": eq["n"],
         }
         print(f"[baselines] HB7 adjacent-depth contrast {a}->{b} layers "
-              f"(paired over seeds, each rung val-tuned): {_fmt_ci(ci)}; "
+              f"(paired over seeds; each rung independently val-tuned over "
+              f"lr x steps, so this is a performance-envelope contrast, not "
+              f"a controlled single-recipe depth effect): {_fmt_ci(ci)}; "
               f"companion TOST vs SESOI={sesoi:g}: "
               f"{eq['mean']:+.4f} [{eq['lo']:+.4f}, {eq['hi']:+.4f}] "
               f"n={eq['n']} p={eq['p_value']:.3f} "
@@ -6172,6 +6174,11 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                             "ceiling (one-sided equivalence); the bare "
                             "'interval reaches the ceiling' companion is "
                             "reaches_ceiling_ci only"),
+        "depth_contrast_note": (
+            "each rung is independently val-tuned over lr x steps, so "
+            "adjacent-depth contrasts describe achievable performance "
+            "envelopes rather than a controlled single-recipe depth effect; "
+            "the selection payload records both axes and boundary flags"),
         "depths": {str(d): depths[d] for d in ladder},
         "tuning_tables": {str(d): tuning_tables[d] for d in ladder},
         "adjacent_contrasts": adjacent,
