@@ -510,15 +510,18 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     margin = chance - float(ci["mean"])
     if ci["n"] > 0 and math.isfinite(margin) and margin > 0.0:
         if n_per_seed is not None:
+            # The seed term of the mean's variance shrinks as sd_seed^2/n;
+            # the common-stream scoring term enters once (all seeds share
+            # the evaluation examples).  Solving the target SE
+            # (margin - z*sd_binomial)/z = sqrt(sd_seed^2/n) for n inflates
+            # the plain seed-only estimate by sd_seed^2 / sd_seed^2/n,
+            # i.e. by the current seed count.
             z = 2.8015852
             floor = z * float(ci.get("sd_binomial", 0.0))
             if margin > floor:
-                denom = margin ** 2 - floor ** 2
-                if sd_seed > 0.0:
-                    ci["seeds_for_certification"] = (
-                        (z * sd_seed) ** 2 / denom)
-                else:
-                    ci["seeds_for_certification"] = 1.0
+                target_se = (margin - floor) / z
+                ci["seeds_for_certification"] = float(
+                    (sd_seed / target_se) ** 2)
             else:
                 ci["seeds_for_certification"] = float("inf")
         else:
