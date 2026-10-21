@@ -1299,13 +1299,20 @@ def _controlled_audit(runs_a, runs_b):
     that factory is combined with.  Returns an audit dict; a contrast whose
     audit fails is not read as supporting its hypothesis.
     """
+    def _seed_key(seed):
+        if seed is None:
+            return (1, 0.0, "")
+        if isinstance(seed, (int, float)) and not isinstance(seed, bool):
+            return (0, float(seed), "")
+        return (0, float("inf"), str(seed))
+
     audit = {
         "controlled": True,
         "seeds_paired": False,
         "n_a": len(runs_a),
         "n_b": len(runs_b),
-        "seeds_a": sorted(r.get("seed") for r in runs_a),
-        "seeds_b": sorted(r.get("seed") for r in runs_b),
+        "seeds_a": sorted((r.get("seed") for r in runs_a), key=_seed_key),
+        "seeds_b": sorted((r.get("seed") for r in runs_b), key=_seed_key),
         "varying_factors": {},
         "model_factor_diffs": {},
         "mismatches": [],
@@ -1316,8 +1323,14 @@ def _controlled_audit(runs_a, runs_b):
             f"seed sets differ: a={audit['seeds_a']} b={audit['seeds_b']} "
             f"(contrast must be paired over identical seeds)")
     for side, seeds in (("a", audit["seeds_a"]), ("b", audit["seeds_b"])):
+        missing = sum(1 for s in seeds if s is None)
+        if missing:
+            audit["mismatches"].append(
+                f"side {side} has {missing} run(s) without a training seed: "
+                f"the contrast cannot be paired")
         repeats = sorted({s for s in seeds
-                          if s is not None and seeds.count(s) > 1})
+                          if s is not None and seeds.count(s) > 1},
+                         key=_seed_key)
         if repeats:
             audit["mismatches"].append(
                 f"side {side} repeats training seed(s) {repeats}: a "
