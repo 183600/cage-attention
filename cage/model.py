@@ -662,7 +662,7 @@ class _CalibAttn(torch.autograd.Function):
                 gbuf = _get_scratch(("calib_f",), q.device, q.dtype, n)
             d_p = _get_scratch(("calib_dp",), q.device, q.dtype, n).view(bh, T, T)
             torch.bmm(grad_y, vt, out=d_p)
-            d_s = _softmax_grad_from_p(d_p, p, grad_ent, buf=gbuf)
+            d_s = _softmax_grad_from_p(d_p, p, grad_ent, eps, buf=gbuf)
             d_qkv = torch.empty_like(qkv)
             torch.bmm(p.transpose(1, 2), grad_y, out=d_qkv[2])
             zero = _zero_scalar(d_s.device, d_s.dtype)
@@ -701,7 +701,7 @@ class _CalibAttn(torch.autograd.Function):
             ge = None if grad_ent is None else grad_ent[:, i0:i1]
             d_p = dpb[:n].view(bh, r, i1)
             torch.bmm(g, vt[:, :, :i1], out=d_p)
-            d_s = _softmax_grad_from_p(d_p, p, ge,
+            d_s = _softmax_grad_from_p(d_p, p, ge, eps,
                                        buf=None if gbuf is None else gbuf[:n])
             # The first block writes ``d_v`` / ``d_k`` outright; later
             # blocks accumulate into their prefix slice.
@@ -726,28 +726,29 @@ class _CalibAttn(torch.autograd.Function):
 
 def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
                          grad_ent: torch.Tensor | None,
+                         eps: float = _EPS,
                          buf: torch.Tensor | None = None) -> torch.Tensor:
     """Score gradient for ``p = softmax(s)`` plus the calibrated-entropy term.
     Consumes ``d_p``.
 
     ``buf`` optionally supplies a flat buffer for the ``log(p)`` term.
 
-    The surviving term is ``log(p) + 1`` on ``p > _EPS`` and ``0`` elsewhere;
+    The surviving term is ``log(p) + 1`` on ``p > eps`` and ``0`` elsewhere;
     the sub-eps entries are dropped by the trailing select, so the value taken
-    there is irrelevant.  ``log`` is still fed ``p.clamp_min(_EPS)`` rather
+    there is irrelevant.  ``log`` is still fed ``p.clamp_min(eps)`` rather
     than raw ``p``: masked-out entries (``p == 0``) would otherwise take the
     log of zero, and the clamp removes them without changing any surviving
     value (bit-for-bit identical results).
     """
     if grad_ent is not None:
         if buf is None:
-            logterm = torch.clamp_min(p, _EPS).log()
+            logterm = torch.clamp_min(p, eps).log()
         else:
             logterm = buf[:p.numel()].view_as(p)
-            torch.clamp_min(p, _EPS, out=logterm)
+            torch.clamp_min(p, eps, out=logterm)
             logterm.log_()
         logterm.add_(1.0)
-        torch.where(p > _EPS, logterm, _zero_scalar(p.device, p.dtype),
+        torch.where(p > eps, logterm, _zero_scalar(p.device, p.dtype),
                     out=logterm)
         d_p.addcmul_(logterm, grad_ent.unsqueeze(-1), value=-1.0)
     d_p.mul_(p)
