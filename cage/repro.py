@@ -38,6 +38,30 @@ import torch
 _HASHSEED_PINNED: str | None = None
 
 
+# PyTorch's documented defaults for reduced-precision matrix products.
+# Restored on every non-deterministic call so a previous deterministic run
+# cannot leak its precision mode into a later one.
+_TF32_DEFAULTS = {"matmul": False, "cudnn": True}
+
+
+def _tf32_modules():
+    """The reduced-precision knobs PyTorch exposes (may be absent)."""
+    modules = {}
+    cuda_backend = getattr(torch.backends, "cuda", None)
+    matmul = getattr(cuda_backend, "matmul", None)
+    if matmul is not None and hasattr(matmul, "allow_tf32"):
+        modules["matmul"] = matmul
+    cudnn = getattr(torch.backends, "cudnn", None)
+    if cudnn is not None and hasattr(cudnn, "allow_tf32"):
+        modules["cudnn"] = cudnn
+    return modules
+
+
+def _tf32_state() -> dict:
+    return {name: bool(module.allow_tf32)
+            for name, module in _tf32_modules().items()}
+
+
 def configure_determinism(deterministic: bool) -> dict:
     """Apply the *whole* determinism switch, including turning it off.
 
@@ -49,6 +73,14 @@ def configure_determinism(deterministic: bool) -> dict:
     cuDNN benchmark autotuning is always disabled because timing-based
     algorithm selection is a run-to-run variance source even when kernels
     themselves are otherwise deterministic.
+
+    Reduced-precision TF32 matrix products are disabled under
+    ``deterministic=True`` and restored to the PyTorch defaults otherwise.
+    TF32 keeps only 10 mantissa bits, so its use changes the numerical
+    trajectory; leaving it enabled would make a ``deterministic`` run
+    fast-but-reduced-precision while its record claimed a reproducible
+    recipe. The resolved values are returned and stamped into the run
+    environment.
 
     ``CUBLAS_WORKSPACE_CONFIG`` is only ever *added* (via ``setdefault``)
     before CUDA initialises; it cannot be unset safely afterwards, so the
@@ -66,6 +98,9 @@ def configure_determinism(deterministic: bool) -> dict:
     if cudnn is not None:
         cudnn.deterministic = deterministic
         cudnn.benchmark = False
+    wanted_tf32 = (not deterministic)
+    for name, module in _tf32_modules().items():
+        module.allow_tf32 = bool(_TF32_DEFAULTS[name]) if wanted_tf32 else False
     return {
         "deterministic": deterministic,
         "deterministic_algorithms": bool(getattr(
@@ -75,6 +110,8 @@ def configure_determinism(deterministic: bool) -> dict:
             "deterministic": bool(cudnn.deterministic),
             "benchmark": bool(cudnn.benchmark),
         },
+        "tf32": _tf32_state(),
+        "torch_num_threads": int(torch.get_num_threads()),
     }
 
 

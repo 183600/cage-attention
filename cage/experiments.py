@@ -166,6 +166,7 @@ from .train import (
     collect_stats,
     collect_stats_and_errors,
     error_detection_aucs,
+    eval_accuracy,
     eval_metrics,
     false_concentration_analysis,
     false_concentration_sweep,
@@ -3301,7 +3302,7 @@ def _environment_record(settings: Settings, git_dirty: bool | None = None) -> di
     the first training call (a previous run in the same process may have
     left the global flag in the other position).
     """
-    configure_determinism(settings.deterministic)
+    determinism = configure_determinism(settings.deterministic)
     env = {
         "python": platform.python_version(),
         "python_executable": sys.executable,
@@ -3311,10 +3312,10 @@ def _environment_record(settings: Settings, git_dirty: bool | None = None) -> di
         "cpu_count": os.cpu_count(),
         "cuda_available": bool(torch.cuda.is_available()),
         "cuda_runtime": torch.version.cuda,
-        "torch_num_threads": int(torch.get_num_threads()),
-        "deterministic_algorithms": bool(getattr(
-            torch, "are_deterministic_algorithms_enabled", lambda: False)()),
-        "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+        "torch_num_threads": determinism["torch_num_threads"],
+        "deterministic_algorithms": determinism["deterministic_algorithms"],
+        "cublas_workspace_config": determinism["cublas_workspace_config"],
+        "tf32": determinism["tf32"],
         "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
         "hash_randomization": bool(sys.flags.hash_randomization),
         "git_dirty": (_git_dirty() if git_dirty is None else bool(git_dirty)),
@@ -3815,6 +3816,14 @@ _REPRO_AUDIT_KEYS = (
     ("data_diff_seed_differs", "a different seed draws different data"),
     ("data_draw_leaves_global_rng_untouched",
      "data draws do not consume the global RNG (stream-owns-its-state)"),
+    ("eval_leaves_global_rng_untouched",
+     "accuracy/metrics/statistics evaluation does not consume the global "
+     "RNG (its fixed evaluation streams own their generators)"),
+    ("eval_restores_module_modes",
+     "evaluation restores every module's train/eval flag (dropout stays "
+     "off afterwards)"),
+    ("eval_metrics_same_seed_identical",
+     "same model + same evaluation seed replays identical metrics"),
     ("rng_same_seed_identical",
      "every RNG seed_everything pins (Python, Torch CPU[, NumPy][, CUDA]) "
      "replays exactly from the same seed"),
@@ -3923,8 +3932,14 @@ def _reproducibility_audit(settings: Settings) -> dict:
                  "torch_cpu": float(torch.rand(()))}
         if np is not None:
             draws["numpy"] = float(np.random.random())
-        if device.startswith("cuda") and torch.cuda.is_available():
-            draws["torch_cuda"] = float(torch.rand((), device=device))
+        # Probe CUDA whenever the build exposes it, even for a CPU run:
+        # ``seed_everything`` seeds every CUDA device unconditionally, so
+        # the claim should be measured there too.
+        if torch.cuda.is_available():
+            try:
+                draws["torch_cuda"] = float(torch.rand((), device="cuda"))
+            except Exception:  # noqa: BLE001 - a broken CUDA probe must not
+                pass          # hide the CPU/RNG checks that still ran
         return draws
 
     def _draw(s):
@@ -3970,6 +3985,63 @@ def _reproducibility_audit(settings: Settings) -> dict:
     seed_everything(other)
     init_other = _model_state_hash(build(cfg, compile=False))
 
+    def _same_metrics(a, b):
+        if a.keys() != b.keys():
+            return False
+        for key in a:
+            va, vb = a[key], b[key]
+            if isinstance(va, float) and isinstance(vb, float):
+                if math.isnan(va) and math.isnan(vb):
+                    continue
+            if va != vb:
+                return False
+        return True
+
+    def _eval_isolation():
+        """Evaluation must neither consume the global RNG nor change modes.
+
+        Training calls validation statistics between optimizer steps.  If
+        an evaluation helper quietly drew from the global generator (or
+        left dropout enabled), the remaining training trajectory would
+        depend on *when* the evaluation ran - a reproducibility hole the
+        data-stream check alone cannot see.
+        """
+        seed_everything(seed, deterministic=settings.deterministic)
+        model = build(cfg, compile=False)
+        model.train()
+        modes = {id(m): bool(m.training) for m in model.modules()}
+        torch_before = torch.get_rng_state()
+        py_before = random.getstate()
+        np_before = (np.random.get_state() if np is not None else None)
+        cuda_before = (torch.cuda.get_rng_state_all()
+                       if torch.cuda.is_available() else None)
+        kwargs = dict(batch=_REPRO_AUDIT_BATCH, batches=1, seed=seed)
+        metrics_a = eval_metrics(model, settings.n_pairs, settings.vocab,
+                                 device, **kwargs)
+        metrics_b = eval_metrics(model, settings.n_pairs, settings.vocab,
+                                 device, **kwargs)
+        eval_accuracy(model, settings.n_pairs, settings.vocab, device,
+                      **kwargs)
+        collect_stats(model, settings.n_pairs, settings.vocab, device,
+                      **kwargs)
+        rng_ok = bool(torch.equal(torch.get_rng_state(), torch_before))
+        rng_ok = rng_ok and random.getstate() == py_before
+        if np_before is not None:
+            now = np.random.get_state()
+            rng_ok = rng_ok and bool(
+                now[0] == np_before[0]
+                and np.array_equal(now[1], np_before[1])
+                and now[2:] == np_before[2:])
+        if cuda_before is not None:
+            rng_ok = rng_ok and all(
+                torch.equal(a, b) for a, b in
+                zip(torch.cuda.get_rng_state_all(), cuda_before))
+        modes_ok = all(bool(m.training) == modes[id(m)]
+                       for m in model.modules())
+        return rng_ok, modes_ok, _same_metrics(metrics_a, metrics_b)
+
+    eval_rng_ok, eval_modes_ok, eval_replay_ok = _eval_isolation()
+
     def _trajectory(s, rng_noise=False, model_cfg=None):
         if rng_noise:
             torch.manual_seed(s + 777)
@@ -4011,6 +4083,9 @@ def _reproducibility_audit(settings: Settings) -> dict:
         "data_same_seed_identical": bool(fp_same_a == fp_same_b),
         "data_diff_seed_differs": bool(fp_same_a != fp_other),
         "data_draw_leaves_global_rng_untouched": rng_untouched,
+        "eval_leaves_global_rng_untouched": bool(eval_rng_ok),
+        "eval_restores_module_modes": bool(eval_modes_ok),
+        "eval_metrics_same_seed_identical": bool(eval_replay_ok),
         "rng_same_seed_identical": bool(rng_a == rng_b),
         "rng_diff_seed_differs": bool(rng_a != rng_other),
         "init_same_seed_identical": bool(init_same_a == init_same_b),
