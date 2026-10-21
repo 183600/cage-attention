@@ -1589,12 +1589,25 @@ def _paired_benchmark(runs_a, runs_b, metric, sesoi, reference):
     seed differences, CI and SESOI are still the right effect-size readout:
     ``complexity_justified`` means the arm is both practically above and
     statistically above the tuned reference, while ``below_reference`` means
-    the reference is confidently better.  The result carries an explicit
-    ``comparison="benchmark"`` tag and a summary of the (expected) recipe
-    mismatches, never the full audit, so it cannot be mistaken for a
-    controlled contrast.
+    the reference is confidently better.  Curve-invalid runs on either side
+    are excluded before pairing (they cannot support a depth claim), and the
+    excluded seeds are recorded under ``curve_invalid_excluded``.  The result
+    carries an explicit ``comparison="benchmark"`` tag and a summary of the
+    (expected) recipe mismatches, never the full audit, so it cannot be
+    mistaken for a controlled contrast.
     """
-    ci = _paired_diff(runs_a, runs_b, metric)
+    def _curve_valid(runs):
+        return [r for r in runs
+                if r.get("curve_verdict") not in CURVE_INVALID_VERDICTS]
+
+    excluded = {}
+    for side, runs in (("a", runs_a), ("b", runs_b)):
+        bad = [r.get("seed") for r in runs
+               if r.get("curve_verdict") in CURVE_INVALID_VERDICTS]
+        if bad:
+            excluded[side] = sorted(bad, key=_seed_order)
+    ci = _paired_diff(_curve_valid(runs_a), _curve_valid(runs_b), metric)
+    ci["curve_invalid_excluded"] = excluded
     audit = ci.get("controlled") or {}
     ci["comparison"] = "benchmark"
     ci["reference"] = str(reference)
@@ -6994,6 +7007,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 "n": bench.get("n"),
                 "seeds_used": bench.get("seeds_used"),
                 "seeds_dropped": bench.get("seeds_dropped"),
+                "curve_invalid_excluded": bench.get("curve_invalid_excluded"),
                 "sesoi": benchmark_sesoi,
                 "state": state,
                 "claim_eligible": claim_eligible,
