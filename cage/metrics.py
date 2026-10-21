@@ -999,10 +999,8 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     if s.numel() != n.numel() or s.numel() == 0:
         empty["reason"] = "empty or mismatched inputs"
         return empty
-    keep = torch.isfinite(s) & torch.isfinite(n) & (n > 0)
-    s, n = s[keep], n[keep]
-    if s.numel() == 0:
-        empty["reason"] = "no positive-length units"
+    if not bool((torch.isfinite(s) & torch.isfinite(n) & (n > 0)).all()):
+        empty["reason"] = "non-finite or non-positive-length unit(s)"
         return empty
     if not bool(((s >= 0) & (s <= n)).all()):
         empty["reason"] = "success count outside [0, n]"
@@ -1180,6 +1178,8 @@ def _self_test() -> int:
           empty_cluster["n"] == 0 and not empty_cluster["valid"])
     bad_cluster = clustered_proportion_ci([2, 1], [1, 1])
     check("cluster_bad_counts_no_claim", not bad_cluster["valid"])
+    mixed_cluster = clustered_proportion_ci([50, float("nan")], [100, 100])
+    check("cluster_partial_invalid_no_claim", not mixed_cluster["valid"])
 
     if failures:
         print("metrics self-test FAILED: " + ", ".join(failures))
