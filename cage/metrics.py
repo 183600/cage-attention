@@ -93,7 +93,11 @@ __all__ = [
 
 
 def _flatten_float(x) -> torch.Tensor:
-    return torch.as_tensor(x).detach().reshape(-1).to(torch.float64)
+    # ``dtype`` must be given to ``as_tensor``: a Python list would otherwise
+    # be captured as float32 (torch's default) and the later upcast would
+    # only convert already-truncated values, inventing ties in the
+    # rank-based metrics and rounding every seed-level statistic.
+    return torch.as_tensor(x, dtype=torch.float64).detach().reshape(-1)
 
 
 def average_ranks(scores: torch.Tensor) -> torch.Tensor:
