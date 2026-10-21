@@ -1005,6 +1005,24 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     if not bool(((s >= 0) & (s <= n)).all()):
         empty["reason"] = "success count outside [0, n]"
         return empty
+    # These are counts: ``successes[i]`` errors out of ``n_per_unit[i]``
+    # examples.  Fractional values would make the shared binomial draw
+    # meaningless (``torch.binomial`` takes an integer trial count) and
+    # ``wilson_ci`` would silently truncate the pooled totals.
+    if not bool((s.eq(s.round()) & n.eq(n.round())).all()):
+        empty["reason"] = "success counts and unit lengths must be integers"
+        return empty
+    if not (math.isfinite(lo_q) and math.isfinite(hi_q)
+            and 0.0 <= lo_q < hi_q <= 1.0):
+        empty["reason"] = "quantile levels must lie in [0, 1]"
+        return empty
+    try:
+        n_boot_int = int(n_boot)
+    except (TypeError, ValueError, OverflowError):
+        n_boot_int = 0
+    if n_boot_int <= 0:
+        empty["reason"] = "n_boot must be a positive integer"
+        return empty
     p = s / n
     units = int(s.numel())
     mean_acc = float(p.mean())
@@ -1013,7 +1031,7 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     n_stream = float(n.min())
     se_stream = math.sqrt(max(mean_acc * (1.0 - mean_acc) / n_stream, 0.0))
     gen = torch.Generator().manual_seed(int(seed))
-    idx = torch.randint(0, units, (int(n_boot), units), generator=gen)
+    idx = torch.randint(0, units, (n_boot_int, units), generator=gen)
     mean_star = p[idx].mean(dim=1)
     # One shared finite-stream draw per replicate, not one per seed: the
     # evaluation examples are common to every training seed.
@@ -1180,6 +1198,15 @@ def _self_test() -> int:
     check("cluster_bad_counts_no_claim", not bad_cluster["valid"])
     mixed_cluster = clustered_proportion_ci([50, float("nan")], [100, 100])
     check("cluster_partial_invalid_no_claim", not mixed_cluster["valid"])
+    fractional_cluster = clustered_proportion_ci([0.5, 0.5], [1, 1])
+    check("cluster_fractional_counts_no_claim",
+          not fractional_cluster["valid"])
+    zero_boot_cluster = clustered_proportion_ci([50] * 5, [100] * 5,
+                                               n_boot=0)
+    check("cluster_zero_boot_no_claim", not zero_boot_cluster["valid"])
+    bad_alpha_cluster = clustered_proportion_ci([50] * 5, [100] * 5,
+                                               lower_alpha=2.0)
+    check("cluster_bad_quantile_no_claim", not bad_alpha_cluster["valid"])
 
     if failures:
         print("metrics self-test FAILED: " + ", ".join(failures))
