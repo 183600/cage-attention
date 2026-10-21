@@ -1596,17 +1596,14 @@ def _paired_benchmark(runs_a, runs_b, metric, sesoi, reference):
     (expected) recipe mismatches, never the full audit, so it cannot be
     mistaken for a controlled contrast.
     """
-    def _curve_valid(runs):
-        return [r for r in runs
-                if r.get("curve_verdict") not in CURVE_INVALID_VERDICTS]
-
     excluded = {}
     for side, runs in (("a", runs_a), ("b", runs_b)):
         bad = [r.get("seed") for r in runs
                if r.get("curve_verdict") in CURVE_INVALID_VERDICTS]
         if bad:
             excluded[side] = sorted(bad, key=_seed_order)
-    ci = _paired_diff(_curve_valid(runs_a), _curve_valid(runs_b), metric)
+    ci = _paired_diff(_curve_valid_runs(runs_a), _curve_valid_runs(runs_b),
+                      metric)
     ci["curve_invalid_excluded"] = excluded
     audit = ci.get("controlled") or {}
     ci["comparison"] = "benchmark"
@@ -2145,6 +2142,11 @@ def _fmt_ci(ci) -> str:
 
 CURVE_INVALID_VERDICTS = (
     "plateau", "diverging", "numerical_instability", "insufficient_points")
+
+
+def _curve_valid_runs(runs):
+    return [r for r in runs
+            if r.get("curve_verdict") not in CURVE_INVALID_VERDICTS]
 
 
 def _curve_invalid_seeds_for(used, run_maps):
@@ -6933,26 +6935,41 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         # seed floor still applies to how the line is *labelled*: below
         # ``min_seeds_for_claim`` paired seeds a CI is a provisional
         # observation, never a "depth is required" result.
+        deep_runs = [r for r in _curve_valid_runs(by_gate["none"])
+                     if r["seed"] in shallow_by_seed]
         diffs = [r["accuracy"] - shallow_by_seed[r["seed"]]
-                 for r in by_gate["none"] if r["seed"] in shallow_by_seed]
+                 for r in deep_runs]
+        excluded_deep = sorted(
+            [r["seed"] for r in by_gate["none"]
+             if r.get("curve_verdict") in CURVE_INVALID_VERDICTS],
+            key=_seed_order)
         floor_note = ""
+        if excluded_deep:
+            floor_note += ("  [curve-invalid deep run(s) excluded: "
+                           f"{', '.join(str(s) for s in excluded_deep)}]")
         if len(diffs) >= 2:
             ci = paired_bootstrap_ci(diffs)
             deep_layers = int(
                 (by_gate["none"][0].get("model_cfg") or {})
                 .get("n_layers", settings.n_layers))
-            if len(diffs) < settings.min_seeds_for_claim:
+            claim_floor_ok = len(diffs) >= settings.min_seeds_for_claim
+            if not claim_floor_ok:
                 floor_note = (f"  [provisional: n={len(diffs)} paired seeds "
                               f"< the pre-registered claim floor "
                               f"{settings.min_seeds_for_claim}: too few "
-                              f"runs for a depth claim]")
+                              f"runs for a depth claim]" + floor_note)
+            readout = (
+                "a supported gap means the depth of the E1/E3 grids is "
+                "measurably required, a gap including 0 means a gate "
+                "gain must be beyond what one layer already reaches"
+                if claim_floor_ok else
+                "a gap excluding 0 is a provisional observation, not a "
+                "depth claim")
             print(f"      paired deep(none, "
                   f"{deep_layers} layers) - "
                   f"shallow({shallow_depth} layer) "
-                  f"accuracy: {_fmt_ci(ci)} (each side val-tuned; a "
-                  f"supported gap means the depth of the E1/E3 grids is "
-                  f"measurably required, a gap including 0 means a gate "
-                  f"gain must be beyond what one layer already reaches)"
+                  f"accuracy: {_fmt_ci(ci)} (each side val-tuned; "
+                  f"{readout})"
                   f"{floor_note}")
         # Per-arm complexity benchmark: the depth-only reference above says
         # whether 8 layers beat 1 layer, but it does not say whether any
