@@ -2230,6 +2230,14 @@ def _fmt_ci(ci) -> str:
             f"n={ci['n']} {p_s}{verdict}")
 
 
+# Metrics that are raw accuracy (or an accuracy difference) and therefore
+# inherit the held-out answer-balance premise.  ``f1_macro``,
+# ``recall_macro`` and the PR-AUC family are explicitly excluded: they are
+# the companions that remain interpretable under a skewed stream.
+_ACCURACY_METRICS = {
+    "accuracy", "accuracy_at_base", "accuracy_at_longest", "accuracy_drop",
+}
+
 CURVE_INVALID_VERDICTS = (
     "plateau", "diverging", "numerical_instability", "insufficient_points")
 
@@ -2554,11 +2562,20 @@ class ContrastLog:
     """
 
     def __init__(self, tag: str, hypotheses=(), min_seeds: int = 3,
-                 competence: dict | None = None, coverage=()):
+                 competence: dict | None = None, coverage=(),
+                 balance_ok: bool = True):
         self.tag = tag
         self.hypotheses = tuple(hypotheses)
         self.min_seeds = int(min_seeds)
         self.rows: list[dict] = []
+        # Held-out answer-balance premise for accuracy-based claims.  The
+        # gross-imbalance audit is not merely descriptive: if the stream is
+        # not uniform, an accuracy contrast is partly a class-prior contrast
+        # and cannot support a mechanism claim.  ``True``/``None`` (not
+        # audited) leave the decision untouched; only an explicit failure
+        # gates the accuracy rows.  Macro-F1/balanced-accuracy and PR-AUC
+        # rows are unaffected.
+        self.balance_ok = balance_ok is not False
         # HB0: the family's competence prerequisite (at least one arm above
         # chance).  When it fails, no contrast in the family may support a
         # claim - an underfit grid's differences describe the step count, not
@@ -2919,6 +2936,16 @@ class ContrastLog:
                     and row.get("stream_direction_agrees") is False):
                 row["claim_eligible"] = False
                 row["stream_sign_conflict"] = True
+            # Accuracy is the pre-registered headline only under the
+            # measured balance premise.  If the held-out stream failed the
+            # gross-imbalance audit, the same accuracy contrast is partly a
+            # class-prior contrast: keep it in the table for transparency
+            # but refuse the claim (macro-F1 / PR-AUC companions can still
+            # carry the mechanism reading).
+            if (not self.balance_ok and row["claim_eligible"]
+                    and row["metric"] in _ACCURACY_METRICS):
+                row["claim_eligible"] = False
+                row["accuracy_balance_failed"] = True
             row["supports_hypothesis"] = bool(
                 row["fdr_reject"] and row["practically_relevant"]
                 and row["claim_eligible"])
@@ -3010,6 +3037,11 @@ class ContrastLog:
                 verdict = ("INELIGIBLE (HB0 competence prerequisite failed: "
                            "no arm above chance, so the contrast cannot be "
                            "read as a mechanism statement)")
+            elif r.get("accuracy_balance_failed"):
+                verdict = ("INELIGIBLE (held-out answer-balance premise "
+                           "failed: accuracy is a class-prior reading on "
+                           "this stream; the macro-F1/PR-AUC companions, "
+                           "not accuracy, carry the claim)")
             elif r.get("stream_sign_conflict"):
                 verdict = ("INELIGIBLE (seed-level effect sign disagrees "
                            "with the item-level paired sign on the shared "
@@ -3185,11 +3217,20 @@ class ContrastLog:
                   f"companion p-value next to the claim")
         curve_invalid_gated = [r for r in testable
                                if r.get("curve_invalid_removes_support")]
+        balance_gated = [r for r in testable
+                         if r.get("accuracy_balance_failed")]
+        if balance_gated:
+            print(f"[{self.tag}] WARNING: {len(balance_gated)} accuracy "
+                  f"contrast(s) are marked claim-ineligible because the "
+                  f"held-out answer-balance audit failed; accuracy is a "
+                  f"class-prior reading on that stream, so only the "
+                  f"macro/PR-AUC companions can support a mechanism claim")
         low_seed = [r for r in testable
                     if not r.get("claim_eligible", True)
                     and r.get("competence_passed") is not False
                     and not r.get("curve_invalid_removes_support")
-                    and not r.get("coverage_gate_failed")]
+                    and not r.get("coverage_gate_failed")
+                    and not r.get("accuracy_balance_failed")]
         if low_seed:
             print(f"[{self.tag}] WARNING: {len(low_seed)}/{len(testable)} "
                   f"testable contrast(s) rest on fewer than "
@@ -7416,7 +7457,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                        hypotheses=("H1a", "H1b", "H1c", "H1d", "H1e", "H1f"),
                        min_seeds=settings.min_seeds_for_claim,
                        competence=competence,
-                       coverage=(ablation_coverage, design_coverage))
+                       coverage=(ablation_coverage, design_coverage),
+                       balance_ok=((verdict.get("eval_answer_balance") or {})
+                                   .get("all_uniform")))
     clog.print("calib - none", "H1a", "accuracy",
                _paired_diff(by_gate["calib"], by_gate["none"], "accuracy"),
                warn=_curve_warn(("calib", by_gate["calib"]),
@@ -7731,7 +7774,7 @@ _E2_VARIANTS = (
 def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H2a", "H2b", "H2c", "H2d", "H2e"))
     # HB1/HB3/HB4/HB5 hard gate (see run_e1).
-    _enforce_baseline_verdict(settings, out_dir, "e2")
+    verdict = _enforce_baseline_verdict(settings, out_dir, "e2")
     _write_manifest(settings, out_dir, "e2")
     _audit_data_splits(settings, out_dir, "e2", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e2")
@@ -8018,7 +8061,9 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     clog = ContrastLog("e2", hypotheses=("H2a", "H2b", "H2c", "H2d", "H2e"),
                        min_seeds=settings.min_seeds_for_claim,
                        competence=competence,
-                       coverage=(ablation_coverage, design_coverage))
+                       coverage=(ablation_coverage, design_coverage),
+                       balance_ok=((verdict.get("eval_answer_balance") or {})
+                                   .get("all_uniform")))
     calib_runs = by_variant["calib"]
     calib_warn = _curve_warn(("calib", calib_runs))
     clog.print("calib - none", "H2a", "accuracy_at_longest",
@@ -8382,7 +8427,9 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     clog = ContrastLog("e3", hypotheses=("H3a", "H3b", "H3c"),
                        min_seeds=settings.min_seeds_for_claim,
                        competence=competence,
-                       coverage=design_coverage)
+                       coverage=design_coverage,
+                       balance_ok=((verdict.get("eval_answer_balance") or {})
+                                   .get("all_uniform")))
     for gate in ("query", "calib"):
         for layer_scale in (None, 1e-2):
             a = index[(gate, "seednorm", layer_scale)]
