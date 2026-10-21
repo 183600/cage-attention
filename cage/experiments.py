@@ -898,7 +898,12 @@ class Settings:
     probe_lr_grid: tuple = (1e-2, 3e-3, 1e-3, 3e-4)
     depth_ladder: tuple = (1, 2, 4)
     dropout: float = 0.0        # model regularisation (recorded in the recipe)
-    deterministic: bool = False  # opt-in deterministic torch kernels
+    # Deterministic kernels are on by default: fixed seeds alone do not make
+    # CUDA runs repeatable when an op may pick a non-deterministic algorithm.
+    # The official grids therefore run under the stricter mode unless the
+    # caller explicitly opts out (--no-deterministic), and the resolved value
+    # is stamped into every record.
+    deterministic: bool = True
     lr: float | None = None
     lr_grid: tuple = (1e-3, 3e-4, 1e-4)
     curve_points: int = 10      # validation checks per run (0 disables)
@@ -3528,11 +3533,12 @@ _SEEDING_POLICY = {
     "every_training_run": (
         "cage.repro.seed_everything(seed): python random + numpy (when "
         "installed) + torch CPU and all CUDA devices; deterministic kernels "
-        "only when Settings.deterministic=True"),
+        "are requested by default (Settings.deterministic=True)"),
     "determinism_switch": (
         "Settings.deterministic is applied by every seeding call, including "
-        "train_model; False explicitly restores non-deterministic kernels "
-        "so a prior deterministic run cannot leak into a later one"),
+        "train_model; it defaults to True and can be opted out via "
+        "--no-deterministic; False explicitly restores non-deterministic "
+        "kernels so a prior deterministic run cannot leak into a later one"),
     "data_streams": (
         "each split and training seed owns a dedicated torch.Generator "
         "(DataLoader generator= equivalent; make_batch never reads the "
@@ -7684,6 +7690,11 @@ def main(argv=None) -> int:
     parser.add_argument("--fdr-q", type=float, default=0.05,
                         help="Benjamini-Hochberg FDR level for the "
                              "pre-registered contrast families")
+    parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="force deterministic torch kernels on/off "
+                             "(default: on; --no-deterministic opts out and "
+                             "is recorded in the run provenance)")
     parser.add_argument("--out", default="results")
     parser.add_argument("--verify-artifacts", action="store_true",
                         help="check files in --out against artifact_index.json "
@@ -7694,6 +7705,8 @@ def main(argv=None) -> int:
 
     settings = Settings.quick(args.device) if args.quick else Settings(
         device=args.device)
+    if args.deterministic is not None:
+        settings.deterministic = bool(args.deterministic)
     if args.seeds is not None:
         requested = tuple(range(args.seeds))
         dropped = tuple(s for s in requested if s in RESERVED_EVAL_SEEDS)
