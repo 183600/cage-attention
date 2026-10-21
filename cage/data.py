@@ -341,6 +341,11 @@ def _as_indices(index, n: int) -> torch.Tensor:
                     f"{int(m.numel())}")
             idx = torch.nonzero(m, as_tuple=False).flatten().to(torch.long)
         else:
+            # ``torch.as_tensor([])`` is float32, but an empty split is a
+            # legitimate assignment (the docstring above allows it).  Only
+            # non-empty float arrays are a truncation hazard.
+            if t.numel() == 0:
+                return torch.empty(0, dtype=torch.long)
             if t.is_floating_point() or t.is_complex():
                 raise ValueError(
                     "split indices must be integers or a boolean mask, got "
@@ -1956,6 +1961,16 @@ def _self_test() -> int:
             check("split_bad_n_rejected", False)
         except ValueError:
             check("split_bad_n_rejected", True)
+    # An empty split container is a legitimate assignment (the function
+    # documents empty splits as allowed), including ``[]`` whose inferred
+    # dtype is float32.  It must not be rejected as a floating index array.
+    for empty in ([], (), torch.tensor([])):
+        try:
+            assert_split_partition(4, {"train": [0, 1, 2, 3],
+                                       "test": empty})
+            check("empty_split_container_allowed", True)
+        except ValueError:
+            check("empty_split_container_allowed", False)
     try:
         time_ordered_split(10.5)
         check("time_split_fractional_n_rejected", False)
