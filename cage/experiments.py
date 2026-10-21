@@ -4070,6 +4070,40 @@ _REPRO_AUDIT_BASE_SEED = 4242
 _REPRO_AUDIT_STEPS = 5
 _REPRO_AUDIT_BATCH = 8
 
+_CROSS_PROCESS_REPLAY_SCRIPT = r"""
+import contextlib
+import io
+import json
+import sys
+
+from cage.data import batch_fingerprint, make_batch
+from cage.model import build
+from cage.repro import seed_everything, stream_generator
+from cage.train import train_model
+
+spec = json.loads(sys.argv[1])
+seed = int(spec["seed"])
+device = spec["device"]
+deterministic = bool(spec["deterministic"])
+seed_everything(seed, deterministic=deterministic)
+gen = stream_generator(seed, device)
+idx, tgt, meta = make_batch(int(spec["batch"]), int(spec["n_pairs"]),
+                            int(spec["vocab"]), device, gen=gen)
+fingerprint = batch_fingerprint(idx, tgt, meta)
+seed_everything(seed, deterministic=deterministic)
+model = build(dict(spec["model_cfg"]), compile=False)
+with contextlib.redirect_stdout(io.StringIO()):
+    hist = train_model(model, steps=int(spec["steps"]),
+                       batch=int(spec["batch"]),
+                       n_pairs=int(spec["n_pairs"]), lr=float(spec["lr"]),
+                       vocab=int(spec["vocab"]), device=device,
+                       log_every=1, seed=seed,
+                       deterministic=deterministic)
+print(json.dumps({"data": fingerprint,
+                  "losses": [float(row["train_loss"]) for row in hist],
+                  "deterministic": deterministic}))
+"""
+
 _REPRO_AUDIT_KEYS = (
     ("data_same_seed_identical", "same seed draws byte-identical batches"),
     ("data_diff_seed_differs", "a different seed draws different data"),
@@ -4100,6 +4134,11 @@ _REPRO_AUDIT_KEYS = (
      "training path, which a dropout=0 run never exercises)"),
     ("trajectory_dropout_diff_seed_differs",
      "a different seed changes the dropout trajectory"),
+    ("cross_process_data_identical",
+     "a fresh interpreter draws the same data batch for the same seed"),
+    ("cross_process_trajectory_identical",
+     "a fresh interpreter replays the training trajectory (same "
+     "seed/config/device)"),
     ("determinism_flag_follows_request",
      "the deterministic-kernel switch follows the requested setting (on "
      "enables it, off restores the default instead of inheriting a "
@@ -4130,6 +4169,82 @@ def _probe_seed(settings: Settings, start: int) -> int:
     return s
 
 
+def _cross_process_replay(settings: Settings, seed: int, cfg: dict,
+                          data_fingerprint: str, losses: list[float]) -> dict:
+    """Replay the probe run in a fresh interpreter and compare results.
+
+    In-process repetition cannot catch state that *survives* a replay:
+    module-level caches, hash-randomisation order, or a seeding step that
+    only works because the first run happened to leave the RNG at the right
+    place.  A fresh process with its own ``PYTHONHASHSEED`` (derived from
+    the probe seed) exercises the actual launch path.  The child imports
+    only the public data/model/train entry points and prints its batch
+    fingerprint plus loss sequence as the last stdout line; warnings from
+    torch stay on stderr.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent
+    spec = {
+        "seed": int(seed),
+        "batch": _REPRO_AUDIT_BATCH,
+        "n_pairs": int(settings.n_pairs),
+        "vocab": int(settings.vocab),
+        "steps": _REPRO_AUDIT_STEPS,
+        "device": settings.device,
+        "deterministic": bool(settings.deterministic),
+        "model_cfg": cfg,
+        "lr": 1e-3,
+    }
+    env = dict(os.environ)
+    pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (str(root) if not pythonpath
+                         else str(root) + os.pathsep + pythonpath)
+    env["PYTHONHASHSEED"] = str(stream_seed_key(seed))
+    base = {
+        "started": False,
+        "error": None,
+        "pythonhashseed": env["PYTHONHASHSEED"],
+        "data_identical": False,
+        "trajectory_identical": False,
+        "max_abs_diff": float("inf"),
+        "child_losses": [],
+    }
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _CROSS_PROCESS_REPLAY_SCRIPT,
+             json.dumps(spec)],
+            capture_output=True, text=True, env=env, cwd=str(root),
+            timeout=300)
+    except (OSError, subprocess.SubprocessError) as exc:
+        base["error"] = f"{type(exc).__name__}: {exc}"
+        return base
+    lines = proc.stdout.strip().splitlines()
+    if proc.returncode != 0 or not lines:
+        detail = (proc.stderr.strip() or "no stdout").splitlines()
+        base["error"] = (f"child exit {proc.returncode}: "
+                         + " | ".join(detail[-3:]))
+        return base
+    try:
+        child = json.loads(lines[-1])
+        child_losses = [float(v) for v in child["losses"]]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        base["error"] = f"unparseable child output: {type(exc).__name__}: {exc}"
+        return base
+    same_length = len(child_losses) == len(losses)
+    diffs = [abs(a - b) for a, b in zip(losses, child_losses)]
+    max_diff = max(diffs) if diffs else float("inf")
+    base.update({
+        "started": True,
+        "child_data": child.get("data"),
+        "child_deterministic": bool(child.get("deterministic")),
+        "child_losses": child_losses,
+        "data_identical": child.get("data") == data_fingerprint,
+        "trajectory_identical": bool(
+            same_length and max_diff <= 1e-9),
+        "max_abs_diff": max_diff,
+    })
+    return base
+
+
 def _reproducibility_audit(settings: Settings) -> dict:
     """Machine-check that one seed pins one run on the current machine.
 
@@ -4157,7 +4272,12 @@ def _reproducibility_audit(settings: Settings) -> dict:
       anything that ran before it (the entry re-seeds), and changes under a
       different seed.  The same replay check is repeated with dropout on,
       which *does* consume the global RNG: only that run verifies the
-      dropout-mask stream is seeded and not shared with the data stream.
+      dropout-mask stream is seeded and not shared with the data stream;
+    * **cross-process replay**: a fresh interpreter (separate
+      ``PYTHONHASHSEED``, its own module state) re-draws the probe batch
+      and re-runs the short trajectory through the public entry points.
+      This catches seeding that only works because in-process state was
+      already warm, which repeated calls in one process cannot expose.
 
     Scope follows ``cage.repro``: same machine and PyTorch build, not
     bit-exact reproduction across hardware/instruction sets.  Cached on
@@ -4203,7 +4323,7 @@ def _reproducibility_audit(settings: Settings) -> dict:
 
     def _draw(s):
         gen = stream_generator(s, device)
-        return make_batch(settings.overfit_batch, settings.n_pairs,
+        return make_batch(_REPRO_AUDIT_BATCH, settings.n_pairs,
                           settings.vocab, device, gen=gen)
 
     fp_same_a = batch_fingerprint(*_draw(seed))
@@ -4325,6 +4445,8 @@ def _reproducibility_audit(settings: Settings) -> dict:
     traj_drop_replay = _trajectory(seed, model_cfg=cfg_drop)
     traj_drop_other = _trajectory(other, model_cfg=cfg_drop)
 
+    cross = _cross_process_replay(settings, seed, cfg, fp_same_a, traj_a)
+
     audit = {
         "probe_seed": int(seed),
         "other_seed": int(other),
@@ -4356,6 +4478,13 @@ def _reproducibility_audit(settings: Settings) -> dict:
             traj_drop_a == traj_drop_replay),
         "trajectory_dropout_diff_seed_differs": bool(
             traj_drop_a != traj_drop_other),
+        "cross_process_data_identical": bool(cross["data_identical"]),
+        "cross_process_trajectory_identical": bool(
+            cross["trajectory_identical"]),
+        "cross_process_max_abs_diff": cross["max_abs_diff"],
+        "cross_process_pythonhashseed": cross["pythonhashseed"],
+        "cross_process_error": cross["error"],
+        "cross_process": cross,
         "determinism_flag_follows_request": determinism_toggle,
         "deterministic_on": det_on,
         "deterministic_off": det_off,
