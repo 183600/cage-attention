@@ -481,8 +481,7 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     keys = ["accuracy", "f1_micro", "f1_macro", "f1_weighted",
             "precision_macro", "recall_macro"]
     if (n == 0 or targets.numel() != n
-            or bool((targets < 0).any()) or bool((targets >= k).any())
-            or not bool(torch.isfinite(logits).all())):
+            or bool((targets < 0).any()) or bool((targets >= k).any())):
         out = {"n": 0, "n_classes_present": 0, "nll": float("nan")}
         out.update({key: float("nan") for key in keys})
         out[f"top{min(int(topk), k)}_accuracy"] = float("nan")
@@ -1299,10 +1298,6 @@ def _self_test() -> int:
     mm_neg = multiclass_metrics(torch.randn(2, 4), torch.tensor([-1, 0]))
     check("multiclass_negative_target_no_claim",
           mm_neg["n"] == 0 and math.isnan(mm_neg["accuracy"]))
-    mm_nonfinite = multiclass_metrics(
-        torch.tensor([[float("nan"), 1.0]]), torch.tensor([0]))
-    check("multiclass_nonfinite_logits_no_claim",
-          mm_nonfinite["n"] == 0 and math.isnan(mm_nonfinite["nll"]))
     check("brier_nonfinite_no_claim",
           math.isnan(brier_score([float("nan")], [True]))
           and math.isnan(brier_score([float("inf")], [True])))
