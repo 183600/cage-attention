@@ -513,10 +513,12 @@ def validate_batch(idx, targets, meta, vocab, diagnostics: bool = True) -> dict:
     * structure: exactly one SEP token, at the fixed separator slot, a
       query at the final position, and ``meta`` agreeing with the
       sequence;
-    * label noise: the query key occurs exactly once among the keys, the
-      recorded answer is the value paired with that key (a repeated key
-      would make the correct answer ambiguous) and the answer id is a
-      selectable token (ids 0=PAD and 1=SEP are reserved and never labels);
+    * label noise: all keys are distinct (the generator samples them
+      without replacement), the query key occurs exactly once among the
+      keys, the recorded answer is the value paired with that key (a
+      repeated key would make the correct answer ambiguous) and the answer
+      id is a selectable token (ids 0=PAD and 1=SEP are reserved and never
+      labels);
     * targets (when given): ids in ``[-1, vocab)``, the supervised entry
       at the query position equal to the answer, and *every* entry aligned
       with its position (``-1`` or the true next-token label).  Checking
@@ -581,6 +583,13 @@ def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
         # Key columns only: ``idx`` is ``[k1 v1 ... kn vn SEP query]``, so
         # the last two columns (SEP at 2n, query at 2n+1) must be excluded.
         keys = idx[:, :-2:2]
+        # Every key must be distinct, not just the queried one: the task
+        # samples keys without replacement, and a repeated non-query key
+        # means the batch violates the generator contract even when the
+        # queried answer happens to stay unique.
+        if keys.size(1) > 1:
+            ordered = keys.sort(dim=1).values
+            checks.append((ordered[:, 1:] != ordered[:, :-1]).all())
         match = keys.eq(query.unsqueeze(1))
         checks.append(match.sum(dim=1).eq(1).all())
         key_pos = match.to(torch.int64).argmax(dim=1).mul(2)
@@ -658,6 +667,14 @@ def _validate_batch_strict(idx, targets, meta, vocab) -> dict:
     # plain ``0::2`` stride would pick up SEP and silently rely on
     # ``query >= 2`` never matching the reserved SEP id.
     keys = idx[:, :-2:2]
+    if keys.size(1) > 1:
+        ordered = keys.sort(dim=1).values
+        if not bool((ordered[:, 1:] != ordered[:, :-1]).all()):
+            raise ValueError(
+                "structure: keys must be distinct within a sequence (the "
+                "generator samples them without replacement); a repeated "
+                "key violates the task contract"
+            )
     match = keys.eq(query.unsqueeze(1))
     if not bool(match.sum(dim=1).eq(1).all()):
         raise ValueError(
@@ -2041,6 +2058,22 @@ def _self_test() -> int:
         check("validate_rejects_pad_value", False)
     except ValueError:
         check("validate_rejects_pad_value", True)
+
+    # A repeated non-query key violates the generator's without-replacement
+    # contract even though the queried key is still unique; the cleaning gate
+    # must reject it (the old check only looked at the query key).
+    dup_nonquery = torch.tensor(
+        [[2, 10, 3, 11, 3, 12, 4, 13, SEP_ID, 4]], dtype=torch.long)
+    dup_nonquery_meta = {
+        "query_pos": torch.tensor([9], dtype=torch.long),
+        "key_pos": torch.tensor([6], dtype=torch.long),
+        "answer": torch.tensor([13], dtype=torch.long),
+    }
+    try:
+        validate_batch(dup_nonquery, None, dup_nonquery_meta, 32)
+        check("validate_rejects_duplicate_nonquery_key", False)
+    except ValueError:
+        check("validate_rejects_duplicate_nonquery_key", True)
 
     # The predicate that guards every training batch must agree with the
     # strict checker exactly: it may not accept a batch the strict checker
