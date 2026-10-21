@@ -906,6 +906,9 @@ def benjamini_hochberg(p_values, q: float = 0.05) -> list:
     contrasts from accumulating ~1 spurious "supported" claim under the
     null.
     """
+    # Materialize once: a one-shot iterable must not be consumed by the
+    # output scaffold and then silently read as an all-NaN family.
+    p_values = list(p_values)
     out = [{"p": float("nan"), "p_adj": float("nan"), "reject": False}
            for _ in p_values]
     finite = []
@@ -1161,6 +1164,10 @@ def _self_test() -> int:
     check("bh_reject_small", adj[0]["reject"] and adj[1]["reject"])
     check("bh_keep_large", not adj[2]["reject"] and not adj[3]["reject"])
     check("bh_nan_untestable", adj[4]["p_adj"] != adj[4]["p_adj"])
+    gen_adj = benjamini_hochberg(
+        (p for p in [0.001, 0.004, 0.2, 0.8, float("nan")]), q=0.05)
+    check("bh_generator_input",
+          [r["reject"] for r in gen_adj] == [r["reject"] for r in adj])
 
     # Wilson interval brackets the point estimate, including exact endpoints.
     w = wilson_ci(60, 100)
