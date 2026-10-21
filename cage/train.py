@@ -18,11 +18,17 @@ from .data import (
 )
 from .metrics import (
     average_ranks,
+    auc_paired_bootstrap_ci,
     brier_score,
+    cohens_d_paired,
     expected_calibration_error,
+    hedges_g_paired,
+    mcnemar_test,
     multiclass_metrics,
     pr_auc,
+    pr_auc_ci,
     roc_auc,
+    roc_auc_ci,
     selection_at_fraction,
     wilson_ci,
 )
