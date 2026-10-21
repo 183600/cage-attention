@@ -5371,16 +5371,40 @@ _SANITY_CONFIGS = (
 _SANITY_REFERENCE = "gate=none"
 
 
+def _sanity_configs(settings: Settings) -> tuple:
+    """Per-path HB5 configurations, including the configured model depth.
+
+    The static matrix isolates gate/normalisation/LayerScale paths on a
+    2-layer miniature so the pre-flight stays cheap.  A backward problem
+    that only appears once activations traverse the configured depth would
+    still pass that matrix while every grid run at ``settings.n_layers``
+    fails, so the two architectures the grids actually depend on (the
+    default Pre-LN arm and the E3 seednorm arm, both with the calibrated
+    gate) are repeated at the real depth.
+    """
+    configs = list(_SANITY_CONFIGS)
+    depth = int(settings.n_layers)
+    if depth > 2:
+        for norm in ("pre", "seednorm"):
+            configs.append((
+                f"gate=calib,norm={norm},n_layers={depth}",
+                {"gate": "calib", "norm": norm, "n_layers": depth}))
+    return tuple(configs)
+
+
 def _overfit_sanity_by_config(settings: Settings) -> dict:
     """Tiny-batch memorisation check for every trained path (cached).
 
-    One fixed batch from ``SANITY_SEED`` is pushed through the tiny 2-layer
-    model of each configuration with dropout off and weight decay zeroed, so
-    every custom kernel's backward path *and* every normalisation /
-    LayerScale path the grids train is exercised - a passing ``gate=none``
-    check alone would not prove the calib/null gates or the
-    seednorm/Post-LN/LayerScale paths backprop.  Cached on ``Settings``:
-    E1/E2/E3 in one ``--only all`` run share a single execution.
+    One fixed batch from ``SANITY_SEED`` is pushed through the model of each
+    configuration with dropout off and weight decay zeroed, so every custom
+    kernel's backward path *and* every normalisation / LayerScale path the
+    grids train is exercised - a passing ``gate=none`` check alone would not
+    prove the calib/null gates or the seednorm/Post-LN/LayerScale paths
+    backprop.  Beyond the cheap 2-layer matrix, ``_sanity_configs`` repeats
+    the default and seednorm arms at ``settings.n_layers`` so depth-specific
+    gradient/loss failures are caught before a grid starts.  Cached on
+    ``Settings``: E1/E2/E3 in one ``--only all`` run share a single
+    execution.
     """
     cached = getattr(settings, "_overfit_sanity_cache", None)
     if cached is not None:
@@ -5393,10 +5417,11 @@ def _overfit_sanity_by_config(settings: Settings) -> dict:
                                    settings.vocab, settings.device, gen=gen)
     validate_batch(sidx, stgt, smeta, settings.vocab, diagnostics=False)
     by_config = {}
-    for label, overrides in _SANITY_CONFIGS:
+    for label, overrides in _sanity_configs(settings):
         seed_everything(SANITY_SEED, deterministic=settings.deterministic)
-        tiny = build(_model_cfg(settings, d_model=48, n_layers=2, **overrides),
-                     compile=False)
+        tiny = build(_model_cfg(
+            settings, **{"d_model": 48, "n_layers": 2, **overrides}),
+            compile=False)
         row = overfit_sanity_check(
             tiny, sidx, stgt, smeta, lr=settings.overfit_lr,
             steps=settings.overfit_steps, seed=SANITY_SEED,
@@ -5553,7 +5578,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     overfit_payload = {**sanity, "passed": hb5_supported,
                        "by_config": sanity_by_config}
     _write_json(out_dir / "baselines_overfit_sanity.json", overfit_payload)
-    for label, overrides in _SANITY_CONFIGS:
+    for label, overrides in _sanity_configs(settings):
         _write_result(out_dir / "baselines_runs.jsonl",
                       {**record, "name": f"overfit_sanity_{label}",
                        "config": label,
