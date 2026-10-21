@@ -1214,6 +1214,14 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
     n_h = float(obs.sum())
     if n_ref <= 0.0 or n_h <= 0.0:
         return float("nan"), float("nan")
+    if isinstance(n_sim, bool):
+        return float("nan"), float("nan")
+    try:
+        n_sim = operator.index(n_sim)
+    except TypeError:
+        return float("nan"), float("nan")
+    if n_sim < 1:
+        return float("nan"), float("nan")
     k = ref.numel()
     probs = (ref + _AUDIT_SMOOTH) / (n_ref + _AUDIT_SMOOTH * k)
     expected = n_h * probs
@@ -1446,6 +1454,15 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
            "p_value": float("nan"), "uniform_supported": False}
     if k < 2 or n <= 0.0:
         return out
+    if isinstance(n_sim, bool):
+        return out
+    try:
+        n_sim_int = operator.index(n_sim)
+    except TypeError:
+        return out
+    if n_sim_int < 1:
+        return out
+    n_sim = n_sim_int
     expected = n / k
     chi2 = float((((c - expected) ** 2) / expected).sum())
     gen = torch.Generator().manual_seed(seed)
@@ -2063,6 +2080,10 @@ def _self_test() -> int:
         check("length_sweep_single_point_rejected", False)
     except ValueError:
         check("length_sweep_single_point_rejected", True)
+    zero_sim = answer_uniformity_test(torch.tensor([5, 5]), n_sim=0)
+    check("uniformity_zero_sim_no_claim",
+          math.isnan(zero_sim["p_value"])
+          and not zero_sim["uniform_supported"])
     for args in ((0, 2, 4, 256), (16, 1, 4, 256), (16, 0, 4, 256),
                  (16, 2, 0, 256)):
         try:
