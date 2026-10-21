@@ -197,7 +197,11 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
                 "precision": float("nan"), "lift": float("nan"),
                 "threshold": float("nan")}
     frac = min(max(float(frac), 0.0), 1.0)
-    k = int(math.ceil(frac * n))
+    # ``frac * n`` can land a few ulps above an exact integer (0.07 * 100 is
+    # 7.000000000000001 in IEEE-754), which would make ``ceil`` overcount by
+    # one; snapping the product to 9 decimals restores the documented
+    # ``ceil(frac * n)`` without touching genuinely fractional products.
+    k = int(math.ceil(round(frac * n, 9)))
     if k <= 0:
         return {"frac": 0.0, "k": 0, "recall": float("nan"),
                 "precision": float("nan"), "lift": float("nan"),
