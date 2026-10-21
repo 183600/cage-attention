@@ -81,6 +81,7 @@ __all__ = [
     "pr_auc",
     "roc_auc_ci",
     "pr_auc_ci",
+    "auc_paired_bootstrap_ci",
     "multiclass_metrics",
     "expected_calibration_error",
     "brier_score",
@@ -298,6 +299,47 @@ def pr_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
     lo = float(torch.quantile(bt, alpha / 2.0))
     hi = float(torch.quantile(bt, 1.0 - alpha / 2.0))
     return {"auc": auc, "lo": lo, "hi": hi, "n": int(y.numel())}
+
+
+def auc_paired_bootstrap_ci(scores_a, scores_b, positives, n_boot: int = 10000,
+                            seed: int = 0, alpha: float = 0.05,
+                            metric: str = "roc") -> dict:
+    """Paired bootstrap CI for difference of ROC/PR-AUC on same items."""
+    sa = _flatten_float(scores_a)
+    sb = _flatten_float(scores_b)
+    y = torch.as_tensor(positives).reshape(-1).bool()
+    if sa.numel() != sb.numel() or sa.numel() != y.numel() or sa.numel() == 0:
+        return {"mean_diff": float("nan"), "lo": float("nan"), "hi": float("nan")}
+    metric = metric.lower()
+    def _auc(sv):
+        return roc_auc(sv, y) if metric == "roc" else pr_auc(sv, y)
+    a0 = _auc(sa)
+    b0 = _auc(sb)
+    gen = torch.Generator(device=sa.device).manual_seed(int(seed))
+    diffs = []
+    n = sa.numel()
+    for _ in range(int(n_boot)):
+        idx = torch.randint(0, n, (n,), generator=gen, device=sa.device)
+        sbi = sa[idx]; sbj = sb[idx]; yb = y[idx]
+        if metric == "roc":
+            npo = int(yb.sum()); nno = yb.numel() - npo
+            if npo == 0 or nno == 0:
+                continue
+        else:
+            if int(yb.sum()) == 0:
+                continue
+        da = roc_auc(sbi, yb) if metric == "roc" else pr_auc(sbi, yb)
+        db = roc_auc(sbj, yb) if metric == "roc" else pr_auc(sbj, yb)
+        if math.isfinite(da) and math.isfinite(db):
+            diffs.append(da - db)
+    if not diffs:
+        return {"mean_diff": a0 - b0 if (math.isfinite(a0) and math.isfinite(b0)) else float("nan"),
+                "lo": float("nan"), "hi": float("nan")}
+    dt = torch.tensor(diffs, dtype=torch.float64)
+    lo = float(torch.quantile(dt, alpha / 2.0))
+    hi = float(torch.quantile(dt, 1.0 - alpha / 2.0))
+    md = a0 - b0 if (math.isfinite(a0) and math.isfinite(b0)) else float(dt.mean())
+    return {"mean_diff": float(md), "lo": lo, "hi": hi, "n": n}
 
 
 def cohens_d_paired(diffs) -> float:
