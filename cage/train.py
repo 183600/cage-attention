@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import math
 
 import torch
@@ -1757,6 +1758,46 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     return correct.item() / total if total else float("nan")
 
 
+def encode_correct_mask(correct: torch.Tensor) -> str:
+    """Compact base64 bitmask of per-item correctness.
+
+    The evaluation stream is finite and every training seed is scored on
+    the *same* examples.  A compact per-item mask lets a downstream paired
+    contrast run the exact item-level test (McNemar) instead of treating
+    the shared stream as if it carried no measurement error.  One bit per
+    row keeps the run record small (``batch * batches`` bits).
+    """
+    bits = torch.as_tensor(correct).detach().reshape(-1).to(
+        device="cpu", dtype=torch.int64)
+    pad = (-bits.numel()) % 8
+    if pad:
+        bits = torch.cat([bits, torch.zeros(pad, dtype=torch.int64)])
+    if bits.numel() == 0:
+        return ""
+    weights = (1 << torch.arange(7, -1, -1)).to(torch.int64)
+    packed = (bits.reshape(-1, 8) * weights).sum(dim=1)
+    return base64.b64encode(bytes(packed.tolist())).decode("ascii")
+
+
+def decode_correct_mask(encoded: str, n: int) -> torch.Tensor:
+    """Decode :func:`encode_correct_mask` back to a boolean row mask."""
+    n = int(n)
+    if n < 0:
+        raise ValueError(f"n must be non-negative, got {n}")
+    if not isinstance(encoded, str):
+        raise TypeError(f"encoded mask must be str, got {type(encoded)}")
+    if not encoded:
+        return torch.zeros(max(n, 0), dtype=torch.bool)
+    raw = base64.b64decode(encoded.encode("ascii"))
+    values = torch.tensor(list(raw), dtype=torch.int64)
+    shifts = torch.arange(7, -1, -1).to(torch.int64)
+    bits = ((values.reshape(-1, 1) >> shifts) & 1).reshape(-1)
+    if bits.numel() < n:
+        raise ValueError(
+            f"encoded mask holds {bits.numel()} bits but n={n} was requested")
+    return bits[:n].bool()
+
+
 @torch.inference_mode()
 def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
                  seed=VAL_SEED, topk=5):
@@ -1824,6 +1865,10 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     out["ece_15bin"] = expected_calibration_error(confidence, pred == tgt_cat,
                                                   n_bins=15)
     out["brier"] = brier_score(confidence, pred == tgt_cat)
+    # Item-level correctness in a compact, JSON-safe form: the shared
+    # finite stream is a real source of uncertainty for paired contrasts
+    # (see ``cage.experiments._paired_diff``).
+    out["correct_bitmask"] = encode_correct_mask(pred == tgt_cat)
     release_eval_scratch()
     return out
 

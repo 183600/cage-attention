@@ -152,6 +152,7 @@ from .data import (
 )
 from .metrics import (
     benjamini_hochberg,
+    mcnemar_test,
     clustered_proportion_ci,
     equivalence_test,
     noninferiority_test,
@@ -163,6 +164,7 @@ from .model import GATES, NORMS, build
 from .repro import configure_determinism, seed_everything, stream_generator
 from .train import (
     _ERROR_TYPES,
+    decode_correct_mask,
     collect_stats,
     collect_stats_and_errors,
     error_detection_aucs,
@@ -1480,6 +1482,79 @@ def _controlled_audit(runs_a, runs_b):
     return audit
 
 
+def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
+    """Exact paired test on the shared finite evaluation stream.
+
+    Training seeds are independent, but the evaluation items are not: every
+    seed is scored on the same sealed stream.  The seed-level bootstrap
+    answers "would this effect replicate over training runs on this stream",
+    not "is the stream large enough to resolve it".  When both sides store
+    the compact per-item correctness mask from ``eval_metrics``, this helper
+    runs McNemar's exact test on the concatenated items and reports the
+    item-level effect, so a positive seed-level mean whose item-level sign
+    disagrees is caught instead of being printed as a win.
+
+    Only ``accuracy`` has a stored mask.  Any missing mask, differing item
+    count, or malformed record makes the companion not applicable (it is a
+    diagnostic, never a reason to fabricate a test).
+    """
+    out = {"applicable": False, "reason": None, "n": 0,
+           "n_seeds": 0, "b": None, "c": None, "p_exact": None,
+           "item_mean_diff": None, "direction_agrees": None}
+    if metric != "accuracy":
+        out["reason"] = "only accuracy stores per-item correctness"
+        return out
+    masks_a, masks_b, ns = [], [], []
+    for seed in used:
+        ra, rb = by_a.get(seed), by_b.get(seed)
+        if ra is None or rb is None:
+            out["reason"] = f"missing run for seed {seed}"
+            return out
+        ea, eb = ra.get("correct_bitmask"), rb.get("correct_bitmask")
+        na = ra.get("n", ra.get("eval_n"))
+        nb = rb.get("n", rb.get("eval_n"))
+        if not isinstance(ea, str) or not isinstance(eb, str):
+            out["reason"] = "per-item correctness not recorded on both sides"
+            return out
+        if not _finite(na) or not _finite(nb) or int(na) != int(nb):
+            out["reason"] = "evaluation item counts differ"
+            return out
+        n = int(na)
+        try:
+            ma = decode_correct_mask(ea, n)
+            mb = decode_correct_mask(eb, n)
+        except (TypeError, ValueError) as exc:
+            out["reason"] = f"invalid correctness mask: {exc}"
+            return out
+        masks_a.append(ma)
+        masks_b.append(mb)
+        ns.append(n)
+    if not masks_a:
+        out["reason"] = "no paired seeds"
+        return out
+    ca = torch.cat(masks_a)
+    cb = torch.cat(masks_b)
+    if ca.numel() != cb.numel() or ca.numel() == 0:
+        out["reason"] = "no evaluation items"
+        return out
+    mc = mcnemar_test(ca, cb)
+    item_mean = float(ca.float().mean() - cb.float().mean())
+    if _finite(seed_mean) and _finite(item_mean):
+        agrees = ((seed_mean > 0.0 and item_mean > 0.0)
+                  or (seed_mean < 0.0 and item_mean < 0.0)
+                  or (seed_mean == 0.0 and item_mean == 0.0))
+    else:
+        agrees = None
+    out.update({
+        "applicable": True, "n": int(ca.numel()),
+        "n_seeds": len(masks_a), "n_per_seed": sorted(set(ns)),
+        "b": mc["b"], "c": mc["c"],
+        "p_exact": mc["p_exact"], "p_chi2_cc": mc["p_chi2_cc"],
+        "item_mean_diff": item_mean, "direction_agrees": agrees,
+    })
+    return out
+
+
 def _paired_diff(runs_a, runs_b, metric):
     """Paired contrast ``a - b`` plus both arms' levels.
 
@@ -1562,6 +1637,15 @@ def _paired_diff(runs_a, runs_b, metric):
     }
     ci["arms_note"] = "paired seeds used by the effect"
     ci["baseline_mean"] = base["mean"]
+    # The shared finite evaluation stream is a second source of noise on
+    # top of training-seed variance: every seed is scored on the same
+    # items.
+    # Run the exact item-level paired test (McNemar) whenever both sides
+    # recorded their per-item correctness.  This cannot replace the
+    # seed-level decision, but it exposes a gain that is only an artifact
+    # of which items the stream happened to contain.
+    ci["stream_test"] = _paired_stream_test(
+        by_a, by_seed, used, metric, ci.get("mean"))
     # Raw per-seed differences: lets an equivalence companion reuse the
     # identical pairing instead of re-deriving it (and drifting from it).
     ci["diffs"] = list(diffs)
@@ -2574,6 +2658,15 @@ class ContrastLog:
             # replacement for the pre-registered decision rule).
             "diffs": list(ci.get("diffs") or []),
             "curve_invalid_seeds": list(ci.get("curve_invalid_seeds") or []),
+            # Item-level companion on the shared finite evaluation stream
+            # (McNemar).  ``stream_sign_conflict`` is a hard gate below:
+            # a seed-level sign that disagrees with the sign over the
+            # actual items is not measuring the same effect.
+            "stream_test": ci.get("stream_test"),
+            "stream_test_p": (ci.get("stream_test") or {}).get("p_exact"),
+            "stream_direction_agrees":
+                (ci.get("stream_test") or {}).get("direction_agrees"),
+            "stream_sign_conflict": False,
         })
         line = f"  [{hyp}] {rule} ({metric}): {_fmt_ci(ci)}"
         if audit is not None:
@@ -2605,6 +2698,13 @@ class ContrastLog:
                      f"{len(dropped) + len(ci.get('seeds_used') or [])} "
                      f"planned seed(s) dropped ({', '.join(why) or 'n/a'}); "
                      f"effective n={ci.get('n')}]")
+        stream = ci.get("stream_test") or {}
+        if stream.get("applicable"):
+            line += (f"  [finite-stream McNemar: b={stream['b']}, "
+                     f"c={stream['c']}, p={stream['p_exact']:.4g}, "
+                     f"n_items={stream['n']}]")
+        elif stream.get("reason"):
+            line += f"  [finite-stream test n/a: {stream['reason']}]"
         flags = small_n_flags(ci)
         if flags:
             line += f"  [{flags}]"
@@ -2783,6 +2883,15 @@ class ContrastLog:
                              or not sens_ok)):
                     row["claim_eligible"] = False
                     row["curve_invalid_removes_support"] = True
+            # The seed-level effect and the item-level paired effect must
+            # at least share a sign.  Opposite signs mean the two
+            # summaries are not measuring the same contrast (e.g. unequal
+            # per-seed item counts or a generated mismatch), so the row
+            # cannot support a directional claim.
+            if (row["claim_eligible"]
+                    and row.get("stream_direction_agrees") is False):
+                row["claim_eligible"] = False
+                row["stream_sign_conflict"] = True
             row["supports_hypothesis"] = bool(
                 row["fdr_reject"] and row["practically_relevant"]
                 and row["claim_eligible"])
@@ -2874,6 +2983,11 @@ class ContrastLog:
                 verdict = ("INELIGIBLE (HB0 competence prerequisite failed: "
                            "no arm above chance, so the contrast cannot be "
                            "read as a mechanism statement)")
+            elif r.get("stream_sign_conflict"):
+                verdict = ("INELIGIBLE (seed-level effect sign disagrees "
+                           "with the item-level paired sign on the shared "
+                           "evaluation stream: the two summaries are not "
+                           "measuring the same contrast)")
             elif r.get("curve_invalid_removes_support"):
                 verdict = ("INELIGIBLE (supported effect disappears after "
                            "dropping curve-invalid seeds: the claim rests "
@@ -3019,6 +3133,29 @@ class ContrastLog:
                   f"marked claim-ineligible and may not be read as mechanism "
                   f"statements; raise the step count and "
                   f"re-run before interpreting any contrast")
+        stream_conflict = [r for r in testable
+                           if r.get("stream_sign_conflict")]
+        if stream_conflict:
+            names = ", ".join(
+                f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                for r in stream_conflict)
+            print(f"[{self.tag}] WARNING: {len(stream_conflict)} "
+                  f"contrast(s) have a seed-level effect whose sign "
+                  f"disagrees with the item-level paired effect on the "
+                  f"shared evaluation stream ({names}): marked "
+                  f"claim-ineligible")
+        stream_uncorroborated = [
+            r for r in supporting
+            if r.get("stream_direction_agrees") is not None
+            and _finite(r.get("stream_test_p"))
+            and r["stream_test_p"] > 0.05]
+        if stream_uncorroborated:
+            print(f"[{self.tag}] WARNING: {len(stream_uncorroborated)} "
+                  f"supported accuracy contrast(s) are not corroborated by "
+                  f"the item-level McNemar test on the shared finite "
+                  f"evaluation stream (p>0.05): the seed-level gain may be "
+                  f"within evaluation-stream measurement error; report the "
+                  f"companion p-value next to the claim")
         curve_invalid_gated = [r for r in testable
                                if r.get("curve_invalid_removes_support")]
         low_seed = [r for r in testable
