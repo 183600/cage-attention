@@ -327,20 +327,29 @@ def assert_split_partition(n_samples: int, splits, require_all: bool = True) -> 
     from the evaluated population.  Empty splits are allowed here; the
     split constructors enforce non-emptiness themselves.
     """
-    n = int(n_samples)
+    if isinstance(n_samples, bool):
+        raise ValueError("n_samples must be an integer, not bool")
+    try:
+        n = operator.index(n_samples)
+    except TypeError as exc:
+        raise ValueError(
+            f"n_samples must be an integer, got {n_samples!r}") from exc
     if n < 1:
         raise ValueError(f"n_samples must be positive, got {n_samples!r}")
     seen = torch.zeros(n, dtype=torch.bool)
-    for name in ("train", "val", "test"):
-        if name not in splits:
-            continue
-        idx = _as_indices(splits[name], n)
+    for name, indices in splits.items():
+        idx = _as_indices(indices, n)
         if idx.numel() == 0:
             continue
+        if idx.numel() != idx.unique().numel():
+            raise ValueError(
+                f"split {name!r} contains repeated row indices; an index "
+                f"split is a set and duplicates would silently over-weight "
+                f"those rows")
         if bool(seen[idx].any()):
             raise ValueError(
                 f"split {name!r} repeats a sample already assigned to "
-                f"another (or the same) split: splits must be disjoint")
+                f"another split: splits must be disjoint")
         seen[idx] = True
     if require_all and not bool(seen.all()):
         missing = int((~seen).sum())
@@ -1851,6 +1860,24 @@ def _self_test() -> int:
         check("split_float_index_rejected", False)
     except ValueError:
         check("split_float_index_rejected", True)
+    try:
+        assert_split_partition(
+            4, {"train": [0, 0, 1], "val": [2], "test": [3]})
+        check("within_split_duplicate_rejected", False)
+    except ValueError:
+        check("within_split_duplicate_rejected", True)
+    try:
+        assert_split_partition(
+            4, {"train": [0, 1], "valid": [1, 2]})
+        check("arbitrary_split_name_audited", False)
+    except ValueError:
+        check("arbitrary_split_name_audited", True)
+    for bad_n in (True, 3.5, 0):
+        try:
+            assert_split_partition(bad_n, {"train": [0]})
+            check("split_bad_n_rejected", False)
+        except ValueError:
+            check("split_bad_n_rejected", True)
     try:
         time_ordered_split(10.5)
         check("time_split_fractional_n_rejected", False)
