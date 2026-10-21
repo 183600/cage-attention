@@ -735,10 +735,19 @@ HYPOTHESES = {
                     "(q=0.05)",
         "sesoi": {"gate_depth_ratio": 0.05,
                   "resid_norm_last_over_first": 0.05,
-                  "accuracy": 0.01},
+                  "accuracy": 0.01,
+                  "norm_gate_depth_ratio": 0.05,
+                  "norm_resid_norm_last_over_first": 0.05,
+                  "norm_accuracy": 0.01},
+        # The average-own-level main effects (each norm level vs pre-LN,
+        # collapsed over gate and LayerScale) reuse the H3a mechanism
+        # direction for seednorm; post/mix are two-sided companions that
+        # measure whether a normalisation level moves the readout at all.
         "direction": {"gate_depth_ratio": "+",
                       "resid_norm_last_over_first": "+",
-                      "accuracy": "+"},
+                      "accuracy": "+",
+                      "norm_gate_depth_ratio": "+",
+                      "norm_resid_norm_last_over_first": "+"},
     },
     "H3b": {
         "experiment": "e3",
@@ -1830,6 +1839,121 @@ def _factorial_main_effect(cells, metric, factor):
             if diff:
                 mismatches.append(
                     f"factorial recipe differs in cell {cell} run {j}: "
+                    f"{diff}")
+    ci["controlled"] = {"controlled": not mismatches,
+                        "mismatches": mismatches,
+                        "varying_factors": factors}
+    return ci
+
+
+def _grid_level_main_effect(cells, metric, level_cells, baseline_cells):
+    """Averaged main effect of one factor level, collapsed over controls.
+
+    E3's grid is gate x norm x LayerScale, but the only registered norm
+    contrast was ``seednorm - pre`` *within* one gate and LayerScale cell.
+    An average-own-level effect (each norm level vs the ``pre`` baseline,
+    collapsed over gate and LayerScale) is what answers "does this
+    normalisation level contribute at all", not merely "does it differ in
+    one control cell".  ``level_cells`` is the list of run lists carrying
+    the level to test (one per control combination, e.g. for each gate and
+    LayerScale), ``baseline_cells`` the matching ``pre``-level run lists in
+    the same order.
+
+    The paired sample is the seeds where *every* one of the level and
+    baseline cells carries a finite value; the effect is the level mean
+    minus the baseline mean within each seed, so both gate and LayerScale
+    are averaged inside the paired difference (repeated-measures pairing:
+    every control combination contributes exactly one level run and one
+    baseline run per seed).  Effective seed set and dropped seeds are
+    recorded, and each cell pair is audited with the same
+    controlled-variable contract as a marginal contrast: the two cells must
+    vary only the ``norm`` factor and share one recipe.  A main effect
+    averaged over a cell with a different optimizer or with a non-norm
+    config difference would not be a factorial effect.
+    """
+    n = len(level_cells)
+    if n == 0 or n != len(baseline_cells):
+        raise ValueError(
+            "grid-level main effect needs equally many level and baseline "
+            f"cells (got {n} vs {len(baseline_cells)})")
+    maps = [({r["seed"]: r for r in rs}) for rs in level_cells]
+    base_maps = [({r["seed"]: r for r in rs}) for rs in baseline_cells]
+    planned = sorted(set().union(*(set(m) for m in maps + base_maps)))
+    diffs, used, dropped, unpaired, undefined = [], [], [], [], []
+    for seed in planned:
+        level_vals, base_vals = [], []
+        present = True
+        finite_any = False
+        for m in maps:
+            r = m.get(seed)
+            if r is None:
+                present = False
+                break
+            v = r.get(metric)
+            level_vals.append(v)
+            finite_any = finite_any or _finite(v)
+        for m in base_maps:
+            r = m.get(seed)
+            if r is None:
+                present = False
+                break
+            v = r.get(metric)
+            base_vals.append(v)
+            finite_any = finite_any or _finite(v)
+        if not present:
+            dropped.append(seed)
+            unpaired.append(seed)
+            continue
+        if not all(_finite(v) for v in level_vals + base_vals):
+            dropped.append(seed)
+            (unpaired if finite_any else undefined).append(seed)
+            continue
+        used.append(seed)
+        diffs.append(sum(float(v) for v in level_vals) / len(level_vals)
+                     - sum(float(v) for v in base_vals) / len(base_vals))
+    ci = paired_bootstrap_ci(diffs)
+    level_pool = [float(m[s][metric]) for s in used for m in maps]
+    base_pool = [float(m[s][metric]) for s in used for m in base_maps]
+    ci["arms"] = {"a": _mean_std(level_pool), "b": _mean_std(base_pool)}
+    ci["arms_note"] = ("level vs pre pooled over gate x LayerScale, on the "
+                       "paired seeds")
+    ci["baseline_mean"] = ci["arms"]["b"]["mean"]
+    ci["diffs"] = list(diffs)
+    ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(
+        used, tuple(maps + base_maps))
+    ci["seeds_used"] = sorted(used)
+    ci["seeds_dropped"] = sorted(dropped)
+    ci["seeds_unpaired"] = sorted(unpaired)
+    ci["seeds_undefined"] = sorted(undefined)
+
+    mismatches, factors = [], {}
+    for level_rs, base_rs in zip(level_cells, baseline_cells):
+        audit = _controlled_audit(level_rs, base_rs)
+        mismatches.extend(audit.get("mismatches", []))
+        factors.update(audit.get("varying_factors", {}))
+        diff_keys = set((audit.get("model_factor_diffs") or {}).keys())
+        if diff_keys and diff_keys != {"norm"}:
+            mismatches.append(
+                f"norm level pair varies {sorted(diff_keys)} rather than "
+                f"only the norm factor")
+        elif not diff_keys and "norm" not in (
+                audit.get("varying_factors") or {}):
+            mismatches.append(
+                "norm level pair shows no audited norm difference")
+    seed_sets = {i: frozenset(m) for i, m in enumerate(maps + base_maps)}
+    if len(set(seed_sets.values())) != 1:
+        mismatches.append("grid cells do not share one seed set")
+    views = [(i, j, _recipe_view(r))
+             for i, rs in enumerate(level_cells + baseline_cells)
+             for j, r in enumerate(rs)]
+    if views:
+        first = views[0][2]
+        for cell, j, view in views[1:]:
+            diff = sorted(k for k in set(first) | set(view)
+                          if view.get(k) != first.get(k))
+            if diff:
+                mismatches.append(
+                    f"grid-level recipe differs in cell {cell} run {j}: "
                     f"{diff}")
     ci["controlled"] = {"controlled": not mismatches,
                         "mismatches": mismatches,
@@ -7049,6 +7173,49 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                            _paired_diff(a, b, metric),
                            warn=_curve_warn((f"{gate}/seednorm", a),
                                             (f"{gate}/pre", b)))
+    # H3a completeness: the average-own-level norm main effects, collapsed
+    # over gate and LayerScale.  The within-cell seednorm-vs-pre rows above
+    # are conditional on one control cell; without the collapsed readout a
+    # level whose contribution is real under one gate but absent under the
+    # other is never averaged, and `post`/`mix` (8 trained cells) would enter
+    # no contrast at all.  Each level is differenced against `pre` inside
+    # each gate x LayerScale control and then averaged (repeated-measures
+    # pairing), so the gate/scale variance cancels exactly as in the paired
+    # marginal rows.  The seednorm rows carry H3a's registered mechanism
+    # direction via the norm_* registry keys; post/mix are two-sided
+    # companions (accuracy is two-sided for all levels).
+    print(f"\n[e3] H3a norm-level main effects (each norm vs pre-LN, "
+          f"collapsed over gate x LayerScale; H3a's mechanism readout is the "
+          f"registered seednorm row, post/mix are two-sided completeness "
+          f"companions):")
+    controls = [(g, ls) for g in ("query", "calib") for ls in (None, 1e-2)]
+    for norm in NORMS:
+        if norm == "pre":
+            continue
+        level_cells = [index[(g, norm, ls)] for g, ls in controls]
+        base_cells = [index[(g, "pre", ls)] for g, ls in controls]
+        warn = _curve_warn(
+            *[(f"{g}/{norm}/ls={('off' if ls is None else f'{ls:g}')}", rs)
+              for (g, ls), rs in zip(controls, level_cells)],
+            *[(f"{g}/pre/ls={('off' if ls is None else f'{ls:g}')}", rs)
+              for (g, ls), rs in zip(controls, base_cells)])
+        clog.print(f"{norm} - pre (norm main effect, gate_depth_ratio)",
+                   "H3a", "norm_gate_depth_ratio",
+                   _grid_level_main_effect(level_cells, "gate_depth_ratio",
+                                           level_cells, base_cells),
+                   warn=warn)
+        clog.print(f"{norm} - pre (norm main effect, "
+                   f"resid_norm_last_over_first)",
+                   "H3a", "norm_resid_norm_last_over_first",
+                   _grid_level_main_effect(level_cells,
+                                           "resid_norm_last_over_first",
+                                           level_cells, base_cells),
+                   warn=warn)
+        clog.print(f"{norm} - pre (norm main effect, accuracy)",
+                   "H3a", "norm_accuracy",
+                   _grid_level_main_effect(level_cells, "accuracy",
+                                           level_cells, base_cells),
+                   warn=warn)
     for gate in ("query", "calib"):
         for norm in NORMS:
             a = index[(gate, norm, 1e-2)]
@@ -7086,6 +7253,21 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                              ("query/seednorm", cells[1]),
                              ("calib/pre", cells[2]),
                              ("query/pre", cells[3])))
+    # H3c robustness companion: the same co-design interaction at LayerScale
+    # on.  H3c is pre-registered "at LayerScale off"; if the interaction is
+    # a property of the co-design it should not flip sign when LayerScale
+    # turns on.  Reported as a companion (not a second decision rule) so a
+    # sign flip is visible instead of being read off a single control cell.
+    print(f"\n[e3] H3c robustness companion: the same co-design interaction at "
+          f"LayerScale=1e-2 (the pre-registered row is at LayerScale off):")
+    for metric in ("accuracy", "gate_depth_ratio"):
+        cells = (index[("calib", "seednorm", 1e-2)],
+                 index[("query", "seednorm", 1e-2)],
+                 index[("calib", "pre", 1e-2)],
+                 index[("query", "pre", 1e-2)])
+        ci = _paired_did(*cells, metric)
+        print(f"      ls=1e-2: seednorm x (calib - query) - pre x "
+              f"(calib - query) ({metric}): {_fmt_ci(ci)}")
     clog.finalize(out_dir, q=settings.fdr_q)
     e3_summary = {f"{g}|{n}|{ls}": _aggregate_runs(rs)
                   for (g, n, ls), rs in index.items()}
