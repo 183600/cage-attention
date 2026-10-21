@@ -218,8 +218,14 @@ def _group_codes(groups) -> torch.Tensor:
         if g.is_floating_point() and not bool(torch.isfinite(g).all()):
             raise ValueError("group ids must be finite (no NaN/Inf)")
         return g
+    try:
+        iterator = iter(groups)
+    except TypeError as exc:
+        raise ValueError(
+            f"groups must be an iterable of ids, got "
+            f"{type(groups).__name__}") from exc
     mapping, codes = {}, []
-    for value in groups:
+    for value in iterator:
         try:
             if value in mapping:
                 codes.append(mapping[value])
@@ -228,7 +234,8 @@ def _group_codes(groups) -> torch.Tensor:
                 codes.append(mapping[value])
         except TypeError as exc:
             raise ValueError(
-                f"group ids must be hashable, got {type(value).__name__}")                 from exc
+                f"group ids must be hashable, got "
+                f"{type(value).__name__}") from exc
         if isinstance(value, float) and not math.isfinite(value):
             raise ValueError("group ids must be finite (no NaN/Inf)")
     return torch.tensor(codes, dtype=torch.long)
@@ -1882,6 +1889,11 @@ def _self_test() -> int:
         check("unhashable_group_rejected", False)
     except ValueError:
         check("unhashable_group_rejected", True)
+    try:
+        group_disjoint_split(3)
+        check("scalar_group_rejected", False)
+    except ValueError:
+        check("scalar_group_rejected", True)
 
     try:
         assert_time_ordered(torch.tensor([0.0, float("nan"), 2.0]),
