@@ -841,6 +841,19 @@ def stream_fingerprint(n_pairs, vocab, device="cpu", batch=8, seed=TEST_SEED):
             "vocab": int(vocab), "sha256": digest}
 
 
+def _positive_audit_count(value, name):
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer, not bool")
+    try:
+        value = operator.index(value)
+    except TypeError as exc:
+        raise ValueError(
+            f"{name} must be an integer, got {value!r}") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be >= 1, got {value}")
+    return value
+
+
 def _draw_split(n_pairs, vocab, device, batch, batches, seed):
     """Draw one split's samples and run the cleaning gate on every batch.
 
@@ -848,6 +861,8 @@ def _draw_split(n_pairs, vocab, device, batch, batches, seed):
     per-batch ``validate_batch`` diagnostics.  Nothing is fitted here; the
     caller decides which split plays the reference role.
     """
+    batch = _positive_audit_count(batch, "batch")
+    batches = _positive_audit_count(batches, "batches")
     gen = torch.Generator(device=device).manual_seed(seed)
     rows, answers, diagnostics = [], [], []
     for _ in range(batches):
@@ -889,9 +904,11 @@ def _draw_stream_keys(seed, n_pairs, vocab, device, batch, units):
     hashed.
     """
     gen = torch.Generator(device=device).manual_seed(int(seed))
+    batch = _positive_audit_count(batch, "batch")
+    units = _positive_audit_count(units, "units")
     keys, n_rows = set(), 0
-    for _ in range(int(units)):
-        idx, tgt, meta = make_batch(int(batch), n_pairs, vocab, device,
+    for _ in range(units):
+        idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
                                     gen=gen)
         validate_batch(idx, tgt, meta, vocab, diagnostics=False)
         batch_keys = _row_keys(idx)
@@ -2182,6 +2199,37 @@ def _self_test() -> int:
         check("duplicate_stream_name_rejected", False)
     except ValueError:
         check("duplicate_stream_name_rejected", True)
+
+    for label, kwargs in (
+            ("split_zero_batches",
+             dict(batch=8, batches=0)),
+            ("split_zero_batch",
+             dict(batch=0, batches=1)),
+    ):
+        try:
+            split_leakage_audit(4, 64, "cpu", train_seeds=(0,), **kwargs)
+            check(f"{label}_rejected", False)
+        except ValueError:
+            check(f"{label}_rejected", True)
+    for label, train_spec, heldout_spec in (
+            ("actual_zero_steps",
+             {"seed": 0, "batch": 8, "steps": 0},
+             {"seed": 1, "batch": 8, "batches": 1}),
+            ("actual_zero_batches",
+             {"seed": 0, "batch": 8, "steps": 1},
+             {"seed": 1, "batch": 8, "batches": 0}),
+            ("actual_zero_batch",
+             {"seed": 0, "batch": 0, "steps": 1},
+             {"seed": 1, "batch": 8, "batches": 1}),
+    ):
+        try:
+            actual_stream_overlap_audit(
+                4, 64, "cpu",
+                train_specs={"train:0": train_spec},
+                heldout_specs={"val": heldout_spec})
+            check(f"{label}_rejected", False)
+        except ValueError:
+            check(f"{label}_rejected", True)
 
     # Dataset-versioning fingerprint must depend on the batch geometry the
     # stream is realized with, not only on the seed.
