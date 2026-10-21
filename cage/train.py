@@ -1324,6 +1324,14 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     summary aggregates every evaluated sample.  ``stats`` matches the
     ``collect_stats`` return value exactly.
     """
+    raw_batch, raw_batches = batch, batches
+    batch = _positive_integer(raw_batch)
+    batches = _positive_integer(raw_batches)
+    if batch is None:
+        raise ValueError(f"batch must be a positive integer, got {raw_batch!r}")
+    if batches is None:
+        raise ValueError(
+            f"batches must be a positive integer, got {raw_batches!r}")
     cfg = model.cfg
     C, H = cfg.d_model, cfg.n_heads
     dk = C // H
