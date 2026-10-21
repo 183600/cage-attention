@@ -1579,6 +1579,35 @@ def _paired_diff(runs_a, runs_b, metric):
     return ci
 
 
+def _paired_benchmark(runs_a, runs_b, metric, sesoi, reference):
+    """Paired tuned-baseline benchmark (not a controlled mechanism contrast).
+
+    The whole point of a complexity comparison is that the two sides differ
+    in architecture and each was tuned independently, so the controlled-
+    recipe audit does not apply and the row must never be routed through
+    :class:`ContrastLog` (which would refuse it as confounded).  The paired
+    seed differences, CI and SESOI are still the right effect-size readout:
+    ``complexity_justified`` means the arm is both practically above and
+    statistically above the tuned reference, while ``below_reference`` means
+    the reference is confidently better.  The underlying control audit is
+    kept under ``controlled_audit`` for transparency, and the result carries
+    an explicit ``comparison="benchmark"`` tag.
+    """
+    ci = _paired_diff(runs_a, runs_b, metric)
+    ci["comparison"] = "benchmark"
+    ci["reference"] = str(reference)
+    ci["sesoi"] = float(sesoi)
+    ci["controlled_audit"] = ci.get("controlled")
+    mean, lo, hi = ci.get("mean"), ci.get("lo"), ci.get("hi")
+    ci["complexity_justified"] = bool(
+        _finite(mean) and _finite(lo)
+        and float(mean) >= float(sesoi) and float(lo) > 0.0)
+    ci["below_reference"] = bool(_finite(hi) and float(hi) < 0.0)
+    ci["indistinguishable"] = bool(
+        not ci["complexity_justified"] and not ci["below_reference"])
+    return ci
+
+
 def _one_sample_contrast(runs, metric, bound=None):
     """One-sample contrast against zero, with curve-invalid seed metadata.
 
@@ -3956,6 +3985,10 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
         "hb7_depth_required": verdict.get("hb7_depth_required"),
         "saturation_depth": verdict.get("saturation_depth"),
         "ladder_competent": verdict.get("ladder_competent"),
+        # Held-out-stream balance stamp: ``None`` on an older verdict that
+        # predates the audit, explicit bool otherwise.
+        "eval_answer_balance_all_uniform": (
+            verdict.get("eval_answer_balance") or {}).get("all_uniform"),
         "seed_floor": floor,
     }
     settings._baseline_validity = marks
@@ -3975,6 +4008,16 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
               f"(Settings.min_seeds_for_claim); they are stamped and "
               f"displayed as provisional, and no seed-level claim may be "
               f"based on them")
+    if marks["eval_answer_balance_all_uniform"] is False:
+        bad = [label for label, row in
+               ((verdict.get("eval_answer_balance") or {}).get("streams")
+                or {}).items()
+               if not row["uniformity"]["uniform_supported"]]
+        print(f"[{tag}] WARNING: held-out answer balance failed on stream(s) "
+              f"{', '.join(bad) or 'unknown'}: accuracy-based readings on "
+              f"those streams are class-prior readings, so the F1/PR-AUC "
+              f"companions carry the headline and the balance premise is "
+              f"stamped as failed in the baseline validity marks")
     return verdict
 
 
@@ -4824,7 +4867,11 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seeds=None):
     model is trained on, never on a held-out split.  The held-out answer
     distributions are instead *scored against* this training reference by
     the HB3 split audit (per-field chi-square shift tests), so
-    validation/test/stats data is transform-only here.  ``seeds`` defaults
+    validation/test/stats data is transform-only here.  The complementary
+    held-out *uniformity* check (does the evaluation stream itself satisfy
+    the accuracy premise?) is the separate scoring-only audit in
+    :func:`_eval_answer_balance`; no training statistic is fitted there
+    either.  ``seeds`` defaults
     to the configured training seeds (``(0,)`` when none are configured,
     matching the training convention elsewhere); each seed is refused if
     it is a reserved evaluation seed.
@@ -4874,6 +4921,103 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seeds=None):
                             else float("nan")),
         "expected_uniform_share": 1.0 / (settings.vocab - 2),
         "uniformity": uniformity,
+        "power_note": (
+            "gross-imbalance test only: a pass at "
+            f"{uniformity['expected_per_class']:.2f} expected samples/class "
+            "does not certify the absence of a small or moderate skew"),
+    }
+
+
+# The held-out streams whose class balance backs the accuracy readout.
+# VAL/TEST are consumed at ``eval_batch x eval_batches`` by ``eval_metrics``;
+# STATS is consumed at ``stats_batch x stats_batches`` by
+# ``collect_stats``.  The audit reproduces that exact geometry and generator
+# seed, so the tested sample is the sample the models are scored on - a
+# wider audit draw would test a different prefix and could pass while the
+# reported stream is skewed.
+_EVAL_BALANCE_STREAMS = (
+    ("val", VAL_SEED, "eval"),
+    ("test", TEST_SEED, "eval"),
+    ("stats", STATS_SEED, "stats"),
+)
+
+
+def _eval_answer_balance(settings: Settings) -> dict:
+    """Class-balance audit for the *evaluation* answer streams.
+
+    ``_answer_balance`` tests the training streams because the train-time
+    class prior is what the model sees.  Accuracy is also the headline on
+    the held-out streams, and that choice is only justified when those
+    streams are uniform too: a skewed TEST stream turns every reported
+    accuracy (and the E1/E2/E3 accuracy contrasts) into a class-prior
+    metric.  The HB3 split audit compares each held-out marginal to the
+    *training* reference, which is a different question - a uniformly
+    skewed training stream and an equally skewed test stream can pass the
+    shift test while both violate the accuracy premise.
+
+    The audit is scoring-only: it draws from the fixed evaluation seeds and
+    validates each batch through the shared cleaning gate, but fits nothing
+    and selects nothing.  The Monte Carlo calibration and the finite-stream
+    caveat are the same as ``_answer_balance``; the per-stream
+    ``expected_per_class`` is reported so a small quick-mode draw is not
+    mistaken for a well-powered balance certificate.
+    """
+    streams = {}
+    for label, seed, geometry in _EVAL_BALANCE_STREAMS:
+        check_eval_seed(seed)
+        if geometry == "stats":
+            batch, batches = settings.stats_batch, settings.stats_batches
+        else:
+            batch, batches = settings.eval_batch, settings.eval_batches
+        gen = stream_generator(seed, settings.device)
+        counts = torch.zeros(settings.vocab, dtype=torch.float64)
+        for _ in range(max(0, int(batches))):
+            idx, targets, meta = make_batch(batch, settings.n_pairs,
+                                            settings.vocab,
+                                            settings.device, gen=gen)
+            validate_batch(idx, targets, meta, settings.vocab,
+                           diagnostics=False)
+            counts += torch.bincount(meta["answer"].cpu(),
+                                     minlength=settings.vocab)
+        present = counts > 0
+        shares = counts[present] / counts.sum() if counts.sum() > 0 else \
+            counts[present]
+        uniformity = answer_uniformity_test(counts[2:])
+        streams[label] = {
+            "stream_seed": int(seed),
+            "seed_key": stream_seed_key(seed),
+            "batch": int(batch),
+            "batches": int(batches),
+            "n": int(counts.sum()),
+            "n_classes_possible": settings.vocab - 2,
+            "n_classes_present": int(present.sum()),
+            "min_class_share": (float(shares.min()) if shares.numel()
+                                else float("nan")),
+            "max_class_share": (float(shares.max()) if shares.numel()
+                                else float("nan")),
+            "expected_uniform_share": 1.0 / (settings.vocab - 2),
+            "uniformity": uniformity,
+            "power_note": (
+                "gross-imbalance test only: a pass at "
+                f"{uniformity['expected_per_class']:.2f} expected "
+                "samples/class does not certify the absence of a small or "
+                "moderate skew"),
+        }
+    all_uniform = all(row["uniformity"]["uniform_supported"]
+                      for row in streams.values())
+    return {
+        "streams": streams,
+        "all_uniform": bool(all_uniform),
+        "geometry": {
+            "eval_batch": int(settings.eval_batch),
+            "eval_batches": int(settings.eval_batches),
+            "stats_batch": int(settings.stats_batch),
+            "stats_batches": int(settings.stats_batches),
+        },
+        "note": ("uniformity is a gross-imbalance test at the reported "
+                 "stream size, not an equivalence proof; expected_per_class "
+                 "is printed so a low-power draw is not read as a "
+                 "certificate"),
     }
 
 
@@ -5799,6 +5943,37 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
               "baselines_verdict.json")
     _write_json(out_dir / "baselines_balance.json", balance)
 
+    # The same accuracy premise has to hold on the streams where accuracy is
+    # reported, not only on the training draws.  This audit reproduces each
+    # consumer's exact geometry and stamps the result in the verdict so
+    # E1/E2/E3 can warn even when run later from a stored verdict.
+    eval_balance = _eval_answer_balance(settings)
+    _write_json(out_dir / "baselines_eval_balance.json", eval_balance)
+    for label, row in eval_balance["streams"].items():
+        uni_row = row["uniformity"]
+        print(f"[baselines] evaluation answer balance ({label} stream, "
+              f"seed {row['stream_seed']}, {row['batch']}x{row['batches']}="
+              f"{row['n']} samples): {row['n_classes_present']} classes "
+              f"present, share min={row['min_class_share']:.5f} "
+              f"max={row['max_class_share']:.5f} "
+              f"(E/class={uni_row['expected_per_class']:.2f}); "
+              f"uniformity p={uni_row['p_value']:.4f} -> "
+              f"{'uniform supported' if uni_row['uniform_supported'] else 'NOT uniform'}")
+    if not eval_balance["all_uniform"]:
+        bad = [label for label, row in eval_balance["streams"].items()
+               if not row["uniformity"]["uniform_supported"]]
+        print("[baselines] WARNING: answer values are not uniform on held-out "
+              f"stream(s) {', '.join(bad)} at the reported geometry: the "
+              "accuracy headline and the accuracy-based contrasts are "
+              "class-prior readings on those streams; read the F1/PR-AUC "
+              "companions and treat the balance premise as failed in "
+              "baselines_verdict.json")
+    else:
+        print("[baselines] evaluation answer balance: all held-out streams "
+              "pass the gross-imbalance test at the reported geometry "
+              "(finite-stream test; see baselines_eval_balance.json for "
+              "expected samples/class)")
+
     # HB5 first: a broken training loop invalidates every learned number
     # below it (including the negative control).  The tiny batch is run
     # through *every* trained path: each gate variant (so the calib/null
@@ -6161,6 +6336,10 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "hb7_claim_eligible": bool(hb7_n_seeds >= floor),
         },
         "answer_balance": balance,
+        # Held-out-stream balance: the accuracy premise applies where the
+        # numbers are reported, not only where the model trains.  Stamped
+        # separately so a reader cannot confuse it with the training audit.
+        "eval_answer_balance": eval_balance,
         "depth_ladder": {
             "ladder": ladder["ladder"],
             "val_seed": VAL_SEED,
@@ -6465,9 +6644,13 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
 
     print(f"\n[e1] test seed {TEST_SEED}, stats seed {STATS_SEED}, "
           f"lr={lr:g}, steps={settings.steps}")
-    header = f"{'gate':>6} {'params':>8} {'accuracy':>16} {'f1_macro':>16} " \
-             f"{'top5':>16} {'abs_r_ent':>16} {'pr_auc_gate':>16}"
+    header = f"{'gate':>6} {'params':>8} {'accuracy':>16} {'bal_acc':>16} " \
+             f"{'f1_macro':>16} {'top5':>16} {'abs_r_ent':>16} " \
+             f"{'pr_auc_gate':>16}"
     print(header)
+    print("  (bal_acc = macro recall, equal weight per target class: a gap "
+          "from accuracy means the reading depends on the answer-class "
+          "distribution)")
     for gate in GATES:
         t = table[gate]
         def cell(key):
@@ -6476,8 +6659,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 return "n/a"
             return f"{m['mean']:.4f}±{m['std']:.4f}"
         print(f"{gate:>6} {int(by_gate[gate][0]['params']):>8} "
-              f"{cell('accuracy'):>16} {cell('f1_macro'):>16} "
-              f"{cell('top5_accuracy'):>16} {cell('abs_gate_vs_entropy'):>16} "
+              f"{cell('accuracy'):>16} {cell('recall_macro'):>16} "
+              f"{cell('f1_macro'):>16} {cell('top5_accuracy'):>16} "
+              f"{cell('abs_gate_vs_entropy'):>16} "
               f"{cell('prauc_gate_to_error'):>16}")
 
     # Metric regime per gate: error detection is a rare-class problem once
@@ -6684,6 +6868,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             shallow_by_seed[int(key)] = float(value)
         except (TypeError, ValueError):
             continue
+    complexity_benchmark = None
     if shallow_by_seed:
         shallow_depth = int(shallow.get("n_layers", 1))
         hb6_prov = ("" if not verdict.get("hb6_supported")
@@ -6738,6 +6923,93 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                   f"measurably required, a gap including 0 means a gate "
                   f"gain must be beyond what one layer already reaches)"
                   f"{floor_note}")
+        # Per-arm complexity benchmark: the depth-only reference above says
+        # whether 8 layers beat 1 layer, but it does not say whether any
+        # *mechanism* arm earns its capacity over the tuned simple model.
+        # Each gate is compared on the same seeds and sealed test stream,
+        # with both sides val-tuned.  This is deliberately not a controlled
+        # mechanism contrast (architecture and lr are the treatment), so it
+        # stays outside the FDR family; the pre-registered SESOI and seed
+        # floor still decide how the row may be labelled.
+        benchmark_sesoi = float(
+            (HYPOTHESES["HB6"].get("sesoi") or {}).get("accuracy", 0.01))
+        shallow_runs = [{"seed": seed, "accuracy": shallow_by_seed[seed]}
+                        for seed in sorted(shallow_by_seed, key=_seed_order)]
+        reference_name = (f"tuned {shallow_depth}-layer standard "
+                          f"transformer (lr={shallow.get('lr', float('nan')):g})")
+        print(f"\n[e1] complexity benchmark vs the tuned shallow rung "
+              f"(paired over seeds; SESOI={benchmark_sesoi:g} accuracy; "
+              f"each arm carries its own val-tuned lr, so this is a "
+              f"benchmark, not a controlled mechanism contrast):")
+        print(f"{'arm':>6} {'arm_acc':>17} {'shallow_acc':>17} "
+              f"{'paired_diff':>28} {'state':>18}")
+        benchmark_by_arm = {}
+        for gate in GATES:
+            bench = _paired_benchmark(by_gate[gate], shallow_runs, "accuracy",
+                                      benchmark_sesoi, reference_name)
+            arm_mean = (bench.get("arms") or {}).get("a", {}).get(
+                "mean", float("nan"))
+            ref_mean = (bench.get("arms") or {}).get("b", {}).get(
+                "mean", float("nan"))
+            prov = ("" if int(bench.get("n") or 0) >= settings.min_seeds_for_claim
+                    else (f" [provisional: n={int(bench.get('n') or 0)} "
+                          f"< claim floor "
+                          f"{settings.min_seeds_for_claim}]"))
+            if bench["complexity_justified"]:
+                state = "beats"
+            elif bench["below_reference"]:
+                state = "below"
+            else:
+                state = "indistinguishable"
+            print(f"{gate:>6} "
+                  f"{arm_mean:>17.4f} {ref_mean:>17.4f} "
+                  f"{_fmt_ci(bench):>28} {state:>18}{prov}")
+            benchmark_by_arm[gate] = {
+                "arm_accuracy": arm_mean,
+                "reference_accuracy": ref_mean,
+                "mean": bench.get("mean"),
+                "lo": bench.get("lo"),
+                "hi": bench.get("hi"),
+                "p_value": bench.get("p_value"),
+                "n": bench.get("n"),
+                "seeds_used": bench.get("seeds_used"),
+                "seeds_dropped": bench.get("seeds_dropped"),
+                "sesoi": benchmark_sesoi,
+                "state": state,
+                "complexity_justified": bench["complexity_justified"],
+                "below_reference": bench["below_reference"],
+                "indistinguishable": bench["indistinguishable"],
+                "control_mismatches": (
+                    (bench.get("controlled_audit") or {}).get("mismatches")
+                    or []),
+            }
+        justified = [g for g, row in benchmark_by_arm.items()
+                     if row["complexity_justified"]]
+        complexity_benchmark = {
+            "reference": reference_name,
+            "reference_depth": shallow_depth,
+            "reference_lr": shallow.get("lr"),
+            "reference_accuracy_mean": shallow.get("accuracy_mean"),
+            "sesoi_accuracy": benchmark_sesoi,
+            "by_arm": benchmark_by_arm,
+            "arms_justified": justified,
+            "comparison": "benchmark",
+            "note": ("paired benchmark, not a controlled mechanism "
+                     "contrast: architecture/capacity and the val-tuned "
+                     "learning rate are the treatment; a non-justified arm "
+                     "may be reported as a mechanism probe at fixed depth "
+                     "but not as complexity justified over the tuned "
+                     "simple model"),
+        }
+        if justified:
+            print(f"      complexity-justified arm(s) over the tuned shallow "
+                  f"reference: {', '.join(justified)}")
+        else:
+            print(f"      WARNING: no E1 arm beats the tuned shallow "
+                  f"reference by the pre-registered SESOI="
+                  f"{benchmark_sesoi:g}; report these as mechanism probes at "
+                  f"the fixed 8-layer depth, not as evidence that the "
+                  f"gated architecture is worth its complexity at this scale")
     ladder = verdict.get("depth_ladder") or {}
     by_depth = ladder.get("by_depth") or {}
     if by_depth:
@@ -7115,6 +7387,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         for case in examples.get(gate, (0, []))[1]:
             print(f"  [{gate}] {_format_case(case)}")
     table["_provenance"] = _stamp(settings)
+    if complexity_benchmark is not None:
+        table["_complexity_benchmark"] = complexity_benchmark
     _write_json(out_dir / "e1_summary.json", table)
 
 
@@ -7164,11 +7438,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                                    max_len=settings.max_len)
     # Per-length absolute reference: the parameter-free structural rule is
     # the task ceiling at *every* length.  Without it a length-related
-    # accuracy drop cannot be attributed: part of it may be the task's own
-    # unique-key requirement (a duplicate key makes the answer ambiguous,
-    # see data._sample_keys), which has nothing to do with the mechanism
-    # under test.  unique_key_rate is reported alongside so the ceiling is
-    # read as exact only where keys stay unique.
+    # accuracy drop cannot be attributed to the mechanism under test rather
+    # than to a changing task.  Keys are drawn without replacement (see
+    # data._sample_keys), so the rule is exact at every length;
+    # unique_key_rate is still reported alongside as a data-contract check
+    # (it must stay 1.0) rather than as a length-dependent ceiling caveat.
     rule_ceiling_by_length = {}
     for length in lengths:
         rule_ceiling_by_length[length] = rule_pair_lookup_stats(
@@ -7644,6 +7918,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                     runs.append(rec)
 
     print(f"\n[e3] {'gate':>5} {'norm':>9} {'ls':>5} {'accuracy':>16} "
+          f"{'bal_acc':>16} "
           f"{'gate_depth_ratio':>18} {'resid_growth':>14} "
           f"{'params':>9} "
           f"{'curve_ok':>9} {'tail':>7} {'curve':>10}")
@@ -7656,6 +7931,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                       and r["layer_scale"] == layer_scale]
                 index[(gate, norm, layer_scale)] = rs
                 acc = _mean_std([r["accuracy"] for r in rs])
+                bal = _mean_std([r["recall_macro"] for r in rs])
                 ratio = _mean_std([r["gate_depth_ratio"] for r in rs])
                 growth = _mean_std([r["resid_norm_last_over_first"] for r in rs])
                 params = _mean_std([r["params"] for r in rs])
@@ -7667,6 +7943,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                           else "n/a")
                 print(f"{gate:>5} {norm:>9} {ls_label:>5} "
                       f"{acc['mean']:>8.4f}±{acc['std']:<7.4f} "
+                      f"{bal['mean']:>8.4f}±{bal['std']:<7.4f} "
                       f"{ratio['mean']:>9.4f}±{ratio['std']:<8.4f} "
                       f"{growth['mean']:>7.3f}±{growth['std']:<6.3f} "
                       f"{params['mean']:>9.0f} "
