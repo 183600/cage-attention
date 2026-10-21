@@ -5106,6 +5106,11 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                       "hi": float("nan"), "n": 0}
             cluster = clustered_proportion_ci([], [])
             summary = _mean_std([])
+        # A rung whose final runs are all curve-invalid has no accuracy
+        # estimate at all.  It is unmeasured, not "at chance": treating it
+        # as measured would let HB7 claim depth is required while a rung
+        # that could still saturate was silently discarded.
+        unmeasured = not bool(valid_runs)
         # HB0 competence premise for HB6/HB7: "below the ceiling" is only
         # evidence that depth is required when the rung demonstrably
         # learned the task.  A rung at chance is an underfit/step-count
@@ -5163,12 +5168,16 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             "reaches_ceiling_ci": reaches_ceiling_ci,
             "hb6_supported": hb6_supported,
             "hb6_supported_ci": hb6_supported_ci,
-            "unmeasured": False,
+            "unmeasured": unmeasured,
             "runs": runs,
         }
         depths[depth] = payload
         tuning_tables[depth] = table
-        if within_sesoi:
+        if unmeasured:
+            status = (f"unmeasured (all {len(runs)} final runs are "
+                      f"curve-invalid: {curve_invalid_seeds}); this rung "
+                      f"cannot support HB6/HB7 or the saturation depth")
+        elif within_sesoi:
             status = (f"within SESOI {sesoi:g} of the ceiling (saturated: "
                       f"even the seed-clustered lower bound is inside the "
                       f"practical band, reach={ceiling_gap:+.4f})")
@@ -5199,6 +5208,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         _write_json(out_dir / f"baselines_depth{depth}.json", payload)
 
     ladder_competent = any(depths[d]["above_chance"] for d in ladder)
+    unmeasured_rungs = [d for d in ladder if depths[d].get("unmeasured")]
     saturation_depth = next((d for d in ladder if depths[d]["reaches_ceiling"]),
                             None)
     saturation_depth_ci = next(
@@ -5209,8 +5219,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     # not be read as "needs more depth").
     if not ceiling_known or not ladder_competent:
         hb7_depth_required = None
-    elif (saturation_depth is None
-          and any(depths[d].get("unmeasured") for d in ladder)):
+    elif saturation_depth is None and unmeasured_rungs:
         # An unmeasured deeper rung could still saturate; without it the
         # absence of a saturation point cannot be read as "depth required".
         hb7_depth_required = None
@@ -5289,7 +5298,11 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                    f"{saturation_depth_ci} only touches the ceiling - "
                    f"absence of evidence, not saturation)")
     if hb7_depth_required is None:
-        if not ladder_competent:
+        if unmeasured_rungs:
+            depth_txt = (f"not determinable - depth(s) {unmeasured_rungs} "
+                         f"are unmeasured, so the ladder cannot establish "
+                         f"whether depth is required")
+        elif not ladder_competent:
             depth_txt = ("not determinable - no rung is above chance, so "
                          "the ladder did not solve the task at this step "
                          "count (raise the step count before reading depth)")
