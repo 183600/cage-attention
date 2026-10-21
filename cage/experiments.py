@@ -893,7 +893,8 @@ class Settings:
     # credible when the simple baseline got its best shot.  The probe grid
     # spans 30x (a diverged high-lr point is recorded and excluded, not
     # read as "cannot do better"); the depth ladder re-tunes the learning
-    # rate per depth so the shallow rungs are not handicapped.
+    # rate and step budget per depth so the shallow rungs are not
+    # handicapped by inheriting an under-trained recipe.
     #
     # The probe evaluation stream is deliberately wider than the grid
     # evaluation stream: HB2 certifies "the tuned probe stays below
@@ -912,6 +913,13 @@ class Settings:
     # pass ``probe_steps`` explicitly.
     probe_steps_grid: tuple = (200, 400, 800)
     depth_ladder: tuple = (1, 2, 4)
+    # The depth ladder tunes (lr, steps) per rung.  A fixed step budget can
+    # make a shallow rung look weaker merely because its best learning rate
+    # was selected at an under-trained budget; the multipliers are relative
+    # to settings.steps so a --steps override propagates.  The multi-axis
+    # boundary audit flags a winner at the 2x edge instead of silently
+    # treating it as resolved.
+    depth_step_multipliers: tuple = (1.0, 2.0)
     dropout: float = 0.0        # model regularisation (recorded in the recipe)
     # Deterministic kernels are on by default: fixed seeds alone do not make
     # CUDA runs repeatable when an op may pick a non-deterministic algorithm.
@@ -959,6 +967,25 @@ class Settings:
 def _finite(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) \
         and math.isfinite(float(value))
+
+
+def _depth_step_candidates(settings: Settings) -> tuple:
+    """Step budgets searched by the depth ladder and its capacity control.
+
+    The search is expressed as multipliers of ``settings.steps`` so the
+    command-line ``--steps`` override shifts the whole grid.  The default
+    budget is always included even when the multiplier list is empty or
+    omits 1.0.
+    """
+    multipliers = tuple(settings.depth_step_multipliers or (1.0,))
+    steps = {int(settings.steps)}
+    for multiplier in multipliers:
+        if not _finite(multiplier) or float(multiplier) <= 0.0:
+            raise ValueError(
+                f"depth_step_multipliers must be finite positive numbers, "
+                f"got {multiplier!r}")
+        steps.add(max(1, int(round(settings.steps * float(multiplier)))))
+    return tuple(sorted(steps))
 
 
 def _seed_order(seed):
@@ -1268,9 +1295,11 @@ def _recipe_view(run):
     return view
 
 
-def _training_record(settings: Settings, lr: float) -> dict:
+def _training_record(settings: Settings, lr: float,
+                     steps: int | None = None) -> dict:
     """The shared optimisation recipe block stamped into every run record."""
-    return {"training_recipe": training_recipe(lr, settings.steps)}
+    return {"training_recipe": training_recipe(
+        lr, settings.steps if steps is None else int(steps))}
 
 
 def _controlled_audit(runs_a, runs_b):
@@ -1774,7 +1803,7 @@ def _paired_benchmark(runs_a, runs_b, metric, sesoi, reference):
     ci["controlled_audit"] = {
         "applicable": False,
         "reason": ("benchmark deliberately varies architecture/capacity and "
-                   "the val-tuned learning rate"),
+                   "the val-tuned learning rate and step budget"),
         "observed_mismatch_count": len(audit.get("mismatches") or []),
     }
     mean, lo, hi = ci.get("mean"), ci.get("lo"), ci.get("hi")
@@ -5126,7 +5155,7 @@ def _curve_record(hist, early_stop_info=None):
 
 def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
                     permute_labels: bool = False, selection: bool = False,
-                    **model_overrides):
+                    steps: int | None = None, **model_overrides):
     """Train + score one run through the single shared entry point.
 
     ``eval_seed`` is mandatory so every call site states which stream it
@@ -5134,6 +5163,11 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
     silently fit decisions to the final numbers.  ``selection=True`` marks
     a call whose metrics inform a choice (recipe/baseline tuning) and is
     refused on the sealed test stream by ``check_eval_seed``.
+
+    ``steps`` optionally overrides the shared recipe's step budget for
+    tuned baselines (the depth ladder and its capacity control); ``None``
+    keeps ``settings.steps`` exactly as before, so every controlled grid
+    still trains one frozen recipe.
 
     Returns ``(model, params, metrics, curve, model_cfg)`` where
     ``model_cfg`` is the exact resolved configuration the model was built
@@ -5154,10 +5188,13 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
     model = build(_model_cfg(settings, **model_overrides), compile=False)
     model_cfg = asdict(model.cfg)
     params = sum(p.numel() for p in model.parameters())
-    eval_every = (max(1, settings.steps // settings.curve_points)
+    train_steps = int(settings.steps if steps is None else steps)
+    if train_steps < 1:
+        raise ValueError(f"steps must be a positive integer, got {steps!r}")
+    eval_every = (max(1, train_steps // settings.curve_points)
                   if settings.curve_points > 0 else 0)
     early_stop_info = {}
-    hist = train_model(model, steps=settings.steps, batch=settings.batch,
+    hist = train_model(model, steps=train_steps, batch=settings.batch,
                        n_pairs=settings.n_pairs, lr=lr, vocab=settings.vocab,
                        device=settings.device, log_every=0, seed=seed,
                        eval_every=eval_every, val_batches=settings.val_batches,
@@ -5744,14 +5781,16 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
 
     The simplest *learned* model on the baseline ladder is the 1-layer
     transformer (HB6), but a single shallow point cannot say where depth
-    stops mattering.  This runner tunes the learning rate of the standard
-    ``gate="none"`` transformer separately at every ladder depth (default
-    1/2/4 layers) through the same entry point as the deep grids - same
-    optimizer factory, cosine schedule, batch geometry and evaluation
-    streams - on the validation seed (over the pre-registered
-    ``min_seeds_for_claim`` floor's worth of training seeds, so no rung's
-    rate is frozen on a two-seed argmax), and reports the chosen rate on
-    the disjoint test seed.  Depth is the only architectural difference from
+    stops mattering.  This runner tunes the learning rate *and step
+    budget* of the standard ``gate="none"`` transformer separately at every
+    ladder depth (default 1/2/4 layers) through the same entry point as the
+    deep grids - same optimizer factory, cosine schedule, batch geometry
+    and evaluation streams - on the validation seed (over the
+    pre-registered ``min_seeds_for_claim`` floor's worth of training seeds,
+    so no rung's recipe is frozen on a two-seed argmax), and reports the
+    chosen recipe on the disjoint test seed.  The step grid is expressed as
+    multipliers of ``settings.steps``; a rung whose optimum sits at either
+    axis boundary is flagged by the selection audit as unresolved.  Depth is the only architectural difference from
     E1's ``none`` arm, so:
 
     * each rung's gap to the parameter-free rule ceiling measures how much
@@ -5811,25 +5850,30 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             "depth ladder's saturation rule")
     depths: dict[int, dict] = {}
     tuning_tables: dict[int, list] = {}
+    step_candidates = _depth_step_candidates(settings)
     for depth in ladder:
         table = []
-        for lr in settings.lr_grid:
-            accs, verdicts = [], []
-            for seed in tune_seeds:
-                _, _, metrics, curve, _ = _train_and_eval(
-                    settings, seed, lr, eval_seed=VAL_SEED, selection=True,
-                    gate="none", n_layers=depth)
-                accs.append(metrics["accuracy"])
-                verdicts.append(curve["curve_verdict"])
-            mean = sum(accs) / len(accs)
-            std = ((sum((a - mean) ** 2 for a in accs)
-                    / (len(accs) - 1)) ** 0.5 if len(accs) > 1 else 0.0)
-            table.append({"lr": lr, "val_accuracy_mean": mean,
-                          "val_accuracy_std": std, "n_seeds": len(accs),
-                          "curve_verdicts": verdicts,
-                          "curve_invalid_runs": sum(
-                              v in CURVE_INVALID_VERDICTS
-                              for v in verdicts)})
+        for train_steps in step_candidates:
+            for lr in settings.lr_grid:
+                accs, verdicts = [], []
+                for seed in tune_seeds:
+                    _, _, metrics, curve, _ = _train_and_eval(
+                        settings, seed, lr, eval_seed=VAL_SEED,
+                        selection=True, steps=train_steps, gate="none",
+                        n_layers=depth)
+                    accs.append(metrics["accuracy"])
+                    verdicts.append(curve["curve_verdict"])
+                mean = sum(accs) / len(accs)
+                std = ((sum((a - mean) ** 2 for a in accs)
+                        / (len(accs) - 1)) ** 0.5 if len(accs) > 1 else 0.0)
+                table.append({"lr": lr, "steps": int(train_steps),
+                              "val_accuracy_mean": mean,
+                              "val_accuracy_std": std,
+                              "n_seeds": len(accs),
+                              "curve_verdicts": verdicts,
+                              "curve_invalid_runs": sum(
+                                  v in CURVE_INVALID_VERDICTS
+                                  for v in verdicts)})
         # An all-non-finite tuning table (every run diverged / produced no
         # finite validation accuracy) must not be silently read as an argmax:
         # NaN comparisons make ``max`` return an arbitrary row, which would
@@ -5837,18 +5881,22 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         finite_rows = [row for row in table
                        if _finite(row["val_accuracy_mean"])]
         # Audit the full table for the unmeasured branch; the selected
-        # (curve-valid) pool is audited again below.
-        selection = _selection_reliability(table, grid=settings.lr_grid)
+        # (curve-valid) pool is audited again below.  Both axes matter: a
+        # winner at the 2x step edge is as unresolved as one at the lr edge.
+        selection = _selection_reliability(
+            table, grid=[(row["lr"], row["steps"]) for row in table],
+            grid_keys=("lr", "steps"))
         if not finite_rows:
             print(f"[baselines] WARNING: depth={depth} tuning table has no "
-                  f"finite validation accuracy (all {len(table)} lr "
-                  f"candidates non-finite); the rung is recorded as "
-                  f"unmeasured and cannot support HB6/HB7 or the saturation "
-                  f"depth")
+                  f"finite validation accuracy (all {len(table)} "
+                  f"lr x steps candidates non-finite); the rung is recorded "
+                  f"as unmeasured and cannot support HB6/HB7 or the "
+                  f"saturation depth")
             depths[depth] = {
                 "name": f"shallow_none_d{depth}", "n_layers": depth,
                 "val_seed": VAL_SEED, "test_seed": TEST_SEED,
-                "chosen_lr": None, "tuning_table": table,
+                "chosen_lr": None, "chosen_steps": None,
+                "tuning_table": table,
                 "selection": selection,
                 "accuracy_mean": float("nan"),
                 "accuracy_std": float("nan"), "accuracy_by_seed": {},
@@ -5870,22 +5918,24 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         pick = _curve_valid_selection_rows(table)
         if pick["n_excluded"]:
             print(f"[baselines] depth={depth} selection excluded "
-                  f"{pick['n_excluded']} of {pick['n_finite']} finite lr "
-                  f"row(s) with curve-invalid runs; selecting among "
-                  f"curve-valid rows only")
+                  f"{pick['n_excluded']} of {pick['n_finite']} finite "
+                  f"lr x steps row(s) with curve-invalid runs; selecting "
+                  f"among curve-valid rows only")
         elif pick["n_invalid"]:
             print(f"[baselines] WARNING: depth={depth} has no curve-valid "
-                  f"finite lr row; falling back to all {pick['n_finite']} "
-                  f"finite row(s) - the rung's recipe is not validated by a "
-                  f"healthy curve")
+                  f"finite lr x steps row; falling back to all "
+                  f"{pick['n_finite']} finite row(s) - the rung's recipe is "
+                  f"not validated by a healthy curve")
         eligible = pick["rows"]
         selection = _selection_reliability(
-            eligible, grid=[row["lr"] for row in eligible])
+            eligible, grid=[(row["lr"], row["steps"]) for row in eligible],
+            grid_keys=("lr", "steps"))
         selection["pool"] = pick["pool"]
         selection["excluded_curve_invalid_rows"] = pick["n_excluded"]
         selection["curve_invalid_rows"] = pick["n_invalid"]
         best = max(eligible, key=lambda row: row["val_accuracy_mean"])
-        warn = _selection_warn(f"depth={depth} lr selection", selection)
+        warn = _selection_warn(
+            f"depth={depth} lr x steps selection", selection)
         if warn:
             print(f"[baselines] {warn}: this rung's tuned accuracy may "
                   f"understate the depth it is credited with")
@@ -5893,7 +5943,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         for seed in settings.seeds:
             model, params, metrics, curve, _ = _train_and_eval(
                 settings, seed, best["lr"], eval_seed=TEST_SEED, gate="none",
-                n_layers=depth)
+                n_layers=depth, steps=best["steps"])
             n = int(metrics["n"])
             runs.append({
                 "seed": seed, "accuracy": metrics["accuracy"],
@@ -5908,12 +5958,14 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                           {"experiment": "baselines",
                            "hypotheses": ["HB6", "HB7"], "name": name,
                            "n_layers": depth, "lr": best["lr"],
+                           "steps": int(best["steps"]),
                            "training_seed": seed, "eval_seed": TEST_SEED,
                            "accuracy": metrics["accuracy"],
                            "accuracy_lo": metrics["accuracy_lo"],
                            "accuracy_hi": metrics["accuracy_hi"], "n": n,
                            "params": params,
-                           **_training_record(settings, best["lr"]),
+                           **_training_record(settings, best["lr"],
+                                              best["steps"]),
                            **_run_context(settings), **curve})
         # Curve-invalid final runs (plateau/diverging/instability) cannot
         # support a depth claim: their accuracies measure an optimisation
@@ -5986,8 +6038,8 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         payload = {
             "name": f"shallow_none_d{depth}", "n_layers": depth,
             "val_seed": VAL_SEED, "test_seed": TEST_SEED,
-            "chosen_lr": best["lr"], "tuning_table": table,
-            "selection": selection,
+            "chosen_lr": best["lr"], "chosen_steps": int(best["steps"]),
+            "tuning_table": table, "selection": selection,
             "accuracy_mean": summary["mean"], "accuracy_std": summary["std"],
             # Per-seed accuracies behind ``accuracy_mean``: curve-invalid
             # runs are excluded exactly as they are from the mean/std and
@@ -6038,8 +6090,9 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         else:
             status = "below the ceiling"
         print(f"[baselines] HB6/HB7 depth={depth} tuned standard "
-              f"transformer (lr={best['lr']:g} on val seed {VAL_SEED}, test "
-              f"seed {TEST_SEED}): accuracy={summary['mean']:.4f} +- "
+              f"transformer (lr={best['lr']:g}, steps={int(best['steps'])} "
+              f"on val seed {VAL_SEED}, test seed {TEST_SEED}): "
+              f"accuracy={summary['mean']:.4f} +- "
               f"{summary['std']:.4f} (seed-clustered "
               f"[{cluster['lo']:.4f}, {cluster['hi']:.4f}], "
               f"n={cluster['n']} seeds/{cluster['n_examples']} examples; "
@@ -6170,6 +6223,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     _write_json(out_dir / "baselines_shallow_tuning.json",
                 {"val_seed": VAL_SEED, "table": tuning_tables[shallowest],
                  "chosen_lr": depths[shallowest]["chosen_lr"],
+                 "chosen_steps": depths[shallowest]["chosen_steps"],
                  "selection": depths[shallowest]["selection"]})
     _write_json(out_dir / "baselines_depth_ladder.json", ladder_payload)
     return {**ladder_payload, "depths": depths, "shallowest": shallowest}
@@ -6182,9 +6236,9 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
     The depth-only ladder holds width fixed, so a deep-vs-shallow gain
     confounds depth with parameter count.  This control trains a 1-layer
     ``gate="none"`` transformer widened until its parameter count is as
-    close as possible to the deepest ladder rung, tunes its learning rate on
-    the same validation seed/recipe grid, and reports it on the sealed test
-    stream.  It is a *capacity* control, not a mechanism contrast: depth and
+    close as possible to the deepest ladder rung, tunes its learning rate
+    and step budget on the same validation seed/grid, and reports it on the
+    sealed test stream.  It is a *capacity* control, not a mechanism contrast: depth and
     width both differ from the deep rung, so it answers only "could a
     shallow model with comparable capacity reach the deep model's accuracy?"
     (a no/yes answer changes how the depth framing is read, not the gate
@@ -6265,38 +6319,45 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
 
     tune_seeds = settings.seeds[:max(1, min(settings.min_seeds_for_claim,
                                              len(settings.seeds)))]
+    step_candidates = _depth_step_candidates(settings)
     table = []
-    for lr in settings.lr_grid:
-        accs, verdicts = [], []
-        for seed in tune_seeds:
-            _, _, metrics, curve, _ = _train_and_eval(
-                settings, seed, lr, eval_seed=VAL_SEED, selection=True,
-                gate="none", n_layers=1, d_model=wide_d)
-            accs.append(metrics["accuracy"])
-            verdicts.append(curve["curve_verdict"])
-        mean = sum(accs) / len(accs)
-        std = ((sum((a - mean) ** 2 for a in accs)
-                / (len(accs) - 1)) ** 0.5 if len(accs) > 1 else 0.0)
-        table.append({"lr": lr, "val_accuracy_mean": mean,
-                      "val_accuracy_std": std, "n_seeds": len(accs),
-                      "curve_verdicts": verdicts,
-                      "curve_invalid_runs": sum(
-                          v in CURVE_INVALID_VERDICTS for v in verdicts)})
+    for train_steps in step_candidates:
+        for lr in settings.lr_grid:
+            accs, verdicts = [], []
+            for seed in tune_seeds:
+                _, _, metrics, curve, _ = _train_and_eval(
+                    settings, seed, lr, eval_seed=VAL_SEED, selection=True,
+                    steps=train_steps, gate="none", n_layers=1,
+                    d_model=wide_d)
+                accs.append(metrics["accuracy"])
+                verdicts.append(curve["curve_verdict"])
+            mean = sum(accs) / len(accs)
+            std = ((sum((a - mean) ** 2 for a in accs)
+                    / (len(accs) - 1)) ** 0.5 if len(accs) > 1 else 0.0)
+            table.append({"lr": lr, "steps": int(train_steps),
+                          "val_accuracy_mean": mean,
+                          "val_accuracy_std": std, "n_seeds": len(accs),
+                          "curve_verdicts": verdicts,
+                          "curve_invalid_runs": sum(
+                              v in CURVE_INVALID_VERDICTS
+                              for v in verdicts)})
     finite = [row for row in table if _finite(row["val_accuracy_mean"])]
     base.update({"tuning_table": table})
     if not finite:
-        base.update({"chosen_lr": None, "unmeasured": True,
-                     "above_chance": False, "runs": [],
+        base.update({"chosen_lr": None, "chosen_steps": None,
+                     "unmeasured": True, "above_chance": False, "runs": [],
                      "reason": "all tuning runs non-finite"})
         _write_json(out_dir / "baselines_matched_shallow.json", base)
         return base
     pick = _curve_valid_selection_rows(table)
     eligible = pick["rows"]
     selection = _selection_reliability(
-        eligible, grid=[row["lr"] for row in eligible])
+        eligible, grid=[(row["lr"], row["steps"]) for row in eligible],
+        grid_keys=("lr", "steps"))
     selection["pool"] = pick["pool"]
     best = max(eligible, key=lambda row: row["val_accuracy_mean"])
-    warn = _selection_warn("matched-shallow lr selection", selection)
+    warn = _selection_warn(
+        "matched-shallow lr x steps selection", selection)
     if warn:
         print(f"[baselines] {warn}: the matched-capacity control may "
               f"understate one-layer capacity")
@@ -6304,7 +6365,7 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
     for seed in settings.seeds:
         _, params, metrics, curve, _ = _train_and_eval(
             settings, seed, best["lr"], eval_seed=TEST_SEED, gate="none",
-            n_layers=1, d_model=wide_d)
+            n_layers=1, d_model=wide_d, steps=best["steps"])
         n = int(metrics["n"])
         runs.append({
             "seed": seed, "accuracy": metrics["accuracy"],
@@ -6319,12 +6380,14 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
                                                                  "HB7"],
                        "name": "matched_shallow_none", "n_layers": 1,
                        "d_model": wide_d, "lr": best["lr"],
+                       "steps": int(best["steps"]),
                        "training_seed": seed, "eval_seed": TEST_SEED,
                        "accuracy": metrics["accuracy"],
                        "accuracy_lo": metrics["accuracy_lo"],
                        "accuracy_hi": metrics["accuracy_hi"], "n": n,
                        "params": params, "capacity_matched": matched,
-                       **_training_record(settings, best["lr"]),
+                       **_training_record(settings, best["lr"],
+                                          best["steps"]),
                        **_run_context(settings), **curve})
     valid = [r for r in runs
              if r.get("curve_verdict") not in CURVE_INVALID_VERDICTS]
@@ -6335,7 +6398,8 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
                  and cluster["lo"] > float(ladder.get("chance") or 0.0))
     ceiling = float(ladder.get("ceiling", float("nan")))
     base.update({
-        "chosen_lr": best["lr"], "selection": selection,
+        "chosen_lr": best["lr"], "chosen_steps": int(best["steps"]),
+        "selection": selection,
         "accuracy_mean": summary["mean"],
         "accuracy_std": summary["std"],
         "accuracy_by_seed": {str(r["seed"]): r["accuracy"] for r in valid},
@@ -6351,8 +6415,9 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
     print(f"[baselines] matched-capacity shallow control (1 layer, "
           f"d_model={wide_d}, {wide_params} params vs target "
           f"{target_params} for depth {target_depth}, "
-          f"capacity_matched={matched}; lr={best['lr']:g} on val seed "
-          f"{VAL_SEED}, test seed {TEST_SEED}): accuracy="
+          f"capacity_matched={matched}; lr={best['lr']:g}, "
+          f"steps={int(best['steps'])} on val seed {VAL_SEED}, test seed "
+          f"{TEST_SEED}): accuracy="
           f"{summary['mean']:.4f} +- {summary['std']:.4f} "
           f"(seed-clustered [{cluster['lo']:.4f}, {cluster['hi']:.4f}], "
           f"chance={float(ladder.get('chance') or 0.0):.4f}, n="
@@ -6988,6 +7053,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "by_depth": {
                 str(d): {
                     "lr": payload["chosen_lr"],
+                    "steps": payload["chosen_steps"],
                     "tuning_table": payload["tuning_table"],
                     "selection": payload["selection"],
                     "accuracy_mean": payload["accuracy_mean"],
@@ -7025,6 +7091,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "matched_shallow": ladder.get("matched_shallow"),
         "shallow_none": {
             "n_layers": ladder["shallowest"], "lr": shallow["chosen_lr"],
+            "steps": shallow.get("chosen_steps"),
             "tuning_table": shallow["tuning_table"],
             "selection": shallow["selection"],
             "accuracy_mean": shallow["accuracy_mean"],
@@ -7700,7 +7767,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                          "seed-clustered lower bound within SESOI]")
         print(f"[e1] complexity control (HB6): tuned {shallow_depth}-layer "
               f"standard transformer "
-              f"(lr={shallow.get('lr', float('nan')):g}) test "
+              f"(lr={shallow.get('lr', float('nan')):g}, "
+              f"steps={shallow.get('steps')}) test "
               f"accuracy={shallow.get('accuracy_mean', float('nan')):.4f}"
               f"±{shallow.get('accuracy_std', float('nan')):.4f}, "
               f"rule ceiling={shallow.get('ceiling', float('nan')):.4f}, "
@@ -7710,8 +7778,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"SESOI={shallow.get('sesoi_accuracy', float('nan')):g})"
               f"{hb6_prov}")
         # Paired complexity reference: same seeds, same test stream,
-        # each side optimised with its own val-tuned learning rate
-        # (that is the point of a tuned-baseline comparison), so the
+        # each side optimised with its own val-tuned learning rate and
+        # step budget (that is the point of a tuned-baseline comparison),
+        # so the
         # strict controlled-recipe audit does not apply and this line
         # is deliberately kept outside the FDR family.  The pre-registered
         # seed floor still applies to how the line is *labelled*: below
@@ -7770,11 +7839,12 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         shallow_runs = [{"seed": seed, "accuracy": shallow_by_seed[seed]}
                         for seed in sorted(shallow_by_seed, key=_seed_order)]
         reference_name = (f"tuned {shallow_depth}-layer standard "
-                          f"transformer (lr={shallow.get('lr', float('nan')):g})")
+                          f"transformer (lr={shallow.get('lr', float('nan')):g}, "
+                          f"steps={shallow.get('steps')})")
         print(f"\n[e1] complexity benchmark vs the tuned shallow rung "
               f"(paired over seeds; SESOI={benchmark_sesoi:g} accuracy; "
-              f"each arm carries its own val-tuned lr, so this is a "
-              f"benchmark, not a controlled mechanism contrast):")
+              f"each arm carries its own val-tuned lr and step budget, so "
+              f"this is a benchmark, not a controlled mechanism contrast):")
         if not reference_competent:
             print(f"      reference rung is not above chance: rows are "
                   f"diagnostics only and cannot justify complexity")
