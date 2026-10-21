@@ -953,12 +953,17 @@ def seeds_for_power(sd, effect, alpha: float = 0.05,
     ``effect`` is zero/non-finite, and the raw (non-integer) count
     otherwise - callers round up.
     """
-    if effect is None or sd is None:
+    try:
+        sd = float(sd)
+        effect = float(effect)
+        alpha = float(alpha)
+        power = float(power)
+    except (TypeError, ValueError, OverflowError):
         return float("inf")
-    sd = float(sd)
-    effect = float(effect)
-    if not math.isfinite(sd) or not math.isfinite(effect) \
-            or sd <= 0.0 or effect == 0.0:
+    if not (math.isfinite(sd) and math.isfinite(effect)
+            and math.isfinite(alpha) and math.isfinite(power)) \
+            or sd <= 0.0 or effect == 0.0 \
+            or not 0.0 < alpha < 1.0 or not 0.0 < power < 1.0:
         return float("inf")
     nd = NormalDist()
     z = nd.inv_cdf(1.0 - alpha / 2.0) + nd.inv_cdf(power)
@@ -1344,6 +1349,15 @@ def _self_test() -> int:
     bad_alpha_cluster = clustered_proportion_ci([50] * 5, [100] * 5,
                                                lower_alpha=2.0)
     check("cluster_bad_quantile_no_claim", not bad_alpha_cluster["valid"])
+
+    for label, kwargs in (
+            ("alpha", {"sd": 1.0, "effect": 0.5, "alpha": 1.5}),
+            ("power", {"sd": 1.0, "effect": 0.5, "power": -0.1}),
+            ("sd", {"sd": "x", "effect": 0.5}),
+            ("effect", {"sd": 1.0, "effect": "x"}),
+    ):
+        check(f"power_plan_bad_{label}_no_claim",
+              math.isinf(seeds_for_power(**kwargs)))
 
     if failures:
         print("metrics self-test FAILED: " + ", ".join(failures))
