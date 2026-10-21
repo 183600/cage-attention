@@ -7783,6 +7783,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                    "metrics_by_length": {},
                    "accuracy_by_length": {}, "eval_n_by_length": {},
                    "balanced_accuracy_by_length": {},
+                   "f1_macro_by_length": {}, "f1_weighted_by_length": {},
                    "entropy_by_length": {}, "entropy_norm_by_length": {},
                    "maxprob_by_length": {}, "gate_by_length": {},
                    **record_extra,
@@ -7811,6 +7812,9 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 rec["accuracy_by_length"][length] = metrics["accuracy"]
                 rec["balanced_accuracy_by_length"][length] = (
                     metrics["recall_macro"])
+                rec["f1_macro_by_length"][length] = metrics["f1_macro"]
+                rec["f1_weighted_by_length"][length] = (
+                    metrics["f1_weighted"])
                 rec["eval_n_by_length"][length] = int(metrics["n"])
                 rec["metrics_by_length"][length] = {
                     k: v for k, v in metrics.items() if k != "n"}
@@ -7909,24 +7913,29 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     # to the headline accuracy at every sweep length.  The values agree
     # under a uniform stream; a divergence means the length reading depends
     # on class frequency and must be reported as such.
-    print(f"\n[e2] balanced accuracy (macro recall) by n_pairs (mean +- std "
-          f"over seeds; companion to the accuracy table - divergence at a "
-          f"length means that length's reading depends on answer-class "
-          f"frequency):")
-    print(f"{'arm':>16}" + "".join(f"{L:>12}" for L in lengths)
+    print(f"\n[e2] balanced accuracy (macro recall) and macro-F1 by n_pairs "
+          f"(mean +- std over seeds; companions to the accuracy table - "
+          f"divergence at a length means that length's reading depends on "
+          f"answer-class frequency; macro-F1 averages F1 over the classes "
+          f"present in the target, f1_micro would equal accuracy):")
+    print(f"{'arm':>16} {'metric':>8}" + "".join(f"{L:>12}" for L in lengths)
           + f"{'drop':>17}")
     for label, *_ in _E2_VARIANTS:
-        cells = []
-        for length in lengths:
-            agg = _mean_std([r["balanced_accuracy_by_length"][length]
-                             for r in by_variant[label]])
-            cells.append(f"{agg['mean']:.3f}±{agg['std']:.3f}")
-        drop = _mean_std([r["balanced_accuracy_drop"]
-                          for r in by_variant[label]])
-        drop_s = (f"{drop['mean']:.3f}±{drop['std']:.3f}"
-                  if _finite(drop["mean"]) else "n/a")
-        print(f"{label:>16}" + "".join(f"{c:>12}" for c in cells)
-              + f"{drop_s:>17}")
+        for metric, key in (("bal_acc", "balanced_accuracy_by_length"),
+                            ("f1_macro", "f1_macro_by_length")):
+            cells = []
+            for length in lengths:
+                agg = _mean_std([r[key][length]
+                                 for r in by_variant[label]])
+                cells.append(f"{agg['mean']:.3f}±{agg['std']:.3f}")
+            drop = _mean_std(
+                [r[key][settings.n_pairs] - r[key][lengths[-1]]
+                 for r in by_variant[label]])
+            drop_s = (f"{drop['mean']:.3f}±{drop['std']:.3f}"
+                      if _finite(drop["mean"]) else "n/a")
+            print(f"{label:>16} {metric:>8}"
+                  + "".join(f"{c:>12}" for c in cells)
+                  + f"{drop_s:>17}")
 
     print(f"\n[e2] training-curve health (curve_ok = curve-valid runs / "
           f"all runs; late = U-shaped val curves; tail_train = relative "
@@ -8151,6 +8160,16 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     e2_summary["_balanced_accuracy"] = {
         label: {str(L): _mean_std(
             [r["balanced_accuracy_by_length"][L] for r in by_variant[label]])
+            for L in lengths}
+        for label, *_ in _E2_VARIANTS}
+    e2_summary["_f1_macro"] = {
+        label: {str(L): _mean_std(
+            [r["f1_macro_by_length"][L] for r in by_variant[label]])
+            for L in lengths}
+        for label, *_ in _E2_VARIANTS}
+    e2_summary["_f1_weighted"] = {
+        label: {str(L): _mean_std(
+            [r["f1_weighted_by_length"][L] for r in by_variant[label]])
             for L in lengths}
         for label, *_ in _E2_VARIANTS}
     e2_summary["_provenance"] = _stamp(settings)
