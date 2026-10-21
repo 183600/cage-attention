@@ -264,9 +264,13 @@ def roc_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
         return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
                 "n": int(y.numel())}
     auc = roc_auc(s, y)
+    if not _bootstrap_args_ok(n_boot, alpha):
+        return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
+                "n": int(y.numel())}
+    n_boot = _positive_integer(n_boot)
     gen = torch.Generator(device=s.device).manual_seed(int(seed))
     boots = []
-    for _ in range(int(n_boot)):
+    for _ in range(n_boot):
         idx = torch.randint(0, s.numel(), (s.numel(),), generator=gen,
                             device=s.device)
         sb = s[idx]
@@ -299,9 +303,13 @@ def pr_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
         return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
                 "n": int(y.numel())}
     auc = pr_auc(s, y)
+    if not _bootstrap_args_ok(n_boot, alpha):
+        return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
+                "n": int(y.numel())}
+    n_boot = _positive_integer(n_boot)
     gen = torch.Generator(device=s.device).manual_seed(int(seed))
     boots = []
-    for _ in range(int(n_boot)):
+    for _ in range(n_boot):
         idx = torch.randint(0, s.numel(), (s.numel(),), generator=gen,
                             device=s.device)
         sb = s[idx]
@@ -337,10 +345,16 @@ def auc_paired_bootstrap_ci(scores_a, scores_b, positives, n_boot: int = 10000,
         return roc_auc(sv, y) if metric == "roc" else pr_auc(sv, y)
     a0 = _auc(sa)
     b0 = _auc(sb)
+    point = a0 - b0 if (math.isfinite(a0) and math.isfinite(b0)) \
+        else float("nan")
+    if not _bootstrap_args_ok(n_boot, alpha):
+        return {"mean_diff": point, "lo": float("nan"),
+                "hi": float("nan")}
+    n_boot = _positive_integer(n_boot)
     gen = torch.Generator(device=sa.device).manual_seed(int(seed))
     diffs = []
     n = sa.numel()
-    for _ in range(int(n_boot)):
+    for _ in range(n_boot):
         idx = torch.randint(0, n, (n,), generator=gen, device=sa.device)
         sbi = sa[idx]; sbj = sb[idx]; yb = y[idx]
         if metric == "roc":
@@ -355,12 +369,11 @@ def auc_paired_bootstrap_ci(scores_a, scores_b, positives, n_boot: int = 10000,
         if math.isfinite(da) and math.isfinite(db):
             diffs.append(da - db)
     if not diffs:
-        return {"mean_diff": a0 - b0 if (math.isfinite(a0) and math.isfinite(b0)) else float("nan"),
-                "lo": float("nan"), "hi": float("nan")}
+        return {"mean_diff": point, "lo": float("nan"), "hi": float("nan")}
     dt = torch.tensor(diffs, dtype=torch.float64)
     lo = float(torch.quantile(dt, alpha / 2.0))
     hi = float(torch.quantile(dt, 1.0 - alpha / 2.0))
-    md = a0 - b0 if (math.isfinite(a0) and math.isfinite(b0)) else float(dt.mean())
+    md = point if math.isfinite(point) else float(dt.mean())
     return {"mean_diff": float(md), "lo": lo, "hi": hi, "n": n}
 
 
@@ -1223,6 +1236,21 @@ def _self_test() -> int:
     check("mismatched_ranking_no_claim",
           math.isnan(roc_auc([1.0, 2.0, 3.0], [False, True]))
           and math.isnan(pr_auc([1.0, 2.0, 3.0], [False, True])))
+    for bad_boot in (0, -1, 2.5, float("nan"), "x"):
+        roc_bad = roc_auc_ci([0.1, 0.2, 0.8, 0.9], [0, 0, 1, 1],
+                             n_boot=bad_boot)
+        pr_bad = pr_auc_ci([0.1, 0.2, 0.8, 0.9], [0, 0, 1, 1],
+                           n_boot=bad_boot)
+        check(f"ranking_ci_bad_boot_{bad_boot}_no_claim",
+              math.isfinite(roc_bad["auc"])
+              and math.isnan(roc_bad["lo"])
+              and math.isfinite(pr_bad["auc"])
+              and math.isnan(pr_bad["lo"]))
+    paired_bad = auc_paired_bootstrap_ci(
+        [0.1, 0.2, 0.8, 0.9], [0.2, 0.1, 0.7, 0.8], [0, 0, 1, 1],
+        n_boot=float("nan"))
+    check("paired_ranking_bad_boot_no_claim",
+          math.isnan(paired_bad["lo"]))
     sel = selection_at_fraction([1.0, 2.0, 3.0], [False, True])
     check("mismatched_selection_no_claim",
           sel["k"] == 0 and math.isnan(sel["precision"]))
