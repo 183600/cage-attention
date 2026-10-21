@@ -4994,7 +4994,10 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                    if r.get("curve_verdict") not in CURVE_INVALID_VERDICTS]
         by_seed_b = {r["seed"]: r for r in depths[b]["runs"]
                      if r.get("curve_verdict") not in CURVE_INVALID_VERDICTS}
-        diffs = [r["accuracy"] - by_seed_b[r["seed"]]["accuracy"]
+        # Positive mean = the deeper rung gains accuracy over the shallower
+        # one, matching the ``a->b`` arrow and the "paired gain" reading
+        # below (the TOST is symmetric, so only the reported sign moves).
+        diffs = [by_seed_b[r["seed"]]["accuracy"] - r["accuracy"]
                  for r in valid_a if r["seed"] in by_seed_b]
         if not diffs:
             adjacent[f"{a}->{b}"] = {
