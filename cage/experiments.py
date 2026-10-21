@@ -5213,10 +5213,18 @@ def _overfit_sanity_by_config(settings: Settings) -> dict:
         seed_everything(SANITY_SEED, deterministic=settings.deterministic)
         tiny = build(_model_cfg(settings, d_model=48, n_layers=2, **overrides),
                      compile=False)
-        by_config[label] = overfit_sanity_check(
+        row = overfit_sanity_check(
             tiny, sidx, stgt, smeta, lr=settings.overfit_lr,
             steps=settings.overfit_steps, seed=SANITY_SEED,
             vocab=settings.vocab, deterministic=settings.deterministic)
+        row["model_cfg"] = asdict(tiny.cfg)
+        row["params"] = int(sum(p.numel() for p in tiny.parameters()))
+        row["stream_seed"] = SANITY_SEED
+        row["n_pairs"] = int(settings.n_pairs)
+        row["vocab"] = int(settings.vocab)
+        row["device"] = settings.device
+        row["deterministic"] = bool(settings.deterministic)
+        by_config[label] = row
     settings._overfit_sanity_cache = by_config
     return by_config
 
@@ -5241,6 +5249,11 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
         "steps": int(sanity["steps"]),
         "lr": float(sanity["lr"]),
         "seed": sanity["seed"],
+        "stream_seed": sanity["stream_seed"],
+        "n_pairs": sanity["n_pairs"],
+        "vocab": sanity["vocab"],
+        "device": sanity["device"],
+        "deterministic": sanity["deterministic"],
         "by_config": {
             label: {
                 "passed": row["passed"],
@@ -5252,12 +5265,16 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
                 "steps_to_target_loss": row["steps_to_target_loss"],
                 "steps_to_target_acc": row["steps_to_target_acc"],
                 "data_sha256": row["data_sha256"],
+                "params": row["params"],
+                "model_cfg": row["model_cfg"],
                 "params_connected": (
                     f"{row['grad_flow']['params_with_grad']}/"
                     f"{row['grad_flow']['params_total']}"),
                 "all_grads_finite": row["grad_flow"]["all_grads_finite"],
                 "active_dropout": row["regularization"]["active_dropout"],
+                "dropout_probs": row["regularization"]["dropout_probs"],
                 "weight_decay": row["regularization"]["weight_decay"],
+                "augmentation": row["regularization"]["augmentation"],
             }
             for label, row in by_config.items()
         },
