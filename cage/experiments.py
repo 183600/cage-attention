@@ -6985,6 +6985,11 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             }
         justified = [g for g, row in benchmark_by_arm.items()
                      if row["complexity_justified"]]
+        # ``none`` is the ungated deep baseline, not a gating arm: it can
+        # justify the depth of the grid but says nothing about the gate's
+        # capacity.  Keep the two readings separate so a depth win is not
+        # printed as a gate win.
+        gating_justified = [g for g in justified if g != "none"]
         complexity_benchmark = {
             "reference": reference_name,
             "reference_depth": shallow_depth,
@@ -6993,6 +6998,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             "sesoi_accuracy": benchmark_sesoi,
             "by_arm": benchmark_by_arm,
             "arms_justified": justified,
+            "gating_arms_justified": gating_justified,
+            "deep_none_justified": "none" in justified,
             "comparison": "benchmark",
             "note": ("paired benchmark, not a controlled mechanism "
                      "contrast: architecture/capacity and the val-tuned "
@@ -7001,9 +7008,13 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                      "but not as complexity justified over the tuned "
                      "simple model"),
         }
-        if justified:
-            print(f"      complexity-justified arm(s) over the tuned shallow "
-                  f"reference: {', '.join(justified)}")
+        if gating_justified:
+            print(f"      gating arm(s) beating the tuned shallow reference "
+                  f"by SESOI: {', '.join(gating_justified)}")
+        elif "none" in justified:
+            print(f"      the ungated deep baseline (none) beats the tuned "
+                  f"shallow reference by SESOI, but no gated arm does: "
+                  f"depth is justified, the gate's capacity is not")
         else:
             print(f"      WARNING: no E1 arm beats the tuned shallow "
                   f"reference by the pre-registered SESOI="
