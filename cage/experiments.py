@@ -5819,13 +5819,25 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
           f"[{ceiling['accuracy_lo']:.4f}, {ceiling['accuracy_hi']:.4f}] "
           f"(Wilson 95%, n={ceiling['n']}, unique_key_rate="
           f"{ceiling['unique_key_rate']:.3f})")
-    print(f"{'gate':>6} {'accuracy':>10} {'ceiling_gap':>12}")
+    # The ceiling gap is an effect size like any other: it is printed with
+    # the seed-level spread of the accuracy it is derived from (the rule
+    # ceiling itself is a fixed parameter-free reference with its own Wilson
+    # interval above), so a gap smaller than the seed noise cannot be read
+    # as a real distance from the ceiling.
+    print(f"{'gate':>6} {'accuracy':>17} {'ceiling_gap':>17}")
     for gate in GATES:
         agg = table[gate].get("accuracy", {})
         acc = agg.get("mean", float("nan"))
+        acc_std = agg.get("std", float("nan"))
         gap = (ceiling["accuracy"] - acc) if math.isfinite(acc) else float("nan")
-        print(f"{gate:>6} {acc:>10.4f} {gap:>12.4f}")
+        acc_s = (f"{acc:.4f}±{acc_std:.4f}" if _finite(acc)
+                 else "n/a")
+        gap_s = (f"{gap:.4f}±{acc_std:.4f}" if _finite(gap) else "n/a")
+        print(f"{gate:>6} {acc_s:>17} {gap_s:>17}")
     probe = verdict.get("probe_accuracy_mean", float("nan"))
+    probe_std = verdict.get("probe_accuracy_std", float("nan"))
+    probe_s = (f"{probe:.4f}±{probe_std:.4f}" if _finite(probe)
+               else f"{probe:.4f}")
     floor = verdict.get("seed_floor") or {}
 
     def _mark(key, claim_key=None):
@@ -5875,7 +5887,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                     f"(underpower/wide CI, not evidence of leakage)")
     print(f"[e1] simple-baseline check (from --only baselines, enforced "
           f"before training): HB1/HB2/HB3/HB4/HB5/HB6={marks}, tuned linear "
-          f"probe test accuracy={probe:.4f} vs chance "
+          f"probe test accuracy={probe_s} (mean±std over probe seeds) vs "
+          f"chance "
           f"{verdict.get('chance', float('nan')):.4f}{hb2_note}{hb4_note} - the "
           f"transformer is only credited for what it does beyond this tuned "
           f"baseline and the rule ceiling (HB4 = no label leakage, HB5 = "
@@ -5905,7 +5918,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         print(f"[e1] complexity control (HB6): tuned {shallow_depth}-layer "
               f"standard transformer "
               f"(lr={shallow.get('lr', float('nan')):g}) test "
-              f"accuracy={shallow.get('accuracy_mean', float('nan')):.4f}, "
+              f"accuracy={shallow.get('accuracy_mean', float('nan')):.4f}"
+              f"±{shallow.get('accuracy_std', float('nan')):.4f}, "
               f"rule ceiling={shallow.get('ceiling', float('nan')):.4f}, "
               f"gap={shallow.get('ceiling_gap', float('nan')):.4f} "
               f"(lower-bound gap="
@@ -5936,6 +5950,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     if by_depth:
         rungs = "/".join(
             f"{d}L {float(row.get('accuracy_mean', float('nan'))):.4f}"
+            f"±{float(row.get('accuracy_std', float('nan'))):.4f}"
             for d, row in sorted(by_depth.items(), key=lambda kv: int(kv[0])))
         sat = verdict.get("saturation_depth")
         req = verdict.get("hb7_depth_required")
