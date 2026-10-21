@@ -960,6 +960,17 @@ def _difficulty_features(split, n_pairs):
             "naive_confusable": naive_confusable}
 
 
+def _joint_difficulty_values(features):
+    """Encode ``(key_pos, value_repeats, naive_confusable)`` as one category.
+
+    The binary ambiguity flags are the two least-significant digits, so the
+    encoding is dense (``0 .. 4*n_pairs-1``) and no joint cell is dropped.
+    """
+    return (((features["key_pos"].to(torch.long) * 2
+              + features["value_repeats"].to(torch.long)) * 2)
+            + features["naive_confusable"].to(torch.long))
+
+
 def _field_values(split, n_pairs, field):
     idx, answer = split["idx"], split["answer"]
     if field == "token":
@@ -970,6 +981,8 @@ def _field_values(split, n_pairs, field):
         return idx[:, :2 * n_pairs:2].reshape(-1)
     if field == "value":
         return idx[:, 1:2 * n_pairs:2].reshape(-1)
+    if field == "difficulty_joint":
+        return _joint_difficulty_values(_difficulty_features(split, n_pairs))
     if field in _AUDIT_DERIVED_FIELDS:
         return _difficulty_features(split, n_pairs)[field]
     raise ValueError(f"unknown audit field {field!r}")
@@ -979,6 +992,8 @@ def _field_categories(field, vocab, n_pairs):
     """Number of possible categories for a categorical audit field."""
     if field == "key_pos":
         return max(int(n_pairs), 1)
+    if field == "difficulty_joint":
+        return max(int(n_pairs), 1) * 4
     if field in ("value_repeats", "naive_confusable"):
         return 2
     return int(vocab)
@@ -1350,7 +1365,8 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
     * **per-field distribution shift**: for pooled tokens, supervised
       answers, key / value sub-populations and the structural difficulty
       covariates (key position, repeated answer values, naive-confusable
-      queries), the total-variation distance between each held-out split
+      queries) and their joint ``(key_pos, value_repeats, naive_confusable)``
+      cell, the total-variation distance between each held-out split
       and the pooled training distribution is reported against a same-size
       noise floor measured between disjoint training streams
       (:func:`_noise_floor`), *and* the same-distribution null is tested
@@ -1659,6 +1675,36 @@ def _self_test() -> int:
           feat["value_repeats"].tolist() == [0, 1])
     check("difficulty_naive_confusable",
           feat["naive_confusable"].tolist() == [1, 0])
+    check("difficulty_joint_encoding",
+          _joint_difficulty_values(feat).tolist() == [5, 6])
+
+    # Joint-difficulty shift: the 2x2 marginals are identical in both
+    # samples, so the separate field tests are blind by construction; the
+    # joint test must still detect the reversed dependence.  A same-source
+    # draw must not be flagged.
+    joint_ref = torch.tensor([300, 200, 200, 300], dtype=torch.int64)
+    joint_obs = torch.tensor([200, 300, 300, 200], dtype=torch.int64)
+
+    def _joint_marginals(c):
+        return (torch.stack([c[0] + c[1], c[2] + c[3]]),
+                torch.stack([c[0] + c[2], c[1] + c[3]]))
+
+    ref_rows, ref_cols = _joint_marginals(joint_ref)
+    obs_rows, obs_cols = _joint_marginals(joint_obs)
+    check("joint_shift_marginals_equal",
+          torch.equal(ref_rows, obs_rows) and torch.equal(ref_cols, obs_cols))
+    p_joint, chi2_joint = _distribution_shift_p(
+        joint_obs, joint_ref, n_sim=400, seed=90210)
+    check("joint_shift_detected", p_joint <= 1.0 / 401.0)
+    check("joint_shift_chi2_large", chi2_joint > 100.0)
+    jgen = torch.Generator().manual_seed(43)
+    joint_same = torch.bincount(
+        torch.multinomial(joint_ref.to(torch.float64) / joint_ref.sum(),
+                          1000, replacement=True, generator=jgen),
+        minlength=4).to(torch.int64)
+    p_joint_same, _ = _distribution_shift_p(
+        joint_same, joint_ref, n_sim=400, seed=90210)
+    check("joint_same_source_not_flagged", p_joint_same > 0.05)
 
     # A shift in retrieval distance must be detected by the same calibrated
     # test used for the token marginals, even when only the *position*
