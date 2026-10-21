@@ -1054,8 +1054,10 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
     without training having done anything.
 
     ``seed`` (optional) is recorded and, when given, re-seeds Python /
-    NumPy / Torch through :func:`cage.repro.seed_everything`; the caller
-    must still seed *before* building the model, because weight
+    NumPy / Torch through :func:`cage.repro.seed_everything` with the
+    caller's ``deterministic`` setting, so the pre-flight cannot silently
+    switch deterministic kernels off for whatever runs afterwards; the
+    caller must still seed *before* building the model, because weight
     initialisation happens before this function runs.
 
     This is a *necessary, not sufficient* check: passing it does not prove
@@ -1075,7 +1077,7 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
     pass this pre-flight via a divergent copy.
     """
     if seed is not None:
-        seed_everything(int(seed))
+        seed_everything(int(seed), deterministic=deterministic)
     sample_every = max(1, steps // 10)
     regularization = {}
     grad_flow = {}
