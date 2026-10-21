@@ -79,16 +79,21 @@ __all__ = [
     "benjamini_hochberg",
     "roc_auc",
     "pr_auc",
+    "roc_auc_ci",
+    "pr_auc_ci",
     "multiclass_metrics",
     "expected_calibration_error",
     "brier_score",
     "paired_bootstrap_ci",
     "equivalence_test",
+    "noninferiority_test",
     "bootstrap_upper_p",
     "clustered_proportion_ci",
     "selection_at_fraction",
     "seeds_for_power",
     "wilson_ci",
+    "cohens_d_paired",
+    "hedges_g_paired",
 ]
 
 
@@ -218,6 +223,111 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
     return {"frac": k / n, "k": k, "recall": recall,
             "precision": precision, "lift": lift,
             "threshold": float(s[order[k - 1]])}
+
+
+def roc_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
+               alpha: float = 0.05) -> dict:
+    """Bootstrap confidence interval for ROC-AUC over rows.
+
+    Rows are resampled with replacement (percentile bootstrap). Returns
+    NaN for degenerate cases where only one class is present.
+    """
+    s = _flatten_float(scores)
+    y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
+    if y.numel() != s.numel() or y.numel() == 0:
+        return {"auc": float("nan"), "lo": float("nan"), "hi": float("nan"),
+                "n": int(y.numel())}
+    n_pos = int(y.sum())
+    n_neg = y.numel() - n_pos
+    if n_pos == 0 or n_neg == 0:
+        auc = roc_auc(s, y)
+        return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
+                "n": int(y.numel())}
+    auc = roc_auc(s, y)
+    gen = torch.Generator(device=s.device).manual_seed(int(seed))
+    boots = []
+    for _ in range(int(n_boot)):
+        idx = torch.randint(0, s.numel(), (s.numel(),), generator=gen,
+                            device=s.device)
+        sb = s[idx]
+        yb = y[idx]
+        nb = int(yb.sum())
+        nn = yb.numel() - nb
+        if nb == 0 or nn == 0:
+            continue
+        boots.append(roc_auc(sb, yb))
+    if not boots:
+        return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
+                "n": int(y.numel())}
+    bt = torch.tensor(boots, dtype=torch.float64)
+    lo = float(torch.quantile(bt, alpha / 2.0))
+    hi = float(torch.quantile(bt, 1.0 - alpha / 2.0))
+    return {"auc": auc, "lo": lo, "hi": hi, "n": int(y.numel())}
+
+
+def pr_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
+              alpha: float = 0.05) -> dict:
+    """Bootstrap confidence interval for PR-AUC (average precision)."""
+    s = _flatten_float(scores)
+    y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
+    if y.numel() != s.numel() or y.numel() == 0:
+        return {"auc": float("nan"), "lo": float("nan"), "hi": float("nan"),
+                "n": int(y.numel())}
+    n_pos = int(y.sum())
+    if n_pos == 0:
+        auc = pr_auc(s, y)
+        return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
+                "n": int(y.numel())}
+    auc = pr_auc(s, y)
+    gen = torch.Generator(device=s.device).manual_seed(int(seed))
+    boots = []
+    for _ in range(int(n_boot)):
+        idx = torch.randint(0, s.numel(), (s.numel(),), generator=gen,
+                            device=s.device)
+        sb = s[idx]
+        yb = y[idx]
+        npp = int(yb.sum())
+        if npp == 0:
+            continue
+        boots.append(pr_auc(sb, yb))
+    if not boots:
+        return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
+                "n": int(y.numel())}
+    bt = torch.tensor(boots, dtype=torch.float64)
+    lo = float(torch.quantile(bt, alpha / 2.0))
+    hi = float(torch.quantile(bt, 1.0 - alpha / 2.0))
+    return {"auc": auc, "lo": lo, "hi": hi, "n": int(y.numel())}
+
+
+def cohens_d_paired(diffs) -> float:
+    """Cohen's d for paired differences: mean(diff)/sd(diff)."""
+    d = _flatten_float(diffs)
+    if d.numel() == 0:
+        return float("nan")
+    if d.numel() == 1:
+        sd = float(d.std(unbiased=False))
+    else:
+        sd = float(d.std(unbiased=True))
+    if sd == 0.0 or not math.isfinite(sd):
+        return float("nan")
+    return float(d.mean()) / sd
+
+
+def hedges_g_paired(diffs) -> float:
+    """Hedges' g for paired differences (small-sample bias correction)."""
+    d = _flatten_float(diffs)
+    if d.numel() == 0:
+        return float("nan")
+    d_c = cohens_d_paired(d)
+    if not math.isfinite(d_c):
+        return float("nan")
+    n = d.numel()
+    if n < 2:
+        return float(d_c)
+    # J correction factor
+    df = n - 1
+    J = math.gamma(df / 2.0) / (math.sqrt(df / 2.0) * math.gamma((df - 1.0) / 2.0))
+    return float(d_c) * J
 
 
 def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
@@ -471,7 +581,8 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 "alpha": float(alpha),
                 "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
                 "loo_sign_flip": False, "lo_bca": float("nan"),
-                "hi_bca": float("nan"), "bca_agrees": None}
+                "hi_bca": float("nan"), "bca_agrees": None,
+                "cohens_d": float("nan"), "hedges_g": float("nan")}
     n = d.numel()
     means = _bootstrap_means(d, n_boot, seed)
     out = _bootstrap_summary(d, means, alpha)
@@ -501,6 +612,8 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
         percentile_excludes = out["lo"] > 0.0 or out["hi"] < 0.0
         bca_excludes = out["lo_bca"] > 0.0 or out["hi_bca"] < 0.0
         out["bca_agrees"] = bool(percentile_excludes == bca_excludes)
+    out["cohens_d"] = cohens_d_paired(d)
+    out["hedges_g"] = hedges_g_paired(d)
     return out
 
 
