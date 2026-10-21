@@ -3617,6 +3617,21 @@ _SEEDING_POLICY = {
 }
 
 
+def _config_cache_key(settings: Settings) -> str:
+    """Content key for per-``Settings`` caches.
+
+    The runners mutate ``Settings`` in place (``--seeds``, CLI overrides,
+    verdict marks), so object identity alone must never decide whether a
+    cached audit is still valid: a mutated config would otherwise reuse
+    results computed for a different recipe and silently certify the wrong
+    setup.  Every cache below stores this key beside its value.
+    """
+    return json.dumps(
+        {name: getattr(settings, name)
+         for name in Settings.__dataclass_fields__ if name != "out_dir"},
+        ensure_ascii=False, sort_keys=True, default=str)
+
+
 def _run_context(settings: Settings) -> dict:
     """Self-contained provenance block attached to every result record.
 
@@ -3642,8 +3657,7 @@ def _run_context(settings: Settings) -> dict:
     _validate_training_seeds(settings.seeds)
     config = {name: getattr(settings, name)
               for name in Settings.__dataclass_fields__ if name != "out_dir"}
-    cache_key = json.dumps(config, ensure_ascii=False, sort_keys=True,
-                           default=str)
+    cache_key = _config_cache_key(settings)
     ctx = getattr(settings, "_run_context_cache", None)
     if ctx is not None and getattr(settings, "_run_context_cache_key", None) \
             == cache_key:
@@ -4283,8 +4297,10 @@ def _reproducibility_audit(settings: Settings) -> dict:
     bit-exact reproduction across hardware/instruction sets.  Cached on
     ``Settings`` so one process (``--only all``) runs it once.
     """
+    cache_key = _config_cache_key(settings)
     cached = getattr(settings, "_repro_audit_cache", None)
-    if cached is not None:
+    if cached is not None and getattr(
+            settings, "_repro_audit_cache_key", None) == cache_key:
         return cached
     device = settings.device
     seed = _probe_seed(settings, _REPRO_AUDIT_BASE_SEED)
@@ -4495,6 +4511,7 @@ def _reproducibility_audit(settings: Settings) -> dict:
     }
     audit["passed"] = all(bool(audit[key]) for key, _ in _REPRO_AUDIT_KEYS)
     settings._repro_audit_cache = audit
+    settings._repro_audit_cache_key = cache_key
     return audit
 
 
@@ -4924,8 +4941,10 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
     gates).
     """
     train_seeds = tuple(settings.seeds) or (0,)
+    cache_key = _config_cache_key(settings)
     audit = getattr(settings, "_split_audit_cache", None)
-    fresh = audit is None
+    fresh = (audit is None
+             or getattr(settings, "_split_audit_cache_key", None) != cache_key)
     if fresh:
         audit_batches = max(
             int(settings.eval_batches),
@@ -5040,6 +5059,7 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
             # catches it before it can masquerade as a mechanism effect.
             and not audit["outlier_shift_detected"])
         settings._split_audit_cache = audit
+        settings._split_audit_cache_key = cache_key
 
     fields = audit["audit_fields"]
     floors = audit["tv_noise_floor"]
@@ -5632,8 +5652,10 @@ def _overfit_sanity_by_config(settings: Settings) -> dict:
     ``Settings``: E1/E2/E3 in one ``--only all`` run share a single
     execution.
     """
+    cache_key = _config_cache_key(settings)
     cached = getattr(settings, "_overfit_sanity_cache", None)
-    if cached is not None:
+    if cached is not None and getattr(
+            settings, "_overfit_sanity_cache_key", None) == cache_key:
         return cached
     # The sanity batch is trained on, so it must never alias a held-out
     # stream even though it is a single non-reported batch.
@@ -5661,6 +5683,7 @@ def _overfit_sanity_by_config(settings: Settings) -> dict:
         row["deterministic"] = bool(settings.deterministic)
         by_config[label] = row
     settings._overfit_sanity_cache = by_config
+    settings._overfit_sanity_cache_key = cache_key
     return by_config
 
 
