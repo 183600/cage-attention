@@ -203,7 +203,12 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
         return {"frac": float("nan"), "k": 0, "recall": float("nan"),
                 "precision": float("nan"), "lift": float("nan"),
                 "threshold": float("nan")}
-    frac = min(max(float(frac), 0.0), 1.0)
+    frac = float(frac)
+    if math.isnan(frac):
+        return {"frac": float("nan"), "k": 0, "recall": float("nan"),
+                "precision": float("nan"), "lift": float("nan"),
+                "threshold": float("nan")}
+    frac = min(max(frac, 0.0), 1.0)
     # ``frac * n`` can land a few ulps above an exact integer (0.07 * 100 is
     # 7.000000000000001 in IEEE-754), which would make ``ceil`` overcount by
     # one; snapping the product to 9 decimals restores the documented
@@ -1151,6 +1156,10 @@ def _self_test() -> int:
     sel = selection_at_fraction([1.0, 2.0, 3.0], [False, True])
     check("mismatched_selection_no_claim",
           sel["k"] == 0 and math.isnan(sel["precision"]))
+    nan_frac = selection_at_fraction([1.0, 2.0, 3.0], [False, True],
+                                     frac=float("nan"))
+    check("nan_selection_fraction_no_claim",
+          nan_frac["k"] == 0 and math.isnan(nan_frac["precision"]))
     check("mismatched_calibration_no_claim",
           math.isnan(expected_calibration_error([0.1, 0.2], [True]))
           and math.isnan(brier_score([0.1, 0.2], [True])))
