@@ -743,11 +743,15 @@ HYPOTHESES = {
         # collapsed over gate and LayerScale) reuse the H3a mechanism
         # direction for seednorm; post/mix are two-sided companions that
         # measure whether a normalisation level moves the readout at all.
+        # The companions register their own (undirected) keys so they cannot
+        # inherit seednorm's sign through the shared display metric.
         "direction": {"gate_depth_ratio": "+",
                       "resid_norm_last_over_first": "+",
                       "accuracy": "+",
                       "norm_gate_depth_ratio": "+",
-                      "norm_resid_norm_last_over_first": "+"},
+                      "norm_resid_norm_last_over_first": "+",
+                      "postmix_norm_gate_depth_ratio": None,
+                      "postmix_norm_resid_norm_last_over_first": None},
     },
     "H3b": {
         "experiment": "e3",
@@ -7214,17 +7218,24 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
               for (g, ls), rs in zip(controls, level_cells)],
             *[(f"{g}/pre/ls={('off' if ls is None else f'{ls:g}')}", rs)
               for (g, ls), rs in zip(controls, base_cells)])
+        # Only seednorm carries H3a's registered "+" mechanism sign; post/mix
+        # route through their own undirected registry keys so a significant
+        # negative main effect is a two-sided finding, not an H3a refutation
+        # the hypothesis never predicted.
+        comp = "" if norm == "seednorm" else "postmix_"
         clog.print(f"{norm} - pre (norm main effect, gate_depth_ratio)",
                    "H3a", "norm_gate_depth_ratio",
                    _grid_level_main_effect("gate_depth_ratio",
                                            level_cells, base_cells),
-                   warn=warn)
+                   warn=warn,
+                   direction_key=f"{comp}norm_gate_depth_ratio")
         clog.print(f"{norm} - pre (norm main effect, "
                    f"resid_norm_last_over_first)",
                    "H3a", "norm_resid_norm_last_over_first",
                    _grid_level_main_effect("resid_norm_last_over_first",
                                            level_cells, base_cells),
-                   warn=warn)
+                   warn=warn,
+                   direction_key=f"{comp}norm_resid_norm_last_over_first")
         clog.print(f"{norm} - pre (norm main effect, accuracy)",
                    "H3a", "norm_accuracy",
                    _grid_level_main_effect("accuracy",
