@@ -8495,6 +8495,212 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     _write_json(out_dir / "e2_summary.json", e2_summary)
 
 
+def _e3_capacity_matched_pre_reference(settings: Settings,
+                                       out_dir: pathlib.Path, gate: str,
+                                       layer_scale: float | None,
+                                       target_params: int, lr: float) -> dict:
+    """Train a capacity-matched Pre-LN reference for one E3 seednorm cell.
+
+    ``seednorm`` adds two ``d_model x d_model`` projections per layer while
+    ``pre`` does not, so the registered ``seednorm - pre`` readout confounds
+    the normalisation mechanism with roughly 1.1M extra parameters at the
+    default width.  This control keeps the same depth, gate, LayerScale,
+    frozen optimiser/lr, steps, data streams and training seeds, but widens
+    the Pre-LN model until its parameter count is as close as possible to
+    the seednorm cell's.  It is a *capacity benchmark*, not a mechanism
+    contrast (width and normalisation both differ): if the seednorm gain
+    disappears against this reference, the gain is not attributable to the
+    dynamic normalisation alone.
+
+    The width search mirrors ``_matched_shallow_control`` (binary search
+    over multiples of ``n_heads``, closest of the neighbouring candidates),
+    and the payload records the target/actual parameter counts plus the
+    relative mismatch.  The reference deliberately reuses E3's frozen lr
+    rather than tuning its own, so the comparison changes only capacity and
+    normalisation - the exact confounding question being audited.
+    """
+    step = max(1, int(settings.n_heads))
+    ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
+
+    def _params_for(d_model):
+        model = build(_model_cfg(settings, gate=gate, norm="pre",
+                                 layer_scale=layer_scale,
+                                 d_model=int(d_model)), compile=False)
+        return int(sum(p.numel() for p in model.parameters()))
+
+    lo_m, hi_m = 1, max(1, int(settings.d_model) // step)
+    while _params_for(hi_m * step) < target_params and hi_m < 8192 // step:
+        hi_m *= 2
+    while lo_m < hi_m:
+        mid = (lo_m + hi_m) // 2
+        if _params_for(mid * step) < target_params:
+            lo_m = mid + 1
+        else:
+            hi_m = mid
+    candidates = sorted({max(step, (lo_m - 1) * step), lo_m * step,
+                         max(step, (lo_m + 1) * step)})
+    wide_d = min(candidates,
+                 key=lambda d: (abs(_params_for(d) - target_params),
+                                _params_for(d) < target_params, d))
+    wide_params = _params_for(wide_d)
+    matched = bool(abs(wide_params - target_params)
+                   <= 0.05 * max(target_params, 1))
+    label = f"{gate}|seednorm|{ls_label}"
+    reference = (f"capacity-matched pre-LN ({gate}, ls={ls_label}, "
+                 f"d_model={wide_d}, {wide_params} params; "
+                 f"seednorm target {target_params})")
+    runs = []
+    for seed in settings.seeds:
+        model, params, metrics, curve, model_cfg = _train_and_eval(
+            settings, seed, lr, eval_seed=TEST_SEED, gate=gate,
+            norm="pre", layer_scale=layer_scale, d_model=wide_d)
+        stats, errors = collect_stats_and_errors(
+            model, settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.stats_batch, batches=settings.stats_batches,
+            seed=STATS_SEED, max_cases=0)
+        resid = stats["resid_norm"].mean(dim=0)
+        rec = {
+            "experiment": "e3_capacity_control",
+            "hypotheses": ["H3a"],
+            "gate": gate, "norm": "pre", "layer_scale": layer_scale,
+            "seed": seed, "lr": lr, "eval_seed": TEST_SEED,
+            "stats_seed": STATS_SEED, "params": params,
+            "model_cfg": model_cfg, "eval_n": int(metrics["n"]),
+            "capacity_control_for": label,
+            "target_params": int(target_params),
+            "capacity_matched": matched,
+            "reference": reference,
+            **{k: v for k, v in metrics.items() if k != "n"},
+            "gate_depth_ratio": gate_depth_ratio(stats),
+            "resid_norm_by_layer": resid.tolist(),
+            "resid_norm_last_over_first": float(
+                resid[-1] / resid[0].clamp_min(1e-12)),
+            **{f"err_{k}": v for k, v in errors["summary"].items()},
+            **_training_record(settings, lr),
+            **curve,
+            **_run_context(settings),
+        }
+        _write_result(out_dir / "e3_capacity_matched_runs.jsonl", rec)
+        runs.append(rec)
+    payload = {
+        "name": f"capacity_matched_pre_{gate}_{ls_label}",
+        "gate": gate, "norm": "pre", "layer_scale": layer_scale,
+        "reference_for": label,
+        "n_layers": int(settings.n_layers),
+        "d_model": int(wide_d),
+        "params": int(wide_params),
+        "target_params": int(target_params),
+        "params_delta": int(wide_params - target_params),
+        "params_delta_frac": ((wide_params - target_params)
+                              / max(target_params, 1)),
+        "capacity_matched": matched,
+        "chosen_lr": float(lr),
+        "comparison": "capacity_benchmark",
+        "note": ("same depth/gate/LayerScale/recipe/seeds, width chosen to "
+                 "match the seednorm cell's parameter count; width and "
+                 "normalisation both differ, so this is not a mechanism "
+                 "contrast"),
+        "runs": runs,
+    }
+    _write_json(out_dir / f"e3_capacity_matched_{gate}_{ls_label}.json",
+                payload)
+    return payload
+
+
+def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
+                           index: dict, lr: float) -> dict:
+    """Compare each seednorm cell with its capacity-matched Pre-LN control.
+
+    The registered ``seednorm - pre`` contrasts hold the model width fixed,
+    so their effect includes the seednorm parameters.  This benchmark asks
+    the stricter question: does the seednorm cell still beat a Pre-LN model
+    of the *same parameter count* under the identical frozen recipe?  The
+    metric directions follow H3a (higher gate-depth ratio / residual growth
+    / accuracy).  It is reported outside the FDR family and never changes
+    the pre-registered decision.
+    """
+    out = {}
+    sesoi = HYPOTHESES["H3a"].get("sesoi") or {}
+    metric_sesoi = {
+        "accuracy": float(sesoi.get("accuracy", 0.01)),
+        "gate_depth_ratio": float(sesoi.get("gate_depth_ratio", 0.05)),
+        "resid_norm_last_over_first": float(
+            sesoi.get("resid_norm_last_over_first", 0.05)),
+    }
+    print(f"\n[e3] capacity-matched Pre-LN benchmark (H3a robustness): "
+          f"seednorm adds parameters that pre-LN does not have, so the "
+          f"same-width readout above can confound normalisation with "
+          f"capacity.  Here pre-LN is widened to the seednorm cell's "
+          f"parameter count and trained with the same frozen lr, steps, "
+          f"data streams and seeds.  This is a capacity benchmark, not a "
+          f"controlled mechanism contrast; it is outside the FDR family.")
+    print(f"{'cell':>23} {'metric':>26} {'seednorm':>10} "
+          f"{'matched_pre':>12} {'paired_diff':>28} {'state':>26}")
+    for gate in ("query", "calib"):
+        for layer_scale in (None, 1e-2):
+            ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
+            target_runs = index.get((gate, "seednorm", layer_scale)) or []
+            if not target_runs:
+                out[f"{gate}|{ls_label}"] = {
+                    "available": False,
+                    "reason": "seednorm cell not trained"}
+                continue
+            target_params = next(
+                (int(r["params"]) for r in target_runs
+                 if _finite(r.get("params"))), None)
+            if target_params is None:
+                out[f"{gate}|{ls_label}"] = {
+                    "available": False,
+                    "reason": "seednorm cell has no recorded parameter count"}
+                continue
+            ref = _e3_capacity_matched_pre_reference(
+                settings, out_dir, gate, layer_scale, target_params, lr)
+            cell = {
+                "reference": ref["name"],
+                "d_model": ref["d_model"],
+                "params": ref["params"],
+                "target_params": ref["target_params"],
+                "capacity_matched": ref["capacity_matched"],
+                "by_metric": {},
+            }
+            for metric, sesoi_value in metric_sesoi.items():
+                bench = _paired_benchmark(
+                    target_runs, ref["runs"], metric, sesoi_value,
+                    ref["name"])
+                if bench["complexity_justified"]:
+                    state = "seednorm beats matched capacity"
+                elif bench["below_reference"]:
+                    state = "seednorm below matched capacity"
+                else:
+                    state = "indistinguishable"
+                cell["by_metric"][metric] = {
+                    "seednorm_mean": (bench.get("arms") or {}).get(
+                        "a", {}).get("mean"),
+                    "reference_mean": (bench.get("arms") or {}).get(
+                        "b", {}).get("mean"),
+                    "mean": bench.get("mean"), "lo": bench.get("lo"),
+                    "hi": bench.get("hi"), "p_value": bench.get("p_value"),
+                    "n": bench.get("n"),
+                    "seeds_used": bench.get("seeds_used"),
+                    "seeds_dropped": bench.get("seeds_dropped"),
+                    "curve_invalid_excluded": bench.get(
+                        "curve_invalid_excluded"),
+                    "sesoi": sesoi_value,
+                    "state": state,
+                    "complexity_justified": bench["complexity_justified"],
+                    "below_reference": bench["below_reference"],
+                    "indistinguishable": bench["indistinguishable"],
+                }
+                a = cell["by_metric"][metric]["seednorm_mean"]
+                b = cell["by_metric"][metric]["reference_mean"]
+                print(f"{gate + '/' + ls_label:>23} {metric:>26} "
+                      f"{a if _finite(a) else float('nan'):>10.4f} "
+                      f"{b if _finite(b) else float('nan'):>12.4f} "
+                      f"{_fmt_ci(bench):>28} {state:>26}")
+            out[f"{gate}|{ls_label}"] = cell
+    return out
+
+
 def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H3a", "H3b", "H3c"))
     # HB1/HB3/HB4/HB5 hard gate (see run_e1).
@@ -8626,6 +8832,8 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                       f"{params['mean']:>9.0f} "
                       f"{invalid}/{len(rs)} {tail_s:>7} "
                       f"{'/'.join(verdicts):>10}")
+
+    capacity_benchmark = _e3_capacity_benchmark(settings, out_dir, index, lr)
 
     # Same bad-case attribution as E1/E2 (raw records in
     # e3_error_cases.jsonl): the residual/gate readouts of H3a/H3b say
@@ -8820,6 +9028,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     clog.finalize(out_dir, q=settings.fdr_q)
     e3_summary = {f"{g}|{n}|{ls}": _aggregate_runs(rs)
                   for (g, n, ls), rs in index.items()}
+    e3_summary["_capacity_matched_pre"] = capacity_benchmark
     e3_summary["_provenance"] = _stamp(settings)
     _write_json(out_dir / "e3_summary.json", e3_summary)
 
