@@ -7005,8 +7005,17 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                     (bench.get("controlled_audit") or {}).get(
                         "observed_mismatch_count", 0)),
             }
-        justified = [g for g, row in benchmark_by_arm.items()
-                     if row["complexity_justified"]]
+        above_sesoi = [g for g, row in benchmark_by_arm.items()
+                       if row["complexity_justified"]]
+        # A win may be statistically and practically above the reference and
+        # still rest on fewer paired seeds than the pre-registered claim
+        # floor.  Those rows are displayed as ``beats (provisional)`` and
+        # must not enter the summary's *justified* lists: that would turn a
+        # provisional observation into a claim by storage.
+        justified = [g for g in above_sesoi
+                     if benchmark_by_arm[g]["claim_eligible"]]
+        provisional = [g for g in above_sesoi
+                       if not benchmark_by_arm[g]["claim_eligible"]]
         # ``none`` is the ungated deep baseline, not a gating arm: it can
         # justify the depth of the grid but says nothing about the gate's
         # capacity.  Keep the two readings separate so a depth win is not
@@ -7019,9 +7028,14 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             "reference_accuracy_mean": shallow.get("accuracy_mean"),
             "sesoi_accuracy": benchmark_sesoi,
             "by_arm": benchmark_by_arm,
+            "arms_above_sesoi": above_sesoi,
             "arms_justified": justified,
+            "provisional_arms_above_sesoi": provisional,
             "gating_arms_justified": gating_justified,
+            "provisional_gating_arms_above_sesoi": [
+                g for g in provisional if g != "none"],
             "deep_none_justified": "none" in justified,
+            "deep_none_provisional": "none" in provisional,
             "comparison": "benchmark",
             "note": ("paired benchmark, not a controlled mechanism "
                      "contrast: architecture/capacity and the val-tuned "
@@ -7037,6 +7051,12 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             print(f"      the ungated deep baseline (none) beats the tuned "
                   f"shallow reference by SESOI, but no gated arm does: "
                   f"depth is justified, the gate's capacity is not")
+        elif provisional:
+            print(f"      provisional only: arm(s) {', '.join(provisional)} "
+                  f"exceed the tuned shallow reference by SESOI but rest on "
+                  f"fewer paired seeds than the claim floor "
+                  f"({settings.min_seeds_for_claim}); not recorded as "
+                  f"complexity justified")
         else:
             print(f"      WARNING: no E1 arm beats the tuned shallow "
                   f"reference by the pre-registered SESOI="
