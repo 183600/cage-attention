@@ -446,7 +446,12 @@ def mcnemar_test(correct_a, correct_b) -> dict:
         p_exact = 1.0
     else:
         k = min(b, c)
-        p_exact = 2.0 * sum(comb(n_dis, i) for i in range(0, k + 1)) / (2.0 ** n_dis)
+        # Keep the denominator an exact integer: ``2.0 ** n_dis`` overflows
+        # to inf for n_dis > 1023 (and then raises), while Python's big-int
+        # true division scales the ratio correctly (including underflow to
+        # 0.0 for very small p-values).
+        p_exact = (2 * sum(comb(n_dis, i) for i in range(0, k + 1))) \
+            / (2 ** n_dis)
         if p_exact > 1.0:
             p_exact = 1.0
     # simple chi2 cc p-value approximation (no scipy) - use normal approx not ideal
@@ -1327,6 +1332,17 @@ def _self_test() -> int:
     check("wilson_brackets", w["lo"] <= w["p"] <= w["hi"])
     check("wilson_upper_exact", wilson_ci(4, 4)["hi"] == 1.0)
     check("wilson_lower_exact", wilson_ci(0, 4)["lo"] == 0.0)
+
+    # The exact McNemar tail must stay finite past the point where a float
+    # power of two overflows (n_dis > 1023).
+    n_dis = 1100
+    half = n_dis // 2
+    mc_a = [False] * half + [True] * half
+    mc_b = [True] * half + [False] * half
+    mc = mcnemar_test(mc_a, mc_b)
+    check("mcnemar_large_sample_exact_finite",
+          mc["b"] == half and mc["c"] == half
+          and math.isfinite(mc["p_exact"]) and 0.0 < mc["p_exact"] <= 1.0)
     check("wilson_invalid_counts_no_claim",
           math.isnan(wilson_ci(5, 4)["p"])
           and math.isnan(wilson_ci(-1, 4)["p"]))
