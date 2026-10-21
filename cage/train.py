@@ -2003,6 +2003,68 @@ def false_concentration_sweep(stats, thresholds=(0.3, 0.5, 0.7, 0.9)) -> dict:
             for thr in thresholds}
 
 
+def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
+                              alpha: float = 0.05) -> dict:
+    """Percentile bootstrap CI for ``mean(a) - mean(b)``.
+
+    The two groups are independent samples of different sizes (correct and
+    false-concentration rows are disjoint), so their resampling indices
+    must be drawn separately; pairing or broadcasting them is invalid.
+    """
+
+    def _flat(x):
+        t = torch.as_tensor(x, dtype=torch.float64).detach().reshape(-1)
+        return t[torch.isfinite(t)]
+
+    a, b = _flat(a), _flat(b)
+    n_a, n_b = a.numel(), b.numel()
+    observed = float(a.mean() - b.mean()) if n_a and n_b else float("nan")
+    if n_a == 0 or n_b == 0:
+        return {"mean": observed, "lo": float("nan"), "hi": float("nan"),
+                "n": int(n_a + n_b), "n_a": int(n_a), "n_b": int(n_b),
+                "sd": float("nan"), "sd_a": float("nan"),
+                "sd_b": float("nan"), "se": float("nan"),
+                "half_width": float("nan"), "mde80": float("nan"),
+                "p_value": float("nan"), "alpha": float(alpha)}
+    gen = torch.Generator(device=a.device).manual_seed(int(seed))
+    idx_a = torch.randint(0, n_a, (int(n_boot), n_a), generator=gen,
+                          device=a.device)
+    idx_b = torch.randint(0, n_b, (int(n_boot), n_b), generator=gen,
+                          device=b.device)
+    boot = a[idx_a].mean(dim=1) - b[idx_b].mean(dim=1)
+    lo = float(torch.quantile(boot, alpha / 2.0))
+    hi = float(torch.quantile(boot, 1.0 - alpha / 2.0))
+    p_lo = float((boot <= 0.0).to(torch.float64).mean())
+    p_hi = float((boot >= 0.0).to(torch.float64).mean())
+    p_value = min(
+        1.0, 2.0 * (min(p_lo, p_hi) * int(n_boot) + 1.0) / (int(n_boot) + 1.0))
+    var_a = float(a.var(unbiased=True)) if n_a > 1 else float("nan")
+    var_b = float(b.var(unbiased=True)) if n_b > 1 else float("nan")
+    sd_a = math.sqrt(var_a) if math.isfinite(var_a) else float("nan")
+    sd_b = math.sqrt(var_b) if math.isfinite(var_b) else float("nan")
+    df = n_a + n_b - 2
+    sd = (math.sqrt(((n_a - 1) * var_a + (n_b - 1) * var_b) / df)
+          if df > 0 else float("nan"))
+    se = (math.sqrt(var_a / n_a + var_b / n_b)
+          if n_a > 1 and n_b > 1 else float("nan"))
+    return {
+        "mean": observed,
+        "lo": lo,
+        "hi": hi,
+        "n": int(n_a + n_b),
+        "n_a": int(n_a),
+        "n_b": int(n_b),
+        "sd": sd,
+        "sd_a": sd_a,
+        "sd_b": sd_b,
+        "se": se,
+        "half_width": (hi - lo) / 2.0,
+        "mde80": 2.8015852 * se if math.isfinite(se) else float("nan"),
+        "p_value": p_value,
+        "alpha": float(alpha),
+    }
+
+
 @torch.inference_mode()
 def false_concentration_gate_test(stats, maxprob_thresh=0.5,
                                    n_boot: int = 10000, seed: int = 12345):
@@ -2011,9 +2073,11 @@ def false_concentration_gate_test(stats, maxprob_thresh=0.5,
     A calibrated gate should close (lower) on false concentration, so the
     difference ``gate_on_correct - gate_on_false_conc`` should be > 0
     and exclude 0 when the mechanism works.
-    """
-    from . import metrics
 
+    Correct and false-concentration rows are disjoint, so the two group
+    means use an independent two-sample bootstrap (their sizes need not,
+    and generally do not, match).
+    """
     mp = stats["maxprob"].max(dim=1)[0]
     corr = stats["correct"].bool()
     g = stats.get("gate")
@@ -2025,11 +2089,10 @@ def false_concentration_gate_test(stats, maxprob_thresh=0.5,
     cc = high & corr
     if not bool(fc.any()) or not bool(cc.any()):
         return {"applicable": False, "n_fc": int(fc.sum()), "n_cc": int(cc.sum())}
-    diffs = (gm[cc] - gm[fc]).float()
-    ci = metrics.paired_bootstrap_ci(diffs, n_boot=n_boot, seed=seed)
+    ci = _two_sample_bootstrap_ci(gm[cc], gm[fc], n_boot=n_boot, seed=seed)
     ci["n_fc"] = int(fc.sum())
     ci["n_cc"] = int(cc.sum())
-    ci["applicable"] = True
+    ci["applicable"] = bool(ci["n_a"] and ci["n_b"])
     return ci
 
 
