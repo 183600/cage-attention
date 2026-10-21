@@ -6859,13 +6859,22 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         hb4_mark = "untestable"
     else:
         hb4_mark = _mark("hb4_supported", "hb4")
+    hb2_state = verdict.get("hb2_state")
+    hb2_mark = {
+        "violated": "VIOLATED",
+        "inconclusive": "INCONCLUSIVE",
+        "untestable": "untestable",
+    }.get(hb2_state, _mark("hb2_supported", "hb2"))
+    hb6_mark = ("n/a" if verdict.get("hb6_supported") is None
+                else _mark("hb6_supported", "hb6")
+                if verdict.get("hb6_supported") else "FLAG")
     marks = "/".join(
         [_mark("hb1_supported"),
-         _mark("hb2_supported", "hb2"),
+         hb2_mark,
          _mark("hb3_supported"),
          hb4_mark,
          _mark("hb5_supported"),
-         _mark("hb6_supported", "hb6")])
+         hb6_mark])
     hb4_note = ""
     if hb4_state == "inconclusive":
         hb4_note = ("; HB4 INCONCLUSIVE - the negative-control interval "
@@ -6875,7 +6884,6 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     elif hb4_state == "violated":
         hb4_note = ("; HB4 VIOLATED - the permutation control is above "
                     "tolerance: answer information leaks into the pipeline")
-    hb2_state = verdict.get("hb2_state")
     if hb2_state in (None, "certified"):
         hb2_note = ""
     elif hb2_state == "violated":
