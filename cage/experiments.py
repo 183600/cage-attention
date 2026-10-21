@@ -9089,8 +9089,17 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                 bench = _paired_benchmark(
                     target_runs, ref["runs"], metric, sesoi_value,
                     ref["name"])
+                capacity_ok = bool(ref["capacity_matched"])
+                floor_ok = (int(bench.get("n") or 0)
+                            >= settings.min_seeds_for_claim)
+                claim_ok = capacity_ok and floor_ok
                 if bench["complexity_justified"]:
-                    state = "seednorm beats matched capacity"
+                    if not capacity_ok:
+                        state = "seednorm beats pre-LN (capacity not matched)"
+                    elif not floor_ok:
+                        state = "seednorm beats matched capacity (provisional)"
+                    else:
+                        state = "seednorm beats matched capacity"
                 elif bench["below_reference"]:
                     state = "seednorm below matched capacity"
                 elif bench.get("unmeasured"):
@@ -9111,6 +9120,8 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                         "curve_invalid_excluded"),
                     "sesoi": sesoi_value,
                     "state": state,
+                    "capacity_matched": capacity_ok,
+                    "claim_eligible": claim_ok,
                     "complexity_justified": bench["complexity_justified"],
                     "below_reference": bench["below_reference"],
                     "indistinguishable": bench["indistinguishable"],
