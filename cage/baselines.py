@@ -261,11 +261,21 @@ def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
 
 
 def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
-                      seeds=(0,), steps=400, batch=64, val_seed=123,
-                      val_batches=4, probe_batch=256, deterministic=False):
-    """Pick the probe learning rate by *mean validation accuracy* over the
-    probe seeds.  Model selection happens on ``val_seed`` only; the chosen
-    rate is then reported on a disjoint test seed by the caller.
+                      seeds=(0,), steps=400, steps_grid=None, batch=64,
+                      val_seed=123, val_batches=4, probe_batch=256,
+                      deterministic=False):
+    """Pick the probe learning rate *and step budget* by mean validation
+    accuracy over the probe seeds.  Model selection happens on ``val_seed``
+    only; the chosen recipe is then reported on a disjoint test seed by the
+    caller.
+
+    Tuning only the learning rate at a fixed step budget can understate a
+    simple baseline: a linear bag-of-tokens probe may need more optimisation
+    steps than the transformer's default to reach its representational
+    ceiling.  The 2-D grid (lr x steps) makes "the tuned probe stays near
+    chance" less attributable to an arbitrarily short budget; the selection
+    audit receives the actual 2-D grid so a winner at the step boundary is
+    flagged.
 
     Robustness: a diverged grid point (non-finite loss/gradient, see
     ``train_linear_probe``) is counted in ``diverged_runs`` and its
@@ -284,49 +294,58 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
             f"validation seed {val_seed} is also a probe training seed; "
             f"selection data must be disjoint from fitting data"
         )
+    step_values = tuple(int(s) for s in (steps_grid or (steps,)))
+    if not step_values or any(s <= 0 for s in step_values):
+        raise ValueError(f"steps_grid must contain positive ints, got "
+                         f"{step_values!r}")
     table = []
     for lr in lr_grid:
-        accs = []
-        diverged_accs = []
-        loss_means = []
-        diverged = 0
-        for seed in seeds:
-            history = []
-            model = train_linear_probe(n_pairs, vocab, device, steps=steps,
-                                       batch=batch, lr=lr, seed=seed,
-                                       history=history,
-                                       deterministic=deterministic)
-            run_diverged = any("nonfinite" in p or "nonfinite_grad" in p
-                               for p in history)
-            if run_diverged:
-                diverged += 1
-            losses = [p["loss"] for p in history
-                      if math.isfinite(p.get("loss", float("nan")))]
-            if losses:
-                loss_means.append(sum(losses) / len(losses))
-            acc = linear_probe_accuracy(model, n_pairs, vocab, device,
-                                        batch=probe_batch,
-                                        batches=val_batches, seed=val_seed)
-            if run_diverged:
-                # The run stopped at an arbitrary step: this accuracy is
-                # recorded for transparency but is not a completed-run
-                # measurement and does not enter selection.
-                if math.isfinite(acc):
-                    diverged_accs.append(acc)
-            elif math.isfinite(acc):
-                accs.append(acc)
-        mean = (sum(accs) / len(accs)) if accs else float("nan")
-        var = (sum((a - mean) ** 2 for a in accs)
-               / (len(accs) - 1) if len(accs) > 1 else 0.0)
-        row = {"lr": lr, "val_accuracy_mean": mean,
-               "val_accuracy_std": var ** 0.5, "n_seeds": len(accs),
-               "diverged_runs": diverged}
-        if diverged_accs:
-            row["diverged_accuracy_mean"] = (sum(diverged_accs)
-                                             / len(diverged_accs))
-        if loss_means:
-            row["train_loss_mean"] = sum(loss_means) / len(loss_means)
-        table.append(row)
+        for train_steps in step_values:
+            accs = []
+            diverged_accs = []
+            loss_means = []
+            diverged = 0
+            for seed in seeds:
+                history = []
+                model = train_linear_probe(n_pairs, vocab, device,
+                                           steps=train_steps,
+                                           batch=batch, lr=lr, seed=seed,
+                                           history=history,
+                                           deterministic=deterministic)
+                run_diverged = any("nonfinite" in p or "nonfinite_grad" in p
+                                   for p in history)
+                if run_diverged:
+                    diverged += 1
+                losses = [p["loss"] for p in history
+                          if math.isfinite(p.get("loss", float("nan")))]
+                if losses:
+                    loss_means.append(sum(losses) / len(losses))
+                acc = linear_probe_accuracy(model, n_pairs, vocab, device,
+                                            batch=probe_batch,
+                                            batches=val_batches,
+                                            seed=val_seed)
+                if run_diverged:
+                    # The run stopped at an arbitrary step: this accuracy
+                    # is recorded for transparency but is not a
+                    # completed-run measurement and does not enter
+                    # selection.
+                    if math.isfinite(acc):
+                        diverged_accs.append(acc)
+                elif math.isfinite(acc):
+                    accs.append(acc)
+            mean = (sum(accs) / len(accs)) if accs else float("nan")
+            var = (sum((a - mean) ** 2 for a in accs)
+                   / (len(accs) - 1) if len(accs) > 1 else 0.0)
+            row = {"lr": lr, "steps": train_steps,
+                   "val_accuracy_mean": mean,
+                   "val_accuracy_std": var ** 0.5, "n_seeds": len(accs),
+                   "diverged_runs": diverged}
+            if diverged_accs:
+                row["diverged_accuracy_mean"] = (sum(diverged_accs)
+                                                 / len(diverged_accs))
+            if loss_means:
+                row["train_loss_mean"] = sum(loss_means) / len(loss_means)
+            table.append(row)
     # Same all-NaN guard as ``tune_shared_recipe`` / the depth ladder:
     # ``max`` over an all-non-finite key returns an arbitrary row, which
     # would hand the caller an unmeasured rate that is then re-trained and
@@ -336,12 +355,12 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
     if not finite_rows:
         raise RuntimeError(
             f"linear probe tuning produced no finite validation accuracy "
-            f"across lr grid {tuple(lr_grid)}: every probe run diverged or "
-            f"returned NaN, so no learning rate can be selected (inspect "
-            f"the training histories; no HB2 near-chance read from this run "
-            f"is interpretable)")
+            f"across grid lr={tuple(lr_grid)} x steps={step_values}: every "
+            f"probe run diverged or returned NaN, so no recipe can be "
+            f"selected (inspect the training histories; no HB2 near-chance "
+            f"read from this run is interpretable)")
     best = max(finite_rows, key=lambda row: row["val_accuracy_mean"])
-    return best["lr"], table
+    return best["lr"], int(best["steps"]), table
 
 
 def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,

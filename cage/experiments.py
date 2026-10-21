@@ -898,6 +898,11 @@ class Settings:
     probe_eval_batch: int = 512
     probe_eval_batches: int = 16
     probe_lr_grid: tuple = (1e-2, 3e-3, 1e-3, 3e-4)
+    # The simple baseline is tuned over (lr, steps), not lr alone: a fixed
+    # 400-step budget can make a linear probe look weaker than it is.  An
+    # empty tuple keeps the legacy single-budget behaviour for callers that
+    # pass ``probe_steps`` explicitly.
+    probe_steps_grid: tuple = (200, 400, 800)
     depth_ladder: tuple = (1, 2, 4)
     dropout: float = 0.0        # model regularisation (recorded in the recipe)
     # Deterministic kernels are on by default: fixed seeds alone do not make
@@ -937,7 +942,8 @@ class Settings:
             device=device, d_model=48, n_heads=4, n_layers=4, max_len=64,
             vocab=64, batch=16, n_pairs=6, steps=12, seeds=(0, 1),
             eval_batch=64, eval_batches=2, stats_batch=32, stats_batches=2,
-            probe_steps=40, probe_batch=16, probe_eval_batch=64,
+            probe_steps=40, probe_steps_grid=(20, 40, 80),
+            probe_batch=16, probe_eval_batch=64,
             probe_eval_batches=2, overfit_steps=100,
         )
 
@@ -2294,7 +2300,8 @@ def _curve_warn(*labeled_runs) -> str:
 def _selection_reliability(rows, metric="val_accuracy_mean",
                            std_key="val_accuracy_std",
                            n_key="n_seeds", curve_key="curve_verdicts",
-                           diverged_key="diverged_runs", grid=None) -> dict:
+                           diverged_key="diverged_runs", grid=None,
+                           grid_keys=None) -> dict:
     """Audit an argmax hyperparameter selection for winner's curse.
 
     Every tuned baseline here selects a value by taking the argmax of a
@@ -2386,6 +2393,20 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
     boundary = None
     if grid is not None and len(grid) == len(rows):
         boundary = bool(i_best in (0, len(rows) - 1))
+    # A multi-dimensional grid (e.g. lr x steps) has a boundary on *each*
+    # axis: an optimum at the smallest or largest learning rate is just as
+    # unresolved as one at the shortest step budget, even when the flattened
+    # row index is interior.
+    axis_boundaries = {}
+    if grid_keys:
+        for key in grid_keys:
+            vals = sorted({float(r[key]) for r in rows
+                           if _finite(r.get(key))})
+            if len(vals) >= 2 and _finite(r_best.get(key)):
+                axis_boundaries[str(key)] = bool(
+                    float(r_best[key]) in (vals[0], vals[-1]))
+        if axis_boundaries:
+            boundary = bool(boundary or any(axis_boundaries.values()))
     reliable = None
     if within_noise is not None:
         reliable = not within_noise
@@ -2401,7 +2422,9 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
                 "margin_se": margin_se, "within_noise": within_noise,
                 "curve_invalid_best": curve_invalid_best,
                 "diverged_runs_best": diverged_best,
-                "best_at_grid_boundary": boundary, "reliable": reliable})
+                "best_at_grid_boundary": boundary,
+                "axis_boundaries": axis_boundaries or None,
+                "reliable": reliable})
     return out
 
 
@@ -2435,7 +2458,11 @@ def _selection_warn(label, selection) -> str:
         return ""
     reasons = []
     if selection.get("best_at_grid_boundary"):
-        reasons.append("optimum at grid boundary - range may exclude it")
+        axes = selection.get("axis_boundaries") or {}
+        at = [k for k, v in axes.items() if v]
+        suffix = f" ({', '.join(at)})" if at else ""
+        reasons.append(f"optimum at grid boundary{suffix} - range may "
+                       f"exclude it")
     if selection.get("within_noise"):
         reasons.append(f"margin {selection['margin']:.4f} < "
                        f"seed-gap SE {selection['margin_se']:.4f}")
@@ -5295,7 +5322,9 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
             } | {
                 f"probe_train:{seed}": {
                     "seed": int(seed), "batch": settings.probe_batch,
-                    "steps": settings.probe_steps, "group": "train",
+                    "steps": max(settings.probe_steps_grid
+                                 or (settings.probe_steps,)),
+                    "group": "train",
                 }
                 for seed in train_seeds
             } | {
@@ -6203,27 +6232,36 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
               "not reach the ceiling, so the task/data construction is broken "
               "and every number reported above is invalid")
 
-    best_lr, table = tune_linear_probe(
+    probe_steps_grid = tuple(settings.probe_steps_grid
+                             or (settings.probe_steps,))
+    best_lr, best_steps, table = tune_linear_probe(
         settings.n_pairs, settings.vocab, settings.device,
         lr_grid=settings.probe_lr_grid,
         seeds=settings.seeds[:max(1, len(settings.seeds))],
-        steps=settings.probe_steps, batch=settings.probe_batch,
+        steps=settings.probe_steps, steps_grid=probe_steps_grid,
+        batch=settings.probe_batch,
         val_seed=VAL_SEED, val_batches=settings.probe_eval_batches,
         probe_batch=settings.probe_eval_batch,
         deterministic=settings.deterministic)
-    probe_selection = _selection_reliability(table,
-                                             grid=settings.probe_lr_grid)
+    probe_selection = _selection_reliability(
+        table, grid=[(row.get("lr"), row.get("steps")) for row in table],
+        grid_keys=("lr", "steps"))
     _write_json(out_dir / "baselines_probe_tuning.json",
                 {"val_seed": VAL_SEED, "table": table, "chosen_lr": best_lr,
+                 "chosen_steps": best_steps,
+                 "lr_grid": list(settings.probe_lr_grid),
+                 "steps_grid": list(probe_steps_grid),
                  "selection": probe_selection})
-    probe_warn = _selection_warn(f"linear probe selection lr={best_lr:g}",
-                                 probe_selection)
+    probe_warn = _selection_warn(
+        f"linear probe selection lr={best_lr:g}, steps={best_steps}",
+        probe_selection)
     if probe_warn:
         print(f"[baselines] {probe_warn}: HB2's near-chance bound may be an "
               f"under-tuned strawman")
     n_diverged = int(sum(row.get("diverged_runs", 0) for row in table))
-    print(f"[baselines] linear probe tuned on val seed {VAL_SEED} over lr "
-          f"grid {settings.probe_lr_grid}: lr={best_lr:g}"
+    print(f"[baselines] linear probe tuned on val seed {VAL_SEED} over "
+          f"lr x steps grid {settings.probe_lr_grid} x {probe_steps_grid}: "
+          f"lr={best_lr:g}, steps={best_steps}"
           + ("" if not n_diverged else
              f" ({n_diverged} diverged grid runs excluded from selection, "
              f"see baselines_probe_tuning.json)"))
@@ -6232,7 +6270,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     for seed in settings.seeds:
         probe_curve = []
         probe = train_linear_probe(settings.n_pairs, settings.vocab,
-                                   settings.device, steps=settings.probe_steps,
+                                   settings.device, steps=best_steps,
                                    batch=settings.probe_batch, lr=best_lr,
                                    seed=seed, history=probe_curve,
                                    deterministic=settings.deterministic)
@@ -6252,6 +6290,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             probe_accs.append(acc)
         _write_result(out_dir / "baselines_runs.jsonl",
                       {**record, "name": "linear_bag_probe", "lr": best_lr,
+                       "steps": best_steps,
                        "training_seed": seed, "eval_seed": TEST_SEED,
                        "accuracy": acc,
                        "diverged": diverged,
@@ -6547,6 +6586,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "probe_accuracy_std": summary["std"],
         "probe_tuning": {
             "lr_grid": list(settings.probe_lr_grid),
+            "steps_grid": list(probe_steps_grid),
+            "chosen_steps": best_steps,
             "diverged_runs": n_diverged,
             "final_diverged_seeds": [row["seed"] for row in probe_diverged],
             "final_diverged_accuracy": {
