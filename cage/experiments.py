@@ -6964,6 +6964,144 @@ _E1_CALIB_PLACEBO = (
 )
 
 
+# Learning-rate sensitivity points for the primary gate contrast, expressed
+# as multiplicative factors of the frozen shared lr.  The controlled audit
+# proves both sides of every contrast use the *same* recipe, but a single
+# point cannot show that the effect is not an artefact of that particular
+# recipe.  These points keep the recipe identical across arms *within* each
+# point and vary only the shared lr between points, so a sign that survives
+# the sweep is not an optimisation-winner artefact; the rows are exploratory
+# companions and never enter the FDR decision family.
+_E1_LR_SENSITIVITY_FACTORS = (0.5, 2.0)
+
+
+def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
+                       reference_lr: float) -> dict:
+    """Re-run the primary gate arms at alternative shared learning rates.
+
+    For each factor in ``_E1_LR_SENSITIVITY_FACTORS`` the same seeds and
+    streams train ``none`` / ``query`` / ``calib`` under one shared lr, and
+    every A-vs-B contrast is re-paired within that point.  The comparison is
+    therefore still controlled at each lr (only the gate factor differs),
+    while the *between-point* shift shows whether the calib-over-control
+    effect is robust to the frozen-recipe choice or exists only at the
+    selected point.  The report is explicitly exploratory: the
+    pre-registered E1 family and its FDR decision are untouched.
+    """
+    reference_lr = float(reference_lr)
+    if not math.isfinite(reference_lr) or reference_lr <= 0.0:
+        return {"available": False, "reason": "non-positive reference lr"}
+    lrs = sorted({reference_lr * float(factor)
+                  for factor in _E1_LR_SENSITIVITY_FACTORS
+                  if math.isfinite(reference_lr * float(factor))
+                  and reference_lr * float(factor) > 0.0})
+    by_cell = {}
+    for alt_lr in lrs:
+        for gate in ("none", "query", "calib"):
+            for seed in settings.seeds:
+                extra = {
+                    "lr_sensitivity": True,
+                    "reference_lr": reference_lr,
+                    "sensitivity_factor": alt_lr / reference_lr,
+                }
+                if gate == "calib":
+                    extra["calib_variant"] = "full"
+                rec, _ = _e1_run(settings, seed, alt_lr, gate, extra)
+                _write_result(out_dir / "e1_lr_sensitivity_runs.jsonl", rec)
+                by_cell.setdefault((alt_lr, gate), []).append(rec)
+
+    print(f"\n[e1] learning-rate sensitivity (exploratory, outside the FDR "
+          f"family): the frozen reference lr={reference_lr:g} is re-run at "
+          f"{', '.join(f'{v:g}' for v in lrs)}; at each lr both sides of a "
+          f"contrast still share the identical recipe, steps and streams.  "
+          f"A sign that flips or a CI that only excludes 0 at the selected "
+          f"point means the effect is recipe-specific, not a mechanism "
+          f"conclusion:")
+    print(f"{'contrast':>24} {'metric':>24} {'lr':>10} "
+          f"{'paired_diff':>28} {'control':>9}")
+    comparisons = (
+        ("calib - query", "calib", "query", "accuracy"),
+        ("calib - query", "calib", "query", "abs_gate_vs_entropy"),
+        ("calib - query", "calib", "query", "gate_margin"),
+        ("calib - none", "calib", "none", "accuracy"),
+    )
+    rows = []
+    for rule, a_gate, b_gate, metric in comparisons:
+        stability = []
+        for alt_lr in lrs:
+            runs_a = by_cell.get((alt_lr, a_gate)) or []
+            runs_b = by_cell.get((alt_lr, b_gate)) or []
+            ci = _paired_diff(runs_a, runs_b, metric)
+            audit = ci.get("controlled") or {}
+            supported = bool(
+                _finite(ci.get("lo")) and _finite(ci.get("hi"))
+                and (ci["lo"] > 0.0 or ci["hi"] < 0.0))
+            row = {
+                "rule": rule, "metric": metric, "lr": float(alt_lr),
+                "reference_lr": reference_lr,
+                "factor": alt_lr / reference_lr,
+                "mean": ci.get("mean"), "lo": ci.get("lo"),
+                "hi": ci.get("hi"), "p_value": ci.get("p_value"),
+                "n": ci.get("n"), "seeds_used": ci.get("seeds_used"),
+                "seeds_dropped": ci.get("seeds_dropped"),
+                "curve_invalid_seeds": ci.get("curve_invalid_seeds"),
+                "controlled": audit.get("controlled"),
+                "control_mismatches": audit.get("mismatches"),
+                "capacity": audit.get("capacity"),
+                "ci_excludes_zero": supported,
+            }
+            rows.append(row)
+            if _finite(ci.get("mean")):
+                stability.append(float(ci["mean"]))
+            print(f"{rule:>24} {metric:>24} {alt_lr:>10g} "
+                  f"{_fmt_ci(ci):>28} "
+                  f"{'ok' if audit.get('controlled') else 'FAILED':>9}")
+        if stability:
+            has_pos = any(v > 0.0 for v in stability)
+            has_neg = any(v < 0.0 for v in stability)
+            sign_flip = has_pos and has_neg
+            same_sign = (not sign_flip) and (has_pos or has_neg)
+            all_exclude = all(
+                row["ci_excludes_zero"] for row in rows
+                if row["rule"] == rule and row["metric"] == metric)
+            any_exclude = any(
+                row["ci_excludes_zero"] for row in rows
+                if row["rule"] == rule and row["metric"] == metric)
+            if sign_flip:
+                verdict = ("SIGN FLIP across learning rates: the effect is "
+                           "recipe-specific")
+            elif not same_sign:
+                verdict = ("point estimate is zero at every lr: the design "
+                           "resolves no directional effect")
+            elif all_exclude:
+                verdict = "stable: same-signed CI excluding 0 at every lr"
+            elif not any_exclude:
+                verdict = ("same-signed point estimates but no lr resolves "
+                           "the effect")
+            else:
+                verdict = ("same-signed across lrs, but CI excludes 0 at "
+                           "only some points")
+            print(f"      -> {rule} ({metric}) stability: {verdict} "
+                  f"[means {', '.join(f'{v:+.4f}' for v in stability)}]")
+            for row in rows:
+                if row["rule"] == rule and row["metric"] == metric:
+                    row["stability"] = verdict
+                    row["sign_stable"] = bool(same_sign)
+                    row["ci_excludes_zero_all_lrs"] = bool(all_exclude)
+    payload = {
+        "reference_lr": reference_lr,
+        "factors": list(_E1_LR_SENSITIVITY_FACTORS),
+        "lrs": lrs,
+        "comparison": "learning_rate_sensitivity",
+        "note": ("exploratory robustness companion; each lr point is a "
+                 "controlled within-point pair, but the family decision "
+                 "remains the pre-registered one at the frozen lr"),
+        "rows": rows,
+    }
+    _write_json(out_dir / "e1_lr_sensitivity.json", payload)
+    return payload
+
+
 def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
             record_extra: dict, **model_overrides):
     """Train + score one E1 condition and build its full run record.
@@ -7865,6 +8003,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"a CI including 0 means the placebo's extra capacity alone "
               f"buys no advantage over the query gate")
     clog.finalize(out_dir, q=settings.fdr_q)
+    lr_sensitivity = _e1_lr_sensitivity(settings, out_dir, lr)
 
     print(f"\n[e1] training curves (val monitored on fixed stream seed "
           f"{VAL_SEED}; verdict -> recommendation; gradmax = max pre-clip "
@@ -8009,6 +8148,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     table["_provenance"] = _stamp(settings)
     if complexity_benchmark is not None:
         table["_complexity_benchmark"] = complexity_benchmark
+    table["_lr_sensitivity"] = lr_sensitivity
     _write_json(out_dir / "e1_summary.json", table)
 
 
