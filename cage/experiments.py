@@ -1846,7 +1846,7 @@ def _factorial_main_effect(cells, metric, factor):
     return ci
 
 
-def _grid_level_main_effect(cells, metric, level_cells, baseline_cells):
+def _grid_level_main_effect(metric, level_cells, baseline_cells):
     """Averaged main effect of one factor level, collapsed over controls.
 
     E3's grid is gate x norm x LayerScale, but the only registered norm
@@ -7216,19 +7216,18 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
               for (g, ls), rs in zip(controls, base_cells)])
         clog.print(f"{norm} - pre (norm main effect, gate_depth_ratio)",
                    "H3a", "norm_gate_depth_ratio",
-                   _grid_level_main_effect(level_cells, "gate_depth_ratio",
+                   _grid_level_main_effect("gate_depth_ratio",
                                            level_cells, base_cells),
                    warn=warn)
         clog.print(f"{norm} - pre (norm main effect, "
                    f"resid_norm_last_over_first)",
                    "H3a", "norm_resid_norm_last_over_first",
-                   _grid_level_main_effect(level_cells,
-                                           "resid_norm_last_over_first",
+                   _grid_level_main_effect("resid_norm_last_over_first",
                                            level_cells, base_cells),
                    warn=warn)
         clog.print(f"{norm} - pre (norm main effect, accuracy)",
                    "H3a", "norm_accuracy",
-                   _grid_level_main_effect(level_cells, "accuracy",
+                   _grid_level_main_effect("accuracy",
                                            level_cells, base_cells),
                    warn=warn)
     for gate in ("query", "calib"):
