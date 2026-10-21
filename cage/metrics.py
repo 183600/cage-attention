@@ -546,7 +546,7 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     matching boolean correctness labels; ``n_bins`` equal-width confidence
     bins over [0, 1].
     """
-    p = torch.as_tensor(probs).detach().reshape(-1).float().clamp(0.0, 1.0)
+    p = torch.as_tensor(probs).detach().reshape(-1).float()
     c = torch.as_tensor(correct).detach().reshape(-1).to(p.device).float()
     n = p.numel()
     if n == 0 or c.numel() != n:
@@ -555,6 +555,7 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     if n_bins is None or not bool(torch.isfinite(p).all()) \
             or not bool(torch.isfinite(c).all()):
         return float("nan")
+    p = p.clamp(0.0, 1.0)
     bin_id = (p * n_bins).long().clamp(max=n_bins - 1)
     counts = torch.bincount(bin_id, minlength=n_bins).float()
     conf = torch.bincount(bin_id, weights=p, minlength=n_bins)
@@ -1306,7 +1307,9 @@ def _self_test() -> int:
           and math.isnan(expected_calibration_error([0.5], [True], n_bins=-2))
           and math.isnan(expected_calibration_error([0.5], [True], n_bins=15.5)))
     check("ece_nonfinite_prob_no_claim",
-          math.isnan(expected_calibration_error([float("nan")], [True])))
+          math.isnan(expected_calibration_error([float("nan")], [True]))
+          and math.isnan(expected_calibration_error([float("inf")], [True]))
+          and math.isnan(expected_calibration_error([float("-inf")], [True])))
 
     # FDR: monotone adjusted p, small p-values survive, large ones do not,
     # NaN stays untestable.
