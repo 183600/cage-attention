@@ -5250,14 +5250,20 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seeds=None):
 # The held-out streams whose class balance backs the accuracy readout.
 # VAL/TEST are consumed at ``eval_batch x eval_batches`` by ``eval_metrics``;
 # STATS is consumed at ``stats_batch x stats_batches`` by
-# ``collect_stats``.  The audit reproduces that exact geometry and generator
-# seed, so the tested sample is the sample the models are scored on - a
-# wider audit draw would test a different prefix and could pass while the
-# reported stream is skewed.
+# ``collect_stats``.  The linear probe is scored on its own, deliberately
+# wider geometry (``probe_eval_batch x probe_eval_batches``) and its HB2
+# near-chance certificate is an accuracy claim, so the probe VAL/TEST
+# streams are audited at that geometry too - the eval-geometry prefix is a
+# different realization and cannot certify them.  The audit reproduces each
+# consumer's exact geometry and generator seed, so the tested sample is the
+# sample the models are scored on - a wider audit draw would test a
+# different prefix and could pass while the reported stream is skewed.
 _EVAL_BALANCE_STREAMS = (
     ("val", VAL_SEED, "eval"),
     ("test", TEST_SEED, "eval"),
     ("stats", STATS_SEED, "stats"),
+    ("probe_val", VAL_SEED, "probe"),
+    ("probe_test", TEST_SEED, "probe"),
 )
 
 
@@ -5286,6 +5292,9 @@ def _eval_answer_balance(settings: Settings) -> dict:
         check_eval_seed(seed)
         if geometry == "stats":
             batch, batches = settings.stats_batch, settings.stats_batches
+        elif geometry == "probe":
+            batch, batches = (settings.probe_eval_batch,
+                              settings.probe_eval_batches)
         else:
             batch, batches = settings.eval_batch, settings.eval_batches
         gen = stream_generator(seed, settings.device)
@@ -5332,6 +5341,8 @@ def _eval_answer_balance(settings: Settings) -> dict:
             "eval_batches": int(settings.eval_batches),
             "stats_batch": int(settings.stats_batch),
             "stats_batches": int(settings.stats_batches),
+            "probe_eval_batch": int(settings.probe_eval_batch),
+            "probe_eval_batches": int(settings.probe_eval_batches),
         },
         "note": ("uniformity is a gross-imbalance test at the reported "
                  "stream size, not an equivalence proof; expected_per_class "
