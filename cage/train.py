@@ -20,6 +20,7 @@ from .data import (
 from .metrics import (
     _bootstrap_args_ok,
     _float_or_nan,
+    _positive_integer,
     average_ranks,
     auc_paired_bootstrap_ci,
     brier_score,
@@ -1742,6 +1743,15 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     gate as training, so a reported accuracy can never be computed on
     structurally invalid or label-noisy data.
     """
+    raw_batch, raw_batches = batch, batches
+    batch = _positive_integer(raw_batch)
+    batches = _positive_integer(raw_batches)
+    if batch is None:
+        raise ValueError(
+            f"batch must be a positive integer, got {raw_batch!r}")
+    if batches is None:
+        raise ValueError(
+            f"batches must be a positive integer, got {raw_batches!r}")
     gen = torch.Generator(device=device).manual_seed(seed)
     training_states = {module: module.training for module in model.modules()}
     model.eval()
@@ -1827,6 +1837,15 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     gate, so the metric panel is only computed on data that satisfies the
     same integrity/label invariants as training.
     """
+    raw_batch, raw_batches = batch, batches
+    batch = _positive_integer(raw_batch)
+    batches = _positive_integer(raw_batches)
+    if batch is None:
+        raise ValueError(
+            f"batch must be a positive integer, got {raw_batch!r}")
+    if batches is None:
+        raise ValueError(
+            f"batches must be a positive integer, got {raw_batches!r}")
     gen = torch.Generator(device=device).manual_seed(seed)
     training_states = {module: module.training for module in model.modules()}
     model.eval()
