@@ -174,6 +174,11 @@ def stream_generator(seed: int, device="cpu") -> torch.Generator:
 
     Every synthetic split/training seed owns one of these; ``make_batch``
     draws exclusively through it, so data order is fixed independently of
-    the global RNG state.
+    the global RNG state.  The seed is canonicalised with
+    :func:`cage.data.stream_seed_key` (the low 32 bits torch's CPU
+    generators consume), so aliased seeds cannot fingerprint as a different
+    dataset than the stream they actually draw.
     """
-    return torch.Generator(device=device).manual_seed(int(seed))
+    from .data import stream_seed_key
+
+    return torch.Generator(device=device).manual_seed(stream_seed_key(seed))

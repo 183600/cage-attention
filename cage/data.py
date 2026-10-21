@@ -830,15 +830,16 @@ def stream_fingerprint(n_pairs, vocab, device="cpu", batch=8, seed=TEST_SEED):
     ``(n_pairs, vocab, batch, seed)`` makes "same fingerprint" mean "same
     protocol *and* same geometry", which is the claim run records rely on.
     """
-    gen = torch.Generator(device=device).manual_seed(seed)
+    key = stream_seed_key(seed)
+    gen = torch.Generator(device=device).manual_seed(key)
     idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
     geometry = (f"n_pairs={int(n_pairs)};vocab={int(vocab)};"
-                f"batch={int(batch)};seed={int(seed)};")
+                f"batch={int(batch)};seed={key};")
     digest = hashlib.sha256(
         (geometry + batch_fingerprint(idx, tgt, meta)).encode("ascii")
     ).hexdigest()[:16]
-    return {"seed": int(seed), "batch": int(batch), "n_pairs": int(n_pairs),
-            "vocab": int(vocab), "sha256": digest}
+    return {"seed": int(seed), "stream_key": key, "batch": int(batch),
+            "n_pairs": int(n_pairs), "vocab": int(vocab), "sha256": digest}
 
 
 def _positive_audit_count(value, name):
@@ -863,7 +864,7 @@ def _draw_split(n_pairs, vocab, device, batch, batches, seed):
     """
     batch = _positive_audit_count(batch, "batch")
     batches = _positive_audit_count(batches, "batches")
-    gen = torch.Generator(device=device).manual_seed(seed)
+    gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     rows, answers, diagnostics = [], [], []
     for _ in range(batches):
         idx, targets, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
@@ -903,7 +904,7 @@ def _draw_stream_keys(seed, n_pairs, vocab, device, batch, units):
     rejected during training/evaluation aborts the audit instead of being
     hashed.
     """
-    gen = torch.Generator(device=device).manual_seed(int(seed))
+    gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     batch = _positive_audit_count(batch, "batch")
     units = _positive_audit_count(units, "units")
     keys, n_rows = set(), 0
@@ -2258,6 +2259,11 @@ def _self_test() -> int:
           fp_a["sha256"] != fp_b["sha256"])
     check("fingerprint_repeatable",
           fp_a == stream_fingerprint(4, 64, "cpu", batch=4, seed=77))
+    fp_alias = stream_fingerprint(4, 64, "cpu", batch=4,
+                                  seed=77 + 2 ** 32)
+    check("fingerprint_seed_alias_canonical",
+          fp_alias["sha256"] == fp_a["sha256"]
+          and fp_alias["stream_key"] == fp_a["stream_key"])
 
     # Sealed-stream guard: selection may read the validation stream only.
     # Both the test and the statistics streams are held out, so using
