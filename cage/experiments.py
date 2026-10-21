@@ -6967,8 +6967,10 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                     else (f" [provisional: n={int(bench.get('n') or 0)} "
                           f"< claim floor "
                           f"{settings.min_seeds_for_claim}]"))
+            claim_eligible = (int(bench.get("n") or 0)
+                              >= settings.min_seeds_for_claim)
             if bench["complexity_justified"]:
-                state = "beats"
+                state = "beats" if claim_eligible else "beats (provisional)"
             elif bench["below_reference"]:
                 state = "below"
             else:
@@ -6988,6 +6990,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 "seeds_dropped": bench.get("seeds_dropped"),
                 "sesoi": benchmark_sesoi,
                 "state": state,
+                "claim_eligible": claim_eligible,
                 "complexity_justified": bench["complexity_justified"],
                 "below_reference": bench["below_reference"],
                 "indistinguishable": bench["indistinguishable"],
