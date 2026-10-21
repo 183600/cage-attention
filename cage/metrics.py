@@ -450,7 +450,8 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     n, k = logits.shape
     keys = ["accuracy", "f1_micro", "f1_macro", "f1_weighted",
             "precision_macro", "recall_macro"]
-    if n == 0 or targets.numel() != n:
+    if (n == 0 or targets.numel() != n
+            or bool((targets < 0).any()) or bool((targets >= k).any())):
         out = {"n": 0, "n_classes_present": 0, "nll": float("nan")}
         out.update({key: float("nan") for key in keys})
         out[f"top{min(int(topk), k)}_accuracy"] = float("nan")
@@ -519,6 +520,13 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     c = torch.as_tensor(correct).detach().reshape(-1).to(p.device).float()
     n = p.numel()
     if n == 0 or c.numel() != n:
+        return float("nan")
+    try:
+        n_bins = int(n_bins)
+    except (TypeError, ValueError, OverflowError):
+        return float("nan")
+    if n_bins < 1 or not bool(torch.isfinite(p).all()) \
+            or not bool(torch.isfinite(c).all()):
         return float("nan")
     bin_id = (p * n_bins).long().clamp(max=n_bins - 1)
     counts = torch.bincount(bin_id, minlength=n_bins).float()
@@ -1184,6 +1192,17 @@ def _self_test() -> int:
     mm_good = multiclass_metrics(torch.tensor([[0.0, 1.0], [1.0, 0.0]]),
                                  torch.tensor([1, 0]))
     check("multiclass_nll_reported", math.isfinite(mm_good["nll"]))
+    mm_range = multiclass_metrics(torch.randn(2, 4), torch.tensor([0, 4]))
+    check("multiclass_target_range_no_claim",
+          mm_range["n"] == 0 and math.isnan(mm_range["accuracy"]))
+    mm_neg = multiclass_metrics(torch.randn(2, 4), torch.tensor([-1, 0]))
+    check("multiclass_negative_target_no_claim",
+          mm_neg["n"] == 0 and math.isnan(mm_neg["accuracy"]))
+    check("ece_invalid_bins_no_claim",
+          math.isnan(expected_calibration_error([0.5], [True], n_bins=0))
+          and math.isnan(expected_calibration_error([0.5], [True], n_bins=-2)))
+    check("ece_nonfinite_prob_no_claim",
+          math.isnan(expected_calibration_error([float("nan")], [True])))
 
     # FDR: monotone adjusted p, small p-values survive, large ones do not,
     # NaN stays untestable.
