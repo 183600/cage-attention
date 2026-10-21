@@ -5570,8 +5570,14 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             "chosen_lr": best["lr"], "tuning_table": table,
             "selection": selection,
             "accuracy_mean": summary["mean"], "accuracy_std": summary["std"],
+            # Per-seed accuracies behind ``accuracy_mean``: curve-invalid
+            # runs are excluded exactly as they are from the mean/std and
+            # from the rung's other decision statistics.  Keeping them here
+            # would let E1 pair its valid deep runs against shallow runs that
+            # the ladder itself marked as optimisation failures (the raw
+            # runs remain available under ``runs`` for transparency).
             "accuracy_by_seed": {str(r["seed"]): r["accuracy"]
-                                 for r in runs},
+                                 for r in valid_runs},
             "curve_invalid_seeds": curve_invalid_seeds,
             "curve_valid_seeds": [int(r["seed"]) for r in valid_runs],
             "n_curve_invalid": len(curve_invalid_seeds),
