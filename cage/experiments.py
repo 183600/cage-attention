@@ -9058,10 +9058,12 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
     of the *same parameter count* under the identical frozen recipe?  The
     metric directions follow H3a (higher gate-depth ratio / residual growth
     / accuracy).  A win against a reference that did not itself learn the
-    task is not evidence for the readout, so reference competence is
-    checked per cell and carried as ``reference_competent`` (the same
-    premise used by the E1 complexity benchmark).  It is reported outside
-    the FDR family and never changes the pre-registered decision.
+    task is not evidence for the readout, and neither is a ``win`` by a
+    target cell that never learned: competence is checked on *both* sides
+    per cell and carried as ``target_competent`` / ``reference_competent``
+    (the reference premise mirrors the E1 complexity benchmark).  It is
+    reported outside the FDR family and never changes the pre-registered
+    decision.
     """
     out = {}
     sesoi = HYPOTHESES["H3a"].get("sesoi") or {}
@@ -9106,12 +9108,22 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                 1.0 / (settings.vocab - 2),
                 what="capacity-matched reference")
             reference_competent = bool(reference_competence["passed"])
+            target_competence = _competence_check(
+                [(f"{gate}|seednorm|{ls_label}",
+                  _curve_valid_runs(target_runs))],
+                lambda r: (int(round(r["accuracy"] * r["eval_n"])),
+                           int(r["eval_n"])),
+                1.0 / (settings.vocab - 2),
+                what="capacity-benchmark target")
+            target_competent = bool(target_competence["passed"])
             cell = {
                 "reference": ref["name"],
                 "d_model": ref["d_model"],
                 "params": ref["params"],
                 "target_params": ref["target_params"],
                 "capacity_matched": ref["capacity_matched"],
+                "target_competent": target_competent,
+                "target_competence": target_competence,
                 "reference_competent": reference_competent,
                 "reference_competence": reference_competence,
                 "by_metric": {},
@@ -9123,10 +9135,14 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                 capacity_ok = bool(ref["capacity_matched"])
                 floor_ok = (int(bench.get("n") or 0)
                             >= settings.min_seeds_for_claim)
-                claim_ok = capacity_ok and floor_ok and reference_competent
+                claim_ok = (capacity_ok and floor_ok
+                            and target_competent and reference_competent)
                 if bench["complexity_justified"]:
                     if not capacity_ok:
                         state = "seednorm beats pre-LN (capacity not matched)"
+                    elif not target_competent:
+                        state = ("seednorm beats pre-LN (target not "
+                                 "competent)")
                     elif not reference_competent:
                         state = ("seednorm beats pre-LN (reference not "
                                  "competent)")
@@ -9137,6 +9153,9 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                 elif bench["below_reference"]:
                     if not capacity_ok:
                         state = "seednorm below pre-LN (capacity not matched)"
+                    elif not target_competent:
+                        state = ("seednorm below pre-LN (target not "
+                                 "competent)")
                     elif not reference_competent:
                         state = ("seednorm below pre-LN (reference not "
                                  "competent)")
@@ -9146,6 +9165,8 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                     state = "unmeasured (no curve-valid paired seeds)"
                 elif not capacity_ok:
                     state = "indistinguishable (capacity not matched)"
+                elif not target_competent:
+                    state = "indistinguishable (target not competent)"
                 elif not reference_competent:
                     state = "indistinguishable (reference not competent)"
                 else:
@@ -9165,6 +9186,7 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                     "sesoi": sesoi_value,
                     "state": state,
                     "capacity_matched": capacity_ok,
+                    "target_competent": target_competent,
                     "reference_competent": reference_competent,
                     "claim_eligible": claim_ok,
                     "complexity_justified": bench["complexity_justified"],
