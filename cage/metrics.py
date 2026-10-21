@@ -367,10 +367,16 @@ def hedges_g_paired(diffs) -> float:
     n = d.numel()
     if n < 2:
         return float(d_c)
-    # J correction factor
+    # J correction factor.  For df=1 (n=2 paired differences) the exact
+    # gamma ratio has a pole in the denominator, so the limit J=0 is used
+    # instead of evaluating math.gamma(0).  ``lgamma`` keeps the remaining
+    # degrees of freedom finite across the whole range.
     df = n - 1
-    J = math.gamma(df / 2.0) / (math.sqrt(df / 2.0) * math.gamma((df - 1.0) / 2.0))
-    return float(d_c) * J
+    if df <= 1:
+        return 0.0
+    log_j = (math.lgamma(df / 2.0) - 0.5 * math.log(df / 2.0)
+             - math.lgamma((df - 1.0) / 2.0))
+    return float(d_c) * math.exp(log_j)
 
 
 def mcnemar_test(correct_a, correct_b) -> dict:
