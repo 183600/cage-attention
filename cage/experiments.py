@@ -7060,7 +7060,8 @@ _E1_LR_SENSITIVITY_FACTORS = (0.5, 2.0)
 
 
 def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
-                       reference_lr: float) -> dict:
+                       reference_lr: float,
+                       reference_runs: dict | None = None) -> dict:
     """Re-run the primary gate arms at alternative shared learning rates.
 
     For each factor in ``_E1_LR_SENSITIVITY_FACTORS`` the same seeds and
@@ -7071,17 +7072,33 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
     effect is robust to the frozen-recipe choice or exists only at the
     selected point.  The report is explicitly exploratory: the
     pre-registered E1 family and its FDR decision are untouched.
+
+    When ``reference_runs`` is supplied (the already-trained pre-registered
+    ``by_gate`` runs), the frozen-lr point is included by reuse rather than
+    retraining, so the stability read covers the decision point itself at no
+    extra cost.  A stability statement that omitted the selected point could
+    otherwise be stable at every alternative while reversing at the point
+    that actually decides the claim.
     """
     reference_lr = float(reference_lr)
     if not math.isfinite(reference_lr) or reference_lr <= 0.0:
         return {"available": False, "reason": "non-positive reference lr"}
-    lrs = sorted({reference_lr * float(factor)
-                  for factor in _E1_LR_SENSITIVITY_FACTORS
-                  if math.isfinite(reference_lr * float(factor))
-                  and reference_lr * float(factor) > 0.0})
+    alternative_lrs = sorted({
+        reference_lr * float(factor)
+        for factor in _E1_LR_SENSITIVITY_FACTORS
+        if math.isfinite(reference_lr * float(factor))
+        and reference_lr * float(factor) > 0.0})
+    lrs = sorted({reference_lr, *alternative_lrs})
     by_cell = {}
+    if reference_runs:
+        for gate in ("none", "query", "calib"):
+            reused = reference_runs.get(gate)
+            if reused:
+                by_cell[(reference_lr, gate)] = list(reused)
     for alt_lr in lrs:
         for gate in ("none", "query", "calib"):
+            if (alt_lr, gate) in by_cell:
+                continue
             for seed in settings.seeds:
                 extra = {
                     "lr_sensitivity": True,
@@ -7095,12 +7112,13 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
                 by_cell.setdefault((alt_lr, gate), []).append(rec)
 
     print(f"\n[e1] learning-rate sensitivity (exploratory, outside the FDR "
-          f"family): the frozen reference lr={reference_lr:g} is re-run at "
-          f"{', '.join(f'{v:g}' for v in lrs)}; at each lr both sides of a "
-          f"contrast still share the identical recipe, steps and streams.  "
-          f"A sign that flips or a CI that only excludes 0 at the selected "
-          f"point means the effect is recipe-specific, not a mechanism "
-          f"conclusion:")
+          f"family): the frozen reference lr={reference_lr:g} point reuses "
+          f"the pre-registered runs, and the gate arms are re-trained at "
+          f"{', '.join(f'{v:g}' for v in alternative_lrs)}; at each lr both "
+          f"sides of a contrast still share the identical recipe, steps and "
+          f"streams.  A sign that flips or a CI that only excludes 0 at the "
+          f"selected point means the effect is recipe-specific, not a "
+          f"mechanism conclusion:")
     print(f"{'contrast':>24} {'metric':>24} {'lr':>10} "
           f"{'paired_diff':>28} {'control':>9}")
     comparisons = (
@@ -7124,6 +7142,7 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
                 "rule": rule, "metric": metric, "lr": float(alt_lr),
                 "reference_lr": reference_lr,
                 "factor": alt_lr / reference_lr,
+                "is_reference_point": bool(alt_lr == reference_lr),
                 "mean": ci.get("mean"), "lo": ci.get("lo"),
                 "hi": ci.get("hi"), "p_value": ci.get("p_value"),
                 "n": ci.get("n"), "seeds_used": ci.get("seeds_used"),
@@ -7175,7 +7194,9 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
     payload = {
         "reference_lr": reference_lr,
         "factors": list(_E1_LR_SENSITIVITY_FACTORS),
+        "alternative_lrs": alternative_lrs,
         "lrs": lrs,
+        "reference_point_reused": bool(reference_runs),
         "comparison": "learning_rate_sensitivity",
         "note": ("exploratory robustness companion; each lr point is a "
                  "controlled within-point pair, but the family decision "
@@ -8092,7 +8113,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"a CI including 0 means the placebo's extra capacity alone "
               f"buys no advantage over the query gate")
     clog.finalize(out_dir, q=settings.fdr_q)
-    lr_sensitivity = _e1_lr_sensitivity(settings, out_dir, lr)
+    lr_sensitivity = _e1_lr_sensitivity(settings, out_dir, lr, by_gate)
 
     print(f"\n[e1] training curves (val monitored on fixed stream seed "
           f"{VAL_SEED}; verdict -> recommendation; gradmax = max pre-clip "
@@ -8348,6 +8369,31 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
                   f"{_fmt_ci(ci):>28} {ci.get('n', 0):>6} "
                   f"{'ok' if audit.get('controlled') else 'FAILED':>9}")
         endpoint = rule_rows[-1]
+        direct = _paired_diff(runs_a, runs_b, "accuracy_at_longest")
+        recompute = {
+            "mean": direct.get("mean"), "lo": direct.get("lo"),
+            "hi": direct.get("hi"), "n": direct.get("n"),
+            "seeds_used": direct.get("seeds_used"),
+        }
+
+        def _same_number(x, y):
+            if not (_finite(x) and _finite(y)):
+                return bool(x is None and y is None) or (
+                    _finite(x) and _finite(y))
+            return abs(float(x) - float(y)) <= 1e-12
+
+        endpoint_matches = bool(
+            _same_number(endpoint["mean"], recompute["mean"])
+            and _same_number(endpoint["lo"], recompute["lo"])
+            and _same_number(endpoint["hi"], recompute["hi"])
+            and endpoint["n"] == recompute["n"]
+            and endpoint["seeds_used"] == recompute["seeds_used"])
+        if not endpoint_matches:
+            print(f"      -> {rule}: WARNING the per-length longest-row does "
+                  f"not reproduce the pre-registered accuracy_at_longest "
+                  f"contrast (per-length {_fmt_ci(endpoint)} vs direct "
+                  f"{_fmt_ci(direct)}); treat the per-length alignment as "
+                  f"broken")
         endpoint_sign = endpoint["signed_direction"]
         interior = rule_rows[1:-1]
         reversals = [row["length"] for row in interior
@@ -8372,6 +8418,8 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
             "worst_mean": None if worst is None else worst["mean"],
             "best_length": None if best is None else best["length"],
             "best_mean": None if best is None else best["mean"],
+            "endpoint_recompute": recompute,
+            "endpoint_matches_registered": endpoint_matches,
         }
         if reversals:
             print(f"      -> {rule}: INTERIOR REVERSAL at L={reversals} "
