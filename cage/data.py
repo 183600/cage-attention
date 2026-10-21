@@ -1227,6 +1227,8 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
             raise ValueError(f"{name} counts contain NaN/Inf")
         if bool((counts < 0).any()):
             raise ValueError(f"{name} counts must be non-negative")
+        if not bool(counts.eq(counts.round()).all()):
+            raise ValueError(f"{name} counts must be integers")
     n_ref = float(ref.sum())
     n_h = float(obs.sum())
     if n_ref <= 0.0 or n_h <= 0.0:
@@ -1463,6 +1465,8 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
         raise ValueError("answer counts contain NaN/Inf")
     if bool((c < 0).any()):
         raise ValueError("answer counts must be non-negative")
+    if not bool(c.eq(c.round()).all()):
+        raise ValueError("answer counts must be integers")
     n = float(c.sum())
     k = c.numel()
     out = {"n": int(n), "n_classes": int(k),
@@ -1833,7 +1837,8 @@ def _self_test() -> int:
           not degenerate["uniform_supported"]
           and math.isnan(degenerate["p_value"]))
     for bad_counts in (torch.tensor([-1, 2]),
-                       torch.tensor([float("nan"), 1.0])):
+                       torch.tensor([float("nan"), 1.0]),
+                       torch.tensor([0.5, 1.5])):
         try:
             answer_uniformity_test(bad_counts)
             check("invalid_answer_counts_rejected", False)
@@ -1845,6 +1850,12 @@ def _self_test() -> int:
         check("mismatched_shift_counts_rejected", False)
     except ValueError:
         check("mismatched_shift_counts_rejected", True)
+    try:
+        _distribution_shift_p(torch.tensor([0.5, 1.5]),
+                              torch.tensor([1.0, 2.0]))
+        check("fractional_shift_counts_rejected", False)
+    except ValueError:
+        check("fractional_shift_counts_rejected", True)
     try:
         _counts(torch.tensor([0, 3]), 3)
         check("out_of_range_audit_value_rejected", False)
