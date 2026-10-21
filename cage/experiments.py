@@ -3352,7 +3352,13 @@ def _verify_artifacts(out_dir) -> int:
         return 2
     try:
         payload = json.loads(index_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("index must be a JSON object")
         artifacts = payload["artifacts"]
+        if not isinstance(artifacts, list):
+            raise ValueError("artifacts must be a list")
+        if any(not isinstance(entry, dict) for entry in artifacts):
+            raise ValueError("every artifact entry must be an object")
     except (OSError, ValueError, KeyError, TypeError) as e:
         print(f"[verify] unreadable artifact index {index_path}: {e}")
         return 2
