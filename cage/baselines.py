@@ -88,6 +88,15 @@ def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
     ceiling/floor baselines are measured on the same data contract as the
     learned models.
     """
+    raw_batch, raw_batches = batch, batches
+    batch = _positive_integer(raw_batch)
+    batches = _positive_integer(raw_batches)
+    if batch is None:
+        raise ValueError(
+            f"batch must be a positive integer, got {raw_batch!r}")
+    if batches is None:
+        raise ValueError(
+            f"batches must be a positive integer, got {raw_batches!r}")
     gen = torch.Generator(device=device).manual_seed(seed)
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
@@ -253,6 +262,15 @@ def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
                           batches=4, seed=123):
     """Probe accuracy on a held-out stream, every batch cleaning-gated like
     training."""
+    raw_batch, raw_batches = batch, batches
+    batch = _positive_integer(raw_batch)
+    batches = _positive_integer(raw_batches)
+    if batch is None:
+        raise ValueError(
+            f"batch must be a positive integer, got {raw_batch!r}")
+    if batches is None:
+        raise ValueError(
+            f"batches must be a positive integer, got {raw_batches!r}")
     gen = torch.Generator(device=device).manual_seed(seed)
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
