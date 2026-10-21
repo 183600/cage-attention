@@ -5229,7 +5229,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     record = {"experiment": "baselines",
               "hypotheses": ["HB1", "HB2", "HB3", "HB4", "HB5", "HB6",
                              "HB7"],
-              "seed": TEST_SEED, **_run_context(settings)}
+              **_run_context(settings)}
 
     balance = _answer_balance(settings)
     uni = balance["uniformity"]
@@ -5357,7 +5357,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             probe_accs.append(acc)
         _write_result(out_dir / "baselines_runs.jsonl",
                       {**record, "name": "linear_bag_probe", "lr": best_lr,
-                       "training_seed": seed, "accuracy": acc,
+                       "training_seed": seed, "eval_seed": TEST_SEED,
+                       "accuracy": acc,
                        "diverged": diverged,
                        "train_loss_first": (
                            probe_curve[0]["loss"] if probe_curve
