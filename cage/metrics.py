@@ -648,6 +648,19 @@ def _bca_bounds(d: torch.Tensor, means: torch.Tensor,
     return (lo, hi)
 
 
+def _bootstrap_args_ok(n_boot, alpha) -> bool:
+    """Whether a bootstrap has at least one replicate and a usable alpha."""
+    if isinstance(n_boot, bool):
+        return False
+    try:
+        nb = float(n_boot)
+        a = float(alpha)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return (math.isfinite(nb) and nb >= 1.0 and nb == int(nb)
+            and math.isfinite(a) and 0.0 < a < 1.0)
+
+
 def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                         alpha: float = 0.05) -> dict:
     """Percentile bootstrap CI for the mean of *paired* differences.
@@ -695,6 +708,18 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 "hi_bca": float("nan"), "bca_agrees": None,
                 "cohens_d": float("nan"), "hedges_g": float("nan")}
     n = d.numel()
+    if not _bootstrap_args_ok(n_boot, alpha):
+        return {"mean": float(d.mean()), "lo": float("nan"),
+                "hi": float("nan"), "n": int(n),
+                "sd": (float(d.std(unbiased=True)) if n > 1 else 0.0),
+                "half_width": float("nan"), "mde80": float("nan"),
+                "p_value": float("nan"), "sign_consistency": float("nan"),
+                "alpha": float(alpha),
+                "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
+                "loo_sign_flip": False, "lo_bca": float("nan"),
+                "hi_bca": float("nan"), "bca_agrees": None,
+                "cohens_d": float("nan"), "hedges_g": float("nan")}
+    n_boot = int(float(n_boot))
     means = _bootstrap_means(d, n_boot, seed)
     out = _bootstrap_summary(d, means, alpha)
     p_lo = float((means <= 0.0).to(torch.float64).mean())
@@ -777,8 +802,10 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         "hi_bca": float("nan"), "equivalent_bca": None,
         "bca_agrees": None,
     }
-    if d.numel() == 0 or not math.isfinite(bound) or bound <= 0.0:
+    if d.numel() == 0 or not math.isfinite(bound) or bound <= 0.0 \
+            or not _bootstrap_args_ok(n_boot, alpha):
         return out
+    n_boot = int(float(n_boot))
     means = _bootstrap_means(d, n_boot, seed)
     out.update(_bootstrap_summary(d, means, alpha))
     p_below = float((means <= -bound).to(torch.float64).mean())
@@ -842,8 +869,10 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         "hi_bca": float("nan"), "noninferior_bca": None,
         "bca_agrees": None,
     }
-    if d.numel() == 0 or not math.isfinite(bound) or bound <= 0.0:
+    if d.numel() == 0 or not math.isfinite(bound) or bound <= 0.0 \
+            or not _bootstrap_args_ok(n_boot, alpha):
         return out
+    n_boot = int(float(n_boot))
     means = _bootstrap_means(d, n_boot, seed)
     out.update(_bootstrap_summary(d, means, alpha))
     p_below = float((means <= -bound).to(torch.float64).mean())
@@ -880,8 +909,10 @@ def bootstrap_upper_p(diffs, bound, n_boot: int = 10000, seed: int = 0) -> float
     """
     d = _flatten_float(diffs)
     bound = float(bound)
-    if d.numel() == 0 or not math.isfinite(bound):
+    if d.numel() == 0 or not math.isfinite(bound) \
+            or not _bootstrap_args_ok(n_boot, 0.05):
         return float("nan")
+    n_boot = int(float(n_boot))
     means = _bootstrap_means(d, n_boot, seed)
     p = float((means >= bound).to(torch.float64).mean())
     return min(1.0, (p * n_boot + 1.0) / (n_boot + 1.0))
@@ -1170,6 +1201,18 @@ def _self_test() -> int:
     check("empty_no_claim", empty["n"] == 0 and empty["bca_agrees"] is None)
     bad_bound = equivalence_test([1.0, 2.0], 0.0)
     check("invalid_bound", bad_bound["equivalent"] is False)
+    zero_boot = paired_bootstrap_ci([1.0, 2.0, 3.0], n_boot=0)
+    check("paired_zero_boot_no_claim",
+          zero_boot["n"] == 3 and math.isnan(zero_boot["lo"]))
+    check("equiv_zero_boot_no_claim",
+          equivalence_test([1.0, 2.0], 0.5, n_boot=0)["equivalent"] is False)
+    check("noninf_zero_boot_no_claim",
+          noninferiority_test([1.0, 2.0], 0.5,
+                              n_boot=0)["noninferior"] is False)
+    check("upper_p_zero_boot_no_claim",
+          math.isnan(bootstrap_upper_p([1.0, 2.0], 0.5, n_boot=0)))
+    check("paired_bad_alpha_no_claim",
+          math.isnan(paired_bootstrap_ci([1.0, 2.0, 3.0], alpha=2.0)["lo"]))
 
     # Mismatched rows must abstain rather than broadcast one side or raise
     # an incidental indexing error.
