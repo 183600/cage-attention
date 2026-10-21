@@ -1772,8 +1772,15 @@ def _paired_benchmark(runs_a, runs_b, metric, sesoi, reference):
         _finite(mean) and _finite(lo)
         and float(mean) >= float(sesoi) and float(lo) > 0.0)
     ci["below_reference"] = bool(_finite(hi) and float(hi) < 0.0)
+    # "Indistinguishable" is an equivalence-style read: it requires a
+    # measured paired effect.  When every seed was excluded as curve-invalid
+    # (or no seed could be paired) there is no evidence at all, and calling
+    # that "indistinguishable" would turn an unmeasured comparison into an
+    # absence-of-difference claim.
+    ci["unmeasured"] = not (ci.get("seeds_used") and _finite(mean))
     ci["indistinguishable"] = bool(
-        not ci["complexity_justified"] and not ci["below_reference"])
+        not ci["unmeasured"] and not ci["complexity_justified"]
+        and not ci["below_reference"])
     return ci
 
 
@@ -7661,6 +7668,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                     state = "beats" if claim_eligible else "beats (provisional)"
             elif bench["below_reference"]:
                 state = "below"
+            elif bench.get("unmeasured"):
+                state = "unmeasured (no curve-valid paired seeds)"
             else:
                 state = "indistinguishable"
             print(f"{gate:>6} "
@@ -7748,6 +7757,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 state = "deep none beats matched capacity"
             elif bench["below_reference"]:
                 state = "deep none below matched capacity"
+            elif bench.get("unmeasured"):
+                state = "unmeasured (no curve-valid paired seeds)"
             else:
                 state = "indistinguishable from matched capacity"
             print(f"\n[e1] capacity-matched shallow control (target = depth "
@@ -7778,6 +7789,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 "complexity_justified": bench["complexity_justified"],
                 "below_reference": bench["below_reference"],
                 "indistinguishable": bench["indistinguishable"],
+                "unmeasured": bench["unmeasured"],
                 "comparison": "capacity_benchmark",
                 "note": ("depth and width both differ from the deep rung; "
                          "this tests whether comparable one-layer capacity "
@@ -9014,6 +9026,8 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                     state = "seednorm beats matched capacity"
                 elif bench["below_reference"]:
                     state = "seednorm below matched capacity"
+                elif bench.get("unmeasured"):
+                    state = "unmeasured (no curve-valid paired seeds)"
                 else:
                     state = "indistinguishable"
                 cell["by_metric"][metric] = {
@@ -9033,6 +9047,7 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                     "complexity_justified": bench["complexity_justified"],
                     "below_reference": bench["below_reference"],
                     "indistinguishable": bench["indistinguishable"],
+                    "unmeasured": bench["unmeasured"],
                 }
                 a = cell["by_metric"][metric]["seednorm_mean"]
                 b = cell["by_metric"][metric]["reference_mean"]
