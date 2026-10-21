@@ -940,6 +940,13 @@ def _finite(value) -> bool:
         and math.isfinite(float(value))
 
 
+def _seed_order(seed):
+    """Deterministic ordering for seed labels of mixed / missing types."""
+    if isinstance(seed, (int, float)) and not isinstance(seed, bool):
+        return (0, float(seed), "")
+    return (1, 0.0, str(seed))
+
+
 def _mean_std(values):
     vals = [float(v) for v in values if _finite(v)]
     if not vals:
@@ -1498,11 +1505,6 @@ def _paired_diff(runs_a, runs_b, metric):
     false-concentration cases), so a shrunken sample is never silently
     read as if it were the full seed set.
     """
-    def _seed_order(seed):
-        if isinstance(seed, (int, float)) and not isinstance(seed, bool):
-            return (0, float(seed), "")
-        return (1, 0.0, str(seed))
-
     missing_a = [r for r in runs_a if r.get("seed") is None]
     missing_b = [r for r in runs_b if r.get("seed") is None]
     by_a = {r["seed"]: r for r in runs_a if r.get("seed") is not None}
@@ -1588,7 +1590,7 @@ def _one_sample_contrast(runs, metric, bound=None):
     """
     by_seed = {r["seed"]: r for r in runs}
     used, values = [], []
-    for seed in sorted(by_seed):
+    for seed in sorted(by_seed, key=_seed_order):
         value = by_seed[seed].get(metric)
         if _finite(value):
             used.append(seed)
@@ -1597,7 +1599,7 @@ def _one_sample_contrast(runs, metric, bound=None):
           else paired_bootstrap_ci(values))
     ci["diffs"] = list(values)
     ci["seeds_used"] = used
-    ci["seeds_dropped"] = sorted(set(by_seed) - set(used))
+    ci["seeds_dropped"] = sorted(set(by_seed) - set(used), key=_seed_order)
     ci["seeds_unpaired"] = []
     ci["seeds_undefined"] = list(ci["seeds_dropped"])
     ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(used, (by_seed,))
@@ -1656,7 +1658,8 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
 
     m1a, m1b, m2a, m2b = (_by_seed(rs)
                           for rs in (runs_a1, runs_b1, runs_a2, runs_b2))
-    planned = sorted(set(m1a) | set(m1b) | set(m2a) | set(m2b))
+    planned = sorted(set(m1a) | set(m1b) | set(m2a) | set(m2b),
+                     key=_seed_order)
     diffs, used, dropped, unpaired, undefined = [], [], [], [], []
     for seed in planned:
         cells = [m.get(seed) for m in (m1a, m1b, m2a, m2b)]
@@ -1701,10 +1704,10 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     ci["diffs"] = list(diffs)
     ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(
         used, (m1a, m1b, m2a, m2b))
-    ci["seeds_used"] = sorted(used)
-    ci["seeds_dropped"] = sorted(dropped)
-    ci["seeds_unpaired"] = sorted(unpaired)
-    ci["seeds_undefined"] = sorted(undefined)
+    ci["seeds_used"] = sorted(used, key=_seed_order)
+    ci["seeds_dropped"] = sorted(dropped, key=_seed_order)
+    ci["seeds_unpaired"] = sorted(unpaired, key=_seed_order)
+    ci["seeds_undefined"] = sorted(undefined, key=_seed_order)
     audits = [_controlled_audit(runs_a1, runs_b1),
               _controlled_audit(runs_a2, runs_b2),
               _controlled_audit(runs_a1, runs_a2),
@@ -1804,7 +1807,8 @@ def _factorial_main_effect(cells, metric, factor):
         raise ValueError(
             f"{factor} main effect needs all 2x2 cells; missing {missing}")
     by_cell = {c: {r["seed"]: r for r in cells[c]} for c in required}
-    planned = sorted(set().union(*(set(m) for m in by_cell.values())))
+    planned = sorted(set().union(*(set(m) for m in by_cell.values())),
+                     key=_seed_order)
     diffs, used, dropped, unpaired, undefined = [], [], [], [], []
     for seed in planned:
         rs = [by_cell[c].get(seed) for c in required]
@@ -1838,10 +1842,10 @@ def _factorial_main_effect(cells, metric, factor):
     ci["diffs"] = list(diffs)
     ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(
         used, tuple(by_cell[c] for c in required))
-    ci["seeds_used"] = sorted(used)
-    ci["seeds_dropped"] = sorted(dropped)
-    ci["seeds_unpaired"] = sorted(unpaired)
-    ci["seeds_undefined"] = sorted(undefined)
+    ci["seeds_used"] = sorted(used, key=_seed_order)
+    ci["seeds_dropped"] = sorted(dropped, key=_seed_order)
+    ci["seeds_unpaired"] = sorted(unpaired, key=_seed_order)
+    ci["seeds_undefined"] = sorted(undefined, key=_seed_order)
 
     mismatches, factors = [], {}
     for left, right in spec["pairs"]:
@@ -1863,7 +1867,8 @@ def _factorial_main_effect(cells, metric, factor):
     if len(set(seed_sets.values())) != 1:
         mismatches.append(
             "2x2 cells do not share one seed set: "
-            + ", ".join(f"{c}={sorted(s)}" for c, s in seed_sets.items()))
+            + ", ".join(f"{c}={sorted(s, key=_seed_order)}"
+                        for c, s in seed_sets.items()))
     views = [(c, j, _recipe_view(r))
              for c in required for j, r in enumerate(cells[c])]
     if views:
@@ -1913,7 +1918,8 @@ def _grid_level_main_effect(metric, level_cells, baseline_cells):
             f"cells (got {n} vs {len(baseline_cells)})")
     maps = [({r["seed"]: r for r in rs}) for rs in level_cells]
     base_maps = [({r["seed"]: r for r in rs}) for rs in baseline_cells]
-    planned = sorted(set().union(*(set(m) for m in maps + base_maps)))
+    planned = sorted(set().union(*(set(m) for m in maps + base_maps)),
+                     key=_seed_order)
     diffs, used, dropped, unpaired, undefined = [], [], [], [], []
     for seed in planned:
         level_vals, base_vals = [], []
@@ -1956,10 +1962,10 @@ def _grid_level_main_effect(metric, level_cells, baseline_cells):
     ci["diffs"] = list(diffs)
     ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(
         used, tuple(maps + base_maps))
-    ci["seeds_used"] = sorted(used)
-    ci["seeds_dropped"] = sorted(dropped)
-    ci["seeds_unpaired"] = sorted(unpaired)
-    ci["seeds_undefined"] = sorted(undefined)
+    ci["seeds_used"] = sorted(used, key=_seed_order)
+    ci["seeds_dropped"] = sorted(dropped, key=_seed_order)
+    ci["seeds_unpaired"] = sorted(unpaired, key=_seed_order)
+    ci["seeds_undefined"] = sorted(undefined, key=_seed_order)
 
     mismatches, factors = [], {}
     for level_rs, base_rs in zip(level_cells, baseline_cells):
@@ -2098,7 +2104,7 @@ def _curve_invalid_seeds_for(used, run_maps):
                     CURVE_INVALID_VERDICTS:
                 bad.add(seed)
                 break
-    return sorted(bad)
+    return sorted(bad, key=_seed_order)
 
 
 def _curve_health(runs):
@@ -7171,7 +7177,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             gate_drifts, HYPOTHESES["H2b"]["sesoi"]["gate_drift"])
         gate_ci["diffs"] = list(gate_drifts)
         gate_ci["seeds_used"] = gate_used
-        gate_ci["seeds_dropped"] = sorted(set(gate_by_seed) - set(gate_used))
+        gate_ci["seeds_dropped"] = sorted(set(gate_by_seed) - set(gate_used),
+                                           key=_seed_order)
         gate_ci["seeds_unpaired"] = []
         gate_ci["seeds_undefined"] = list(gate_ci["seeds_dropped"])
         gate_ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(
