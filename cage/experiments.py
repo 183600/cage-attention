@@ -8185,6 +8185,129 @@ _E2_VARIANTS = (
 )
 
 
+def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
+                             by_variant: dict, lengths: list) -> dict:
+    """Paired calib-vs-control CIs at *every* sweep length.
+
+    The pre-registered E2 decision reads only the longest length (plus the
+    base-to-longest drop), which is the right endpoint for the length- and
+    concentration-term hypotheses.  It can still hide a mid-sweep reversal:
+    an arm that is worse at an intermediate length but recovers by the
+    longest one would leave the endpoint verdict unchanged while
+    undermining the claim that calibration helps as length grows.  This
+    companion re-pairs the same seeds and streams at each length, reports
+    the paired CI, and flags interior CIs whose sign is opposite to the
+    endpoint effect (the ``worst_length`` is also recorded, since an
+    endpoint that is not the worst point overstates robustness).  The rows
+    are exploratory: they do not enter the FDR family and cannot change
+    the pre-registered endpoint decision.
+    """
+    print(f"\n[e2] per-length paired contrasts (exploratory, outside the "
+          f"FDR family): the endpoint decision above uses L={lengths[-1]} "
+          f"only; these rows ask whether an earlier sweep length reverses "
+          f"or exaggerates that effect on the same seeds/streams.  An "
+          f"interior reversal is diagnostic, not a new decision rule.")
+    print(f"{'contrast':>18} {'length':>7} {'arm_a':>9} {'control':>9} "
+          f"{'paired_diff':>28} {'seeds':>6} {'control':>9}")
+    payload = {"lengths": list(lengths), "contrasts": {},
+               "note": ("exploratory per-length companion; endpoint rows "
+                        "above remain the pre-registered decision and the "
+                        "FDR family is unchanged")}
+    for rule, a_label, b_label in (
+        ("calib - none", "calib", "none"),
+        ("calib - query", "calib", "query"),
+    ):
+        runs_a = by_variant[a_label]
+        runs_b = by_variant[b_label]
+        rule_rows = []
+        for length in lengths:
+            def _at_length(r):
+                metrics = (r.get("metrics_by_length") or {}).get(length) or {}
+                return dict(
+                    r, accuracy=r["accuracy_by_length"][length],
+                    correct_bitmask=metrics.get("correct_bitmask"),
+                    n=(r.get("eval_n_by_length") or {}).get(length))
+            tagged_a = [_at_length(r) for r in runs_a]
+            tagged_b = [_at_length(r) for r in runs_b]
+            ci = _paired_diff(tagged_a, tagged_b, "accuracy")
+            audit = ci.get("controlled") or {}
+            signed = 0
+            if (_finite(ci.get("lo")) and _finite(ci.get("hi"))
+                    and (ci["lo"] > 0.0 or ci["hi"] < 0.0)
+                    and _finite(ci.get("mean"))):
+                signed = 1 if ci["mean"] > 0.0 else -1
+            row = {
+                "rule": rule, "length": int(length),
+                "arm_a": a_label, "control": b_label,
+                "a_mean": (ci.get("arms") or {}).get("a", {}).get("mean"),
+                "b_mean": (ci.get("arms") or {}).get("b", {}).get("mean"),
+                "mean": ci.get("mean"), "lo": ci.get("lo"),
+                "hi": ci.get("hi"), "p_value": ci.get("p_value"),
+                "n": ci.get("n"), "sesoi": HYPOTHESES["H2a"]["sesoi"]["accuracy_at_longest"],
+                "seeds_used": ci.get("seeds_used"),
+                "seeds_dropped": ci.get("seeds_dropped"),
+                "curve_invalid_seeds": ci.get("curve_invalid_seeds"),
+                "controlled": audit.get("controlled"),
+                "ci_excludes_zero": bool(signed),
+                "signed_direction": signed,
+                "stream_test": ci.get("stream_test"),
+            }
+            rule_rows.append(row)
+            print(f"{rule:>18} {length:>7} "
+                  f"{row['a_mean'] if _finite(row['a_mean']) else float('nan'):>9.4f} "
+                  f"{row['b_mean'] if _finite(row['b_mean']) else float('nan'):>9.4f} "
+                  f"{_fmt_ci(ci):>28} {ci.get('n', 0):>6} "
+                  f"{'ok' if audit.get('controlled') else 'FAILED':>9}")
+        endpoint = rule_rows[-1]
+        endpoint_sign = endpoint["signed_direction"]
+        interior = rule_rows[1:-1]
+        reversals = [row["length"] for row in interior
+                     if endpoint_sign and row["signed_direction"]
+                     and row["signed_direction"] != endpoint_sign]
+        finite_means = [row for row in rule_rows if _finite(row["mean"])]
+        worst = (min(finite_means, key=lambda row: row["mean"])
+                 if finite_means else None)
+        best = (max(finite_means, key=lambda row: row["mean"])
+                if finite_means else None)
+        verdict = {
+            "endpoint_length": int(lengths[-1]),
+            "endpoint_mean": endpoint["mean"],
+            "endpoint_signed_direction": endpoint_sign,
+            "interior_reversal_lengths": reversals,
+            "interior_reversal": bool(reversals),
+            "endpoint_is_worst": bool(worst is not None
+                                      and worst["length"] == lengths[-1]),
+            "endpoint_is_best": bool(best is not None
+                                     and best["length"] == lengths[-1]),
+            "worst_length": None if worst is None else worst["length"],
+            "worst_mean": None if worst is None else worst["mean"],
+            "best_length": None if best is None else best["length"],
+            "best_mean": None if best is None else best["mean"],
+        }
+        if reversals:
+            print(f"      -> {rule}: INTERIOR REVERSAL at L={reversals} "
+                  f"(endpoint sign {endpoint_sign:+d}); the endpoint "
+                  f"decision is unchanged, but length robustness is not "
+                  f"monotone")
+        elif endpoint_sign and worst is not None and worst["length"] != lengths[-1]:
+            direction = ("benefit" if endpoint_sign > 0 else "loss")
+            print(f"      -> {rule}: no sign reversal, but the endpoint "
+                  f"understates the {direction} (most extreme L="
+                  f"{worst['length']}, {worst['mean']:+.4f} vs endpoint "
+                  f"{endpoint['mean']:+.4f}); the endpoint decision is "
+                  f"unchanged but is not the conservative summary")
+        elif endpoint_sign:
+            print(f"      -> {rule}: no interior reversal and the endpoint "
+                  f"is the worst point")
+        else:
+            print(f"      -> {rule}: endpoint effect is not confidently "
+                  f"signed, so no reversal conclusion is drawn")
+        payload["contrasts"][rule] = {"rows": rule_rows,
+                                      "summary": verdict}
+    _write_json(out_dir / "e2_length_contrasts.json", payload)
+    return payload
+
+
 def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H2a", "H2b", "H2c", "H2d", "H2e"))
     # HB1/HB3/HB4/HB5 hard gate (see run_e1).
@@ -8611,6 +8734,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         clog.print("length x concentration interaction (2x2)", "H2e", metric,
                    ci, warn=factorial_warn)
     clog.finalize(out_dir, q=settings.fdr_q)
+    length_contrasts = _e2_per_length_contrasts(
+        settings, out_dir, by_variant, lengths)
     e2_summary = {
         label: {str(L): _mean_std([r["accuracy_by_length"][L]
                                    for r in by_variant[label]])
@@ -8631,6 +8756,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             [r["f1_weighted_by_length"][L] for r in by_variant[label]])
             for L in lengths}
         for label, *_ in _E2_VARIANTS}
+    e2_summary["_per_length_contrasts"] = length_contrasts
     e2_summary["_provenance"] = _stamp(settings)
     _write_json(out_dir / "e2_summary.json", e2_summary)
 
