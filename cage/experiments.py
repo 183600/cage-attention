@@ -7774,15 +7774,27 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             bench = _paired_benchmark(
                 by_gate["none"], matched_runs, "accuracy",
                 benchmark_sesoi, matched_ref_name)
-            claim_ok = (int(bench.get("n") or 0)
+            capacity_ok = bool(matched.get("capacity_matched"))
+            floor_ok = (int(bench.get("n") or 0)
                         >= settings.min_seeds_for_claim)
+            claim_ok = capacity_ok and floor_ok
             if bench["complexity_justified"]:
-                state = ("deep none beats matched capacity" if claim_ok else
-                         "deep none beats matched capacity (provisional)")
+                if not capacity_ok:
+                    state = ("deep none beats capacity-unmatched shallow "
+                             "control")
+                elif not floor_ok:
+                    state = "deep none beats matched capacity (provisional)"
+                else:
+                    state = "deep none beats matched capacity"
             elif bench["below_reference"]:
-                state = "deep none below matched capacity"
+                state = ("deep none below capacity-unmatched shallow control"
+                         if not capacity_ok else
+                         "deep none below matched capacity")
             elif bench.get("unmeasured"):
                 state = "unmeasured (no curve-valid paired seeds)"
+            elif not capacity_ok:
+                state = ("indistinguishable from capacity-unmatched shallow "
+                         "control")
             else:
                 state = "indistinguishable from matched capacity"
             print(f"\n[e1] capacity-matched shallow control (target = depth "
@@ -7793,7 +7805,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                   f"matched={matched.get('capacity_matched')}):")
             print(f"      deep(none) - matched shallow accuracy: "
                   f"{_fmt_ci(bench)}; {state}"
-                  + ("" if claim_ok else
+                  + ("" if floor_ok else
                      f" [provisional: n={bench.get('n')} < claim floor "
                      f"{settings.min_seeds_for_claim}]"))
             matched_benchmark = {
@@ -7802,7 +7814,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 "target_params": matched.get("target_params"),
                 "params": matched.get("params"),
                 "d_model": matched.get("d_model"),
-                "capacity_matched": matched.get("capacity_matched"),
+                "capacity_matched": capacity_ok,
                 "reference_accuracy": (bench.get("arms") or {}).get(
                     "b", {}).get("mean"),
                 "deep_accuracy": (bench.get("arms") or {}).get(
@@ -9101,9 +9113,13 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                     else:
                         state = "seednorm beats matched capacity"
                 elif bench["below_reference"]:
-                    state = "seednorm below matched capacity"
+                    state = ("seednorm below matched capacity"
+                             if capacity_ok else
+                             "seednorm below pre-LN (capacity not matched)")
                 elif bench.get("unmeasured"):
                     state = "unmeasured (no curve-valid paired seeds)"
+                elif not capacity_ok:
+                    state = "indistinguishable (capacity not matched)"
                 else:
                     state = "indistinguishable"
                 cell["by_metric"][metric] = {
