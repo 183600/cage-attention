@@ -7777,7 +7777,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             claim_ok = (int(bench.get("n") or 0)
                         >= settings.min_seeds_for_claim)
             if bench["complexity_justified"]:
-                state = "deep none beats matched capacity"
+                state = ("deep none beats matched capacity" if claim_ok else
+                         "deep none beats matched capacity (provisional)")
             elif bench["below_reference"]:
                 state = "deep none below matched capacity"
             elif bench.get("unmeasured"):
@@ -7808,11 +7809,19 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                     "a", {}).get("mean"),
                 "mean": bench.get("mean"), "lo": bench.get("lo"),
                 "hi": bench.get("hi"), "n": bench.get("n"),
+                "seeds_used": bench.get("seeds_used"),
+                "seeds_dropped": bench.get("seeds_dropped"),
+                "curve_invalid_excluded": bench.get(
+                    "curve_invalid_excluded"),
                 "state": state, "claim_eligible": claim_ok,
                 "complexity_justified": bench["complexity_justified"],
                 "below_reference": bench["below_reference"],
                 "indistinguishable": bench["indistinguishable"],
                 "unmeasured": bench["unmeasured"],
+                "controlled": False,
+                "observed_recipe_mismatches": (
+                    (bench.get("controlled_audit") or {}).get(
+                        "observed_mismatch_count", 0)),
                 "comparison": "capacity_benchmark",
                 "note": ("depth and width both differ from the deep rung; "
                          "this tests whether comparable one-layer capacity "
