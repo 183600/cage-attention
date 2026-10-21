@@ -5930,21 +5930,31 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         # each side optimised with its own val-tuned learning rate
         # (that is the point of a tuned-baseline comparison), so the
         # strict controlled-recipe audit does not apply and this line
-        # is deliberately kept outside the FDR family.
+        # is deliberately kept outside the FDR family.  The pre-registered
+        # seed floor still applies to how the line is *labelled*: below
+        # ``min_seeds_for_claim`` paired seeds a CI is a provisional
+        # observation, never a "depth is required" result.
         diffs = [r["accuracy"] - shallow_by_seed[r["seed"]]
                  for r in by_gate["none"] if r["seed"] in shallow_by_seed]
+        floor_note = ""
         if len(diffs) >= 2:
             ci = paired_bootstrap_ci(diffs)
             deep_layers = int(
                 (by_gate["none"][0].get("model_cfg") or {})
                 .get("n_layers", settings.n_layers))
+            if len(diffs) < settings.min_seeds_for_claim:
+                floor_note = (f"  [provisional: n={len(diffs)} paired seeds "
+                              f"< the pre-registered claim floor "
+                              f"{settings.min_seeds_for_claim}: too few "
+                              f"runs for a depth claim]")
             print(f"      paired deep(none, "
                   f"{deep_layers} layers) - "
                   f"shallow({shallow_depth} layer) "
                   f"accuracy: {_fmt_ci(ci)} (each side val-tuned; a "
                   f"supported gap means the depth of the E1/E3 grids is "
                   f"measurably required, a gap including 0 means a gate "
-                  f"gain must be beyond what one layer already reaches)")
+                  f"gain must be beyond what one layer already reaches)"
+                  f"{floor_note}")
     ladder = verdict.get("depth_ladder") or {}
     by_depth = ladder.get("by_depth") or {}
     if by_depth:
