@@ -3169,7 +3169,10 @@ def _run_event(settings: Settings, experiment: str, event: str, **details) -> No
     write failures are warnings rather than experiment failures.
     """
     try:
-        ctx = _run_context(settings)
+        try:
+            ctx = _run_context(settings)
+        except Exception as e:  # noqa: BLE001 - keep the failure event
+            ctx = _fallback_context(e)
         record = {
             "run_id": ctx["run_id"],
             "schema_version": ctx["schema_version"],
@@ -3254,6 +3257,26 @@ def _register_artifact(path) -> None:
         pass
 
 
+def _fallback_context(error: Exception) -> dict:
+    """Minimal provenance when the full context itself failed.
+
+    Setup problems (e.g. asking for CUDA on a CPU-only build) can make
+    ``_run_context`` raise before any run event is written.  Recording a
+    minimal block keeps the failure traceable instead of losing it just
+    because the environment probe failed too.
+    """
+    return {
+        "run_id": _RUN_ID,
+        "schema_version": _RECORD_SCHEMA,
+        "run_started_utc": _RUN_STARTED_UTC,
+        "git_sha": _git_sha(),
+        "git_dirty": _git_dirty(),
+        "source_tree_sha256": _source_tree_sha256(),
+        "setup_sha256": None,
+        "context_error": f"{type(error).__name__}: {error}",
+    }
+
+
 def _write_artifact_index(out_dir: pathlib.Path, settings: Settings,
                           experiment: str, completed: bool,
                           elapsed_seconds: float) -> dict:
@@ -3279,14 +3302,17 @@ def _write_artifact_index(out_dir: pathlib.Path, settings: Settings,
         if path.suffix == ".jsonl":
             entry["records"] = data.count(b"\n")
         entries.append(entry)
+    try:
+        context = _run_context(settings)
+    except Exception as e:  # noqa: BLE001 - an index must still be written
+        context = _fallback_context(e)
     payload = {
         "experiment": experiment,
         "completed": bool(completed),
         "elapsed_seconds": round(float(elapsed_seconds), 3),
         "artifact_count": len(entries),
         "artifacts": entries,
-        "schema_version": _RECORD_SCHEMA,
-        **_run_context(settings),
+        **context,
     }
     (root / "artifact_index.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
@@ -7603,19 +7629,18 @@ def main(argv=None) -> int:
     _RUN_ARTIFACTS.clear()
     started = time.monotonic()
     status = "failed"
-    _write_json(out_dir / "hypotheses.json", HYPOTHESES)
-    _write_json(out_dir / "environment.json", _run_context(settings))
-    _run_event(settings, args.only, "started", quick=bool(args.quick),
-               seeds=list(settings.seeds), steps=settings.steps,
-               lr=settings.lr, device=settings.device,
-               fdr_q=settings.fdr_q)
-
-    print(f"[runner] only={args.only} quick={args.quick} "
-          f"seeds={settings.seeds} steps={settings.steps} "
-          f"lr={settings.lr if settings.lr is not None else 'tuned'} "
-          f"fdr_q={settings.fdr_q:g} "
-          f"device={settings.device} out={out_dir}")
     try:
+        _write_json(out_dir / "hypotheses.json", HYPOTHESES)
+        _run_event(settings, args.only, "started", quick=bool(args.quick),
+                   seeds=list(settings.seeds), steps=settings.steps,
+                   lr=settings.lr, device=settings.device,
+                   fdr_q=settings.fdr_q)
+        _write_json(out_dir / "environment.json", _run_context(settings))
+        print(f"[runner] only={args.only} quick={args.quick} "
+              f"seeds={settings.seeds} steps={settings.steps} "
+              f"lr={settings.lr if settings.lr is not None else 'tuned'} "
+              f"fdr_q={settings.fdr_q:g} "
+              f"device={settings.device} out={out_dir}")
         if args.only == "baselines":
             run_baselines(settings, out_dir)
         elif args.only == "sanity":
