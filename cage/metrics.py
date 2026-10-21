@@ -107,6 +107,19 @@ def _flatten_float(x) -> torch.Tensor:
     return torch.as_tensor(x, dtype=torch.float64).detach().reshape(-1)
 
 
+def _positive_integer(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not (math.isfinite(number) and number >= 1.0
+            and number == int(number)):
+        return None
+    return int(number)
+
+
 def average_ranks(scores: torch.Tensor) -> torch.Tensor:
     """1-based average ranks; tied values share the mean of their ranks."""
     s = _flatten_float(scores)
@@ -521,11 +534,8 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     n = p.numel()
     if n == 0 or c.numel() != n:
         return float("nan")
-    try:
-        n_bins = int(n_bins)
-    except (TypeError, ValueError, OverflowError):
-        return float("nan")
-    if n_bins < 1 or not bool(torch.isfinite(p).all()) \
+    n_bins = _positive_integer(n_bins)
+    if n_bins is None or not bool(torch.isfinite(p).all()) \
             or not bool(torch.isfinite(c).all()):
         return float("nan")
     bin_id = (p * n_bins).long().clamp(max=n_bins - 1)
@@ -650,14 +660,11 @@ def _bca_bounds(d: torch.Tensor, means: torch.Tensor,
 
 def _bootstrap_args_ok(n_boot, alpha) -> bool:
     """Whether a bootstrap has at least one replicate and a usable alpha."""
-    if isinstance(n_boot, bool):
-        return False
     try:
-        nb = float(n_boot)
         a = float(alpha)
     except (TypeError, ValueError, OverflowError):
         return False
-    return (math.isfinite(nb) and nb >= 1.0 and nb == int(nb)
+    return (_positive_integer(n_boot) is not None
             and math.isfinite(a) and 0.0 < a < 1.0)
 
 
@@ -1078,11 +1085,8 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
             and 0.0 <= lo_q < hi_q <= 1.0):
         empty["reason"] = "quantile levels must lie in [0, 1]"
         return empty
-    try:
-        n_boot_int = int(n_boot)
-    except (TypeError, ValueError, OverflowError):
-        n_boot_int = 0
-    if n_boot_int <= 0:
+    n_boot_int = _positive_integer(n_boot)
+    if n_boot_int is None:
         empty["reason"] = "n_boot must be a positive integer"
         return empty
     p = s / n
@@ -1243,7 +1247,8 @@ def _self_test() -> int:
           mm_neg["n"] == 0 and math.isnan(mm_neg["accuracy"]))
     check("ece_invalid_bins_no_claim",
           math.isnan(expected_calibration_error([0.5], [True], n_bins=0))
-          and math.isnan(expected_calibration_error([0.5], [True], n_bins=-2)))
+          and math.isnan(expected_calibration_error([0.5], [True], n_bins=-2))
+          and math.isnan(expected_calibration_error([0.5], [True], n_bins=15.5)))
     check("ece_nonfinite_prob_no_claim",
           math.isnan(expected_calibration_error([float("nan")], [True])))
 
@@ -1304,6 +1309,10 @@ def _self_test() -> int:
     zero_boot_cluster = clustered_proportion_ci([50] * 5, [100] * 5,
                                                n_boot=0)
     check("cluster_zero_boot_no_claim", not zero_boot_cluster["valid"])
+    fractional_boot_cluster = clustered_proportion_ci(
+        [50] * 5, [100] * 5, n_boot=2.5)
+    check("cluster_fractional_boot_no_claim",
+          not fractional_boot_cluster["valid"])
     bad_alpha_cluster = clustered_proportion_ci([50] * 5, [100] * 5,
                                                lower_alpha=2.0)
     check("cluster_bad_quantile_no_claim", not bad_alpha_cluster["valid"])
