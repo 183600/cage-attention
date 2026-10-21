@@ -1983,6 +1983,36 @@ def false_concentration_sweep(stats, thresholds=(0.3, 0.5, 0.7, 0.9)) -> dict:
             for thr in thresholds}
 
 
+@torch.inference_mode()
+def false_concentration_gate_test(stats, maxprob_thresh=0.5,
+                                   n_boot: int = 10000, seed: int = 12345):
+    """Bootstrap test of gate_on_correct - gate_on_false_conc for gated models.
+
+    A calibrated gate should close (lower) on false concentration, so the
+    difference ``gate_on_correct - gate_on_false_conc`` should be > 0
+    and exclude 0 when the mechanism works.
+    """
+    from . import metrics
+
+    mp = stats["maxprob"].max(dim=1)[0]
+    corr = stats["correct"].bool()
+    g = stats.get("gate")
+    if g is None:
+        return {"applicable": False}
+    gm = g.mean(1)
+    high = mp > maxprob_thresh
+    fc = high & ~corr
+    cc = high & corr
+    if not bool(fc.any()) or not bool(cc.any()):
+        return {"applicable": False, "n_fc": int(fc.sum()), "n_cc": int(cc.sum())}
+    diffs = (gm[cc] - gm[fc]).float()
+    ci = metrics.paired_bootstrap_ci(diffs, n_boot=n_boot, seed=seed)
+    ci["n_fc"] = int(fc.sum())
+    ci["n_cc"] = int(cc.sum())
+    ci["applicable"] = True
+    return ci
+
+
 def error_detection_aucs(stats):
     """Imbalance-aware error-detection summary of attention statistics.
 
