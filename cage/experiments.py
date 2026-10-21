@@ -3254,13 +3254,54 @@ def _run_event(settings: Settings, experiment: str, event: str, **details) -> No
               f"{event}: {e}")
 
 
+_RECORD_PROVENANCE_KEYS = (
+    "run_id", "schema_version", "setup_sha256", "git_sha",
+    "source_tree_sha256",
+)
+
+
+class TrackingError(RuntimeError):
+    """A result row cannot be joined to its run manifest / reproducible setup."""
+
+
+def _validate_result_record(record) -> None:
+    """Refuse to persist a row without the provenance needed to trace it.
+
+    Every result row must be joinable to the run manifest that describes the
+    code revision, resolved config, seeds and data fingerprints behind it.
+    The runners pass ``**_run_context`` (full rows) or ``**_stamp`` (auxiliary
+    error-case rows); a future call site that forgets either would otherwise
+    append an untraceable number to the results file, silently violating the
+    "every run records code/config/seed/data/curve/result" contract.  The
+    check is deliberately limited to the join keys, so auxiliary rows with
+    different payloads remain valid.
+    """
+    if not isinstance(record, dict):
+        raise TrackingError(
+            f"result record must be a dict, got {type(record).__name__}")
+    missing = [key for key in _RECORD_PROVENANCE_KEYS
+               if record.get(key) in (None, "")]
+    if missing:
+        raise TrackingError(
+            f"result record is missing provenance {missing}; stamp it with "
+            f"**_run_context(settings) or **_stamp(settings) so it can be "
+            f"joined to its manifest")
+    try:
+        json.dumps(record, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise TrackingError(
+            f"result record is not JSON-serializable: {exc}") from exc
+
+
 def _write_result(path: pathlib.Path, record: dict) -> None:
     """Append one JSONL run record, stamped with its creation time.
 
     The timestamp is injected here rather than by each runner, so every
     record on disk carries "when" next to the ``git_sha`` / ``setup_sha256``
-    provenance it already stores inline.
+    provenance it already stores inline.  The write is refused (instead of
+    appending an orphan row) when the provenance join keys are absent.
     """
+    _validate_result_record(record)
     record.setdefault("created_utc",
                       time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     path.parent.mkdir(parents=True, exist_ok=True)
