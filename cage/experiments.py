@@ -428,7 +428,13 @@ HYPOTHESES = {
                     "excludes 0 after Benjamini-Hochberg FDR control across "
                     "the E1 contrasts (q=0.05)",
         "sesoi": {"accuracy": 0.01, "abs_gate_vs_entropy": 0.05},
-        "direction": {"abs_gate_vs_entropy": "+", "accuracy": "+"},
+        # The one-sided accuracy companion covers the registered calib
+        # contrasts (calib - none, calib - query).  The query-vs-none
+        # completeness companion measures whether *any* gate moves accuracy
+        # and is not a signed claim, so it registers its own undirected key
+        # and cannot inherit the calib accuracy sign.
+        "direction": {"abs_gate_vs_entropy": "+", "accuracy": "+",
+                      "query_none_accuracy": None},
     },
     "H1b": {
         "experiment": "e1",
@@ -6349,11 +6355,14 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     # ever in the uncorrected exploratory loop; registering it gives the
     # "does having a gate at all help" leg a pre-registered, FDR-controlled
     # row (two-sided: the companion measures whether the simplest gate moves
-    # accuracy, not a signed claim).
+    # accuracy, not a signed claim - it routes through its own undirected
+    # registry key so a significant loss is not read as refuting H1a's
+    # calib-vs-controls prediction).
     clog.print("query - none", "H1a", "accuracy",
                _paired_diff(by_gate["query"], by_gate["none"], "accuracy"),
                warn=_curve_warn(("query", by_gate["query"]),
-                                ("none", by_gate["none"])))
+                                ("none", by_gate["none"])),
+               direction_key="query_none_accuracy")
     print(f"\n[e1] H1d calibration-term ablation contrasts (removing a term "
           f"from the full gate; only the calib_variant factor varies, the "
           f"recipe stays frozen - every contrast carries its "
