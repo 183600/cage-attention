@@ -1498,15 +1498,22 @@ def _paired_diff(runs_a, runs_b, metric):
     false-concentration cases), so a shrunken sample is never silently
     read as if it were the full seed set.
     """
-    by_a = {r["seed"]: r for r in runs_a}
-    by_seed = {r["seed"]: r for r in runs_b}
+    def _seed_order(seed):
+        if isinstance(seed, (int, float)) and not isinstance(seed, bool):
+            return (0, float(seed), "")
+        return (1, 0.0, str(seed))
+
+    missing_a = [r for r in runs_a if r.get("seed") is None]
+    missing_b = [r for r in runs_b if r.get("seed") is None]
+    by_a = {r["seed"]: r for r in runs_a if r.get("seed") is not None}
+    by_seed = {r["seed"]: r for r in runs_b if r.get("seed") is not None}
     diffs = []
     used, dropped, unpaired, undefined = [], [], [], []
     # Iterate the *union* of the two seed sets: a seed present only on one
     # side is a pairing failure and must be recorded as dropped/unpaired,
     # not silently absent from the accounting just because it happens to
     # be missing on side a.
-    planned = sorted(set(by_a) | set(by_seed))
+    planned = sorted(set(by_a) | set(by_seed), key=_seed_order)
     for seed in planned:
         ra, rb = by_a.get(seed), by_seed.get(seed)
         va = None if ra is None else ra.get(metric)
@@ -1524,6 +1531,10 @@ def _paired_diff(runs_a, runs_b, metric):
             # shrinks the effective sample and must be visible.
             dropped.append(seed)
             undefined.append(seed)
+    if missing_a or missing_b:
+        n_missing = len(missing_a) + len(missing_b)
+        dropped.extend([None] * n_missing)
+        unpaired.extend([None] * n_missing)
     ci = paired_bootstrap_ci(diffs)
     # Levels are reported on exactly the seeds that entered the paired
     # difference.  Using all runs here would let a metric-undefined or
@@ -1553,10 +1564,10 @@ def _paired_diff(runs_a, runs_b, metric):
     # finite value for this metric: recording which seeds actually entered
     # makes a silently shrunken sample visible (and the finalize layer
     # refuses claims below the pre-registered minimum seed floor).
-    ci["seeds_used"] = sorted(used)
-    ci["seeds_dropped"] = sorted(dropped)
-    ci["seeds_unpaired"] = sorted(unpaired)
-    ci["seeds_undefined"] = sorted(undefined)
+    ci["seeds_used"] = sorted(used, key=_seed_order)
+    ci["seeds_dropped"] = sorted(dropped, key=_seed_order)
+    ci["seeds_unpaired"] = sorted(unpaired, key=_seed_order)
+    ci["seeds_undefined"] = sorted(undefined, key=_seed_order)
     ci["controlled"] = _controlled_audit(runs_a, runs_b)
     return ci
 
