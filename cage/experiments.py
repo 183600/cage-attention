@@ -9112,6 +9112,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     clog.finalize(out_dir, q=settings.fdr_q)
     length_contrasts = _e2_per_length_contrasts(
         settings, out_dir, by_variant, lengths)
+    endpoint_companions = _e2_endpoint_class_companions(by_variant, lengths)
     e2_summary = {
         label: {str(L): _mean_std([r["accuracy_by_length"][L]
                                    for r in by_variant[label]])
@@ -9133,8 +9134,49 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             for L in lengths}
         for label, *_ in _E2_VARIANTS}
     e2_summary["_per_length_contrasts"] = length_contrasts
+    e2_summary["_class_frequency_companions"] = endpoint_companions
     e2_summary["_provenance"] = _stamp(settings)
     _write_json(out_dir / "e2_summary.json", e2_summary)
+
+
+def _e2_endpoint_class_companions(by_variant: dict,
+                                  lengths: list) -> dict:
+    """Class-frequency robustness companions for the E2 endpoint decision.
+
+    The registered E2 rows read accuracy at the longest sweep length (and
+    the base-to-longest drop); the per-length tables already carry macro-F1
+    and balanced accuracy, but without a paired uncertainty read.  This
+    re-pairs the same seeds at the endpoint and reports the same
+    class-frequency-robust metrics as the E1/E3 companions, so an endpoint
+    accuracy gain that reverses on macro-F1 is visible without adding a new
+    pre-registered decision.
+    """
+    endpoint = int(lengths[-1])
+
+    def tagged(runs):
+        out = []
+        for run in runs:
+            metrics = ((run.get("metrics_by_length") or {})
+                       .get(endpoint) or {})
+            out.append({
+                **run,
+                "accuracy": metrics.get(
+                    "accuracy", (run.get("accuracy_by_length") or {})
+                    .get(endpoint)),
+                "recall_macro": metrics.get("recall_macro"),
+                "f1_macro": metrics.get("f1_macro"),
+                "f1_weighted": metrics.get("f1_weighted"),
+                "correct_bitmask": metrics.get("correct_bitmask"),
+                "n": metrics.get("n"),
+            })
+        return out
+
+    return _class_frequency_companions(
+        [("calib - none", tagged(by_variant["calib"]),
+          tagged(by_variant["none"]), "H2a"),
+         ("calib - query", tagged(by_variant["calib"]),
+          tagged(by_variant["query"]), "H2d")],
+        f"e2 (endpoint L={endpoint})")
 
 
 def _e3_capacity_matched_pre_reference(settings: Settings,
