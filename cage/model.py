@@ -133,6 +133,22 @@ class Cfg:
                 f"d_model={self.d_model} is not a positive multiple of "
                 f"n_heads={self.n_heads}"
             )
+        if self.n_layers < 1:
+            raise ValueError(f"n_layers must be >= 1, got {self.n_layers!r}")
+        if self.max_len < 1:
+            raise ValueError(f"max_len must be >= 1, got {self.max_len!r}")
+        if self.vocab_size < 1:
+            raise ValueError(
+                f"vocab_size must be >= 1, got {self.vocab_size!r}")
+        if not (math.isfinite(float(self.dropout))
+                and 0.0 <= float(self.dropout) <= 1.0):
+            raise ValueError(
+                f"dropout must be finite and in [0, 1], got "
+                f"{self.dropout!r}")
+        for name in ("calib_a", "calib_c", "calib_scale"):
+            value = getattr(self, name)
+            if not math.isfinite(float(value)):
+                raise ValueError(f"{name} must be finite, got {value!r}")
         if (not math.isfinite(float(self.calib_tau_init))
                 or float(self.calib_tau_init) <= 0.0):
             raise ValueError(
