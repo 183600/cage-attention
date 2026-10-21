@@ -1117,7 +1117,10 @@ def _counts(values, n_categories):
     if n_categories < 0:
         raise ValueError(
             f"n_categories must be non-negative, got {n_categories}")
-    flat = values.reshape(-1).to(torch.long).cpu()
+    raw = values.reshape(-1)
+    if raw.is_floating_point() and not bool(raw.eq(raw.round()).all()):
+        raise ValueError("audit values must be integers")
+    flat = raw.to(torch.long).cpu()
     if flat.numel() and (bool((flat < 0).any())
                          or bool((flat >= n_categories).any())):
         raise ValueError(
@@ -1861,6 +1864,11 @@ def _self_test() -> int:
         check("out_of_range_audit_value_rejected", False)
     except ValueError:
         check("out_of_range_audit_value_rejected", True)
+    try:
+        _counts(torch.tensor([0.5, 1.5]), 3)
+        check("fractional_audit_value_rejected", False)
+    except ValueError:
+        check("fractional_audit_value_rejected", True)
 
     # Structural difficulty covariates: hand-built sequences pin where the
     # matching key sits, whether the answer value repeats, and whether the
