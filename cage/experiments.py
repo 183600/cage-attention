@@ -5978,6 +5978,193 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     return {**ladder_payload, "depths": depths, "shallowest": shallowest}
 
 
+def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
+                             ladder: dict) -> dict:
+    """Train a parameter-matched 1-layer control for the depth ladder.
+
+    The depth-only ladder holds width fixed, so a deep-vs-shallow gain
+    confounds depth with parameter count.  This control trains a 1-layer
+    ``gate="none"`` transformer widened until its parameter count is as
+    close as possible to the deepest ladder rung, tunes its learning rate on
+    the same validation seed/recipe grid, and reports it on the sealed test
+    stream.  It is a *capacity* control, not a mechanism contrast: depth and
+    width both differ from the deep rung, so it answers only "could a
+    shallow model with comparable capacity reach the deep model's accuracy?"
+    (a no/yes answer changes how the depth framing is read, not the gate
+    contrast itself).
+
+    The width is chosen by binary search over ``d_model`` multiples of
+    ``n_heads``; the payload records both parameter counts and the relative
+    mismatch, and marks the control ``capacity_matched=False`` when no width
+    in the search range reaches the target.  All selection uses VAL_SEED;
+    the final runs use TEST_SEED exactly like the ladder rungs.
+    """
+    target_depth = int(ladder["ladder"][-1])
+    target_payload = (ladder["depths"].get(target_depth)
+                      or ladder["depths"].get(str(target_depth)))
+    target_runs = target_payload.get("runs") or []
+    target_params = next((int(r["params"]) for r in target_runs
+                          if _finite(r.get("params"))), None)
+    base = {
+        "name": "matched_shallow_none",
+        "control_for_depth": target_depth,
+        "target_params": target_params,
+        "n_layers": 1,
+        "val_seed": VAL_SEED, "test_seed": TEST_SEED,
+        "chance": ladder.get("chance"),
+        "ceiling": ladder.get("ceiling"),
+        "sesoi_accuracy": ladder.get("sesoi_accuracy"),
+        "comparison": "capacity_control",
+        "note": ("parameter-matched width control: depth and width both "
+                 "differ from the deep rung, so this is not a depth or "
+                 "mechanism contrast; it only tests whether comparable "
+                 "capacity at one layer closes the gap"),
+    }
+    if target_params is None:
+        base.update({"d_model": None, "params": None,
+                     "capacity_matched": False, "unmeasured": True,
+                     "reason": "target rung has no recorded parameter count",
+                     "runs": []})
+        _write_json(out_dir / "baselines_matched_shallow.json", base)
+        return base
+
+    step = int(settings.n_heads)
+
+    def _params_for(d_model):
+        model = build(_model_cfg(settings, gate="none", n_layers=1,
+                                 d_model=int(d_model)), compile=False)
+        return int(sum(p.numel() for p in model.parameters()))
+
+    # Binary search the smallest multiple of n_heads whose parameter count
+    # reaches the target; also keep the previous multiple so the closest
+    # (rather than only the first overshoot) can be selected.
+    lo_m, hi_m = 1, max(1, int(settings.d_model) // step)
+    while _params_for(hi_m * step) < target_params and hi_m < 8192 // step:
+        hi_m *= 2
+    while lo_m < hi_m:
+        mid = (lo_m + hi_m) // 2
+        if _params_for(mid * step) < target_params:
+            lo_m = mid + 1
+        else:
+            hi_m = mid
+    candidates = sorted({max(step, (lo_m - 1) * step), lo_m * step,
+                         max(step, (lo_m + 1) * step)})
+    wide_d = min(candidates,
+                 key=lambda d: (abs(_params_for(d) - target_params),
+                                _params_for(d) < target_params, d))
+    wide_params = _params_for(wide_d)
+    matched = bool(abs(wide_params - target_params)
+                   <= 0.05 * max(target_params, 1))
+    base.update({"d_model": int(wide_d), "params": int(wide_params),
+                 "capacity_matched": matched,
+                 "params_delta": int(wide_params - target_params),
+                 "params_delta_frac": ((wide_params - target_params)
+                                       / max(target_params, 1))})
+    if not matched:
+        print(f"[baselines] WARNING: matched-shallow control width d_model="
+              f"{wide_d} gives {wide_params} params vs target "
+              f"{target_params} (>5% mismatch); the control is recorded "
+              f"but capacity_matched=False")
+
+    tune_seeds = settings.seeds[:max(1, min(settings.min_seeds_for_claim,
+                                             len(settings.seeds)))]
+    table = []
+    for lr in settings.lr_grid:
+        accs, verdicts = [], []
+        for seed in tune_seeds:
+            _, _, metrics, curve, _ = _train_and_eval(
+                settings, seed, lr, eval_seed=VAL_SEED, selection=True,
+                gate="none", n_layers=1, d_model=wide_d)
+            accs.append(metrics["accuracy"])
+            verdicts.append(curve["curve_verdict"])
+        mean = sum(accs) / len(accs)
+        std = ((sum((a - mean) ** 2 for a in accs)
+                / (len(accs) - 1)) ** 0.5 if len(accs) > 1 else 0.0)
+        table.append({"lr": lr, "val_accuracy_mean": mean,
+                      "val_accuracy_std": std, "n_seeds": len(accs),
+                      "curve_verdicts": verdicts,
+                      "curve_invalid_runs": sum(
+                          v in CURVE_INVALID_VERDICTS for v in verdicts)})
+    finite = [row for row in table if _finite(row["val_accuracy_mean"])]
+    base.update({"tuning_table": table})
+    if not finite:
+        base.update({"chosen_lr": None, "unmeasured": True,
+                     "above_chance": False, "runs": [],
+                     "reason": "all tuning runs non-finite"})
+        _write_json(out_dir / "baselines_matched_shallow.json", base)
+        return base
+    pick = _curve_valid_selection_rows(table)
+    eligible = pick["rows"]
+    selection = _selection_reliability(
+        eligible, grid=[row["lr"] for row in eligible])
+    selection["pool"] = pick["pool"]
+    best = max(eligible, key=lambda row: row["val_accuracy_mean"])
+    warn = _selection_warn("matched-shallow lr selection", selection)
+    if warn:
+        print(f"[baselines] {warn}: the matched-capacity control may "
+              f"understate one-layer capacity")
+    runs = []
+    for seed in settings.seeds:
+        _, params, metrics, curve, _ = _train_and_eval(
+            settings, seed, best["lr"], eval_seed=TEST_SEED, gate="none",
+            n_layers=1, d_model=wide_d)
+        n = int(metrics["n"])
+        runs.append({
+            "seed": seed, "accuracy": metrics["accuracy"],
+            "accuracy_lo": metrics["accuracy_lo"],
+            "accuracy_hi": metrics["accuracy_hi"], "n": n,
+            "correct": int(round(metrics["accuracy"] * n)),
+            "correct_bitmask": metrics["correct_bitmask"],
+            "params": params, "curve_verdict": curve["curve_verdict"],
+        })
+        _write_result(out_dir / "baselines_runs.jsonl",
+                      {"experiment": "baselines", "hypotheses": ["HB6",
+                                                                 "HB7"],
+                       "name": "matched_shallow_none", "n_layers": 1,
+                       "d_model": wide_d, "lr": best["lr"],
+                       "training_seed": seed, "eval_seed": TEST_SEED,
+                       "accuracy": metrics["accuracy"],
+                       "accuracy_lo": metrics["accuracy_lo"],
+                       "accuracy_hi": metrics["accuracy_hi"], "n": n,
+                       "params": params, "capacity_matched": matched,
+                       **_training_record(settings, best["lr"]),
+                       **_run_context(settings), **curve})
+    valid = [r for r in runs
+             if r.get("curve_verdict") not in CURVE_INVALID_VERDICTS]
+    cluster = clustered_proportion_ci(
+        [r["correct"] for r in valid], [r["n"] for r in valid])
+    summary = _mean_std([r["accuracy"] for r in valid])
+    above = bool(cluster["valid"] and math.isfinite(cluster["lo"])
+                 and cluster["lo"] > float(ladder.get("chance") or 0.0))
+    ceiling = float(ladder.get("ceiling", float("nan")))
+    base.update({
+        "chosen_lr": best["lr"], "selection": selection,
+        "accuracy_mean": summary["mean"],
+        "accuracy_std": summary["std"],
+        "accuracy_by_seed": {str(r["seed"]): r["accuracy"] for r in valid},
+        "correct_bitmask_by_seed": {
+            str(r["seed"]): r["correct_bitmask"] for r in valid},
+        "eval_n_by_seed": {str(r["seed"]): int(r["n"]) for r in valid},
+        "cluster_ci": cluster, "above_chance": above,
+        "unmeasured": not bool(valid),
+        "ceiling_gap": (ceiling - summary["mean"]
+                        if math.isfinite(ceiling) else float("nan")),
+        "runs": runs,
+    })
+    print(f"[baselines] matched-capacity shallow control (1 layer, "
+          f"d_model={wide_d}, {wide_params} params vs target "
+          f"{target_params} for depth {target_depth}, "
+          f"capacity_matched={matched}; lr={best['lr']:g} on val seed "
+          f"{VAL_SEED}, test seed {TEST_SEED}): accuracy="
+          f"{summary['mean']:.4f} +- {summary['std']:.4f} "
+          f"(seed-clustered [{cluster['lo']:.4f}, {cluster['hi']:.4f}], "
+          f"chance={float(ladder.get('chance') or 0.0):.4f}, n="
+          f"{cluster['n']} seeds/{cluster['n_examples']} examples); "
+          f"{'above chance' if above else 'NOT above chance'}")
+    _write_json(out_dir / "baselines_matched_shallow.json", base)
+    return base
+
+
 class OverfitSanityError(RuntimeError):
     """The tiny-batch overfit pre-flight failed; grid training is refused."""
 
@@ -6415,6 +6602,8 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     # mattering.  Runs before the negative control so a shallow-model
     # finding (few layers already saturate the task) is on record next to it.
     ladder = _run_depth_ladder(settings, out_dir, rule_stats)
+    ladder["matched_shallow"] = _matched_shallow_control(
+        settings, out_dir, ladder)
     shallow = ladder["depths"][ladder["shallowest"]]
 
     # HB4 negative control: same architecture and shared recipe as E1, but
@@ -6636,6 +6825,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             "selection": probe_selection,
             "by_lr": table,
         },
+        "matched_shallow": ladder.get("matched_shallow"),
         "shallow_none": {
             "n_layers": ladder["shallowest"], "lr": shallow["chosen_lr"],
             "tuning_table": shallow["tuning_table"],
@@ -7129,6 +7319,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         except (TypeError, ValueError):
             continue
     complexity_benchmark = None
+    matched_benchmark = None
     if shallow_by_seed:
         shallow_depth = int(shallow.get("n_layers", 1))
         reference_competent = bool(
@@ -7303,6 +7494,88 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         # capacity.  Keep the two readings separate so a depth win is not
         # printed as a gate win.
         gating_justified = [g for g in justified if g != "none"]
+        # Capacity-matched control: the depth-only benchmark above holds
+        # width fixed, so its deep-vs-shallow gain is depth + parameters.
+        # The baselines runner trains a 1-layer model widened to the deep
+        # rung's parameter count; comparing the deep ungated arm to that
+        # control is the capacity reading (still not a mechanism contrast:
+        # depth and width both differ).
+        matched = verdict.get("matched_shallow") or {}
+        matched_runs = []
+        matched_by_seed = matched.get("accuracy_by_seed") or {}
+        matched_masks = matched.get("correct_bitmask_by_seed") or {}
+        matched_ns = matched.get("eval_n_by_seed") or {}
+        for key, acc in matched_by_seed.items():
+            try:
+                seed = int(key)
+                n = int(matched_ns.get(str(seed), 0))
+            except (TypeError, ValueError):
+                continue
+            mask = matched_masks.get(str(seed))
+            if n <= 0 or not isinstance(mask, str):
+                continue
+            matched_runs.append({"seed": seed, "accuracy": float(acc),
+                                 "n": n, "correct_bitmask": mask})
+        if (matched_runs and matched.get("above_chance")
+                and not matched.get("unmeasured", False)):
+            matched_ref_name = (
+                f"capacity-matched 1-layer standard transformer "
+                f"(d_model={matched.get('d_model')}, "
+                f"{matched.get('params')} params; target "
+                f"{matched.get('target_params')}; "
+                f"matched={matched.get('capacity_matched')})")
+            bench = _paired_benchmark(
+                by_gate["none"], matched_runs, "accuracy",
+                benchmark_sesoi, matched_ref_name)
+            claim_ok = (int(bench.get("n") or 0)
+                        >= settings.min_seeds_for_claim)
+            if bench["complexity_justified"]:
+                state = "deep none beats matched capacity"
+            elif bench["below_reference"]:
+                state = "deep none below matched capacity"
+            else:
+                state = "indistinguishable from matched capacity"
+            print(f"\n[e1] capacity-matched shallow control (target = depth "
+                  f"{matched.get('control_for_depth')} rung's "
+                  f"{matched.get('target_params')} params; 1 layer, "
+                  f"d_model={matched.get('d_model')}, "
+                  f"{matched.get('params')} params, "
+                  f"matched={matched.get('capacity_matched')}):")
+            print(f"      deep(none) - matched shallow accuracy: "
+                  f"{_fmt_ci(bench)}; {state}"
+                  + ("" if claim_ok else
+                     f" [provisional: n={bench.get('n')} < claim floor "
+                     f"{settings.min_seeds_for_claim}]"))
+            matched_benchmark = {
+                "reference": matched_ref_name,
+                "control_for_depth": matched.get("control_for_depth"),
+                "target_params": matched.get("target_params"),
+                "params": matched.get("params"),
+                "d_model": matched.get("d_model"),
+                "capacity_matched": matched.get("capacity_matched"),
+                "reference_accuracy": (bench.get("arms") or {}).get(
+                    "b", {}).get("mean"),
+                "deep_accuracy": (bench.get("arms") or {}).get(
+                    "a", {}).get("mean"),
+                "mean": bench.get("mean"), "lo": bench.get("lo"),
+                "hi": bench.get("hi"), "n": bench.get("n"),
+                "state": state, "claim_eligible": claim_ok,
+                "complexity_justified": bench["complexity_justified"],
+                "below_reference": bench["below_reference"],
+                "indistinguishable": bench["indistinguishable"],
+                "comparison": "capacity_benchmark",
+                "note": ("depth and width both differ from the deep rung; "
+                         "this tests whether comparable one-layer capacity "
+                         "closes the gap, not whether depth itself does"),
+            }
+        else:
+            reason = matched.get("reason") or (
+                "control not above chance" if matched_runs
+                else "no matched-shallow control in the verdict")
+            print(f"\n[e1] capacity-matched shallow control: not usable "
+                  f"({reason}); depth claims remain confounded with "
+                  f"parameter count")
+            matched_benchmark = {"available": False, "reason": reason}
         complexity_benchmark = {
             "reference": reference_name,
             "reference_depth": shallow_depth,
@@ -7321,6 +7594,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             "deep_none_justified": "none" in justified,
             "deep_none_provisional": "none" in provisional,
             "deep_none_reference_incompetent": "none" in reference_incompetent,
+            "capacity_matched_reference": matched_benchmark,
             "comparison": "benchmark",
             "note": ("paired benchmark, not a controlled mechanism "
                      "contrast: architecture/capacity and the val-tuned "
