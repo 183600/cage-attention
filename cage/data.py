@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import operator
 
 import torch
 
@@ -164,7 +165,14 @@ def time_ordered_split(n_samples: int, train_frac: float = 0.7,
     allowed operation performed by the training loop; this function only
     decides the split.
     """
-    n = int(n_samples)
+    if isinstance(n_samples, bool):
+        raise ValueError(
+            f"n_samples must be an integer, got {n_samples!r}")
+    try:
+        n = operator.index(n_samples)
+    except TypeError as exc:
+        raise ValueError(
+            f"n_samples must be an integer, got {n_samples!r}") from exc
     if n < 3:
         raise ValueError(
             f"time_ordered_split needs at least 3 samples for three "
@@ -185,11 +193,13 @@ def time_ordered_split(n_samples: int, train_frac: float = 0.7,
         n_train = 1
         n_val = 1
         n_test = n - 2
-    return {
+    out = {
         "train": slice(0, n_train),
         "val": slice(n_train, n_train + n_val),
         "test": slice(n_train + n_val, n),
     }
+    assert_split_partition(n, out)
+    return out
 
 
 def group_disjoint_split(groups, train_frac: float = 0.7,
@@ -260,16 +270,82 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
     for name, gids in assigned.items():
         mask = torch.isin(inverse, torch.tensor(gids, dtype=torch.long))
         out[name] = torch.nonzero(mask, as_tuple=False).flatten()
+    assert_split_partition(n, out)
+    assert_group_disjoint(g, out)
     return out
 
 
 def _as_indices(index, n: int) -> torch.Tensor:
-    """Normalize a split index container to a ``LongTensor`` of positions."""
+    """Normalize a split index container to a ``LongTensor`` of positions.
+
+    Boolean masks are interpreted as masks of the sample axis, *not* cast to
+    0/1 positions (the old behaviour silently audited sample 0/1 for every
+    ``True`` entry).  Floating-point and complex index arrays are rejected
+    instead of being truncated: a split must name whole samples.  The
+    returned positions are checked to lie in ``[0, n)``; negative indices
+    would otherwise wrap and a wrapped index could hide a crossing sample.
+    Duplicate detection is left to :func:`assert_split_partition`, because
+    a repeated index is only invalid in the context of a split assignment.
+    """
+    n = int(n)
+    if n < 0:
+        raise ValueError(f"sample count must be non-negative, got {n}")
     if isinstance(index, slice):
-        return torch.arange(*index.indices(n), dtype=torch.long)
-    if isinstance(index, range):
-        return torch.tensor(list(index), dtype=torch.long)
-    return torch.as_tensor(index).reshape(-1).to(torch.long)
+        idx = torch.arange(*index.indices(n), dtype=torch.long)
+    elif isinstance(index, range):
+        idx = torch.tensor(list(index), dtype=torch.long)
+    else:
+        t = torch.as_tensor(index)
+        if t.dtype == torch.bool:
+            m = t.reshape(-1)
+            if int(m.numel()) != n:
+                raise ValueError(
+                    f"boolean split mask must have length {n}, got "
+                    f"{int(m.numel())}")
+            idx = torch.nonzero(m, as_tuple=False).flatten().to(torch.long)
+        else:
+            if t.is_floating_point() or t.is_complex():
+                raise ValueError(
+                    "split indices must be integers or a boolean mask, got "
+                    f"dtype {t.dtype}")
+            idx = t.reshape(-1).to(torch.long)
+    if idx.numel() and (bool((idx < 0).any()) or bool((idx >= n).any())):
+        raise ValueError(
+            f"split indices must lie in [0, {n}), got range "
+            f"[{int(idx.min())}, {int(idx.max())}]")
+    return idx
+
+
+def assert_split_partition(n_samples: int, splits, require_all: bool = True) -> None:
+    """Raise unless the split indices are disjoint (and optionally complete).
+
+    Disjointness is the sample-level counterpart of the group/time
+    contract: if the same row appears in two splits, that row is both
+    trained on and evaluated, regardless of how the split was produced.
+    ``require_all=True`` additionally requires every sample to be assigned
+    exactly once, so a typo in a custom split cannot silently drop samples
+    from the evaluated population.  Empty splits are allowed here; the
+    split constructors enforce non-emptiness themselves.
+    """
+    n = int(n_samples)
+    if n < 1:
+        raise ValueError(f"n_samples must be positive, got {n_samples!r}")
+    seen = torch.zeros(n, dtype=torch.bool)
+    for name in ("train", "val", "test"):
+        if name not in splits:
+            continue
+        idx = _as_indices(splits[name], n)
+        if idx.numel() == 0:
+            continue
+        if bool(seen[idx].any()):
+            raise ValueError(
+                f"split {name!r} repeats a sample already assigned to "
+                f"another (or the same) split: splits must be disjoint")
+        seen[idx] = True
+    if require_all and not bool(seen.all()):
+        missing = int((~seen).sum())
+        raise ValueError(
+            f"split assignment leaves {missing} of {n} samples unassigned")
 
 
 def assert_group_disjoint(groups, splits) -> None:
@@ -277,6 +353,7 @@ def assert_group_disjoint(groups, splits) -> None:
     g = torch.as_tensor(groups).reshape(-1)
     if g.is_floating_point() and not bool(torch.isfinite(g).all()):
         raise ValueError("group ids must be finite (no NaN/Inf)")
+    assert_split_partition(int(g.numel()), splits, require_all=False)
     seen: dict = {}
     for name in ("train", "val", "test"):
         if name not in splits:
@@ -304,6 +381,7 @@ def assert_time_ordered(times, splits) -> None:
     if not bool(torch.isfinite(t).all()):
         raise ValueError("time values must be finite (no NaN/Inf): a "
                          "non-finite timestamp makes the ordering undefined")
+    assert_split_partition(int(t.numel()), splits, require_all=False)
     spans = []
     for name in ("train", "val", "test"):
         if name not in splits:
@@ -1641,6 +1719,40 @@ def _self_test() -> int:
         check("time_nonfinite_rejected", False)
     except ValueError:
         check("time_nonfinite_rejected", True)
+
+    # Boolean split masks must select the masked rows, not be cast to 0/1
+    # positions; duplicated or missing sample assignments must be rejected
+    # instead of silently auditing the wrong data.
+    bool_train = torch.tensor([False, False, True, True])
+    bool_test = ~bool_train
+    try:
+        assert_group_disjoint(
+            torch.tensor([0, 0, 1, 1]),
+            {"train": bool_train, "test": bool_test})
+        check("bool_mask_split_read_correctly", True)
+    except ValueError:
+        check("bool_mask_split_read_correctly", False)
+    try:
+        assert_split_partition(
+            4, {"train": [0, 1], "val": [1, 2], "test": [3]})
+        check("split_duplicate_rejected", False)
+    except ValueError:
+        check("split_duplicate_rejected", True)
+    try:
+        assert_split_partition(4, {"train": [0, 1], "val": [2]})
+        check("split_missing_sample_rejected", False)
+    except ValueError:
+        check("split_missing_sample_rejected", True)
+    try:
+        assert_split_partition(4, {"train": torch.tensor([0.5, 1.0])})
+        check("split_float_index_rejected", False)
+    except ValueError:
+        check("split_float_index_rejected", True)
+    try:
+        time_ordered_split(10.5)
+        check("time_split_fractional_n_rejected", False)
+    except ValueError:
+        check("time_split_fractional_n_rejected", True)
     try:
         group_disjoint_split(torch.tensor([0.0, 1.0, float("nan"), 2.0, 3.0]))
         check("group_nonfinite_rejected", False)
