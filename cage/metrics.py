@@ -94,6 +94,7 @@ __all__ = [
     "wilson_ci",
     "cohens_d_paired",
     "hedges_g_paired",
+    "mcnemar_test",
 ]
 
 
@@ -328,6 +329,49 @@ def hedges_g_paired(diffs) -> float:
     df = n - 1
     J = math.gamma(df / 2.0) / (math.sqrt(df / 2.0) * math.gamma((df - 1.0) / 2.0))
     return float(d_c) * J
+
+
+def mcnemar_test(correct_a, correct_b) -> dict:
+    """McNemar's test for paired binary classification outcomes.
+
+    ``correct_a`` and ``correct_b`` are boolean-like arrays of length n
+    indicating correctness of two models on the *same* test items. Returns
+    the discordant counts (b: a wrong,b right; c: a right,b wrong), the
+    exact binomial p-value (mid-p not required, use standard exact for
+    small b+c) and the continuity-corrected chi-square approximation.
+    """
+    ca = torch.as_tensor(correct_a).reshape(-1).bool()
+    cb = torch.as_tensor(correct_b).reshape(-1).bool()
+    if ca.numel() != cb.numel() or ca.numel() == 0:
+        return {"n": int(ca.numel()), "b": 0, "c": 0, "chi2_cc": float("nan"),
+                "p_chi2_cc": float("nan"), "p_exact": float("nan")}
+    b = int((~ca & cb).sum())
+    c = int((ca & ~cb).sum())
+    n_dis = b + c
+    # continuity-corrected chi-square
+    if n_dis == 0:
+        chi2_cc = 0.0
+    else:
+        chi2_cc = (abs(b - c) - 1.0) ** 2 / n_dis if (abs(b - c) - 1.0) >= 0 else 0.0
+    # exact binomial: test b/(b+c)=0.5
+    from math import comb
+    if n_dis == 0:
+        p_exact = 1.0
+    else:
+        k = min(b, c)
+        p_exact = 2.0 * sum(comb(n_dis, i) for i in range(0, k + 1)) / (2.0 ** n_dis)
+        if p_exact > 1.0:
+            p_exact = 1.0
+    # simple chi2 cc p-value approximation (no scipy) - use normal approx not ideal
+    # just report values; experiments can interpret
+    try:
+        from math import erfc, sqrt
+        # chi2_1 approx tail ~ erfc(sqrt(x/2))
+        p_chi2_cc = erfc(sqrt(chi2_cc / 2.0))
+    except Exception:
+        p_chi2_cc = float("nan")
+    return {"n": int(ca.numel()), "b": b, "c": c, "chi2_cc": chi2_cc,
+            "p_chi2_cc": p_chi2_cc, "p_exact": p_exact}
 
 
 def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
