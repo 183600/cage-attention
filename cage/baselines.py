@@ -46,9 +46,20 @@ import math
 import torch
 import torch.nn.functional as F
 
-from .data import (check_eval_seed, check_train_seed, make_batch,
-                   stream_seed_key, validate_batch)
-from .metrics import bootstrap_upper_p, paired_bootstrap_ci, seeds_for_power, wilson_ci
+from .data import (
+    check_eval_seed,
+    check_train_seed,
+    make_batch,
+    stream_seed_key,
+    validate_batch,
+)
+from .metrics import (
+    _positive_integer,
+    bootstrap_upper_p,
+    paired_bootstrap_ci,
+    seeds_for_power,
+    wilson_ci,
+)
 from .repro import seed_everything, stream_generator
 from .train import _make_adamw
 
@@ -397,6 +408,14 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     chance = float(chance)
     accs = [float(a) for a in accuracies if math.isfinite(float(a))]
     margins = [a - chance for a in accs]
+    # ``paired_bootstrap_ci``/``bootstrap_upper_p`` degrade to NaN readouts
+    # for an invalid replicate count.  Normalise once here (a float or a
+    # numeric string must become the integer shape torch wants) and skip
+    # the manual per-seed bootstrap below when no replicate can be drawn,
+    # instead of crashing on ``torch.randint``/``torch.binomial``.
+    n_boot_valid = _positive_integer(n_boot)
+    bootstrap_ok = n_boot_valid is not None
+    n_boot = n_boot_valid if bootstrap_ok else 0
     ci = paired_bootstrap_ci(margins, n_boot=n_boot, seed=seed)
     ci["chance"] = chance
     if n_per_seed is not None:
@@ -413,7 +432,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     p_value_seed = float(ci.get("p_value", float("nan")))
     mde80_seed = float(ci.get("mde80", float("nan")))
     p_above_seed = bootstrap_upper_p(margins, chance, n_boot=n_boot, seed=seed)
-    if n_per_seed is not None and n > 0:
+    if n_per_seed is not None and n > 0 and bootstrap_ok:
         a = torch.tensor(accs, dtype=torch.float64)
         gen = torch.Generator(device=a.device).manual_seed(seed)
         idx = torch.randint(0, n, (n_boot, n), generator=gen, device=a.device)
@@ -498,7 +517,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     violated = bool(ci["n"] > 0 and ci["lo"] >= chance)
     ci["hb2_supported"] = certified
     ci["hb2_violated"] = violated
-    if ci["n"] <= 0:
+    if ci["n"] <= 0 or not bootstrap_ok:
         state = "untestable"
     elif certified:
         state = "certified"
@@ -508,7 +527,8 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
         state = "inconclusive"
     ci["hb2_state"] = state
     margin = chance - float(ci["mean"])
-    if ci["n"] > 0 and math.isfinite(margin) and margin > 0.0:
+    if bootstrap_ok and ci["n"] > 0 and math.isfinite(margin) \
+            and margin > 0.0:
         if n_per_seed is not None:
             # The seed term of the mean's variance shrinks as sd_seed^2/n;
             # the common-stream scoring term enters once (all seeds share
