@@ -481,7 +481,8 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     keys = ["accuracy", "f1_micro", "f1_macro", "f1_weighted",
             "precision_macro", "recall_macro"]
     if (n == 0 or targets.numel() != n
-            or bool((targets < 0).any()) or bool((targets >= k).any())):
+            or bool((targets < 0).any()) or bool((targets >= k).any())
+            or not bool(torch.isfinite(logits).all())):
         out = {"n": 0, "n_classes_present": 0, "nll": float("nan")}
         out.update({key: float("nan") for key in keys})
         out[f"top{min(int(topk), k)}_accuracy"] = float("nan")
@@ -568,7 +569,9 @@ def brier_score(probs, correct) -> float:
     """Brier score of the top-1 answer correctness prediction."""
     p = torch.as_tensor(probs).detach().reshape(-1).float()
     c = torch.as_tensor(correct).detach().reshape(-1).to(p.device).float()
-    if p.numel() == 0 or c.numel() != p.numel():
+    if p.numel() == 0 or c.numel() != p.numel() \
+            or not bool(torch.isfinite(p).all()) \
+            or not bool(torch.isfinite(c).all()):
         return float("nan")
     return float(((p - c) ** 2).mean())
 
@@ -1296,6 +1299,13 @@ def _self_test() -> int:
     mm_neg = multiclass_metrics(torch.randn(2, 4), torch.tensor([-1, 0]))
     check("multiclass_negative_target_no_claim",
           mm_neg["n"] == 0 and math.isnan(mm_neg["accuracy"]))
+    mm_nonfinite = multiclass_metrics(
+        torch.tensor([[float("nan"), 1.0]]), torch.tensor([0]))
+    check("multiclass_nonfinite_logits_no_claim",
+          mm_nonfinite["n"] == 0 and math.isnan(mm_nonfinite["nll"]))
+    check("brier_nonfinite_no_claim",
+          math.isnan(brier_score([float("nan")], [True]))
+          and math.isnan(brier_score([float("inf")], [True])))
     check("ece_invalid_bins_no_claim",
           math.isnan(expected_calibration_error([0.5], [True], n_bins=0))
           and math.isnan(expected_calibration_error([0.5], [True], n_bins=-2))
