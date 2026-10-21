@@ -5707,10 +5707,12 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     # sits next to ROC-AUC, which stays optimistic under imbalance.
     print("\n[e1] error-detection regime (positive = wrong answer): lift = "
           "PR-AUC / prevalence (1.0 = random ranking); recall@10% = share of "
-          "errors captured in the 10% lowest-gate answers")
-    print(f"{'gate':>6} {'primary':>8} {'err_rate':>9} {'imbalance':>10} "
-          f"{'regime':>10} {'prauc':>8} {'lift':>8} {'recall@10%':>11} "
-          f"{'rocauc':>8}")
+          "errors captured in the 10% lowest-gate answers; mean±std over "
+          "seeds (these are H1e's headline metrics, whose decision rows carry "
+          "the FDR-controlled CI below):")
+    print(f"{'gate':>6} {'primary':>8} {'err_rate':>17} {'imbalance':>17} "
+          f"{'regime':>10} {'prauc':>17} {'lift':>17} {'recall@10%':>17} "
+          f"{'rocauc':>17}")
     for gate in GATES:
         t = table[gate]
         primary = str(by_gate[gate][0].get("primary_metric", ""))
@@ -5727,7 +5729,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             m = t.get(key)
             if not m or not math.isfinite(m["mean"]):
                 return "n/a"
-            return f"{m['mean']:.4f}"
+            return f"{m['mean']:.4f}±{m['std']:.4f}"
 
         err_rate = t.get("error_rate", {}).get("mean", float("nan"))
         ratio = t.get("imbalance_ratio", {}).get("mean", float("nan"))
@@ -5747,12 +5749,12 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             regime = "high"
         else:
             regime = "balanced"
-        print(f"{gate:>6} {score:>8} {ecell('error_rate'):>9} "
-              f"{ecell('imbalance_ratio'):>10} {regime:>10} "
-              f"{ecell(f'prauc_{score}_to_error'):>8} "
-              f"{ecell(f'prauc_lift_{score}_to_error'):>8} "
-              f"{ecell(f'recall_at_10pct_{score}_to_error'):>11} "
-              f"{ecell(f'rocauc_{score}_to_error'):>8}")
+        print(f"{gate:>6} {score:>8} {ecell('error_rate'):>17} "
+              f"{ecell('imbalance_ratio'):>17} {regime:>10} "
+              f"{ecell(f'prauc_{score}_to_error'):>17} "
+              f"{ecell(f'prauc_lift_{score}_to_error'):>17} "
+              f"{ecell(f'recall_at_10pct_{score}_to_error'):>17} "
+              f"{ecell(f'rocauc_{score}_to_error'):>17}")
 
     abl_table = {label: _aggregate_runs(rs)
                  for label, rs in ablation_runs.items()}
