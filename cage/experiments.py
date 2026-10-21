@@ -7925,6 +7925,9 @@ def main(argv=None) -> int:
     if args.deterministic is not None:
         settings.deterministic = bool(args.deterministic)
     if args.seeds is not None:
+        if args.seeds < 1:
+            print("[runner] --seeds must be a positive integer; aborting")
+            return 2
         requested = tuple(range(args.seeds))
         dropped = tuple(s for s in requested if s in RESERVED_EVAL_SEEDS)
         settings.seeds = tuple(s for s in requested
