@@ -8379,10 +8379,17 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
         }
 
         def _same_number(x, y):
-            if not (_finite(x) and _finite(y)):
-                return bool(x is None and y is None) or (
-                    _finite(x) and _finite(y))
-            return abs(float(x) - float(y)) <= 1e-12
+            if x is None or y is None:
+                return x is None and y is None
+            try:
+                xf, yf = float(x), float(y)
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if math.isnan(xf) or math.isnan(yf):
+                return math.isnan(xf) and math.isnan(yf)
+            if math.isinf(xf) or math.isinf(yf):
+                return xf == yf
+            return abs(xf - yf) <= 1e-12
 
         endpoint_matches = bool(
             _same_number(endpoint["mean"], recompute["mean"])
