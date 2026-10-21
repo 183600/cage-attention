@@ -935,7 +935,7 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
 # distribution shift shows up directly as a total-variation distance and a
 # calibrated chi-square.
 _AUDIT_FIELDS = ("token", "answer", "key", "value", "key_pos",
-                 "value_repeats", "naive_confusable")
+                 "value_repeats", "naive_confusable", "difficulty_joint")
 _AUDIT_DERIVED_FIELDS = ("key_pos", "value_repeats", "naive_confusable")
 
 # Calibration of the distribution-shift check.  ``_AUDIT_SIM`` Monte Carlo
@@ -2163,6 +2163,10 @@ def _self_test() -> int:
           e2e["outlier_audit"]["fields"] == list(_OUTLIER_FIELDS))
     check("audit_e2e_no_tail_shift",
           not any(e2e["outlier_audit"]["shift_by_split"].values()))
+    check("audit_e2e_joint_field_present",
+          "difficulty_joint" in e2e["audit_fields"]
+          and set(e2e["shift_p_value"]["difficulty_joint"])
+          == {"val", "test", "stats"})
     check("audit_e2e_stationarity_present",
           len(e2e["train_stationarity"]) == len(_STATIONARITY_FIELDS))
     cov = e2e["support_coverage"]
