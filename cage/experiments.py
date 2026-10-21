@@ -8437,8 +8437,9 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
                   f"monotone")
         elif endpoint_sign and worst is not None and worst["length"] != lengths[-1]:
             direction = ("benefit" if endpoint_sign > 0 else "loss")
+            relation = ("overstates" if endpoint_sign > 0 else "understates")
             print(f"      -> {rule}: no sign reversal, but the endpoint "
-                  f"understates the {direction} (most extreme L="
+                  f"{relation} the {direction} (most extreme L="
                   f"{worst['length']}, {worst['mean']:+.4f} vs endpoint "
                   f"{endpoint['mean']:+.4f}); the endpoint decision is "
                   f"unchanged but is not the conservative summary")
