@@ -149,7 +149,7 @@ def roc_auc(scores, positives) -> float:
     """
     s = _flatten_float(scores)
     y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
-    if y.numel() != s.numel():
+    if y.numel() != s.numel() or not bool(torch.isfinite(s).all()):
         return float("nan")
     n_pos = int(y.sum())
     n_neg = y.numel() - n_pos
@@ -170,7 +170,7 @@ def pr_auc(scores, positives) -> float:
     """
     s = _flatten_float(scores)
     y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
-    if y.numel() != s.numel():
+    if y.numel() != s.numel() or not bool(torch.isfinite(s).all()):
         return float("nan")
     n_pos = int(y.sum())
     if n_pos == 0:
@@ -212,7 +212,7 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
     s = _flatten_float(scores)
     y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
     n = s.numel()
-    if n == 0 or y.numel() != n:
+    if n == 0 or y.numel() != n or not bool(torch.isfinite(s).all()):
         return {"frac": float("nan"), "k": 0, "recall": float("nan"),
                 "precision": float("nan"), "lift": float("nan"),
                 "threshold": float("nan")}
@@ -254,7 +254,8 @@ def roc_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
     """
     s = _flatten_float(scores)
     y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
-    if y.numel() != s.numel() or y.numel() == 0:
+    if y.numel() != s.numel() or y.numel() == 0 \
+            or not bool(torch.isfinite(s).all()):
         return {"auc": float("nan"), "lo": float("nan"), "hi": float("nan"),
                 "n": int(y.numel())}
     n_pos = int(y.sum())
@@ -294,7 +295,8 @@ def pr_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
     """Bootstrap confidence interval for PR-AUC (average precision)."""
     s = _flatten_float(scores)
     y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
-    if y.numel() != s.numel() or y.numel() == 0:
+    if y.numel() != s.numel() or y.numel() == 0 \
+            or not bool(torch.isfinite(s).all()):
         return {"auc": float("nan"), "lo": float("nan"), "hi": float("nan"),
                 "n": int(y.numel())}
     n_pos = int(y.sum())
@@ -338,7 +340,9 @@ def auc_paired_bootstrap_ci(scores_a, scores_b, positives, n_boot: int = 10000,
     # and the bootstrap indexes all three with one device-local index.
     y = torch.as_tensor(positives).reshape(-1).to(sa.device).bool()
     sb = sb.to(sa.device)
-    if sa.numel() != sb.numel() or sa.numel() != y.numel() or sa.numel() == 0:
+    if sa.numel() != sb.numel() or sa.numel() != y.numel() \
+            or sa.numel() == 0 or not bool(torch.isfinite(sa).all()) \
+            or not bool(torch.isfinite(sb).all()):
         return {"mean_diff": float("nan"), "lo": float("nan"), "hi": float("nan")}
     metric = metric.lower()
     def _auc(sv):
@@ -1241,6 +1245,20 @@ def _self_test() -> int:
     check("mismatched_ranking_no_claim",
           math.isnan(roc_auc([1.0, 2.0, 3.0], [False, True]))
           and math.isnan(pr_auc([1.0, 2.0, 3.0], [False, True])))
+    nan_scores = [1.0, float("nan"), 3.0]
+    check("nonfinite_ranking_no_claim",
+          math.isnan(roc_auc(nan_scores, [False, True, True]))
+          and math.isnan(pr_auc(nan_scores, [False, True, True])))
+    nan_sel = selection_at_fraction(nan_scores, [False, True, True])
+    check("nonfinite_selection_no_claim",
+          nan_sel["k"] == 0 and math.isnan(nan_sel["precision"]))
+    nan_ci = roc_auc_ci(nan_scores, [False, True, True], n_boot=20)
+    check("nonfinite_ranking_ci_no_claim", math.isnan(nan_ci["auc"]))
+    nan_pair = auc_paired_bootstrap_ci(
+        [1.0, float("inf"), 3.0], [1.0, 2.0, 3.0],
+        [False, True, True], n_boot=20)
+    check("nonfinite_paired_ranking_no_claim",
+          math.isnan(nan_pair["mean_diff"]))
     for bad_boot in (0, -1, 2.5, float("nan"), "x"):
         roc_bad = roc_auc_ci([0.1, 0.2, 0.8, 0.9], [0, 0, 1, 1],
                              n_boot=bad_boot)
