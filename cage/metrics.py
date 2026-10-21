@@ -120,6 +120,22 @@ def _positive_integer(value):
     return int(number)
 
 
+def _float_or_nan(value) -> float:
+    """Coerce a scalar argument to float; NaN when it is not a number.
+
+    ``_bootstrap_args_ok`` deliberately accepts numeric strings and rejects
+    anything it cannot convert, but the abstention branches echo the raw
+    argument (``float(alpha)``) and the valid path divides it
+    (``alpha / 2.0``).  Without one normalisation the guard's "unusable
+    level" verdict is an exception instead of a NaN readout, so every
+    entry point normalises first and lets the guard reject the NaN.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return float("nan")
+
+
 def average_ranks(scores: torch.Tensor) -> torch.Tensor:
     """1-based average ranks; tied values share the mean of their ranks."""
     s = _flatten_float(scores)
@@ -216,7 +232,7 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
         return {"frac": float("nan"), "k": 0, "recall": float("nan"),
                 "precision": float("nan"), "lift": float("nan"),
                 "threshold": float("nan")}
-    frac = float(frac)
+    frac = _float_or_nan(frac)
     if math.isnan(frac):
         return {"frac": float("nan"), "k": 0, "recall": float("nan"),
                 "precision": float("nan"), "lift": float("nan"),
@@ -252,6 +268,7 @@ def roc_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
     Rows are resampled with replacement (percentile bootstrap). Returns
     NaN for degenerate cases where only one class is present.
     """
+    alpha = _float_or_nan(alpha)
     s = _flatten_float(scores)
     y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
     if y.numel() != s.numel() or y.numel() == 0 \
@@ -293,6 +310,7 @@ def roc_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
 def pr_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
               alpha: float = 0.05) -> dict:
     """Bootstrap confidence interval for PR-AUC (average precision)."""
+    alpha = _float_or_nan(alpha)
     s = _flatten_float(scores)
     y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
     if y.numel() != s.numel() or y.numel() == 0 \
@@ -333,6 +351,7 @@ def auc_paired_bootstrap_ci(scores_a, scores_b, positives, n_boot: int = 10000,
                             seed: int = 0, alpha: float = 0.05,
                             metric: str = "roc") -> dict:
     """Paired bootstrap CI for difference of ROC/PR-AUC on same items."""
+    alpha = _float_or_nan(alpha)
     sa = _flatten_float(scores_a)
     sb = _flatten_float(scores_b)
     # The three row-aligned inputs must live on one device: callers can
@@ -728,13 +747,14 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
       (``None`` below n=4, where the jackknife acceleration is not
       estimable, and for degenerate bootstrap distributions).
     """
+    alpha = _float_or_nan(alpha)
     d = _flatten_float(diffs)
     if d.numel() == 0:
         return {"mean": float("nan"), "lo": float("nan"),
                 "hi": float("nan"), "n": 0, "sd": float("nan"),
                 "half_width": float("nan"), "mde80": float("nan"),
                 "p_value": float("nan"), "sign_consistency": float("nan"),
-                "alpha": float(alpha),
+                "alpha": alpha,
                 "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
                 "loo_sign_flip": False, "lo_bca": float("nan"),
                 "hi_bca": float("nan"), "bca_agrees": None,
@@ -746,7 +766,7 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 "sd": (float(d.std(unbiased=True)) if n > 1 else 0.0),
                 "half_width": float("nan"), "mde80": float("nan"),
                 "p_value": float("nan"), "sign_consistency": float("nan"),
-                "alpha": float(alpha),
+                "alpha": alpha,
                 "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
                 "loo_sign_flip": False, "lo_bca": float("nan"),
                 "hi_bca": float("nan"), "bca_agrees": None,
@@ -821,13 +841,14 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
     equivalence claim that is an artifact of one lucky seed or of
     percentile-interval bias is flagged at the decision point.
     """
-    bound = float(bound)
+    bound = _float_or_nan(bound)
+    alpha = _float_or_nan(alpha)
     d = _flatten_float(diffs)
     out = {
         "mean": float("nan"), "lo": float("nan"), "hi": float("nan"),
         "n": 0, "sd": float("nan"), "half_width": float("nan"),
         "mde80": float("nan"), "p_value": float("nan"),
-        "sign_consistency": float("nan"), "alpha": float(alpha),
+        "sign_consistency": float("nan"), "alpha": alpha,
         "test": "equivalence", "bound": bound, "equivalent": False,
         "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
         "loo_within_bound": False, "lo_bca": float("nan"),
@@ -888,13 +909,14 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
     fields and ``noninferior=False`` for an empty input or a non-positive/
     non-finite bound.
     """
-    bound = float(bound)
+    bound = _float_or_nan(bound)
+    alpha = _float_or_nan(alpha)
     d = _flatten_float(diffs)
     out = {
         "mean": float("nan"), "lo": float("nan"), "hi": float("nan"),
         "n": 0, "sd": float("nan"), "half_width": float("nan"),
         "mde80": float("nan"), "p_value": float("nan"),
-        "sign_consistency": float("nan"), "alpha": float(alpha),
+        "sign_consistency": float("nan"), "alpha": alpha,
         "test": "noninferiority", "bound": bound, "noninferior": False,
         "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
         "loo_above_bound": False, "lo_bca": float("nan"),
@@ -940,7 +962,7 @@ def bootstrap_upper_p(diffs, bound, n_boot: int = 10000, seed: int = 0) -> float
     even fall below the bound (no amount of resampling certifies it).
     """
     d = _flatten_float(diffs)
-    bound = float(bound)
+    bound = _float_or_nan(bound)
     if d.numel() == 0 or not math.isfinite(bound) \
             or not _bootstrap_args_ok(n_boot, 0.05):
         return float("nan")
@@ -1083,7 +1105,8 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
         n = n.expand_as(s).clone()
     if s.numel() == 1 and n.numel() > 1:
         s = s.expand_as(n).clone()
-    lo_q = alpha / 2.0 if lower_alpha is None else float(lower_alpha)
+    alpha = _float_or_nan(alpha)
+    lo_q = alpha / 2.0 if lower_alpha is None else _float_or_nan(lower_alpha)
     hi_q = 1.0 - alpha / 2.0
     pooled = wilson_ci(0, 0)
     empty = {

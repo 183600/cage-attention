@@ -17,6 +17,8 @@ from .data import (
     validate_batch,
 )
 from .metrics import (
+    _bootstrap_args_ok,
+    _float_or_nan,
     average_ranks,
     auc_paired_bootstrap_ci,
     brier_score,
@@ -2016,20 +2018,22 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
         t = torch.as_tensor(x, dtype=torch.float64).detach().reshape(-1)
         return t[torch.isfinite(t)]
 
+    alpha = _float_or_nan(alpha)
     a, b = _flat(a), _flat(b)
     n_a, n_b = a.numel(), b.numel()
     observed = float(a.mean() - b.mean()) if n_a and n_b else float("nan")
-    if n_a == 0 or n_b == 0:
+    if n_a == 0 or n_b == 0 or not _bootstrap_args_ok(n_boot, alpha):
         return {"mean": observed, "lo": float("nan"), "hi": float("nan"),
                 "n": int(n_a + n_b), "n_a": int(n_a), "n_b": int(n_b),
                 "sd": float("nan"), "sd_a": float("nan"),
                 "sd_b": float("nan"), "se": float("nan"),
                 "half_width": float("nan"), "mde80": float("nan"),
-                "p_value": float("nan"), "alpha": float(alpha)}
+                "p_value": float("nan"), "alpha": alpha}
+    n_boot = int(float(n_boot))
     gen = torch.Generator(device=a.device).manual_seed(int(seed))
-    idx_a = torch.randint(0, n_a, (int(n_boot), n_a), generator=gen,
+    idx_a = torch.randint(0, n_a, (n_boot, n_a), generator=gen,
                           device=a.device)
-    idx_b = torch.randint(0, n_b, (int(n_boot), n_b), generator=gen,
+    idx_b = torch.randint(0, n_b, (n_boot, n_b), generator=gen,
                           device=b.device)
     boot = a[idx_a].mean(dim=1) - b[idx_b].mean(dim=1)
     lo = float(torch.quantile(boot, alpha / 2.0))
