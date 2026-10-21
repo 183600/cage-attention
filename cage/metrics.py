@@ -451,7 +451,7 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     keys = ["accuracy", "f1_micro", "f1_macro", "f1_weighted",
             "precision_macro", "recall_macro"]
     if n == 0 or targets.numel() != n:
-        out = {"n": 0, "n_classes_present": 0}
+        out = {"n": 0, "n_classes_present": 0, "nll": float("nan")}
         out.update({key: float("nan") for key in keys})
         out[f"top{min(int(topk), k)}_accuracy"] = float("nan")
         return out
@@ -492,10 +492,12 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     f1_weighted = float((f1 * (tgt_counts / support.clamp_min(1.0))).sum())
     tp_t, fp_t, fn_t = tp.sum(), fp.sum(), fn.sum()
     f1_micro = float(2 * tp_t / (2 * tp_t + fp_t + fn_t).clamp_min(1.0))
+    nll = float(torch.nn.functional.cross_entropy(logits.float(), targets))
 
     return {
         "n": int(n),
         "n_classes_present": int(present.sum()),
+        "nll": nll,
         "accuracy": acc,
         f"top{topk_used}_accuracy": topk_acc,
         "f1_micro": f1_micro,
@@ -1170,6 +1172,9 @@ def _self_test() -> int:
     mm_bad = multiclass_metrics(torch.randn(3, 5), torch.tensor([0]))
     check("mismatched_multiclass_no_claim",
           mm_bad["n"] == 0 and math.isnan(mm_bad["accuracy"]))
+    mm_good = multiclass_metrics(torch.tensor([[0.0, 1.0], [1.0, 0.0]]),
+                                 torch.tensor([1, 0]))
+    check("multiclass_nll_reported", math.isfinite(mm_good["nll"]))
 
     # FDR: monotone adjusted p, small p-values survive, large ones do not,
     # NaN stays untestable.
