@@ -760,6 +760,22 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
       logged ``hist`` entry, which the overfit check samples as its
       learning curve.
     """
+    raw_steps, raw_batch = steps, batch
+    steps = _positive_integer(raw_steps)
+    batch = _positive_integer(raw_batch)
+    if steps is None:
+        raise ValueError(
+            f"steps must be a positive integer, got {raw_steps!r}")
+    if batch is None:
+        raise ValueError(
+            f"batch must be a positive integer, got {raw_batch!r}")
+    if eval_every > 0:
+        raw_val_batches = val_batches
+        val_batches = _positive_integer(raw_val_batches)
+        if val_batches is None:
+            raise ValueError(
+                f"val_batches must be a positive integer, got "
+                f"{raw_val_batches!r}")
     if seed is None:
         if fixed_batch is None:
             raise ValueError(
