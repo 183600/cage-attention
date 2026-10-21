@@ -837,7 +837,6 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                   f"first_bad_stage={diag['first_bad_stage']}")
             hist.append(entry)
             opt.zero_grad(set_to_none=True)
-            sched.step()
             if is_log or do_val:
                 if window_loss_n:
                     entry["train_loss_window"] = window_loss_sum / window_loss_n
@@ -862,7 +861,6 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                   f"first_bad_stage={diag['first_bad_stage']}")
             hist.append(entry)
             opt.zero_grad(set_to_none=True)
-            sched.step()
             if is_log or do_val:
                 if window_loss_n:
                     entry["train_loss_window"] = window_loss_sum / window_loss_n
