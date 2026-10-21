@@ -1000,8 +1000,17 @@ def _field_categories(field, vocab, n_pairs):
 
 
 def _counts(values, n_categories):
-    return torch.bincount(values.reshape(-1).to(torch.long).cpu(),
-                          minlength=n_categories).to(torch.int64)
+    n_categories = int(n_categories)
+    if n_categories < 0:
+        raise ValueError(
+            f"n_categories must be non-negative, got {n_categories}")
+    flat = values.reshape(-1).to(torch.long).cpu()
+    if flat.numel() and (bool((flat < 0).any())
+                         or bool((flat >= n_categories).any())):
+        raise ValueError(
+            f"audit values must lie in [0, {n_categories}), got range "
+            f"[{int(flat.min())}, {int(flat.max())}]")
+    return torch.bincount(flat, minlength=n_categories).to(torch.int64)
 
 
 def _distribution_from_counts(counts):
@@ -1094,8 +1103,17 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
     ``python3 -m cage.data``: same-source draws are not flagged, a
     half-range split is).  Returns ``(nan, nan)`` for empty inputs.
     """
-    obs = observed.detach().cpu().to(torch.float64)
-    ref = reference.detach().cpu().to(torch.float64)
+    obs = observed.detach().cpu().reshape(-1).to(torch.float64)
+    ref = reference.detach().cpu().reshape(-1).to(torch.float64)
+    if obs.numel() != ref.numel():
+        raise ValueError(
+            f"observed and reference count vectors must have the same "
+            f"length, got {obs.numel()} and {ref.numel()}")
+    for name, counts in (("observed", obs), ("reference", ref)):
+        if not bool(torch.isfinite(counts).all()):
+            raise ValueError(f"{name} counts contain NaN/Inf")
+        if bool((counts < 0).any()):
+            raise ValueError(f"{name} counts must be non-negative")
     n_ref = float(ref.sum())
     n_h = float(obs.sum())
     if n_ref <= 0.0 or n_h <= 0.0:
@@ -1320,6 +1338,10 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     two classes) returns NaN fields and ``uniform_supported=False``.
     """
     c = torch.as_tensor(counts).detach().reshape(-1).to(torch.float64)
+    if not bool(torch.isfinite(c).all()):
+        raise ValueError("answer counts contain NaN/Inf")
+    if bool((c < 0).any()):
+        raise ValueError("answer counts must be non-negative")
     n = float(c.sum())
     k = c.numel()
     out = {"n": int(n), "n_classes": int(k),
@@ -1658,6 +1680,24 @@ def _self_test() -> int:
     check("degenerate_input_not_supported",
           not degenerate["uniform_supported"]
           and math.isnan(degenerate["p_value"]))
+    for bad_counts in (torch.tensor([-1, 2]),
+                       torch.tensor([float("nan"), 1.0])):
+        try:
+            answer_uniformity_test(bad_counts)
+            check("invalid_answer_counts_rejected", False)
+        except ValueError:
+            check("invalid_answer_counts_rejected", True)
+    try:
+        _distribution_shift_p(torch.tensor([1.0, 2.0]),
+                              torch.tensor([1.0, 2.0, 3.0]))
+        check("mismatched_shift_counts_rejected", False)
+    except ValueError:
+        check("mismatched_shift_counts_rejected", True)
+    try:
+        _counts(torch.tensor([0, 3]), 3)
+        check("out_of_range_audit_value_rejected", False)
+    except ValueError:
+        check("out_of_range_audit_value_rejected", True)
 
     # Structural difficulty covariates: hand-built sequences pin where the
     # matching key sits, whether the answer value repeats, and whether the
