@@ -1919,16 +1919,30 @@ def gate_stat_correlations(stats):
         return r
     ent, mp, corr = stats["entropy"], stats["maxprob"], stats["correct"]
     cols = range(g.size(1))
-    r["gate_vs_entropy"] = _fisher_mean(
-        [pearson(g[:, i], ent[:, i]).item() for i in cols])
-    r["gate_vs_maxprob"] = _fisher_mean(
-        [pearson(g[:, i], mp[:, i]).item() for i in cols])
-    r["gate_vs_correct"] = _fisher_mean(
-        [pearson(g[:, i], corr).item() for i in cols])
-    r["gate_vs_entropy_spearman"] = _fisher_mean(
-        [spearman(g[:, i], ent[:, i]).item() for i in cols])
-    r["gate_vs_maxprob_spearman"] = _fisher_mean(
-        [spearman(g[:, i], mp[:, i]).item() for i in cols])
+    r_list = [pearson(g[:, i], ent[:, i]).item() for i in cols]
+    s_list = [spearman(g[:, i], ent[:, i]).item() for i in cols]
+    r_list_m = [pearson(g[:, i], mp[:, i]).item() for i in cols]
+    s_list_m = [spearman(g[:, i], mp[:, i]).item() for i in cols]
+    r_list_c = [pearson(g[:, i], corr).item() for i in cols]
+    r["gate_vs_entropy"] = _fisher_mean(r_list)
+    r["gate_vs_maxprob"] = _fisher_mean(r_list_m)
+    r["gate_vs_correct"] = _fisher_mean(r_list_c)
+    r["gate_vs_entropy_spearman"] = _fisher_mean(s_list)
+    r["gate_vs_maxprob_spearman"] = _fisher_mean(s_list_m)
+    # Quantify cross-layer variability (complement Fisher-mean summary)
+    def _zmean_std(rs):
+        vals = [x for x in rs if x == x]
+        if not vals:
+            return {"mean": float("nan"), "std": float("nan"), "n": 0}
+        zs = [math.atanh(min(max(x, -0.999999), 0.999999)) for x in vals]
+        m = sum(zs) / len(zs)
+        if len(zs) < 2:
+            return {"mean": math.tanh(m), "std": float("nan"), "n": len(vals)}
+        var = sum((z - m) ** 2 for z in zs) / (len(zs) - 1)
+        return {"mean": math.tanh(m), "std": math.sqrt(var), "n": len(vals)}
+    r["gate_vs_entropy_by_layer"] = _zmean_std(r_list)
+    r["gate_vs_maxprob_by_layer"] = _zmean_std(r_list_m)
+    r["gate_vs_entropy_spearman_by_layer"] = _zmean_std(s_list)
     return r
 
 
