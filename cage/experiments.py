@@ -7506,6 +7506,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                    **{k: v for k, v in base_metrics.items() if k != "n"},
                    "metrics_by_length": {},
                    "accuracy_by_length": {}, "eval_n_by_length": {},
+                   "balanced_accuracy_by_length": {},
                    "entropy_by_length": {}, "entropy_norm_by_length": {},
                    "maxprob_by_length": {}, "gate_by_length": {},
                    **record_extra,
@@ -7532,6 +7533,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 if want_errors:
                     errors = last_errors
                 rec["accuracy_by_length"][length] = metrics["accuracy"]
+                rec["balanced_accuracy_by_length"][length] = (
+                    metrics["recall_macro"])
                 rec["eval_n_by_length"][length] = int(metrics["n"])
                 rec["metrics_by_length"][length] = {
                     k: v for k, v in metrics.items() if k != "n"}
@@ -7547,6 +7550,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             rec["accuracy_at_base"] = base_acc
             rec["accuracy_at_longest"] = long_acc
             rec["accuracy_drop"] = base_acc - long_acc
+            base_bal = rec["balanced_accuracy_by_length"][settings.n_pairs]
+            long_bal = rec["balanced_accuracy_by_length"][lengths[-1]]
+            rec["balanced_accuracy_at_base"] = base_bal
+            rec["balanced_accuracy_at_longest"] = long_bal
+            rec["balanced_accuracy_drop"] = base_bal - long_bal
             rec["rule_ceiling_by_length"] = {
                 L: rule_ceiling_by_length[L]["accuracy"] for L in lengths}
             rec["rule_unique_key_rate_by_length"] = {
@@ -7620,6 +7628,29 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                   for L in lengths]
     print(f"{'rule ceiling':>16}" + "".join(f"{c:>12}" for c in ceil_cells)
           + f"{'-':>17} {'(gap@long)':>17} {'-':>17}")
+
+    # Balanced accuracy (macro recall) is the distribution-robust companion
+    # to the headline accuracy at every sweep length.  The values agree
+    # under a uniform stream; a divergence means the length reading depends
+    # on class frequency and must be reported as such.
+    print(f"\n[e2] balanced accuracy (macro recall) by n_pairs (mean +- std "
+          f"over seeds; companion to the accuracy table - divergence at a "
+          f"length means that length's reading depends on answer-class "
+          f"frequency):")
+    print(f"{'arm':>16}" + "".join(f"{L:>12}" for L in lengths)
+          + f"{'drop':>17}")
+    for label, *_ in _E2_VARIANTS:
+        cells = []
+        for length in lengths:
+            agg = _mean_std([r["balanced_accuracy_by_length"][length]
+                             for r in by_variant[label]])
+            cells.append(f"{agg['mean']:.3f}±{agg['std']:.3f}")
+        drop = _mean_std([r["balanced_accuracy_drop"]
+                          for r in by_variant[label]])
+        drop_s = (f"{drop['mean']:.3f}±{drop['std']:.3f}"
+                  if _finite(drop["mean"]) else "n/a")
+        print(f"{label:>16}" + "".join(f"{c:>12}" for c in cells)
+              + f"{drop_s:>17}")
 
     print(f"\n[e2] training-curve health (curve_ok = curve-valid runs / "
           f"all runs; late = U-shaped val curves; tail_train = relative "
@@ -7840,6 +7871,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         label: {str(L): _mean_std([r["accuracy_by_length"][L]
                                    for r in by_variant[label]])
                 for L in lengths}
+        for label, *_ in _E2_VARIANTS}
+    e2_summary["_balanced_accuracy"] = {
+        label: {str(L): _mean_std(
+            [r["balanced_accuracy_by_length"][L] for r in by_variant[label]])
+            for L in lengths}
         for label, *_ in _E2_VARIANTS}
     e2_summary["_provenance"] = _stamp(settings)
     _write_json(out_dir / "e2_summary.json", e2_summary)
