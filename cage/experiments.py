@@ -9167,7 +9167,7 @@ def _e2_endpoint_class_companions(by_variant: dict,
                 "f1_macro": metrics.get("f1_macro"),
                 "f1_weighted": metrics.get("f1_weighted"),
                 "correct_bitmask": metrics.get("correct_bitmask"),
-                "n": metrics.get("n"),
+                "n": (run.get("eval_n_by_length") or {}).get(endpoint),
             })
         return out
 
