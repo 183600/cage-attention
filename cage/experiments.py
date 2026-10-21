@@ -1840,6 +1840,97 @@ def _interaction_manipulation(audit: dict) -> dict:
     return dict(audit.get("varying_factors") or {})
 
 
+_CLASS_METRIC_COMPANIONS = (
+    ("recall_macro",
+     "balanced accuracy: unweighted mean per-class recall, target-present "
+     "classes"),
+    ("f1_macro",
+     "macro F1: unweighted mean per-class F1, target-present classes "
+     "(micro F1 equals accuracy)"),
+    ("f1_weighted",
+     "support-weighted F1, target-present classes"),
+)
+
+
+def _class_frequency_companions(rules, title):
+    """Re-read accuracy contrasts on class-frequency-robust metrics.
+
+    Accuracy is only prior-invariant while the answer stream is balanced.
+    The E1/E3 runners audit that premise and gate claims on it, but the
+    *decision* rows are still accuracy-only: a stable accuracy gain can
+    hide a macro-F1 loss when one answer class absorbs the errors.  These
+    companions keep the identical seed pairing and hierarchy (seed-level
+    paired bootstrap of ``a - b``) and explicitly label the averaging
+    convention for each metric.  They are exploratory robustness readouts,
+    not additional pre-registered decisions, so they are reported outside
+    the FDR family and never overwrite the registered verdict.
+    """
+    rows = []
+    print(f"\n[{title}] class-frequency robustness companions "
+          f"(exploratory, outside the FDR family; seed-paired a - b):")
+    print(f"  {'contrast':<34} {'metric':<15} {'effect [95% CI]':>29} "
+          f"{'n':>3}  {'vs accuracy':>18}")
+    for label, runs_a, runs_b, hypothesis in rules:
+        acc = _paired_diff(runs_a, runs_b, "accuracy")
+        for metric, convention in _CLASS_METRIC_COMPANIONS:
+            ci = _paired_diff(runs_a, runs_b, metric)
+            sign_disagrees = None
+            uncertainty_disagrees = None
+            if (_finite(acc.get("mean")) and _finite(ci.get("mean"))
+                    and acc["mean"] != 0.0 and ci["mean"] != 0.0):
+                sign_disagrees = ((acc["mean"] > 0.0)
+                                  != (ci["mean"] > 0.0))
+            if ci.get("n") and acc.get("n"):
+                acc_sig = bool(_finite(acc.get("lo"))
+                               and _finite(acc.get("hi"))
+                               and (acc["lo"] > 0.0 or acc["hi"] < 0.0))
+                met_sig = bool(_finite(ci.get("lo"))
+                               and _finite(ci.get("hi"))
+                               and (ci["lo"] > 0.0 or ci["hi"] < 0.0))
+                uncertainty_disagrees = (acc_sig != met_sig)
+            if sign_disagrees:
+                note = "sign flips"
+            elif uncertainty_disagrees:
+                note = "CI decisive differs"
+            else:
+                note = "consistent"
+            effect = (f"{ci['mean']:+.4f} [{ci['lo']:+.4f}, "
+                      f"{ci['hi']:+.4f}]"
+                      if (_finite(ci.get("mean")) and _finite(ci.get("lo"))
+                          and _finite(ci.get("hi"))) else "n/a")
+            print(f"  {label:<34} {metric:<15} {effect:>29} "
+                  f"{ci.get('n', 0):>3}  {note:>18}")
+            rows.append({
+                "contrast": label,
+                "hypothesis": hypothesis,
+                "metric": metric,
+                "convention": convention,
+                "effect": ci.get("mean"),
+                "lo": ci.get("lo"),
+                "hi": ci.get("hi"),
+                "n": ci.get("n", 0),
+                "seeds_used": ci.get("seeds_used", []),
+                "baseline_mean": ci.get("baseline_mean"),
+                "accuracy_mean": acc.get("mean"),
+                "accuracy_lo": acc.get("lo"),
+                "accuracy_hi": acc.get("hi"),
+                "accuracy_n": acc.get("n", 0),
+                "sign_disagrees_with_accuracy": sign_disagrees,
+                "uncertainty_disagrees_with_accuracy": (
+                    uncertainty_disagrees),
+            })
+    return {
+        "title": title,
+        "outside_fdr_family": True,
+        "note": ("same seed pairing and paired bootstrap as the registered "
+                 "accuracy row; macro metrics exclude answer classes with "
+                 "zero target support, and f1_weighted weights by support. "
+                 "These rows are robustness companions, not extra "
+                 "pre-registered decisions."),
+        "rows": rows,
+    }
+
+
 def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     """Paired difference-in-differences ``(a1 - b1) - (a2 - b2)``.
 
@@ -8154,6 +8245,13 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"a CI including 0 means the placebo's extra capacity alone "
               f"buys no advantage over the query gate")
     clog.finalize(out_dir, q=settings.fdr_q)
+    metric_robustness = _class_frequency_companions(
+        [("calib - none", by_gate["calib"], by_gate["none"], "H1a"),
+         ("calib - query", by_gate["calib"], by_gate["query"], "H1a"),
+         ("query - none", by_gate["query"], by_gate["none"], "H1a"),
+         (f"calib - {_CALIB_PLACEBO_CELL}", by_gate["calib"],
+          placebo_runs, "H1f")],
+        "e1")
     lr_sensitivity = _e1_lr_sensitivity(settings, out_dir, lr, by_gate)
 
     print(f"\n[e1] training curves (val monitored on fixed stream seed "
@@ -8299,6 +8397,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     table["_provenance"] = _stamp(settings)
     if complexity_benchmark is not None:
         table["_complexity_benchmark"] = complexity_benchmark
+    table["_class_frequency_companions"] = metric_robustness
     table["_lr_sensitivity"] = lr_sensitivity
     _write_json(out_dir / "e1_summary.json", table)
 
@@ -9540,9 +9639,27 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
         print(f"      ls=1e-2: seednorm x (calib - query) - pre x "
               f"(calib - query) ({metric}): {_fmt_ci(ci)}")
     clog.finalize(out_dir, q=settings.fdr_q)
+    robustness_rules = []
+    for norm in NORMS:
+        for layer_scale in (None, 1e-2):
+            ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
+            robustness_rules.append((
+                f"{norm}/ls={ls_label}: calib - query",
+                index[("calib", norm, layer_scale)],
+                index[("query", norm, layer_scale)], "H3a"))
+    for gate in ("query", "calib"):
+        for layer_scale in (None, 1e-2):
+            ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
+            robustness_rules.append((
+                f"{gate}: seednorm - pre (ls={ls_label})",
+                index[(gate, "seednorm", layer_scale)],
+                index[(gate, "pre", layer_scale)], "H3a"))
+    metric_robustness = _class_frequency_companions(
+        robustness_rules, "e3")
     e3_summary = {f"{g}|{n}|{ls}": _aggregate_runs(rs)
                   for (g, n, ls), rs in index.items()}
     e3_summary["_capacity_matched_pre"] = capacity_benchmark
+    e3_summary["_class_frequency_companions"] = metric_robustness
     e3_summary["_provenance"] = _stamp(settings)
     _write_json(out_dir / "e3_summary.json", e3_summary)
 
