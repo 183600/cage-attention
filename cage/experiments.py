@@ -1589,15 +1589,27 @@ def _paired_benchmark(runs_a, runs_b, metric, sesoi, reference):
     seed differences, CI and SESOI are still the right effect-size readout:
     ``complexity_justified`` means the arm is both practically above and
     statistically above the tuned reference, while ``below_reference`` means
-    the reference is confidently better.  The underlying control audit is
-    kept under ``controlled_audit`` for transparency, and the result carries
-    an explicit ``comparison="benchmark"`` tag.
+    the reference is confidently better.  The result carries an explicit
+    ``comparison="benchmark"`` tag and a summary of the (expected) recipe
+    mismatches, never the full audit, so it cannot be mistaken for a
+    controlled contrast.
     """
     ci = _paired_diff(runs_a, runs_b, metric)
+    audit = ci.get("controlled") or {}
     ci["comparison"] = "benchmark"
     ci["reference"] = str(reference)
     ci["sesoi"] = float(sesoi)
-    ci["controlled_audit"] = ci.get("controlled")
+    # The audit is *expected* to fail (the point is a different architecture
+    # and a separately tuned lr), so the row is marked as intentionally
+    # non-controlled instead of carrying a wall of recipe mismatches into
+    # the summary; only their count is kept for traceability.
+    ci["controlled"] = None
+    ci["controlled_audit"] = {
+        "applicable": False,
+        "reason": ("benchmark deliberately varies architecture/capacity and "
+                   "the val-tuned learning rate"),
+        "observed_mismatch_count": len(audit.get("mismatches") or []),
+    }
     mean, lo, hi = ci.get("mean"), ci.get("lo"), ci.get("hi")
     ci["complexity_justified"] = bool(
         _finite(mean) and _finite(lo)
@@ -6979,9 +6991,10 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 "complexity_justified": bench["complexity_justified"],
                 "below_reference": bench["below_reference"],
                 "indistinguishable": bench["indistinguishable"],
-                "control_mismatches": (
-                    (bench.get("controlled_audit") or {}).get("mismatches")
-                    or []),
+                "controlled": False,
+                "observed_recipe_mismatches": (
+                    (bench.get("controlled_audit") or {}).get(
+                        "observed_mismatch_count", 0)),
             }
         justified = [g for g, row in benchmark_by_arm.items()
                      if row["complexity_justified"]]
