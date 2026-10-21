@@ -424,13 +424,16 @@ HYPOTHESES = {
                       "the same direction holds for the rank (Spearman) "
                       "correlation as a robustness check.  The registered "
                       "accuracy companion (calib - none and calib - query) "
-                      "is one-sided: the calibrated gate must not lose "
-                      "accuracy to its controls - a significant accuracy "
-                      "*loss* refutes the mechanism rather than supporting "
-                      "it, so the companion carries a registered direction",
+                      "is a one-sided non-inferiority check: the calibrated "
+                      "gate must not lose accuracy beyond the registered "
+                      "SESOI to its controls - a loss larger than that bound "
+                      "refutes the mechanism, while a gain is not required",
         "decision": "paired bootstrap 95% CI of the seed differences "
                     "excludes 0 after Benjamini-Hochberg FDR control across "
-                    "the E1 contrasts (q=0.05)",
+                    "the E1 contrasts (q=0.05); the accuracy companions are "
+                    "one-sided non-inferiority tests against the registered "
+                    "SESOI (lower bound above -SESOI), not directional "
+                    "superiority claims",
         "sesoi": {"accuracy": 0.01, "abs_gate_vs_entropy": 0.05},
         # The one-sided accuracy companion covers the registered calib
         # contrasts (calib - none, calib - query).  The query-vs-none
@@ -439,6 +442,7 @@ HYPOTHESES = {
         # and cannot inherit the calib accuracy sign.
         "direction": {"abs_gate_vs_entropy": "+", "accuracy": "+",
                       "query_none_accuracy": None},
+        "sesoi_test": {"accuracy": "noninferior"},
     },
     "H1b": {
         "experiment": "e1",
@@ -734,15 +738,17 @@ HYPOTHESES = {
                       "resid_norm_last_over_first is larger under seednorm "
                       "than under pre-LN; the registered "
                       "accuracy companion (calib - query within each norm "
-                      "and LayerScale level) is one-sided: the calibrated "
-                      "gate must not lose "
-                      "accuracy to the query-only gate - a significant "
-                      "accuracy loss refutes the co-design story rather "
-                      "than supporting it, so the companion carries a "
-                      "registered direction",
+                      "and LayerScale level) is a one-sided non-inferiority "
+                      "check: the calibrated gate must not lose accuracy "
+                      "beyond the registered SESOI to the query-only gate - "
+                      "a loss larger than that bound refutes the co-design "
+                      "story, while a gain is not required",
         "decision": "paired bootstrap 95% CI excludes 0 after "
                     "Benjamini-Hochberg FDR control across the E3 contrasts "
-                    "(q=0.05)",
+                    "(q=0.05); the accuracy companion is a one-sided "
+                    "non-inferiority test against the registered SESOI "
+                    "(lower bound above -SESOI), not a directional "
+                    "superiority claim",
         "sesoi": {"gate_depth_ratio": 0.05,
                   "resid_norm_last_over_first": 0.05,
                   "accuracy": 0.01,
@@ -762,6 +768,7 @@ HYPOTHESES = {
                       "norm_resid_norm_last_over_first": "+",
                       "postmix_norm_gate_depth_ratio": None,
                       "postmix_norm_resid_norm_last_over_first": None},
+        "sesoi_test": {"accuracy": "noninferior"},
     },
     "H3b": {
         "experiment": "e3",
@@ -8114,19 +8121,26 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                        coverage=(ablation_coverage, design_coverage),
                        balance_ok=((verdict.get("eval_answer_balance") or {})
                                    .get("all_uniform")))
-    clog.print("calib - none", "H1a", "accuracy",
-               _paired_diff(by_gate["calib"], by_gate["none"], "accuracy"),
-               warn=_curve_warn(("calib", by_gate["calib"]),
-                                ("none", by_gate["none"])))
+    clog.print_equivalence_ci(
+        "calib - none", "H1a", "accuracy",
+        _paired_equivalence(by_gate["calib"], by_gate["none"], "accuracy",
+                            HYPOTHESES["H1a"]["sesoi"]["accuracy"],
+                            mode="noninferior"),
+        warn=_curve_warn(("calib", by_gate["calib"]),
+                         ("none", by_gate["none"])))
     # The query gate is the closest tuned simpler model (same parameter
     # count, same architecture, gate on the query only): calibration must
-    # earn its keep against *this* baseline, not only against `none`
-    # (which lacks a gate altogether).  Pre-registered so it is read
-    # through the same FDR + SESOI decision layer as the other contrasts.
-    clog.print("calib - query", "H1a", "accuracy",
-               _paired_diff(by_gate["calib"], by_gate["query"], "accuracy"),
-               warn=_curve_warn(("calib", by_gate["calib"]),
-                                ("query", by_gate["query"])))
+    # not lose materially to *this* baseline, not only to `none` (which
+    # lacks a gate altogether).  Pre-registered as one-sided
+    # non-inferiority so a small loss inside the SESOI is not misread as a
+    # directional refutation of H1a.
+    clog.print_equivalence_ci(
+        "calib - query", "H1a", "accuracy",
+        _paired_equivalence(by_gate["calib"], by_gate["query"], "accuracy",
+                            HYPOTHESES["H1a"]["sesoi"]["accuracy"],
+                            mode="noninferior"),
+        warn=_curve_warn(("calib", by_gate["calib"]),
+                         ("query", by_gate["query"])))
     clog.print("calib - query", "H1a", "abs_gate_vs_entropy",
                _paired_diff(by_gate["calib"], by_gate["query"],
                             "abs_gate_vs_entropy"),
@@ -9600,10 +9614,13 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
             a = index[("calib", norm, layer_scale)]
             b = index[("query", norm, layer_scale)]
             ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
-            clog.print(f"{norm}/ls={ls_label}: calib - query", "H3a",
-                       "accuracy", _paired_diff(a, b, "accuracy"),
-                       warn=_curve_warn((f"calib/{norm}/ls={ls_label}", a),
-                                        (f"query/{norm}/ls={ls_label}", b)))
+            clog.print_equivalence_ci(
+                f"{norm}/ls={ls_label}: calib - query", "H3a", "accuracy",
+                _paired_equivalence(a, b, "accuracy",
+                                    HYPOTHESES["H3a"]["sesoi"]["accuracy"],
+                                    mode="noninferior"),
+                warn=_curve_warn((f"calib/{norm}/ls={ls_label}", a),
+                                 (f"query/{norm}/ls={ls_label}", b)))
     # H3c: the co-design interaction.  The marginal calib-vs-query
     # differences under seednorm and under pre-LN are differenced on the
     # same training seed, so the (large) between-seed variance cancels and
