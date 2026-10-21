@@ -2152,9 +2152,10 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
       rows come from the *same* seeds (paired), so the conservative
       unpaired combination is used deliberately: it cannot claim more
       resolution than a paired test would;
-    - ``within_noise`` = ``margin < margin_se``: the winner is not
-      resolved beyond seed noise, and small follow-up differences built
-      on this value inherit that ambiguity;
+    - ``within_noise`` = ``margin < margin_se`` or ``margin <= 0`` (an
+      exact tie is never resolved): the winner is not resolved beyond
+      seed noise, and small follow-up differences built on this value
+      inherit that ambiguity;
     - ``curve_invalid_best``: how many of the best row's runs are
       curve-invalid (``plateau``/``diverging``/...): an argmax chosen
       among runs that never learned measures the optimizer, not the
@@ -2206,7 +2207,11 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
         else float("nan")
     within_noise = None
     if math.isfinite(margin_se):
-        within_noise = bool(margin < margin_se)
+        # An exact tie has no winner even when both rows happen to have
+        # zero seed variance; ``margin < margin_se`` would call that
+        # resolved (0 < 0 is false) and stamp the arbitrary argmax as
+        # reliable.
+        within_noise = bool(margin <= 0.0 or margin < margin_se)
 
     curve_invalid_best = None
     verdicts = r_best.get(curve_key)
