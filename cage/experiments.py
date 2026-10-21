@@ -1500,13 +1500,27 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
     item-level effect, so a positive seed-level mean whose item-level sign
     disagrees is caught instead of being printed as a win.
 
+    That pooled exact p is only descriptive: concatenating seeds repeats the
+    same sealed items, so the pooled item table violates McNemar's
+    independence assumption and its p is anti-conservative.  The per-seed
+    discordant counts, the seed-level sign test over the independent training
+    seeds, and the consistency of the per-seed item effects are therefore
+    reported alongside it; only the seed-level summaries may corroborate a
+    claim.  The pooled p is retained for continuity and explicitly labelled
+    descriptive.
+
     Only ``accuracy`` has a stored mask.  Any missing mask, differing item
     count, or malformed record makes the companion not applicable (it is a
     diagnostic, never a reason to fabricate a test).
     """
     out = {"applicable": False, "reason": None, "n": 0,
            "n_seeds": 0, "b": None, "c": None, "p_exact": None,
-           "item_mean_diff": None, "direction_agrees": None}
+           "item_mean_diff": None, "direction_agrees": None,
+           "pooled_descriptive": True, "per_seed": [],
+           "seed_sign_positive": 0, "seed_sign_negative": 0,
+           "seed_sign_zero": 0, "seed_sign_test_p": None,
+           "seed_sign_consistent_with_mean": None,
+           "per_seed_direction_agreement": None}
     if metric != "accuracy":
         out["reason"] = "only accuracy stores per-item correctness"
         return out
@@ -1543,6 +1557,18 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
     if ca.numel() != cb.numel() or ca.numel() == 0:
         out["reason"] = "no evaluation items"
         return out
+    per_seed = []
+    for seed, ma, mb, n in zip(used, masks_a, masks_b, ns):
+        mc_seed = mcnemar_test(ma, mb)
+        diff_seed = float(ma.float().mean() - mb.float().mean())
+        per_seed.append({
+            "seed": seed, "n": int(n),
+            "b": int(mc_seed["b"]), "c": int(mc_seed["c"]),
+            "item_mean_diff": diff_seed,
+            "p_exact": mc_seed["p_exact"],
+            "signed_direction": (1 if diff_seed > 0.0 else
+                                 -1 if diff_seed < 0.0 else 0),
+        })
     mc = mcnemar_test(ca, cb)
     item_mean = float(ca.float().mean() - cb.float().mean())
     if _finite(seed_mean) and _finite(item_mean):
@@ -1551,12 +1577,43 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
                   or (seed_mean == 0.0 and item_mean == 0.0))
     else:
         agrees = None
+    directions = [row["signed_direction"] for row in per_seed]
+    nonzero = [d for d in directions if d != 0]
+    pos = sum(1 for d in directions if d > 0)
+    neg = sum(1 for d in directions if d < 0)
+    zero = sum(1 for d in directions if d == 0)
+    overall_dir = (1 if item_mean > 0.0 else -1 if item_mean < 0.0 else 0)
+    if overall_dir and nonzero:
+        agreement = sum(1 for d in nonzero if d == overall_dir) / len(nonzero)
+        consistent = all(d == overall_dir for d in nonzero)
+    else:
+        agreement = None
+        consistent = None
+    if nonzero:
+        k = max(pos, neg)
+        tail = sum(math.comb(len(nonzero), i)
+                   for i in range(k, len(nonzero) + 1))
+        sign_p = min(1.0, 2.0 * tail / (2 ** len(nonzero)))
+    else:
+        sign_p = None
     out.update({
         "applicable": True, "n": int(ca.numel()),
         "n_seeds": len(masks_a), "n_per_seed": sorted(set(ns)),
         "b": mc["b"], "c": mc["c"],
         "p_exact": mc["p_exact"], "p_chi2_cc": mc["p_chi2_cc"],
         "item_mean_diff": item_mean, "direction_agrees": agrees,
+        "pooled_descriptive": True,
+        "pooled_note": (
+            "the pooled McNemar p concatenates every seed's evaluation of "
+            "the same sealed items, so repeated item evaluations are not "
+            "independent and this p must not be read as a confirmation or "
+            "a claim gate; use the per-seed counts and the independent-seed "
+            "sign test"),
+        "per_seed": per_seed,
+        "seed_sign_positive": int(pos), "seed_sign_negative": int(neg),
+        "seed_sign_zero": int(zero), "seed_sign_test_p": sign_p,
+        "seed_sign_consistent_with_mean": consistent,
+        "per_seed_direction_agreement": agreement,
     })
     return out
 
@@ -2708,6 +2765,18 @@ class ContrastLog:
             # actual items is not measuring the same effect.
             "stream_test": ci.get("stream_test"),
             "stream_test_p": (ci.get("stream_test") or {}).get("p_exact"),
+            "stream_pooled_descriptive": (
+                ci.get("stream_test") or {}).get("pooled_descriptive"),
+            "stream_per_seed": (ci.get("stream_test") or {}).get("per_seed"),
+            "stream_seed_sign_test_p": (
+                ci.get("stream_test") or {}).get("seed_sign_test_p"),
+            "stream_seed_sign_consistent": (
+                ci.get("stream_test") or {}).get(
+                    "seed_sign_consistent_with_mean"),
+            "stream_seed_sign_positive": (
+                ci.get("stream_test") or {}).get("seed_sign_positive"),
+            "stream_seed_sign_negative": (
+                ci.get("stream_test") or {}).get("seed_sign_negative"),
             "stream_direction_agrees":
                 (ci.get("stream_test") or {}).get("direction_agrees"),
             "stream_sign_conflict": False,
@@ -2744,9 +2813,18 @@ class ContrastLog:
                      f"effective n={ci.get('n')}]")
         stream = ci.get("stream_test") or {}
         if stream.get("applicable"):
-            line += (f"  [finite-stream McNemar: b={stream['b']}, "
+            per_seed = stream.get("per_seed") or []
+            counts = ", ".join(
+                f"{s['seed']}:{s['b']}/{s['c']}" for s in per_seed)
+            sign_p = stream.get("seed_sign_test_p")
+            sign_p_s = f"{sign_p:.4g}" if _finite(sign_p) else "n/a"
+            line += (f"  [finite-stream McNemar (pooled, descriptive only: "
+                     f"repeated sealed items): b={stream['b']}, "
                      f"c={stream['c']}, p={stream['p_exact']:.4g}, "
-                     f"n_items={stream['n']}]")
+                     f"n_items={stream['n']}; per-seed discordant b/c="
+                     f"[{counts}]; seed signs +/-/0={stream['seed_sign_positive']}/"
+                     f"{stream['seed_sign_negative']}/{stream['seed_sign_zero']}, "
+                     f"independent-seed sign p={sign_p_s}]")
         elif stream.get("reason"):
             line += f"  [finite-stream test n/a: {stream['reason']}]"
         flags = small_n_flags(ci)
@@ -3206,15 +3284,14 @@ class ContrastLog:
         stream_uncorroborated = [
             r for r in supporting
             if r.get("stream_direction_agrees") is not None
-            and _finite(r.get("stream_test_p"))
-            and r["stream_test_p"] > 0.05]
+            and r.get("stream_seed_sign_consistent") is False]
         if stream_uncorroborated:
             print(f"[{self.tag}] WARNING: {len(stream_uncorroborated)} "
-                  f"supported accuracy contrast(s) are not corroborated by "
-                  f"the item-level McNemar test on the shared finite "
-                  f"evaluation stream (p>0.05): the seed-level gain may be "
-                  f"within evaluation-stream measurement error; report the "
-                  f"companion p-value next to the claim")
+                  f"supported accuracy contrast(s) have per-seed item-level "
+                  f"effects that do not all share the seed-level sign: the "
+                  f"pooled McNemar p reuses the same sealed items across "
+                  f"seeds and is descriptive only, so it cannot corroborate "
+                  f"the claim; report the per-seed counts next to it")
         curve_invalid_gated = [r for r in testable
                                if r.get("curve_invalid_removes_support")]
         balance_gated = [r for r in testable
