@@ -127,7 +127,8 @@ class Cfg:
             raise ValueError(f"unknown gate {self.gate!r}; valid: {list(GATES)}")
         if self.norm not in NORMS:
             raise ValueError(f"unknown norm {self.norm!r}; valid: {list(NORMS)}")
-        if self.n_heads <= 0 or self.d_model % self.n_heads:
+        if self.d_model <= 0 or self.n_heads <= 0 \
+                or self.d_model % self.n_heads:
             raise ValueError(
                 f"d_model={self.d_model} is not a positive multiple of "
                 f"n_heads={self.n_heads}"
