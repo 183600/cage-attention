@@ -204,6 +204,11 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     as "the probe cannot do better".
     """
     check_train_seed(seed)
+    raw_steps = steps
+    steps = _positive_integer(raw_steps)
+    if steps is None:
+        raise ValueError(
+            f"steps must be a positive integer, got {raw_steps!r}")
     seed_everything(seed, deterministic=deterministic)
     gen = stream_generator(seed, device)
     model = LinearBagProbe(vocab).to(device)
@@ -294,10 +299,11 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
             f"validation seed {val_seed} is also a probe training seed; "
             f"selection data must be disjoint from fitting data"
         )
-    step_values = tuple(int(s) for s in (steps_grid or (steps,)))
-    if not step_values or any(s <= 0 for s in step_values):
+    raw_steps = tuple(steps_grid or (steps,))
+    step_values = tuple(_positive_integer(s) for s in raw_steps)
+    if not step_values or any(s is None for s in step_values):
         raise ValueError(f"steps_grid must contain positive ints, got "
-                         f"{step_values!r}")
+                         f"{raw_steps!r}")
     table = []
     for lr in lr_grid:
         for train_steps in step_values:
@@ -438,11 +444,12 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     ci = paired_bootstrap_ci(margins, n_boot=n_boot, seed=seed)
     ci["chance"] = chance
     if n_per_seed is not None:
-        n_per_seed = int(n_per_seed)
-        if n_per_seed < 1:
+        raw_n_per_seed = n_per_seed
+        n_per_seed = _positive_integer(raw_n_per_seed)
+        if n_per_seed is None:
             raise ValueError(
                 f"n_per_seed must be a positive example count, "
-                f"got {n_per_seed!r}")
+                f"got {raw_n_per_seed!r}")
     n = len(accs)
     sd_seed = float(ci.get("sd", float("nan")))
     mean_seed = float(ci.get("mean", float("nan")))
