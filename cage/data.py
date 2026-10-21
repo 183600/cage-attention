@@ -1700,6 +1700,28 @@ def length_sweep_lengths(base: int = 16, factor: int = 2, n: int = 4,
     rather than return such a one-point grid so the caller cannot train a
     full E2 grid that answers nothing.
     """
+    values = {}
+    for name, value in (("base", base), ("factor", factor), ("n", n),
+                        ("max_len", max_len)):
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be an integer, not bool")
+        try:
+            values[name] = operator.index(value)
+        except TypeError as exc:
+            raise ValueError(
+                f"{name} must be an integer, got {value!r}") from exc
+    base, factor, n, max_len = (values[name] for name in
+                               ("base", "factor", "n", "max_len"))
+    if base < 1:
+        raise ValueError(f"base must be >= 1, got {base}")
+    if factor <= 1:
+        raise ValueError(
+            f"factor must be > 1 so the sweep contains distinct lengths, "
+            f"got {factor}")
+    if n < 1:
+        raise ValueError(f"n must be >= 1, got {n}")
+    if max_len < 1:
+        raise ValueError(f"max_len must be >= 1, got {max_len}")
     lengths = [base * (factor ** i) for i in range(n)]
     fits = [L for L in lengths if 2 * L + 2 <= max_len]
     if len(fits) < 2:
@@ -2041,6 +2063,13 @@ def _self_test() -> int:
         check("length_sweep_single_point_rejected", False)
     except ValueError:
         check("length_sweep_single_point_rejected", True)
+    for args in ((0, 2, 4, 256), (16, 1, 4, 256), (16, 0, 4, 256),
+                 (16, 2, 0, 256)):
+        try:
+            length_sweep_lengths(*args)
+            check(f"length_sweep_invalid_rejected_{args}", False)
+        except ValueError:
+            check(f"length_sweep_invalid_rejected_{args}", True)
 
     # Outlier/tail audit: a same-distribution held-out draw must not be
     # flagged, while a held-out draw pushed into the rare tail of the same
