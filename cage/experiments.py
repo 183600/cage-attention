@@ -6444,8 +6444,12 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
           f"H2c calibration-term ablations, completing the 2x2 with calib; "
           f"gap@long = mean gap to the per-length rule ceiling at the "
           f"longest length, the absolute reference for H2a's drop):")
+    # ``drop`` / ``gap@long`` / ``entropy_drift`` are the pre-registered H2a
+    # readouts, so they carry the same mean +- std treatment as the per-length
+    # cells: an effect size printed without its seed-to-seed spread invites a
+    # 0.2%-effect-vs-0.5%-std reading that the contrast layer would refuse.
     line = f"{'arm':>16}" + "".join(f"{L:>12}" for L in lengths) + \
-           f"{'drop':>10} {'gap@long':>10} {'entropy_drift':>14}"
+           f"{'drop':>17} {'gap@long':>17} {'entropy_drift':>17}"
     print(line)
     for label, *_ in _E2_VARIANTS:
         cells = []
@@ -6457,13 +6461,19 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         gap = _mean_std([r["ceiling_gap_at_longest"]
                          for r in by_variant[label]])
         drift = _mean_std([r["entropy_drift"] for r in by_variant[label]])
+
+        def dcell(agg):
+            if not _finite(agg["mean"]):
+                return "n/a"
+            return f"{agg['mean']:.3f}±{agg['std']:.3f}"
+
         print(f"{label:>16}" + "".join(f"{c:>12}" for c in cells)
-              + f"{drop['mean']:>10.3f} {gap['mean']:>10.3f} "
-              + f"{drift['mean']:>14.3f}")
+              + f"{dcell(drop):>17} {dcell(gap):>17} "
+              + f"{dcell(drift):>17}")
     ceil_cells = [f"{rule_ceiling_by_length[L]['accuracy']:.3f}"
                   for L in lengths]
     print(f"{'rule ceiling':>16}" + "".join(f"{c:>12}" for c in ceil_cells)
-          + f"{'-':>10} {'(gap@long)':>10} {'-':>14}")
+          + f"{'-':>17} {'(gap@long)':>17} {'-':>17}")
 
     print(f"\n[e2] training-curve health (curve_ok = curve-valid runs / "
           f"all runs; late = U-shaped val curves; tail_train = relative "
