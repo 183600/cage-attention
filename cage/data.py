@@ -918,6 +918,11 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
         raise ValueError(
             "actual_stream_overlap_audit needs at least one training and "
             "one held-out stream spec")
+    shared_names = sorted(set(train_specs) & set(heldout_specs), key=str)
+    if shared_names:
+        raise ValueError(
+            "stream names must be unique across train_specs and "
+            f"heldout_specs; duplicated: {shared_names}")
     key_sets, streams, groups = {}, {}, {}
     all_specs = ([(name, spec, "train")
                   for name, spec in train_specs.items()]
@@ -2087,6 +2092,17 @@ def _self_test() -> int:
     check("same_group_prefix_overlap_observed", same_pair > 0)
     check("same_group_overlap_not_leakage",
           same_split["max_overlap"] == 0 and same_pair > 0)
+    # A shared name would overwrite one stream in the replay map and make
+    # the train-vs-held-out pairwise lookup raise ``KeyError``; names must
+    # be rejected explicitly while the caller can still fix the spec.
+    try:
+        actual_stream_overlap_audit(
+            4, 64, "cpu",
+            train_specs={"shared": {"seed": 0, "batch": 8, "steps": 1}},
+            heldout_specs={"shared": {"seed": 1, "batch": 8, "batches": 1}})
+        check("duplicate_stream_name_rejected", False)
+    except ValueError:
+        check("duplicate_stream_name_rejected", True)
 
     # Dataset-versioning fingerprint must depend on the batch geometry the
     # stream is realized with, not only on the seed.
