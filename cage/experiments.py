@@ -3545,13 +3545,23 @@ def _environment_record(settings: Settings, git_dirty: bool | None = None) -> di
         "cuda_available": bool(torch.cuda.is_available()),
         "cuda_runtime": torch.version.cuda,
         "torch_num_threads": determinism["torch_num_threads"],
+        "deterministic_requested": bool(settings.deterministic),
         "deterministic_algorithms": determinism["deterministic_algorithms"],
         "cublas_workspace_config": determinism["cublas_workspace_config"],
         "tf32": determinism["tf32"],
         "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
         "hash_randomization": bool(sys.flags.hash_randomization),
+        # How the run was launched is part of the recipe: the same config
+        # can mean different code paths through CLI flags, and a result is
+        # only rebuildable when its invocation is recorded.
+        "argv": [str(arg) for arg in sys.argv],
+        "cwd": os.getcwd(),
         "git_dirty": (_git_dirty() if git_dirty is None else bool(git_dirty)),
     }
+    try:
+        env["torch_num_interop_threads"] = int(torch.get_num_interop_threads())
+    except Exception:  # noqa: BLE001 - older/limited builds may not expose it
+        env["torch_num_interop_threads"] = None
     cudnn = getattr(torch.backends, "cudnn", None)
     if cudnn is not None:
         env["cudnn_deterministic"] = bool(cudnn.deterministic)
@@ -3565,8 +3575,22 @@ def _environment_record(settings: Settings, git_dirty: bool | None = None) -> di
         env["numpy"] = np.__version__
     except ImportError:
         env["numpy"] = None
-    if settings.device.startswith("cuda") and torch.cuda.is_available():
-        env["cuda_device"] = torch.cuda.get_device_name(0)
+    if torch.cuda.is_available():
+        try:
+            count = int(torch.cuda.device_count())
+            devices = []
+            for i in range(count):
+                props = torch.cuda.get_device_properties(i)
+                devices.append({
+                    "index": i,
+                    "name": props.name,
+                    "capability": f"{props.major}.{props.minor}",
+                    "total_memory_bytes": int(props.total_memory),
+                })
+            env["cuda_device_count"] = count
+            env["cuda_devices"] = devices
+        except Exception as exc:  # noqa: BLE001 - probe must not fail a record
+            env["cuda_devices_error"] = f"{type(exc).__name__}: {exc}"
     return env
 
 
