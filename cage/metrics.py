@@ -953,10 +953,19 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
     interval would hide that a rule can only be checked to +-binomial
     noise at the evaluated sample size.
     """
-    if total <= 0:
+    try:
+        successes = float(successes)
+        total = float(total)
+    except (TypeError, ValueError):
         return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
                 "n": 0}
-    if successes < 0 or successes > total:
+    if not (math.isfinite(successes) and math.isfinite(total)) or total <= 0:
+        return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
+                "n": 0}
+    # Counts must be whole samples; accepting e.g. 0.5/2 would report a
+    # binomial interval for a quantity that is not a proportion of trials.
+    if successes != round(successes) or total != round(total) \
+            or successes < 0 or successes > total:
         return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
                 "n": int(total)}
     p = successes / total
@@ -1195,6 +1204,10 @@ def _self_test() -> int:
     check("wilson_invalid_counts_no_claim",
           math.isnan(wilson_ci(5, 4)["p"])
           and math.isnan(wilson_ci(-1, 4)["p"]))
+    check("wilson_fractional_counts_no_claim",
+          math.isnan(wilson_ci(0.5, 2)["p"])
+          and math.isnan(wilson_ci(1, 2.5)["p"])
+          and math.isnan(wilson_ci(float("nan"), 2)["p"]))
 
     # Seed-clustered proportion: identical seed accuracies evaluated on one
     # shared stream must retain the stream's measurement noise; pooling the
