@@ -11,7 +11,12 @@ Metric choices (and why)
   ``f1_micro == accuracy`` for single-label classification, ``f1_macro``
   weights every *present* class equally (rare values matter as much as
   frequent ones) and is averaged over the classes that occur in the
-  targets, and ``f1_weighted`` weights each class by its support.
+  targets, and ``f1_weighted`` weights each class by its support.  Because
+  a macro average over target-present classes excludes classes that were
+  only *predicted*, ``*_macro_all_labels`` companions average over the
+  union of true and predicted labels (the conventional sklearn macro
+  convention), so a false-positive class contributes its zero recall
+  instead of disappearing from the mean.
 * Error-detection diagnostics are **binary and imbalanced** (after
   convergence, wrong answers are rare).  For scores that are supposed to
   flag errors we report both ROC-AUC and PR-AUC and treat PR-AUC as the
@@ -496,6 +501,16 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     undefined recall and are excluded); predictions of never-observed
     classes still lower the recall of the true classes, so they are not
     silently dropped.
+
+    ``f1_macro_all_labels`` / ``precision_macro_all_labels`` /
+    ``recall_macro_all_labels`` are explicit companions that average over
+    the union of target-present and predicted classes, i.e. the usual
+    sklearn macro convention.  They differ from the pinned ``*_macro``
+    values exactly when the argmax predicts a class absent from the
+    targets: that class then contributes a zero-recall/zero-F1 term instead
+    of being excluded.  The existing definitions are left unchanged because
+    the design notes pin them; the companions only make the convention
+    visible.
     """
     logits = torch.as_tensor(logits).detach()
     targets = torch.as_tensor(targets).detach().reshape(-1).long()
@@ -503,7 +518,9 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
         logits = logits.unsqueeze(0)
     n, k = logits.shape
     keys = ["accuracy", "f1_micro", "f1_macro", "f1_weighted",
-            "precision_macro", "recall_macro"]
+            "precision_macro", "recall_macro",
+            "f1_macro_all_labels", "precision_macro_all_labels",
+            "recall_macro_all_labels"]
     if (n == 0 or targets.numel() != n
             or bool((targets < 0).any()) or bool((targets >= k).any())):
         out = {"n": 0, "n_classes_present": 0, "nll": float("nan")}
@@ -543,6 +560,15 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
                        if bool(present.any()) else float("nan"))
     recall_macro = (float(recall[present].mean())
                     if bool(present.any()) else float("nan"))
+    all_labels = present | has_pred
+    if bool(all_labels.any()):
+        f1_macro_all_labels = float(f1[all_labels].mean())
+        precision_macro_all_labels = float(precision[all_labels].mean())
+        recall_macro_all_labels = float(recall[all_labels].mean())
+    else:
+        f1_macro_all_labels = float("nan")
+        precision_macro_all_labels = float("nan")
+        recall_macro_all_labels = float("nan")
     support = tgt_counts.sum()
     f1_weighted = float((f1 * (tgt_counts / support.clamp_min(1.0))).sum())
     tp_t, fp_t, fn_t = tp.sum(), fp.sum(), fn.sum()
@@ -560,6 +586,11 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
         "f1_weighted": f1_weighted,
         "precision_macro": precision_macro,
         "recall_macro": recall_macro,
+        # Label-union macro companions: predicted-only classes contribute
+        # their zero recall/F1 instead of being excluded from the average.
+        "f1_macro_all_labels": f1_macro_all_labels,
+        "precision_macro_all_labels": precision_macro_all_labels,
+        "recall_macro_all_labels": recall_macro_all_labels,
     }
 
 
@@ -1321,6 +1352,19 @@ def _self_test() -> int:
     mm_good = multiclass_metrics(torch.tensor([[0.0, 1.0], [1.0, 0.0]]),
                                  torch.tensor([1, 0]))
     check("multiclass_nll_reported", math.isfinite(mm_good["nll"]))
+    # Row 0 predicts target 0 correctly; row 1 predicts class 2 while the
+    # target is class 1.  The pinned target-present macro-F1 ignores class 2
+    # (mean of 2/3 and 0), while the label-union companion charges it as a
+    # zero-recall/zero-F1 class (mean of 2/3, 0, 0).
+    mm_union = multiclass_metrics(
+        torch.tensor([[3.0, 0.0, 0.0], [0.0, 0.0, 3.0]]),
+        torch.tensor([0, 1]))
+    check("multiclass_macro_union_is_not_target_present_macro",
+          abs(mm_union["f1_macro"] - 0.5) < 1e-9
+          and abs(mm_union["f1_macro_all_labels"] - 1.0 / 3.0) < 1e-9
+          and abs(mm_union["recall_macro_all_labels"] - 1.0 / 3.0) < 1e-9)
+    check("multiclass_union_equals_present_when_no_predicted_only",
+          abs(mm_good["f1_macro"] - mm_good["f1_macro_all_labels"]) < 1e-12)
     mm_range = multiclass_metrics(torch.randn(2, 4), torch.tensor([0, 4]))
     check("multiclass_target_range_no_claim",
           mm_range["n"] == 0 and math.isnan(mm_range["accuracy"]))
