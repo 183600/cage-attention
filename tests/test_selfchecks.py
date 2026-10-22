@@ -105,6 +105,19 @@ class MetricInputValidationTest(unittest.TestCase):
                 self.assertTrue(out["reason"])
 
 
+class CorrelationInputValidationTest(unittest.TestCase):
+    def test_complex_correlations_abstain(self):
+        import torch
+
+        from cage.train import pearson, spearman
+
+        x = torch.tensor([1.0 + 2.0j, 2.0 + 3.0j, 3.0])
+        y = torch.tensor([1.0, 2.0, 3.0])
+        for fn in (pearson, spearman):
+            self.assertTrue(math.isnan(float(fn(x, y))))
+            self.assertTrue(math.isnan(float(fn(y, x))))
+
+
 class ProjectSelfCheckTest(unittest.TestCase):
     def test_metrics_self_check(self):
         with contextlib.redirect_stdout(io.StringIO()):

@@ -2337,8 +2337,14 @@ def pearson(x, y):
     # Keep the caller's precision: downcasting float64 to float32 can turn
     # distinct values into ties (and a large common offset then looks like a
     # constant vector), silently destroying the correlation.
-    x = x.flatten().to(torch.float64)
-    y = y.flatten().to(torch.float64)
+    x = x.flatten()
+    y = y.flatten()
+    # ``.to(float64)`` silently drops the imaginary part of a complex
+    # tensor; that projection is not the correlation the caller asked for.
+    if x.is_complex() or y.is_complex():
+        return torch.tensor(float("nan"))
+    x = x.to(torch.float64)
+    y = y.to(torch.float64)
     if x.numel() == 0 or y.numel() != x.numel():
         return torch.tensor(float("nan"))
     dx = x - x.mean()
@@ -2363,8 +2369,14 @@ def spearman(x, y):
     the effect is not an artifact of the correlation measure.
     """
     # As in ``pearson``, ranking a float32 downcast would invent ties.
-    x = x.flatten().to(torch.float64)
-    y = y.flatten().to(torch.float64)
+    x = x.flatten()
+    y = y.flatten()
+    # A complex rank correlation has no real interpretation; abstain rather
+    # than silently correlating the real projections.
+    if x.is_complex() or y.is_complex():
+        return torch.tensor(float("nan"))
+    x = x.to(torch.float64)
+    y = y.to(torch.float64)
     if x.numel() == 0 or y.numel() != x.numel():
         return torch.tensor(float("nan"))
     rx = average_ranks(x)
@@ -2605,6 +2617,10 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
     """
 
     def _flat(x):
+        # A complex sample has no real mean difference; drop it rather than
+        # letting the float64 cast silently discard its imaginary part.
+        if torch.is_tensor(x) and x.is_complex():
+            return torch.empty(0, dtype=torch.float64)
         t = torch.as_tensor(x, dtype=torch.float64).detach().reshape(-1)
         return t[torch.isfinite(t)]
 
