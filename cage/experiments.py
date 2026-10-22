@@ -2772,10 +2772,19 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
         da = ra.get("stream_digest")
         db = rb.get("stream_digest")
         for side, value in (("a", da), ("b", db)):
-            if value is not None and not isinstance(value, str):
+            if value is None:
+                continue
+            if not isinstance(value, str):
                 out["reason"] = (
                     f"evaluation-stream digest on side {side} is not a "
                     f"string")
+                return out
+            if not value.strip():
+                # An empty/blank stamp is a malformed record, not a
+                # verifiable digest: treating it as a present value would
+                # let two unversioned runs pass as "verified".
+                out["reason"] = (
+                    f"evaluation-stream digest on side {side} is empty")
                 return out
         if da is not None and db is not None:
             # Both sides stamped the digest: only this pair can verify that

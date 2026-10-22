@@ -214,6 +214,18 @@ class PairedStreamDigestTest(unittest.TestCase):
         self.assertFalse(out["applicable"])
         self.assertIn("digest", out["reason"])
 
+    def test_blank_digest_is_rejected_not_verified(self):
+        a = [[1] * 16]
+        b = [[0] * 16]
+        for blank in ("", "   "):
+            with self.subTest(blank=repr(blank)):
+                by_a, by_b = self._records(a, b)
+                by_a[0]["stream_digest"] = blank
+                by_b[0]["stream_digest"] = blank
+                out = _paired_stream_test(by_a, by_b, [0], "accuracy", 1.0)
+                self.assertFalse(out["applicable"])
+                self.assertIn("digest", out["reason"])
+
     def test_non_accuracy_metric_still_abstains(self):
         a = [[1] * 16]
         b = [[0] * 16]
