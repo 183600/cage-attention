@@ -934,6 +934,20 @@ def _draw_stream_keys(seed, n_pairs, vocab, device, batch, units):
     return keys, n_rows
 
 
+def _audit_stream_name(name, kind):
+    """Reject names the flat pair-key format cannot represent unambiguously."""
+    if not isinstance(name, str) or not name:
+        raise ValueError(
+            f"{kind} stream names must be non-empty strings, got {name!r}")
+    if "|" in name:
+        raise ValueError(
+            f"{kind} stream name {name!r} may not contain '|': the audit "
+            "encodes pair keys as '<name>|<name>', so a delimiter in a "
+            "name could make two different pairs share one key and hide "
+            "a cross-split overlap")
+    return name
+
+
 def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
                                 train_specs=None, heldout_specs=None):
     """Exact content overlap of the streams a run *actually* consumes.
@@ -980,6 +994,10 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
         raise ValueError(
             "actual_stream_overlap_audit needs at least one training and "
             "one held-out stream spec")
+    for name in train_specs:
+        _audit_stream_name(name, "training")
+    for name in heldout_specs:
+        _audit_stream_name(name, "held-out")
     shared_names = sorted(set(train_specs) & set(heldout_specs), key=str)
     if shared_names:
         raise ValueError(
@@ -2301,6 +2319,16 @@ def _self_test() -> int:
         check("duplicate_stream_name_rejected", False)
     except ValueError:
         check("duplicate_stream_name_rejected", True)
+    # Pair keys are flattened as "<name>|<name>"; a delimiter inside a name
+    # can make two different pairs share one key, so reject it explicitly.
+    try:
+        actual_stream_overlap_audit(
+            4, 64, "cpu",
+            train_specs={"train|0": {"seed": 0, "batch": 8, "steps": 1}},
+            heldout_specs={"val": {"seed": 1, "batch": 8, "batches": 1}})
+        check("stream_name_delimiter_rejected", False)
+    except ValueError:
+        check("stream_name_delimiter_rejected", True)
 
     for label, kwargs in (
             ("split_zero_batches",
