@@ -1396,11 +1396,14 @@ def _run_order_audit(order, cells, seeds, randomized=True):
         for block, seed in enumerate(seeds)
         if block not in per_block or seed not in block_seeds.get(block, [])
     ]
+    duplicate_seeds = sorted({seed for seed in seeds
+                              if seeds.count(seed) > 1})
     complete = (bool(cells) and bool(seeds)
                 and set(per_block) == set(range(n_blocks))
                 and not missing and not duplicated and not unexpected
                 and not invalid_positions and not seed_mismatches
-                and not unexpected_seeds and not missing_seeds)
+                and not unexpected_seeds and not missing_seeds
+                and not duplicate_seeds)
     always_first = sorted(
         key for key, vals in positions.items()
         if len(vals) == n_blocks and vals and all(v == 0 for v in vals))
@@ -1432,6 +1435,7 @@ def _run_order_audit(order, cells, seeds, randomized=True):
         "seed_mismatches": seed_mismatches,
         "unexpected_seeds": unexpected_seeds,
         "missing_seeds": missing_seeds,
+        "duplicate_seeds": duplicate_seeds,
         "always_first": always_first,
         "always_last": always_last,
         "extreme_p_value": extreme_p,

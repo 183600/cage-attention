@@ -109,6 +109,12 @@ class BlockedRunOrderTest(unittest.TestCase):
                    for cell, _seed, block, pos in complete]
         self.assertFalse(
             _run_order_audit(swapped, self.CELLS, self.SEEDS)["complete"])
+        # Two blocks labelled with the same seed are not independent blocks
+        # even when every cell appears once in each.
+        duplicate_seed = _blocked_run_order(
+            self.CELLS, (0, 0), 11)
+        self.assertFalse(
+            _run_order_audit(duplicate_seed, self.CELLS, (0, 0))["complete"])
 
     def test_two_block_random_schedule_is_not_over_flagged(self):
         # With only two blocks, a random schedule can put one arm first in
