@@ -20,6 +20,19 @@
    下一次运行可能直接向它追加，并在结束时把修改后的内容写成新的"已验证"
    条目。
 
+第 1–4 节封住这两个缺口。它们仍不覆盖两类更隐蔽的失败：
+
+3. **并发写者**：两个进程同时写同一个 `results/` 时，JSONL 行会交错，
+   `environment.json` 会互相覆盖，最后结束的进程还会用自己看到的
+   `artifact_index.json` 覆盖另一方的条目。哈希链无法修复交错的记录。
+4. **语义不可连接**：哈希只能证明"字节没变"，不能证明一行记录里声明的
+   `setup_sha256` / `environment_sha256` 真的由它自己携带的
+   config/data/environment 计算得到，也不能证明同一 `run_id` 没有在
+   两个协议下被复用。文件被整体替换成一个"内部看起来合理"的副本时，
+   仅比较哈希是不够的。
+
+第 5、6 节分别补上单写者约束与记录级溯源审计。
+
 ## 1. 环境记录（`environment.json`）
 
 每次正式运行把 `cage.experiments._environment_record` 写入
@@ -103,7 +116,74 @@ make verify-artifacts OUT=results
 python3 -m cage.experiments --verify-artifacts --out results
 ```
 
-## 5. 解释边界
+## 5. 单写者约束（`results/.results.lock`）
+
+每次真正会写结果的调用（`--only baselines/sanity/e1/e2/e3/all`）在写入
+任何证据文件之前，对 `--out` 目录取一个非阻塞的 POSIX advisory 排他锁
+（`fcntl.flock`，锁文件 `.results.lock`）。第二个并发调用会立即以
+**exit 4** 退出，而不是排队等待：
+
+- 结果文件是追加式 JSONL，两个写者会让同一文件的行交错，读者无法判断
+  哪一行属于哪次运行；
+- `environment.json` 与 `artifact_index.json` 是"读旧—改—写新"状态，
+  后结束的进程会覆盖先结束进程刚认证的条目；
+- 锁是**咨询式**的：它防止协作进程（误开第二个终端、并行脚本）互相踩踏，
+  不是安全边界；恶意进程仍可绕过。
+- 锁在进程退出（包括被杀）时由内核释放，因此残留的 `.results.lock`
+  不会阻塞下一次运行；文件里只留下最后持有者的 pid/host/时间，供排查。
+- 锁文件是点文件，不进入 `artifact_index.json`，因为它不是科研证据。
+- 没有 `fcntl` 的平台降级为 `lock_mode="unavailable"`，运行会打印警告并把
+  该模式写进 `run_index.jsonl` 的 `started` 事件，而不是假装受保护。
+
+只读命令（`--check-environment`、`--verify-artifacts`、
+`--verify-provenance`）不取锁、不写目录，可与运行并行。
+
+## 6. 记录级溯源审计（`--verify-provenance`）
+
+`--verify-artifacts` 证明"文件字节未被改动"；它不证明**行内声明的
+provenance 与行内数据一致**。新命令对目录做语义审计：
+
+```bash
+make verify-provenance OUT=results
+# 等价于
+python3 -m cage.experiments --verify-provenance --out results
+# 把"同一结果文件混入多个协议/环境"也当作错误：
+python3 -m cage.experiments --verify-provenance --require-homogeneous --out results
+```
+
+它扫描 `*_runs.jsonl` 与 `*_error_cases.jsonl`，并读取
+`environment.json`、`*_manifest.json` 与 `run_index.jsonl` 作为锚点：
+
+1. **结构**：每行必须是 JSON 对象，带 `run_id / schema_version /
+   setup_sha256 / git_sha / source_tree_sha256`；schema 必须是当前
+   `_RECORD_SCHEMA`，两个短哈希必须是 16 位小写十六进制。
+2. **setup 自校验**：完整记录（含 `config`、`data_fingerprints`、
+   `hypotheses_sha256`）的 `setup_sha256` 由这些字段按
+   `_run_context` 的同一公式重算，必须与声明值一致。只带 `_stamp` 的
+   错误案例行没有这些字段，改用同一 `run_id` 的锚点校验。
+3. **环境自校验**：记录内嵌的 `environment` 块重新计算
+   `environment_sha256`，必须与声明值一致；`environment.json` 与每个
+   manifest 的环境块同样检查。
+4. **run 一致性**：同一个 `run_id` 在所有文件、manifest 与
+   `run_index.jsonl` 中只能对应一个
+   `(setup_sha256, git_sha, source_tree_sha256)` 和一个环境哈希。复用
+   `run_id` 但换了协议会被判为失败。
+5. **文件同质性**：一个结果文件内出现多个 setup 或环境时，默认打印
+   `WARNING`（因为目录本就允许跨多次调用累积），
+   `--require-homogeneous` 将其升级为错误；结果文件的唯一环境与
+   `environment.json` 不一致也会被报告。**这些行不能直接合并分析**：
+   需要按 setup/environment 拆分，或只保留同一协议的子集。
+
+退出码：`0` 全部可连接且自洽；`1` 发现缺陷（或在
+`--require-homogeneous` 下发现混合文件）；`2` 没有可审计的结果记录。
+命令只读，不写任何文件。
+
+```bash
+# 发布/分析前的一次性证据检查（三项都通过才视为可分析）
+make verify OUT=results
+```
+
+## 7. 解释边界
 
 - 环境一致 + 代码/配置/数据一致，才构成"可重建"的充分记录；本仓库仍不
   承诺跨硬件/指令集/内核库的 bit-exact 复现（见 `cage/repro.py` 的 scope）。
@@ -116,13 +196,16 @@ python3 -m cage.experiments --verify-artifacts --out results
   改写结果文件与索引的人仍可伪造整条链。它防止的是误操作、截断和选择性
   追加，不是恶意攻击者。
 
-## 6. 复现
+## 8. 复现
 
 ```bash
 python3 -m unittest tests.test_reproducibility_contract -v
 python3 -m unittest tests.test_artifact_append_guard -v
+python3 -m unittest tests.test_provenance_audit -v
+python3 -m unittest tests.test_results_lock -v
 python3 -m cage.experiments --only sanity --quick --out results_quick
 make verify-env OUT=results_quick
 make verify-artifacts OUT=results_quick
+make verify-provenance OUT=results_quick
 make check
 ```

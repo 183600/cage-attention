@@ -235,6 +235,7 @@ from .metrics import (
 )
 from .model import Cfg, GATES, NORMS, build
 from .repro import configure_determinism, seed_everything, stream_generator
+from .runlock import LOCK_EXIT_CODE, ResultsLock, ResultsLockError
 from .train import (
     _ERROR_TYPES,
     decode_correct_mask,
@@ -7015,6 +7016,378 @@ def _verify_artifacts(out_dir) -> int:
           f"{payload.get('run_id')} (completed={payload.get('completed')}, "
           f"schema={payload.get('schema_version')}, "
           f"current={payload.get('current_artifact_count', 'n/a')})")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Record-level provenance audit
+# ---------------------------------------------------------------------------
+# The artifact index proves that a file's bytes have not changed since it was
+# certified; it does not prove that the *records inside* are joinable to the
+# setup and environment they claim.  ``--verify-provenance`` closes that gap
+# by recomputing the two content ids from each record's own payload, checking
+# that one ``run_id`` never names two different setups, and reporting result
+# files that pool rows from more than one protocol/environment.
+
+_RESULT_RECORD_SUFFIXES = ("_runs.jsonl", "_error_cases.jsonl")
+
+_PROVENANCE_REQUIRED_KEYS = (
+    "run_id", "schema_version", "setup_sha256", "git_sha",
+    "source_tree_sha256",
+)
+
+# The exact inputs ``_run_context`` hashes into ``setup_sha256``.  A full
+# record carries all of them, so its declared id can be recomputed; a compact
+# ``_stamp`` row carries only the resulting id and is checked against the
+# lifecycle/manifest anchor for its ``run_id`` instead.
+_SETUP_HASH_INPUT_KEYS = (
+    "git_sha", "source_tree_sha256", "hypotheses_sha256", "config",
+    "data_fingerprints",
+)
+
+
+def _is_short_sha(value) -> bool:
+    """Whether ``value`` is one of the repository's 16-hex content ids."""
+    return (isinstance(value, str) and len(value) == 16
+            and all(ch in "0123456789abcdef" for ch in value))
+
+
+def _setup_fingerprint(record) -> str | None:
+    """Recompute ``setup_sha256`` from a record's own stored inputs.
+
+    Returns ``None`` when the record is a compact stamp (no ``config`` /
+    ``data_fingerprints`` / ``hypotheses_sha256``), which cannot be
+    self-verified but can still be matched to its run anchor.  The payload is
+    built exactly as :func:`_run_context` builds it, so a record produced by
+    this code must reproduce its declared id.
+    """
+    if not isinstance(record, Mapping):
+        return None
+    if not all(key in record for key in _SETUP_HASH_INPUT_KEYS):
+        return None
+    payload = {key: record[key] for key in _SETUP_HASH_INPUT_KEYS}
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                         default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _provenance_record_errors(record) -> list[str]:
+    """Structural and self-consistency defects in one result row."""
+    if not isinstance(record, Mapping):
+        return [f"record is not a JSON object ({type(record).__name__})"]
+    problems = []
+    missing = [key for key in _PROVENANCE_REQUIRED_KEYS
+               if key not in record]
+    if missing:
+        problems.append(f"missing provenance keys {missing}")
+    run_id = record.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        problems.append("run_id must be a non-empty string")
+    schema = record.get("schema_version")
+    if isinstance(schema, bool) or not isinstance(schema, int):
+        problems.append("schema_version must be an integer")
+    elif schema != _RECORD_SCHEMA:
+        problems.append(
+            f"schema_version {schema} is not the current {_RECORD_SCHEMA}")
+    setup = record.get("setup_sha256")
+    if not _is_short_sha(setup):
+        problems.append("setup_sha256 must be a 16-character lowercase hex id")
+    for key in ("git_sha", "source_tree_sha256"):
+        value = record.get(key)
+        if not isinstance(value, str) or not value:
+            problems.append(f"{key} must be a non-empty string")
+    present = [key for key in ("hypotheses_sha256", "config",
+                               "data_fingerprints") if key in record]
+    if present and len(present) != 3:
+        problems.append(
+            f"incomplete full-context block: has {present} but needs "
+            f"hypotheses_sha256, config and data_fingerprints")
+    elif present:
+        expected = _setup_fingerprint(record)
+        if expected is not None and expected != setup:
+            problems.append(
+                f"setup_sha256 {setup} does not match the hash of this "
+                f"record's own config/data/hypotheses ({expected})")
+    environment = record.get("environment")
+    if "environment" in record:
+        if not isinstance(environment, Mapping):
+            problems.append("environment must be a JSON object")
+        else:
+            declared = environment.get("environment_sha256")
+            if not _is_short_sha(declared):
+                problems.append(
+                    "environment.environment_sha256 must be a 16-character "
+                    "lowercase hex id")
+            else:
+                recomputed = _environment_fingerprint(environment)
+                if recomputed != declared:
+                    problems.append(
+                        f"environment_sha256 {declared} does not match the "
+                        f"hash of the environment block itself ({recomputed})")
+    return problems
+
+
+def _audit_provenance(out_dir, require_homogeneous: bool = False) -> int:
+    """Verify that every result row can be joined to its declared setup.
+
+    The checks are semantic, complementing :func:`_verify_artifacts`:
+
+    * every row carries the record schema and provenance join keys;
+    * a full row's ``setup_sha256`` is recomputed from its own
+      code/config/data/hypotheses fields and must match;
+    * a full row's environment block is re-hashed and must match its declared
+      ``environment_sha256``;
+    * one ``run_id`` may not name two different setups or environments
+      (checked across all result files, manifests and the lifecycle index);
+    * a compact stamp row must share the setup of the same ``run_id`` seen in
+      the lifecycle index or a full row;
+    * rows inside one result file are expected to describe one protocol and
+      one environment.  Mixing them is reported as a warning by default and
+      as an error with ``require_homogeneous=True``, because such a file
+      cannot be pooled for analysis without splitting it first.
+
+    Exit codes: 0 = every row traceable and internally consistent, 1 = a
+    defect was found (or a mixed file under ``require_homogeneous``),
+    2 = no result records to audit.
+    """
+    root = pathlib.Path(out_dir)
+    if not root.is_dir():
+        print(f"[provenance] no results directory at {root}")
+        return 2
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    def _problem(message: str) -> None:
+        if message not in errors:
+            errors.append(message)
+
+    def _warning(message: str) -> None:
+        if message not in warnings:
+            warnings.append(message)
+
+    # ``run_id -> {(setup, git_sha, source_tree_sha256): first location}``
+    # and the analogous environment map.  A run_id may legitimately appear in
+    # many files, but never with two different provenance tuples.
+    run_base: dict[str, dict[tuple, str]] = {}
+    run_env: dict[str, dict[str, str]] = {}
+
+    def _add_run(record, where: str) -> None:
+        if not isinstance(record, Mapping):
+            return
+        run_id = record.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            return
+        setup = record.get("setup_sha256")
+        git_sha = record.get("git_sha")
+        source = record.get("source_tree_sha256")
+        if _is_short_sha(setup) and isinstance(git_sha, str) and git_sha \
+                and isinstance(source, str) and source:
+            run_base.setdefault(run_id, {}).setdefault(
+                (setup, git_sha, source), where)
+        environment = record.get("environment")
+        if isinstance(environment, Mapping):
+            declared = environment.get("environment_sha256")
+            if _is_short_sha(declared):
+                run_env.setdefault(run_id, {}).setdefault(declared, where)
+
+    def _read_json_document(path: pathlib.Path, where: str):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            _problem(f"{where}: unreadable provenance document "
+                     f"({type(exc).__name__}: {exc})")
+            return None
+        if not isinstance(payload, Mapping):
+            _problem(f"{where}: provenance document is not a JSON object")
+            return None
+        return payload
+
+    # ---- anchors: environment.json and every manifest -----------------
+    environment_path = root / "environment.json"
+    directory_environment = None
+    anchor_paths = []
+    if environment_path.is_file():
+        anchor_paths.append(environment_path)
+    anchor_paths.extend(sorted(root.glob("*_manifest.json")))
+    for path in anchor_paths:
+        relative = path.relative_to(root).as_posix()
+        payload = _read_json_document(path, relative)
+        if payload is None:
+            continue
+        environment, context = _extract_environment_record(payload)
+        if environment is None:
+            _problem(f"{relative}: has no environment block")
+            continue
+        declared = environment.get("environment_sha256")
+        if not _is_short_sha(declared):
+            _problem(f"{relative}: environment_sha256 is malformed")
+        else:
+            recomputed = _environment_fingerprint(environment)
+            if recomputed != declared:
+                _problem(
+                    f"{relative}: environment_sha256 {declared} does not "
+                    f"match the hash of its environment block ({recomputed})")
+        if path is environment_path and _is_short_sha(declared):
+            directory_environment = declared
+        if isinstance(context, Mapping):
+            _add_run(context, relative)
+
+    # ---- lifecycle index: the anchor for compact error-case stamps ----
+    run_index_path = root / "run_index.jsonl"
+    if run_index_path.is_file():
+        relative = run_index_path.name
+        with run_index_path.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except (TypeError, ValueError) as exc:
+                    _problem(f"{relative}:{line_number}: invalid JSON "
+                             f"({type(exc).__name__}: {exc})")
+                    continue
+                if not isinstance(row, Mapping):
+                    _problem(f"{relative}:{line_number}: row is not a "
+                             f"JSON object")
+                    continue
+                # A failed environment probe writes a fallback context
+                # with setup_sha256=None; that is an honest failure row,
+                # not a provenance defect in an experiment result.
+                _add_run(row, f"{relative}:{line_number}")
+
+    # ---- result files --------------------------------------------------
+    # Runs already anchored by environment.json, a manifest or the lifecycle
+    # index.  Full result rows add themselves; compact stamps only point at
+    # one of these.
+    anchored_runs = set(run_base)
+    stamp_rows: list[tuple[str, str]] = []
+    result_files = sorted(
+        path for path in root.rglob("*.jsonl")
+        if path.is_file() and path.name.endswith(_RESULT_RECORD_SUFFIXES)
+        and path != run_index_path)
+    if not result_files:
+        print(f"[provenance] no result records under {root}; nothing to audit")
+        return 2
+
+    total_records = 0
+    file_summaries = []
+    for path in result_files:
+        relative = path.relative_to(root).as_posix()
+        file_setups: set[str] = set()
+        file_environments: set[str] = set()
+        n_records = 0
+        try:
+            handle = path.open(encoding="utf-8")
+        except OSError as exc:
+            _problem(f"{relative}: cannot read ({type(exc).__name__}: {exc})")
+            continue
+        with handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                n_records += 1
+                try:
+                    record = json.loads(line)
+                except (TypeError, ValueError) as exc:
+                    _problem(f"{relative}:{line_number}: invalid JSON "
+                             f"({type(exc).__name__}: {exc})")
+                    continue
+                where = f"{relative}:{line_number}"
+                for problem in _provenance_record_errors(record):
+                    _problem(f"{where}: {problem}")
+                if not isinstance(record, Mapping):
+                    continue
+                setup = record.get("setup_sha256")
+                if _is_short_sha(setup):
+                    file_setups.add(setup)
+                environment = record.get("environment")
+                if isinstance(environment, Mapping):
+                    declared = environment.get("environment_sha256")
+                    if _is_short_sha(declared):
+                        file_environments.add(declared)
+                _add_run(record, where)
+                # A compact stamp has no full context of its own; it is only
+                # traceable through the same run's anchor.  Defer the verdict
+                # until every file has been read, so a full row in a later
+                # file still counts as the anchor.
+                run_id = record.get("run_id")
+                if _setup_fingerprint(record) is None:
+                    if isinstance(run_id, str) and run_id:
+                        stamp_rows.append((where, run_id))
+                elif isinstance(run_id, str) and run_id:
+                    anchored_runs.add(run_id)
+        total_records += n_records
+        message = None
+        if len(file_setups) > 1:
+            message = (f"{relative} mixes {len(file_setups)} setups "
+                       f"({', '.join(sorted(file_setups))})")
+        if len(file_environments) > 1:
+            extra = (f"{relative} mixes {len(file_environments)} "
+                     f"environments ({', '.join(sorted(file_environments))})")
+            message = f"{message}; {extra}" if message else extra
+        if directory_environment is not None and file_environments and \
+                file_environments != {directory_environment}:
+            extra = (f"{relative} was not produced under the environment in "
+                     f"environment.json ({', '.join(sorted(file_environments))} "
+                     f"vs {directory_environment})")
+            message = f"{message}; {extra}" if message else extra
+        if message is not None:
+            if require_homogeneous:
+                _problem(message)
+            else:
+                _warning(message)
+        file_summaries.append((relative, n_records, file_setups,
+                               file_environments))
+
+    for where, run_id in stamp_rows:
+        if run_id not in anchored_runs:
+            _warning(
+                f"{where}: compact row for run {run_id} has no full-context "
+                f"anchor in this directory")
+
+    # ---- cross-file run consistency -----------------------------------
+    for run_id, variants in sorted(run_base.items()):
+        if len(variants) > 1:
+            detail = "; ".join(
+                f"{key[0]} at {where}"
+                for key, where in sorted(variants.items(),
+                                         key=lambda item: item[1]))
+            _problem(f"run {run_id} is claimed by {len(variants)} different "
+                     f"setups: {detail}")
+    for run_id, environments in sorted(run_env.items()):
+        if len(environments) > 1:
+            detail = "; ".join(
+                f"{sha} at {where}"
+                for sha, where in sorted(environments.items(),
+                                         key=lambda item: item[1]))
+            _problem(f"run {run_id} is claimed by {len(environments)} "
+                     f"different environments: {detail}")
+
+    if total_records == 0:
+        _problem("result files exist but contain no records")
+
+    print(f"[provenance] scanned {len(result_files)} result file(s), "
+          f"{total_records} record(s), {len(run_base)} run(s) under {root}")
+    for relative, n_records, setups, environments in file_summaries:
+        print(f"    {relative}: {n_records} record(s), "
+              f"{len(setups)} setup(s), {len(environments)} environment(s)")
+        for setup in sorted(setups):
+            print(f"        setup {setup}")
+        for sha in sorted(environments):
+            print(f"        env   {sha}")
+    for warning in warnings:
+        print(f"[provenance] WARNING: {warning}")
+    if errors:
+        print(f"[provenance] FAILED ({len(errors)} issue(s)):")
+        for error in errors:
+            print(f"    {error}")
+        return 1
+    print("[provenance] PASS: every result row is traceable to one declared "
+          "setup and environment")
+    if warnings:
+        print(f"[provenance] note: {len(warnings)} warning(s) above; use "
+              f"--require-homogeneous to make mixed-protocol files an error")
     return 0
 
 
@@ -16426,6 +16799,15 @@ def main(argv=None) -> int:
                         help="compare --out's recorded environment with this "
                              "process and exit (0-compatible, 1-drift, "
                              "2-no usable record); writes nothing")
+    parser.add_argument("--verify-provenance", action="store_true",
+                        help="recompute every result row's setup/environment "
+                             "hashes and check that one run_id never names "
+                             "two protocols; exit 0-consistent, 1-defect, "
+                             "2-no result records; writes nothing")
+    parser.add_argument("--require-homogeneous", action="store_true",
+                        help="with --verify-provenance: treat a result file "
+                             "that mixes setups/environments as an error "
+                             "instead of a warning")
     parser.add_argument("--strict-environment", action="store_true",
                         help="abort a run when the recorded environment in "
                              "--out differs from the current one in a "
@@ -16436,6 +16818,9 @@ def main(argv=None) -> int:
         return _verify_artifacts(args.out)
     if args.check_environment:
         return _check_environment(args.out)
+    if args.verify_provenance:
+        return _audit_provenance(
+            args.out, require_homogeneous=bool(args.require_homogeneous))
 
     settings = Settings.quick(args.device) if args.quick else Settings(
         device=args.device)
@@ -16489,6 +16874,25 @@ def main(argv=None) -> int:
     out_dir = pathlib.Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     settings.out_dir = out_dir
+    # One writer per results directory: the append-only JSONL files, the
+    # environment chain and the cumulative artifact index are all
+    # read-modify-write state.  A second concurrent invocation would
+    # interleave rows and could drop the other's index entries, so fail fast
+    # with a dedicated exit code instead of corrupting the evidence store.
+    lock = ResultsLock(out_dir)
+    try:
+        lock.acquire()
+    except ResultsLockError as exc:
+        print(f"[runner] ABORTED: {exc}")
+        return LOCK_EXIT_CODE
+    except OSError as exc:
+        lock.release()
+        print(f"[runner] ABORTED: cannot lock {out_dir} "
+              f"({type(exc).__name__}: {exc})")
+        return LOCK_EXIT_CODE
+    if lock.mode == "unavailable":
+        print("[runner] WARNING: advisory file locking is unavailable on "
+              "this platform; concurrent writers are not prevented")
     _RUN_ARTIFACTS.clear()
     started = time.monotonic()
     status = "failed"
@@ -16531,6 +16935,7 @@ def main(argv=None) -> int:
                    seeds=list(settings.seeds), steps=settings.steps,
                    lr=settings.lr, device=settings.device,
                    fdr_q=settings.fdr_q,
+                   lock_mode=lock.mode,
                    environment_compatible=drift.get("compatible"),
                    environment_identical=drift.get("identical"),
                    environment_critical_fields=critical_fields,
@@ -16579,6 +16984,8 @@ def main(argv=None) -> int:
                                   elapsed_seconds=time.monotonic() - started)
         except Exception as e:  # noqa: BLE001 - index failure is a warning
             print(f"[runner] WARNING: could not write artifact index: {e}")
+        finally:
+            lock.release()
 
 
 if __name__ == "__main__":
