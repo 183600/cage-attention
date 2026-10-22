@@ -132,6 +132,21 @@ class BatchValidationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_batch(self.idx, self.tgt, bad, 32)
 
+    def test_fractional_or_bool_vocab_is_rejected(self):
+        for vocab in (8.5, 8.0, True):
+            with self.subTest(vocab=vocab):
+                with self.assertRaises(ValueError):
+                    validate_batch(self.idx, self.tgt, self.meta, vocab)
+
+    def test_odd_width_sequence_is_rejected(self):
+        idx = torch.tensor([[5, 10, 7, 1, 5]])
+        tgt = torch.tensor([[-1, -1, -1, -1, 10]])
+        meta = {"query_pos": torch.tensor([4]),
+                "key_pos": torch.tensor([0]),
+                "answer": torch.tensor([10])}
+        with self.assertRaises(ValueError):
+            validate_batch(idx, tgt, meta, 32)
+
     def test_batch_fingerprint_is_stable_for_same_batch(self):
         self.assertEqual(batch_fingerprint(self.idx, self.tgt, self.meta),
                          batch_fingerprint(self.idx.clone(), self.tgt.clone(),

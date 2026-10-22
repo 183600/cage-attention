@@ -702,6 +702,26 @@ def _count_duplicate_rows(idx) -> int:
     return int(idx.size(0)) - int(unique_rows)
 
 
+def _batch_vocab_int(vocab) -> int:
+    """Validate and canonicalise the ``vocab`` scalar of a batch gate.
+
+    A float vocab would make the ``idx < vocab`` comparison accept a batch
+    whose ids are not drawn from a discrete vocabulary, and a bool is not a
+    vocabulary size.  The generator and ``check_data_geometry`` already
+    refuse both, so the cleaning gate must not be looser than the producer
+    it is checking.
+    """
+    if isinstance(vocab, bool):
+        raise ValueError(f"vocab must be an integer, not bool")
+    try:
+        value = operator.index(vocab)
+    except TypeError as exc:
+        raise ValueError(f"vocab must be an integer, got {vocab!r}") from exc
+    if value < 1:
+        raise ValueError(f"vocab must be >= 1, got {value}")
+    return int(value)
+
+
 def validate_batch(idx, targets, meta, vocab, diagnostics: bool = True) -> dict:
     """Data-cleaning gate for one freshly generated batch.
 
@@ -730,6 +750,7 @@ def validate_batch(idx, targets, meta, vocab, diagnostics: bool = True) -> dict:
     ``diagnostics=False`` skips only the duplicate-row count for callers
     that discard the result; every cleaning invariant above still runs.
     """
+    vocab = _batch_vocab_int(vocab)
     if not _batch_invariants_hold(idx, targets, meta, vocab):
         _validate_batch_strict(idx, targets, meta, vocab)
     out = {"n": int(idx.size(0)), "unique_key_rate": 1.0}
@@ -753,6 +774,12 @@ def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
         if not _is_integer_tensor(idx) or idx.dim() != 2:
             return False
         batch_size, width = idx.shape
+        # The task layout is ``[k1 v1 ... kn vn SEP query]``: an odd width
+        # cannot pair every key with a value, and width < 4 cannot hold one
+        # pair plus SEP/query.  Reject before the key/value gathers can
+        # read a "value" that is really the next key or the SEP slot.
+        if width < 4 or width % 2:
+            return False
         checks = [((idx >= 0) & (idx < vocab)).all()]
         if not _is_integer_tensor(meta["query_pos"]):
             return False
@@ -831,6 +858,10 @@ def _validate_batch_strict(idx, targets, meta, vocab) -> dict:
     if not bool((idx >= 0).all()) or not bool((idx < vocab).all()):
         raise ValueError(f"idx contains token ids outside [0, {vocab})")
     batch_size, width = idx.shape
+    if width < 4 or width % 2:
+        raise ValueError(
+            "structure: the sequence must be [k v]*n + SEP + query, so its "
+            f"width must be even and at least 4, got {width}")
     # ``validate_batch`` promises ValueError for every invariant violation.
     # A missing / non-mapping metadata object used to escape as KeyError or
     # TypeError from the raw subscript below, which is neither documented nor
