@@ -192,6 +192,7 @@ from .train import (
     false_concentration_sweep,
     gate_depth_ratio,
     gate_stat_correlations,
+    null_mass_gate_test,
     overfit_sanity_check,
     train_model,
     training_curve_verdict,
@@ -8857,6 +8858,12 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
         rec["false_conc_gate_boot"] = fc_gate_boot
     if gate == "null":
         rec["null_mass_error_margin"] = _null_mass_margin(stats)
+        # Within-stream uncertainty companions to the seed-level H1c
+        # contrast: all errors vs all correct, and the false-concentration
+        # subset (the same high-max-prob cut used for the gate margin).
+        rec["null_mass_all_boot"] = null_mass_gate_test(stats)
+        rec["null_mass_false_conc_boot"] = null_mass_gate_test(
+            stats, 0.5)
         # Report the null slot's absolute occupancy too, not only the
         # error-minus-correct margin: a slot that is uniformly open (or
         # uniformly closed) has a near-zero margin but no suppression
@@ -9593,6 +9600,37 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
           "independent two-sample bootstrap CI for gate_on_correct - "
           "gate_on_false_conc lies entirely above 0 - a different "
           "uncertainty from the seed-level margin)")
+
+    # H1c's stream-level companion: the null arm has no gate to bootstrap,
+    # so its null-mass error margin gets the same independent two-sample
+    # treatment as the gated arms' gate margin.  This separates "the
+    # diagnostic stream cannot resolve the two conditional levels" from
+    # "the seed-level effect is absent".
+    null_boot_ok = 0
+    null_boot_n = 0
+    null_fc_boot_ok = 0
+    null_fc_boot_n = 0
+    for r in by_gate["null"]:
+        for key, counter in (("null_mass_all_boot", "all"),
+                             ("null_mass_false_conc_boot", "fc")):
+            boot = r.get(key) or {}
+            if not boot.get("applicable"):
+                continue
+            if counter == "all":
+                null_boot_n += 1
+                null_boot_ok += int(_finite(boot.get("lo"))
+                                    and float(boot["lo"]) > 0.0)
+            else:
+                null_fc_boot_n += 1
+                null_fc_boot_ok += int(_finite(boot.get("lo"))
+                                       and float(boot["lo"]) > 0.0)
+    print(f"[e1] H1c null-slot within-stream check: independent two-sample "
+          f"bootstrap of null_mass(error) - null_mass(correct) on each "
+          f"seed's stats stream.  CI entirely above 0 (all errors): "
+          f"{null_boot_ok}/{null_boot_n} seeds; on the high-maxprob subset: "
+          f"{null_fc_boot_ok}/{null_fc_boot_n} seeds.  The seed-level H1c "
+          f"contrast above remains the decision; this says whether the "
+          f"finite diagnostic stream resolves the margin within a run.")
 
     # Keep the layer axis aligned: the aggregate table above uses a
     # max-over-layers confidence and a mean-over-layers gate, which is not

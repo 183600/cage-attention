@@ -2500,6 +2500,58 @@ def false_concentration_gate_test(stats, maxprob_thresh=0.5,
     return ci
 
 
+@torch.inference_mode()
+def null_mass_gate_test(stats, maxprob_thresh=None, n_boot: int = 10000,
+                        seed: int = 12345):
+    """Within-stream bootstrap for the null slot's error-minus-correct mass.
+
+    H1c is the null arm's mechanism claim: the dedicated null slot should
+    absorb the write more on errors than on correct answers.  The seed-level
+    margin is tested across training seeds by the H1c contrast, but the
+    *finite diagnostic stream* resolves the two conditional levels with its
+    own uncertainty - the same second source of noise that
+    :func:`false_concentration_gate_test` reports for the gated arms.  This
+    companion applies the identical independent two-sample bootstrap to the
+    null mass (error rows minus correct rows), optionally restricting to
+    high-max-prob rows so the false-concentration reading is available too.
+    The error and correct groups are disjoint, so their resampling indices
+    are drawn independently.
+
+    Returns ``{"applicable": False}`` for non-null stats or a degenerate
+    group, otherwise the bootstrap dict plus the contrast label and group
+    sizes.
+    """
+    nm = stats.get("null_mass")
+    if nm is None:
+        return {"applicable": False, "reason": "no null_mass in stats"}
+    mass = nm.mean(dim=1)
+    corr = stats["correct"].bool()
+    if maxprob_thresh is None:
+        err_group, correct_group = mass[~corr], mass[corr]
+        group = "all"
+    else:
+        threshold = float(maxprob_thresh)
+        high = stats["maxprob"].max(dim=1)[0] > threshold
+        err_group = mass[high & ~corr]
+        correct_group = mass[high & corr]
+        group = f"maxprob>{threshold:g}"
+    if not bool(err_group.numel()) or not bool(correct_group.numel()):
+        return {"applicable": False, "group": group,
+                "n_error": int(err_group.numel()),
+                "n_correct": int(correct_group.numel()),
+                "reason": "empty error or correct group"}
+    ci = _two_sample_bootstrap_ci(err_group, correct_group, n_boot=n_boot,
+                                  seed=seed)
+    ci.update({
+        "applicable": True,
+        "contrast": "null_mass_error - null_mass_correct",
+        "group": group,
+        "n_error": int(err_group.numel()),
+        "n_correct": int(correct_group.numel()),
+    })
+    return ci
+
+
 def error_detection_aucs(stats):
     """Imbalance-aware error-detection summary of attention statistics.
 
