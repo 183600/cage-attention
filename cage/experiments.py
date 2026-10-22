@@ -8239,7 +8239,7 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
         tuning_rows.append(rec)
         return rec
 
-    def _pick(rows, key, label):
+    def _pick(rows, key, label, preferred=None):
         pick = _curve_valid_selection_rows(rows)
         eligible = pick["rows"]
         if not eligible:
@@ -8248,7 +8248,13 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                 "n_finite": pick["n_finite"], "n_invalid": pick["n_invalid"],
                 "reason": "no finite validation row",
             }
-        best = max(eligible, key=lambda row: row["val_accuracy_mean"])
+        # Break accuracy ties toward the frozen reference point: an
+        # arbitrary argmax on equal validation accuracy would select a
+        # different recipe for no measured reason and forgo reference-run
+        # reuse.  The controlled point is the conservative choice.
+        best = max(eligible, key=lambda row: (
+            row["val_accuracy_mean"],
+            preferred is not None and row[key] == preferred))
         selection = _selection_reliability(
             eligible, grid=[row[key] for row in eligible])
         selection["pool"] = pick["pool"]
@@ -8277,7 +8283,8 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                     v in CURVE_INVALID_VERDICTS for v in verdicts),
                 "runs": runs,
             })
-        best_lr_row, lr_selection = _pick(lr_rows, "lr", f"{gate}:lr")
+        best_lr_row, lr_selection = _pick(
+            lr_rows, "lr", f"{gate}:lr", preferred=reference_lr)
         fallback = None
         if best_lr_row is None:
             final_lr = reference_lr
@@ -8313,7 +8320,8 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                     "runs": runs,
                 })
             best_tau_row, tau_selection = _pick(
-                tau_rows, "calib_tau_init", "calib:tau")
+                tau_rows, "calib_tau_init", "calib:tau",
+                preferred=default_tau)
             if best_tau_row is None:
                 final_tau = default_tau
                 fallback = ((fallback + "; ") if fallback else "") + \
@@ -10523,7 +10531,7 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
         tuning_rows.append(rec)
         return rec
 
-    def _pick(rows, key, label):
+    def _pick(rows, key, label, preferred=None):
         pick = _curve_valid_selection_rows(rows)
         eligible = pick["rows"]
         if not eligible:
@@ -10532,7 +10540,13 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                 "n_finite": pick["n_finite"], "n_invalid": pick["n_invalid"],
                 "reason": "no finite validation row",
             }
-        best = max(eligible, key=lambda row: row["val_accuracy_mean"])
+        # Break accuracy ties toward the frozen reference point: an
+        # arbitrary argmax on equal validation accuracy would select a
+        # different recipe for no measured reason and forgo reference-run
+        # reuse.  The controlled point is the conservative choice.
+        best = max(eligible, key=lambda row: (
+            row["val_accuracy_mean"],
+            preferred is not None and row[key] == preferred))
         selection = _selection_reliability(
             eligible, grid=[row[key] for row in eligible])
         selection["pool"] = pick["pool"]
@@ -10561,7 +10575,8 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                     v in CURVE_INVALID_VERDICTS for v in verdicts),
                 "runs": runs,
             })
-        best_lr_row, lr_selection = _pick(lr_rows, "lr", f"{gate}:lr")
+        best_lr_row, lr_selection = _pick(
+            lr_rows, "lr", f"{gate}:lr", preferred=reference_lr)
         fallback = None
         if best_lr_row is None:
             final_lr = reference_lr
@@ -10597,7 +10612,8 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                     "runs": runs,
                 })
             best_tau_row, tau_selection = _pick(
-                tau_rows, "calib_tau_init", "calib:tau")
+                tau_rows, "calib_tau_init", "calib:tau",
+                preferred=default_tau)
             if best_tau_row is None:
                 final_tau = default_tau
                 fallback = ((fallback + "; ") if fallback else "") + \
