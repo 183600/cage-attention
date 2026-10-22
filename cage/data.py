@@ -224,6 +224,11 @@ def _group_codes(groups) -> torch.Tensor:
     unhashable ids are rejected rather than silently coerced.
     """
     if isinstance(groups, torch.Tensor):
+        if groups.dim() != 1:
+            raise ValueError(
+                "groups must be one-dimensional (one id per sample), got "
+                f"shape {tuple(groups.shape)}; a 2-D matrix would be "
+                f"flattened into the wrong number of samples")
         g = groups.reshape(-1)
         if g.is_complex():
             raise ValueError("group ids must not be complex")
@@ -440,7 +445,12 @@ def _as_indices(index, n: int) -> torch.Tensor:
     elif isinstance(index, range):
         idx = torch.tensor(list(index), dtype=torch.long)
     else:
-        t = torch.as_tensor(index)
+        try:
+            t = torch.as_tensor(index)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise ValueError(
+                f"split indices must be integers or a boolean mask, got "
+                f"{type(index).__name__}") from exc
         if t.dtype == torch.bool:
             m = t.reshape(-1)
             if int(m.numel()) != n:
@@ -533,11 +543,17 @@ def assert_time_ordered(times, splits) -> None:
     newer than a test sample.
     """
     try:
-        raw = torch.as_tensor(times).reshape(-1)
+        raw = torch.as_tensor(times)
     except (TypeError, ValueError) as exc:
         raise ValueError(
             "time values must be numeric timestamps, got a non-numeric "
             "container") from exc
+    if raw.dim() != 1:
+        raise ValueError(
+            "time values must be one-dimensional (one timestamp per "
+            f"sample), got shape {tuple(raw.shape)}; flattening a matrix "
+            f"would audit the wrong samples")
+    raw = raw.reshape(-1)
     if raw.is_complex() or raw.dtype == torch.bool:
         raise ValueError(
             f"time values must be real numeric timestamps, got dtype "
@@ -654,10 +670,18 @@ def make_batch(batch: int, n_pairs: int, vocab: int, device, dense_lm: bool = Fa
       key_pos    (B,) index of the matching ki
       answer     (B,) correct value token
     """
+    canonical = {}
     for name, value in (("batch", batch), ("n_pairs", n_pairs),
                         ("vocab", vocab)):
-        if isinstance(value, bool) or not isinstance(value, int):
+        if isinstance(value, bool):
             raise ValueError(f"{name} must be an integer, got {value!r}")
+        try:
+            canonical[name] = operator.index(value)
+        except TypeError as exc:
+            raise ValueError(
+                f"{name} must be an integer, got {value!r}") from exc
+    batch, n_pairs, vocab = (canonical["batch"], canonical["n_pairs"],
+                             canonical["vocab"])
     if batch < 0:
         raise ValueError(f"batch must be non-negative, got {batch}")
     check_data_geometry(n_pairs, vocab)
@@ -1451,14 +1475,36 @@ def difficulty_features(idx, answer, n_pairs):
             f"answer has {int(answer.numel())} entries for {int(batch)} "
             f"sequences")
     query = idx[:, -1]
+    # ``meta`` tensors carry no values to read back (they are a shape-only
+    # device), so they skip the value-level checks while preserving
+    # placement.
+    readable = idx.device.type != "meta"
     keys = idx[:, :2 * n_pairs:2]
+    if readable and int(idx.size(0)):
+        # These are the same structural/label invariants the cleaning gate
+        # enforces.  Without them this helper would happily describe a batch
+        # (reserved SEP/PAD ids in content slots, duplicate keys, a misplaced
+        # SEP) that ``validate_batch`` rejects, and could count the SEP slot
+        # as a "later value" of a reserved query token.
+        if not bool((idx[:, :-2] >= 2).all()) \
+                or not bool((idx[:, -1] >= 2).all()):
+            raise ValueError(
+                "ids 0=PAD and 1=SEP are reserved; all key/value positions "
+                "and the query must be selectable ids >= 2")
+        if not bool(idx.eq(SEP_ID).sum(dim=1).eq(1).all()) \
+                or not bool(idx[:, -2].eq(SEP_ID).all()):
+            raise ValueError(
+                "structure: expected exactly one SEP token at the fixed "
+                "separator slot (T-2)")
+        if keys.size(1) > 1:
+            ordered = keys.sort(dim=1).values
+            if not bool((ordered[:, 1:] != ordered[:, :-1]).all()):
+                raise ValueError(
+                    "structure: keys must be distinct within a sequence")
     match = keys.eq(query.unsqueeze(1))
     # A batch with no matching key (or a duplicated key) has no defined
     # retrieval position; ``argmax`` would silently label it as an easy
     # early-key sample.  Refuse it instead, matching the geometry checks.
-    # ``meta`` tensors carry no values to read back (they are a shape-only
-    # device), so they skip the two value checks while preserving placement.
-    readable = idx.device.type != "meta"
     if readable and int(idx.size(0)) and not bool(
             match.sum(dim=1).eq(1).all()):
         raise ValueError(
@@ -2060,6 +2106,14 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
     invalidates the HB3 decision and every number reported above it.
     """
     check_data_geometry(n_pairs, vocab)
+    batch = _positive_audit_count(batch, "batch")
+    batches = _positive_audit_count(batches, "batches")
+    if batch * batches < 2:
+        raise ValueError(
+            "split_leakage_audit needs at least two samples per split to "
+            f"estimate a sampling-noise floor, got batch={batch} x "
+            f"batches={batches}=1; the floor would be NaN and the TV/floor "
+            f"check would silently pass")
     unique = {}
     for seed in train_seeds:
         unique.setdefault(stream_seed_key(seed), int(seed))
