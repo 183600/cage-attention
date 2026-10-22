@@ -10262,7 +10262,15 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         clog.print(f"calib - {label}", "H1d", "gate_margin",
                    _paired_diff(by_gate["calib"], rs, "gate_margin"),
                    warn=warn)
-    for label in ("calib_len_only", "calib_ent_only"):
+    # Only the arm that actually removes the concentration term can test
+    # the mechanism leg ("the association collapses when the entropy term
+    # is removed").  ``calib_ent_only`` keeps the concentration term on and
+    # removes the *length* term, so its |r| is not a leave-one-out
+    # manipulation of the pathway this row measures; routing it through the
+    # same directional H1d decision would attribute a length-term change to
+    # the concentration term.  The complete 2x2 is still read through the
+    # factorial main effect below.
+    for label in ("calib_len_only",):
         rs = ablation_runs[label]
         clog.print(f"calib - {label}", "H1d", "abs_gate_vs_entropy",
                    _paired_diff(by_gate["calib"], rs, "abs_gate_vs_entropy"),
