@@ -6490,6 +6490,22 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
                                  reference=None) -> dict:
     """Measure how cost grows with the E2 sweep length for every arm."""
     lengths = [int(length) for length in lengths]
+    if not lengths:
+        payload = {
+            "experiment": experiment,
+            "lengths": [],
+            "seq_lengths": [],
+            "reference": None if reference is None else str(reference),
+            "comparison": "length_efficiency_companion",
+            "note": ("empty length sweep: no base/longest cost point to "
+                     "measure; companion abstained"),
+            "cells": {},
+            "_provenance": _stamp(settings),
+        }
+        _write_json(out_dir / f"{experiment}_efficiency.json", payload)
+        print(f"[{experiment}] inference cost scaling: empty sweep; no "
+              f"base/longest point to measure")
+        return payload
     runs_by_label = {str(label): runs for label, runs in cells}
     ref_runs = (runs_by_label.get(str(reference))
                 if reference is not None else None)
@@ -11987,6 +12003,10 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
     if not settings.per_variant_tuning:
         return {"available": False,
                 "reason": "disabled by Settings.per_variant_tuning"}
+    if not lengths:
+        return {"available": False,
+                "reason": ("empty length sweep: no endpoint at which to "
+                           "score the tuned recipe")}
     reference_lr = float(reference_lr)
     if not math.isfinite(reference_lr) or reference_lr <= 0.0:
         return {"available": False, "reason": "non-positive reference lr"}

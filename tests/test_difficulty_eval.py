@@ -12,6 +12,8 @@ from __future__ import annotations
 import contextlib
 import io
 import math
+import pathlib
+import tempfile
 import unittest
 
 import torch
@@ -186,6 +188,26 @@ class EmptySweepCompanionTest(unittest.TestCase):
         self.assertEqual(difficulty["contrasts"], {})
         self.assertIsNone(difficulty["reference_length"])
         self.assertEqual(endpoint["rows"], [])
+
+    def test_empty_sweep_cost_and_tuned_companions_abstain(self):
+        from cage.experiments import (
+            Settings,
+            _e2_per_variant_tuning,
+            _length_efficiency_companion,
+        )
+
+        settings = Settings.quick()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            with contextlib.redirect_stdout(io.StringIO()):
+                cost = _length_efficiency_companion(
+                    settings, out, "e2", [], [])
+                tuned = _e2_per_variant_tuning(
+                    settings, out, 1e-3, {}, [])
+        self.assertEqual(cost["lengths"], [])
+        self.assertEqual(cost["cells"], {})
+        self.assertFalse(tuned["available"])
+        self.assertIn("empty length sweep", tuned["reason"])
 
 
 class StandardizedProportionTest(unittest.TestCase):
