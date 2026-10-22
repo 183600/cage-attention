@@ -29,7 +29,7 @@ from dataclasses import asdict
 import torch
 
 from .metrics import _positive_integer
-from .model import Cfg, build, release_eval_scratch
+from .model import Cfg, _query_blocks, build, release_eval_scratch
 
 
 def _as_cfg(cfg) -> Cfg:
@@ -67,16 +67,21 @@ def analytic_matmul_flops(cfg, seq_len: int, batch: int = 1,
     proj = 2 * d * d * t
     mlp = 2 * (d * 4 * d + 4 * d * d) * t
     gate = 2 * d * d * t if cfg.gate in ("query", "calib") else 0
-    # The pinned kernel computes the *full* (B*H, T, T) score matrix and
-    # the full p @ v product before the causal mask is applied; both are
-    # 2*d*t^2 FLOPs.  Counting only the causal half would understate the
-    # actual matmul work by roughly 2x in the attention term.
+    # The pinned kernel iterates the same query blocks as the forward pass
+    # (D3) and computes only the visible key prefix ``i1`` for each block,
+    # so the causal attention matmul work is proportional to the number of
+    # *computed* score entries, ``sum((i1 - i0) * i1)`` - not to the full
+    # ``T * T`` matrix.  Both the q @ k scores and the p @ v product cost
+    # ``2 * d`` FLOPs per computed entry (``h * dk == d_model``).  Counting
+    # the full square would overstate a blocked causal pass by almost 2x
+    # once the query blocking engages.
+    bh = max(1, int(batch)) * int(cfg.n_heads)
+    score_entries = sum((i1 - i0) * i1 for i0, i1 in _query_blocks(bh, t))
+    attention = 4 * d * score_entries
     if cfg.gate == "null":
         # One extra score (q . null_k) and one extra value term per row:
         # 2*d*t each.
-        attention = 2 * d * t * (2 * t + 2)
-    else:
-        attention = 2 * d * t * (2 * t)
+        attention += 4 * d * t
     norm_scale = 2 * (2 * d * d * t) if cfg.norm == "seednorm" else 0
     final_scale = 2 * d * d * head_tokens if cfg.norm == "seednorm" else 0
     per_layer = qkv + proj + mlp + gate + attention + norm_scale
