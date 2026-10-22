@@ -1544,8 +1544,14 @@ def _difficulty_vectors(difficulty):
         totals = [0] * size
         correct = [0] * size
         for sid, row in zip(ids, rows):
-            total = _difficulty_count(row.get("n", 0))
-            hit = _difficulty_count(row.get("correct", 0))
+            if "n" not in row or "correct" not in row:
+                # A partially recorded row cannot be completed by assuming
+                # the missing count is zero: that would silently fabricate a
+                # perfectly failed (or empty) stratum and bias the
+                # standardized rate.
+                return [], []
+            total = _difficulty_count(row["n"])
+            hit = _difficulty_count(row["correct"])
             if total is None or hit is None or hit > total:
                 return [], []
             totals[sid] += total
@@ -1553,8 +1559,10 @@ def _difficulty_vectors(difficulty):
         return totals, correct
     totals, correct = [], []
     for row in rows:
-        total = _difficulty_count(row.get("n", 0))
-        hit = _difficulty_count(row.get("correct", 0))
+        if "n" not in row or "correct" not in row:
+            return [], []
+        total = _difficulty_count(row["n"])
+        hit = _difficulty_count(row["correct"])
         if total is None or hit is None or hit > total:
             return [], []
         totals.append(total)
