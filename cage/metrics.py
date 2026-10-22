@@ -350,9 +350,16 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
                 "threshold": float("nan")}
     # ``frac * n`` can land a few ulps above an exact integer (0.07 * 100 is
     # 7.000000000000001 in IEEE-754), which would make ``ceil`` overcount by
-    # one; snapping the product to 9 decimals restores the documented
-    # ``ceil(frac * n)`` without touching genuinely fractional products.
-    k = int(math.ceil(round(frac * n, 9)))
+    # one.  Snap only a product that is already within rounding distance of
+    # a positive integer; rounding the whole product to 9 decimals first
+    # would turn a genuinely positive sub-5e-10 product into 0 and contradict
+    # the documented ``ceil(frac * n)``.
+    product = frac * n
+    nearest = round(product)
+    if nearest >= 1 and abs(product - nearest) <= 1e-9:
+        k = int(nearest)
+    else:
+        k = int(math.ceil(product))
     if k <= 0:
         return {"frac": 0.0, "k": 0, "recall": float("nan"),
                 "precision": float("nan"), "lift": float("nan"),
@@ -472,7 +479,9 @@ def auc_paired_bootstrap_ci(scores_a, scores_b, positives, n_boot: int = 10000,
     if y is None or sa.numel() != sb.numel() or sa.numel() != y.numel() \
             or sa.numel() == 0 or not bool(torch.isfinite(sa).all()) \
             or not bool(torch.isfinite(sb).all()):
-        return {"mean_diff": float("nan"), "lo": float("nan"), "hi": float("nan")}
+        return {"mean_diff": float("nan"), "lo": float("nan"),
+                "hi": float("nan"),
+                "n": 0 if y is None else int(sa.numel())}
     if not isinstance(metric, str):
         raise ValueError(
             f"metric must be 'roc' or 'pr', got {metric!r}")
@@ -489,7 +498,7 @@ def auc_paired_bootstrap_ci(scores_a, scores_b, positives, n_boot: int = 10000,
         else float("nan")
     if not _bootstrap_args_ok(n_boot, alpha):
         return {"mean_diff": point, "lo": float("nan"),
-                "hi": float("nan")}
+                "hi": float("nan"), "n": int(sa.numel())}
     n_boot = _positive_integer(n_boot)
     gen = torch.Generator(device=sa.device).manual_seed(int(seed))
     diffs = []
@@ -509,7 +518,8 @@ def auc_paired_bootstrap_ci(scores_a, scores_b, positives, n_boot: int = 10000,
         if math.isfinite(da) and math.isfinite(db):
             diffs.append(da - db)
     if not diffs:
-        return {"mean_diff": point, "lo": float("nan"), "hi": float("nan")}
+        return {"mean_diff": point, "lo": float("nan"),
+                "hi": float("nan"), "n": n}
     dt = torch.tensor(diffs, dtype=torch.float64)
     lo = float(torch.quantile(dt, alpha / 2.0))
     hi = float(torch.quantile(dt, 1.0 - alpha / 2.0))
@@ -1114,9 +1124,14 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
     loo = _jackknife_means(d)
     out["loo_mean_min"] = float(loo.min()) if loo.numel() else float("nan")
     out["loo_mean_max"] = float(loo.max()) if loo.numel() else float("nan")
+    # A leave-one-out mean of exactly zero has no direction to flip; only a
+    # strictly opposite sign counts (the same convention as the fold audit's
+    # ``_sign`` helper).  Counting zero would flag a degenerate jackknife
+    # replication as a reversed effect.
     out["loo_sign_flip"] = bool(
         loo.numel() > 0 and out["mean"] != 0.0
-        and bool(((loo > 0.0) != (out["mean"] > 0.0)).any()))
+        and bool((((loo > 0.0) != (out["mean"] > 0.0))
+                  & (loo != 0.0)).any()))
     bca = _bca_bounds(d, means, alpha)
     if bca is None:
         out["lo_bca"] = out["hi_bca"] = float("nan")
@@ -2573,10 +2588,10 @@ def sign_flip_test(diffs, alternative: str = "two-sided",
     if max_exact_int > 20:
         # 2**20 sign assignments is already ≈1M rows; a larger exact
         # threshold would turn a statistics companion into an accidental
-        # denial of service.  Callers that need more units get the
-        # Monte-Carlo fallback.
-        out["reason"] = "max_exact must be <= 20"
-        return out
+        # denial of service.  The documented contract caps the threshold,
+        # so a caller asking for more gets the 20-unit cap (and the
+        # Monte-Carlo fallback above it) instead of an abstention.
+        max_exact_int = 20
     if isinstance(seed, bool) or not isinstance(seed, int):
         out["reason"] = "seed must be a plain integer"
         return out

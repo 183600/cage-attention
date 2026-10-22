@@ -161,6 +161,51 @@ class MetricInputValidationTest(unittest.TestCase):
                 self.assertTrue(math.isnan(out["frac"]))
                 self.assertTrue(math.isnan(out["precision"]))
 
+    def test_tiny_positive_selection_fraction_still_flags_one_row(self):
+        # Rounding the product before ``ceil`` used to turn any genuinely
+        # positive product below 5e-10 into zero, contradicting the
+        # documented ``ceil(frac * n)`` rule.
+        out = metrics.selection_at_fraction(
+            [1.0, 2.0, 3.0], [False, True, True], frac=1e-10)
+        self.assertEqual(out["k"], 1)
+        self.assertAlmostEqual(out["frac"], 1.0 / 3.0)
+        self.assertTrue(math.isfinite(out["precision"]))
+        # The floating-point-noise case the snap exists for still works.
+        exact = metrics.selection_at_fraction(
+            list(range(100)), [1] * 100, frac=0.07)
+        self.assertEqual(exact["k"], 7)
+
+    def test_max_exact_is_capped_not_an_abstention(self):
+        # The docstring says the threshold is capped at 20; a caller asking
+        # for more should still get the exact test for small samples, not a
+        # silently invalid result.
+        result = metrics.sign_flip_test(
+            [1.0, 2.0, 3.0], max_exact=21)
+        self.assertTrue(result["valid"], result["reason"])
+        self.assertEqual(result["method"], "exact")
+        self.assertEqual(result["n_permutations"], 8)
+
+    def test_paired_auc_companions_always_carry_the_item_count(self):
+        for args in (([], [], []),
+                     ([1.0, 2.0], [1.0], [0, 1]),
+                     ([1.0, float("inf")], [1.0, 2.0], [0, 1])):
+            with self.subTest(args=args):
+                out = metrics.auc_paired_bootstrap_ci(*args, n_boot=20)
+                self.assertIn("n", out)
+                self.assertTrue(math.isnan(out["mean_diff"]))
+        # An invalid bootstrap count is still a measurable pair of panels.
+        out = metrics.auc_paired_bootstrap_ci(
+            [1.0, 2.0, 3.0], [3.0, 2.0, 1.0], [0, 1, 1],
+            n_boot=float("nan"))
+        self.assertEqual(out["n"], 3)
+        self.assertTrue(math.isnan(out["lo"]))
+
+    def test_zero_leave_one_out_mean_is_not_a_sign_flip(self):
+        ci = metrics.paired_bootstrap_ci([1.0, -1.0, 2.0], n_boot=200)
+        self.assertGreater(ci["mean"], 0.0)
+        self.assertEqual(ci["loo_mean_min"], 0.0)
+        self.assertFalse(ci["loo_sign_flip"])
+
     def test_malformed_cluster_inputs_abstain(self):
         for successes, totals in ((["not-a-count"], [1]),
                                   ([1], ["not-a-count"]),
