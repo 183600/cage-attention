@@ -5377,14 +5377,18 @@ def _reproducibility_audit(settings: Settings) -> dict:
                  "torch_cpu": float(torch.rand(()))}
         if np is not None:
             draws["numpy"] = float(np.random.random())
-        # Probe CUDA whenever the build exposes it, even for a CPU run:
-        # ``seed_everything`` seeds every CUDA device unconditionally, so
-        # the claim should be measured there too.
+        # Probe every CUDA device whenever the build exposes them, even for
+        # a CPU run: ``seed_everything`` calls ``manual_seed_all``, so
+        # "all devices" is the claim that must be measured rather than
+        # assumed from a single-device draw.
         if torch.cuda.is_available():
-            try:
-                draws["torch_cuda"] = float(torch.rand((), device="cuda"))
-            except Exception:  # noqa: BLE001 - a broken CUDA probe must not
-                pass          # hide the CPU/RNG checks that still ran
+            for index in range(torch.cuda.device_count()):
+                try:
+                    with torch.cuda.device(index):
+                        draws[f"torch_cuda_{index}"] = float(
+                            torch.rand((), device=f"cuda:{index}"))
+                except Exception:  # noqa: BLE001 - a broken device probe must
+                    pass          # not hide the checks that still ran
         return draws
 
     def _draw(s):
