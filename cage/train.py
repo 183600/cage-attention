@@ -904,6 +904,16 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
       seeded" is a measured, per-run fact rather than a static policy
       claim; with ``seed=None`` it records that no re-seeding happened.
     """
+    # Semantic switches must be real booleans: a truthy string such as
+    # ``"False"`` would silently enable label permutation / regularisation
+    # changes / extra logging and change what the run measured.
+    for name, value in (("dense_lm", dense_lm),
+                        ("permute_labels", permute_labels),
+                        ("restore_best", restore_best),
+                        ("disable_regularization", disable_regularization),
+                        ("batch_metrics", batch_metrics)):
+        if not isinstance(value, bool):
+            raise ValueError(f"{name} must be a bool, got {value!r}")
     raw_steps, raw_batch = steps, batch
     steps = _positive_integer(raw_steps)
     batch = _positive_integer(raw_batch)

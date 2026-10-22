@@ -222,6 +222,20 @@ class MetricInputValidationTest(unittest.TestCase):
                 self.assertTrue(out["reason"])
 
 
+class TrainingFlagValidationTest(unittest.TestCase):
+    def test_truthy_non_boolean_training_flags_are_rejected(self):
+        from cage.train import train_model
+
+        for kwargs in ({"dense_lm": "False"},
+                       {"permute_labels": "False"},
+                       {"restore_best": "False"},
+                       {"disable_regularization": 0},
+                       {"batch_metrics": None}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    train_model(None, steps=1, **kwargs)
+
+
 class BootstrapSeedValidationTest(unittest.TestCase):
     def test_fractional_or_boolean_resampling_seeds_are_rejected(self):
         from cage.baselines import probe_vs_chance_test
