@@ -510,11 +510,11 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     # them rather than inferring kernel health from hidden states only.
     if isinstance(meta, dict) and meta.get("query_pos") is not None:
         stat_pos = meta["query_pos"]
+        invalid_attn_stats = []
         try:
             model.eval()
             with torch.inference_mode():
                 _, _, layer_stats = model(idx, stat_pos=stat_pos)
-            invalid_attn_stats = []
             for layer_idx, stat in enumerate(layer_stats or ()):
                 for key, value in stat.items():
                     if not torch.is_tensor(value) or not value.numel():
