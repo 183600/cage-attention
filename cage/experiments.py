@@ -116,6 +116,18 @@ Design principles
     ``H/log T`` is length-stable, and H2g asks whether the trained gate
     actually needs that normalisation rather than merely whether the
     statistic is stable.
+6. **Design preparation before data collection.**  Every grid is written a
+    ``<tag>_design_plan.json`` *before* its first run: the pre-registered
+    SESOI per metric is translated into the largest seed-level SD the
+    planned N can tolerate (and, for accuracy, into the required seed count
+    from the baseline-ladder pilot variance).  An underpowered plan is
+    flagged at preparation time instead of being discovered as an
+    "inconclusive" after the compute is spent.  The runs themselves are
+    scheduled as randomised complete blocks (one block per training seed,
+    every cell once per block, recorded in ``<tag>_run_order.json``), so a
+    slow machine drift cannot be aliased with one treatment arm; the
+    schedule is deterministic from ``Settings.run_order_seed`` and never
+    perturbs the data/dropout RNG streams.
 
 Outputs land in ``results/`` (git-ignored); nothing is written into the
 tracked tree.
@@ -145,6 +157,7 @@ import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from statistics import NormalDist
 
 import torch
 
@@ -1114,6 +1127,20 @@ class Settings:
     # contrast needs before it may support a claim: a 0.2% effect next to a
     # 0.5% seed-level std is not evidence, and a two-seed "win" is noise.
     min_seeds_for_claim: int = 3
+    # Prospective design plan (written before the first grid run): the
+    # two-sided per-test alpha and target power used to translate the
+    # pre-registered SESOI into a sensitivity budget.  These are planning
+    # parameters, not a second decision rule - the FDR-controlled contrasts
+    # still carry the pre-registered readout.
+    design_alpha: float = 0.05
+    power_target: float = 0.8
+    # Run-order randomisation: every seed is a complete block containing all
+    # planned cells once, and the cell order inside each block is a fixed
+    # pseudo-random permutation.  The schedule is deterministic and recorded,
+    # so it is reproducible while ensuring that a time-varying machine state
+    # cannot be aliased with one treatment arm.
+    randomize_run_order: bool = True
+    run_order_seed: int = 20240517
     overfit_steps: int = 300    # HB5 tiny-batch overfit check
     overfit_batch: int = 8
     overfit_lr: float = 3e-3
@@ -1139,6 +1166,28 @@ class Settings:
                 f"fdr_q must be a finite number strictly between 0 and 1, "
                 f"got {raw_q!r}")
         self.fdr_q = q
+        for name in ("design_alpha", "power_target"):
+            raw = getattr(self, name)
+            try:
+                value = float(raw)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    f"{name} must be a finite number strictly between 0 and "
+                    f"1, got {raw!r}") from exc
+            if not (math.isfinite(value) and 0.0 < value < 1.0):
+                raise ValueError(
+                    f"{name} must be a finite number strictly between 0 and "
+                    f"1, got {raw!r}")
+            setattr(self, name, value)
+        if not isinstance(self.randomize_run_order, bool):
+            raise ValueError(
+                f"randomize_run_order must be a bool, got "
+                f"{self.randomize_run_order!r}")
+        if isinstance(self.run_order_seed, bool) or not isinstance(
+                self.run_order_seed, int):
+            raise ValueError(
+                f"run_order_seed must be a plain integer, got "
+                f"{self.run_order_seed!r}")
         floor = _positive_integer(self.min_seeds_for_claim)
         if floor is None:
             raise ValueError(
@@ -1211,6 +1260,162 @@ def _seed_order(seed):
     if isinstance(seed, (int, float)) and not isinstance(seed, bool):
         return (0, float(seed), "")
     return (1, 0.0, str(seed))
+
+
+def _blocked_run_order(cells, seeds, schedule_seed, shuffle=True):
+    """Randomised complete-block schedule for a grid.
+
+    Each training seed is one block: every declared cell is run exactly
+    once inside it.  Running all seeds of one arm consecutively (the
+    historical loop order) aliases the arm with any slow drift of the
+    machine - thermal throttling, a competing process, a driver change -
+    so an apparent treatment effect can be an order effect.  A complete
+    block removes that alias: every arm experiences every block position
+    on average, and the recorded schedule makes the realised order part of
+    the experiment rather than an accident.
+
+    The permutation is deterministic from ``(schedule_seed, block index)``
+    and never touches the global RNG, so reruns reproduce the same order
+    without perturbing data or dropout streams.  ``shuffle=False`` keeps
+    the cell-major order (useful for a controlled legacy replay) but is
+    still returned as explicit ``(cell, seed, block, position)`` rows.
+    """
+    cells = list(cells)
+    seeds = list(seeds)
+    if not cells or not seeds:
+        return []
+    out = []
+    for block, seed in enumerate(seeds):
+        indices = list(range(len(cells)))
+        if shuffle:
+            # ``random.Random`` with an integer seed is local and
+            # deterministic; deriving it from the registered schedule seed
+            # and the block keeps the schedule auditable.
+            key = ((stream_seed_key(schedule_seed) << 20)
+                   ^ (int(block) * 0x9E3779B1) ^ len(cells))
+            random.Random(key).shuffle(indices)
+        for position, index in enumerate(indices):
+            out.append((cells[index], seed, block, position))
+    return out
+
+
+def _run_order_audit(order, cells, seeds, randomized=True):
+    """Check that a schedule is a complete, non-degenerate block design.
+
+    ``complete`` means every block contains every declared cell exactly
+    once; without that the randomisation cannot balance the treatment
+    arms against time.  ``always_first`` / ``always_last`` catch a
+    schedule that is technically complete but systematically puts one arm
+    at an extreme position in every block.  With only a few blocks, a
+    genuinely random schedule can put one arm at an extreme in every block
+    by chance, so the extreme-position warning is only raised when the
+    family-wise probability under random complete blocks
+    (``n_cells * (1/n_cells)**n_blocks``) is below 0.05; a deliberately
+    unshuffled schedule is always flagged.  The audit is stored next to
+    the run records so the realised order can be checked without rerunning
+    the grid.
+    """
+    cells = list(cells)
+    seeds = list(seeds)
+    per_block: dict[int, dict[str, int]] = {}
+    positions: dict[str, list[int]] = {_coverage_cell_key(c): []
+                                       for c in cells}
+    for cell, _seed, block, position in order:
+        key = _coverage_cell_key(cell)
+        per_block.setdefault(int(block), {}).setdefault(key, 0)
+        per_block[int(block)][key] += 1
+        positions.setdefault(key, []).append(int(position))
+    expected = {_coverage_cell_key(c) for c in cells}
+    missing = []
+    duplicated = []
+    for block, counts in sorted(per_block.items()):
+        for key in sorted(expected):
+            if counts.get(key, 0) == 0:
+                missing.append({"block": block, "cell": key})
+            elif counts.get(key, 0) > 1:
+                duplicated.append({"block": block, "cell": key,
+                                   "count": counts[key]})
+    n_cells = len(cells)
+    n_blocks = len(seeds)
+    complete = (bool(cells) and bool(seeds)
+                and set(per_block) == set(range(n_blocks))
+                and not missing and not duplicated)
+    always_first = sorted(
+        key for key, vals in positions.items()
+        if len(vals) == n_blocks and vals and all(v == 0 for v in vals))
+    always_last = sorted(
+        key for key, vals in positions.items()
+        if len(vals) == n_blocks and vals and all(
+            v == n_cells - 1 for v in vals))
+    if n_cells > 1 and n_blocks > 0:
+        extreme_p = min(1.0, n_cells * (1.0 / n_cells) ** n_blocks)
+    else:
+        extreme_p = 1.0
+    # A systematic (unshuffled) schedule is always a real order confound;
+    # a random one is only surprising when the family-wise chance of an
+    # extreme position is below 5%.
+    flag_extremes = (not randomized) or extreme_p < 0.05
+    mean_position = {
+        key: (sum(vals) / len(vals) if vals else float("nan"))
+        for key, vals in sorted(positions.items())}
+    finite_means = [v for v in mean_position.values() if _finite(v)]
+    return {
+        "cells": [_coverage_cell_key(c) for c in cells],
+        "seeds": [int(s) for s in seeds],
+        "n_runs": len(order),
+        "complete": bool(complete),
+        "missing": missing,
+        "duplicated": duplicated,
+        "always_first": always_first,
+        "always_last": always_last,
+        "extreme_p_value": extreme_p,
+        "extreme_flag_threshold": 0.05,
+        "extreme_check_triggered": bool(flag_extremes),
+        "mean_position": mean_position,
+        "mean_position_spread": (
+            max(finite_means) - min(finite_means)
+            if finite_means else float("nan")),
+        "balanced": bool(
+            complete and not (
+                flag_extremes and (always_first or always_last))),
+    }
+
+
+def _write_run_order(settings: Settings, out_dir: pathlib.Path, tag: str,
+                     order, cells, seeds) -> dict:
+    """Persist the realised complete-block schedule before training."""
+    audit = _run_order_audit(
+        order, cells, seeds, randomized=settings.randomize_run_order)
+    payload = {
+        "experiment": tag,
+        "schedule_seed": int(settings.run_order_seed),
+        "randomized": bool(settings.randomize_run_order),
+        "order": [
+            {"cell": _coverage_cell_key(cell), "seed": int(seed),
+             "block": int(block), "position": int(position)}
+            for cell, seed, block, position in order
+        ],
+        **audit,
+        **_stamp(settings),
+    }
+    _write_json(out_dir / f"{tag}_run_order.json", payload)
+    if not audit["complete"]:
+        print(f"[{tag}] WARNING: run-order schedule is not a complete block "
+              f"design: missing={audit['missing']} "
+              f"duplicated={audit['duplicated']}; treatment arms are not "
+              f"balanced against run time")
+    elif audit["extreme_check_triggered"] and (
+            audit["always_first"] or audit["always_last"]):
+        print(f"[{tag}] WARNING: run-order schedule puts "
+              f"{audit['always_first'] or audit['always_last']} at the same "
+              f"extreme position in every block "
+              f"(family-wise chance {audit['extreme_p_value']:.4f})")
+    else:
+        print(f"[{tag}] run order: complete randomised blocks over "
+              f"{len(list(seeds))} seed(s) x {len(list(cells))} cell(s); "
+              f"mean-position spread="
+              f"{audit['mean_position_spread']:.2f}")
+    return payload
 
 
 def _mean_std(values):
@@ -1710,6 +1915,312 @@ def _report_design_coverage(out_dir, tag, runs, design, extract, expected,
               f"and those cell effects are confounded with seed "
               f"availability")
     _write_json(out_dir / f"{tag}_{design}_coverage.json", payload)
+    return payload
+
+
+def _registered_sesoi_metrics(experiment: str) -> list:
+    """Pre-registered numeric SESOIs for one experiment, de-duplicated.
+
+    The planning table is derived from ``HYPOTHESES`` (the same hashed
+    registry that carries the decision rules), not from a second hard-coded
+    list: adding a registered effect automatically adds it to the design
+    plan, and the plan cannot silently drift from the pre-registration.
+    ``mode`` records whether the registered prediction is a superiority /
+    directional test or a null (equivalence / non-inferiority) claim, since
+    the latter needs a different power calculation and must not be read as
+    an underpowered superiority test.
+    """
+    rows: dict[tuple, dict] = {}
+    for hyp_id, spec in HYPOTHESES.items():
+        if (spec.get("experiment") or "") != experiment:
+            continue
+        test_modes = spec.get("sesoi_test") or {}
+        for metric, bound in (spec.get("sesoi") or {}).items():
+            if not _finite(bound) or float(bound) <= 0.0:
+                continue
+            mode = test_modes.get(metric)
+            if mode not in ("equivalence", "noninferior"):
+                mode = "superiority"
+            # Key by mode as well: the same display metric can carry a
+            # directional claim in one hypothesis and a non-inferiority /
+            # equivalence claim in another.  Collapsing them would plan one
+            # of the two with the wrong z.
+            key = (metric, float(bound), str(mode))
+            row = rows.setdefault(key, {
+                "metric": metric,
+                "sesoi": float(bound),
+                "mode": str(mode),
+                "hypotheses": set(),
+            })
+            row["hypotheses"].add(hyp_id)
+    out = []
+    for key in sorted(rows):
+        row = rows[key]
+        row["hypotheses"] = sorted(row["hypotheses"])
+        out.append(row)
+    return out
+
+
+def _pilot_accuracy_sd(verdict) -> tuple[float, str | None]:
+    """Seed-level accuracy SD from the baseline pilot (largest rung).
+
+    The power of every accuracy contrast depends on the between-seed
+    spread, which is unknown before the grid.  The baseline depth ladder
+    already trains standard transformers at several depths on the same
+    sealed stream, so its per-rung seed spread is an empirical, pre-grid
+    pilot.  The **largest** rung SD is used deliberately: an optimistic
+    pilot would certify an underpowered design, while the conservative
+    maximum only asks for more seeds than strictly needed.
+
+    Returns ``(nan, None)`` when the verdict carries no usable pilot;
+    callers then report a ``no_pilot`` status instead of inventing a
+    variance.
+    """
+    if not isinstance(verdict, dict):
+        return float("nan"), None
+    candidates: list[tuple[float, str]] = []
+    ladder = verdict.get("depth_ladder") or {}
+    for depth, row in (ladder.get("by_depth") or {}).items():
+        if not isinstance(row, dict) or row.get("unmeasured"):
+            continue
+        values = [float(v) for v in
+                  (row.get("accuracy_by_seed") or {}).values()
+                  if _finite(v)]
+        if len(values) >= 2:
+            mean = sum(values) / len(values)
+            sd = math.sqrt(sum((v - mean) ** 2 for v in values)
+                           / (len(values) - 1))
+            candidates.append((sd, f"depth_ladder.d{depth}"))
+            continue
+        sd = row.get("accuracy_std")
+        if _finite(sd) and float(sd) >= 0.0:
+            candidates.append((float(sd), f"depth_ladder.d{depth}.std"))
+    shallow = verdict.get("shallow_none") or {}
+    shallow_values = [float(v) for v in
+                      (shallow.get("accuracy_by_seed") or {}).values()
+                      if _finite(v)]
+    if len(shallow_values) >= 2:
+        mean = sum(shallow_values) / len(shallow_values)
+        sd = math.sqrt(sum((v - mean) ** 2 for v in shallow_values)
+                       / (len(shallow_values) - 1))
+        candidates.append((sd, "shallow_none"))
+    elif _finite(shallow.get("accuracy_std")):
+        candidates.append((float(shallow["accuracy_std"]),
+                           "shallow_none.std"))
+    if not candidates:
+        return float("nan"), None
+    sd, source = max(candidates, key=lambda item: item[0])
+    return float(sd), source
+
+
+def _power_z(mode: str, alpha: float, power: float) -> float:
+    """Multiplier ``z`` in ``n = (z * sd / bound)**2`` for a test mode.
+
+    * ``superiority``: two-sided difference test at ``alpha``;
+    * ``noninferior``: one-sided non-inferiority test at ``alpha``;
+    * ``equivalence``: two one-sided tests (TOST) at ``alpha`` each, with
+      the target power evaluated at a true difference of zero.
+
+    The non-inferiority/equivalence modes exist because several registered
+    accuracy claims are null/reverse checks, not superiority claims: planning
+    them with the two-sided superiority formula would overstate their power.
+    """
+    nd = NormalDist()
+    alpha = float(alpha)
+    power = float(power)
+    if mode == "equivalence":
+        return nd.inv_cdf(1.0 - alpha) + nd.inv_cdf((1.0 + power) / 2.0)
+    if mode == "noninferior":
+        return nd.inv_cdf(1.0 - alpha) + nd.inv_cdf(power)
+    return nd.inv_cdf(1.0 - alpha / 2.0) + nd.inv_cdf(power)
+
+
+def _required_seeds(mode: str, sd, bound, alpha: float, power: float):
+    """Normal-approximation seed count for one registered test mode."""
+    if not (_finite(sd) and _finite(bound) and float(sd) > 0.0
+            and float(bound) > 0.0):
+        return None
+    z = _power_z(mode, alpha, power)
+    return float((z * float(sd) / float(bound)) ** 2)
+
+
+def _power_at_effect(mode: str, effect, sd, n: int, alpha: float,
+                     bound=None) -> float:
+    """Normal power at ``effect`` under the registered test mode.
+
+    ``effect`` is the true difference used for the calculation.  For
+    non-inferiority/equivalence rows the conservative planning point is a
+    true difference of zero; for superiority rows it is the SESOI.  The
+    null/reverse modes need the SESOI as their comparison ``bound``:
+    non-inferiority rejects when the lower confidence limit clears
+    ``-bound`` and TOST when the whole interval lies inside ``+-bound``.
+    """
+    needed = [_finite(effect), _finite(sd), _finite(alpha)]
+    if mode in ("equivalence", "noninferior"):
+        needed.append(_finite(bound))
+    if not (all(needed) and float(sd) > 0.0 and int(n) > 0
+            and 0.0 < float(alpha) < 1.0):
+        return float("nan")
+    se = float(sd) / math.sqrt(int(n))
+    if se <= 0.0:
+        return float("nan")
+    nd = NormalDist()
+    alpha = float(alpha)
+    cutoff = nd.inv_cdf(1.0 - alpha)
+    if mode == "equivalence":
+        upper = (float(bound) - float(effect)) / se
+        lower = (-float(bound) - float(effect)) / se
+        power = nd.cdf(upper - cutoff) - nd.cdf(lower + cutoff)
+    elif mode == "noninferior":
+        power = nd.cdf((float(bound) + float(effect)) / se - cutoff)
+    else:
+        cutoff = nd.inv_cdf(1.0 - alpha / 2.0)
+        shifted = float(effect) / se
+        power = 1.0 - nd.cdf(cutoff - shifted) + nd.cdf(-cutoff - shifted)
+    return min(1.0, max(0.0, float(power)))
+
+
+def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
+                             tag: str) -> dict:
+    """Write the prospective sensitivity budget before the grid trains.
+
+    The project already reports a *post-hoc* MDE80 next to every contrast.
+    That is too late to change the design: if the planned seed count cannot
+    resolve the pre-registered SESOI, the grid spends compute to produce an
+    "inconclusive" that could have been predicted.  This plan translates
+    each registered SESOI into the largest seed-level SD the design can
+    tolerate at the configured alpha/power and, where an empirical pilot
+    exists (accuracy from the baseline ladder), into the required seed
+    count and the power at the planned N.  The artifact is written before
+    the first grid run, so it is part of the preparation record rather than
+    a rationalisation after the fact.
+
+    It does **not** change the pre-registered decision rule: an
+    underpowered plan is a warning that a null read is uninformative, not a
+    licence to drop the contrast.
+    """
+    n = len(settings.seeds)
+    alpha = float(settings.design_alpha)
+    target = float(settings.power_target)
+    pilot_sd, pilot_source = _pilot_accuracy_sd(verdict)
+    rows = []
+    for item in _registered_sesoi_metrics(tag):
+        metric = item["metric"]
+        bound = float(item["sesoi"])
+        mode = item["mode"]
+        z = _power_z(mode, alpha, target)
+        max_sd = (bound * math.sqrt(max(n, 1)) / z
+                  if _finite(z) and z > 0.0 else float("nan"))
+        row = {
+            "metric": metric,
+            "sesoi": bound,
+            "mode": mode,
+            "hypotheses": item["hypotheses"],
+            "z_for_mode": z,
+            "max_sd_for_power": max_sd,
+        }
+        # The pilot is an accuracy-scale quantity; applying it to a metric
+        # with different units would be a fabricated variance.
+        sd = pilot_sd if "accuracy" in metric else float("nan")
+        source = pilot_source if "accuracy" in metric else None
+        row["pilot_sd"] = float(sd)
+        row["pilot_source"] = source
+        if not _finite(sd):
+            row.update({"required_seeds": None, "power_at_planned": None,
+                        "powered": None, "status": "no_pilot"})
+        elif float(sd) <= 0.0:
+            row.update({"required_seeds": None, "power_at_planned": None,
+                        "powered": None,
+                        "status": "pilot_degenerate"})
+        else:
+            required = _required_seeds(mode, sd, bound, alpha, target)
+            if _finite(required):
+                required = int(math.ceil(required))
+            else:
+                required = None
+            # The conservative planning point for a directional test is the
+            # SESOI itself; for a null/reverse check it is a true
+            # difference of zero.
+            true_effect = 0.0 if mode in ("equivalence", "noninferior") \
+                else bound
+            power_at = _power_at_effect(
+                mode, true_effect, sd, n, alpha, bound=bound)
+            powered = None if required is None else bool(required <= n)
+            row.update({
+                "required_seeds": required,
+                "power_at_planned": power_at,
+                "powered": powered,
+                "status": ("powered" if powered
+                           else "underpowered" if powered is False
+                           else "unpowerable"),
+            })
+        rows.append(row)
+    accuracy_rows = [r for r in rows if "accuracy" in r["metric"]
+                     and r["status"] in ("powered", "underpowered")]
+    underpowered = sorted({r["metric"] for r in accuracy_rows
+                           if r["status"] == "underpowered"})
+    if not accuracy_rows:
+        all_powered = None
+    else:
+        all_powered = not underpowered
+    payload = {
+        "experiment": tag,
+        "planned_n": n,
+        "planned_seeds": [int(s) for s in settings.seeds],
+        "alpha": alpha,
+        "power_target": target,
+        "pilot_accuracy_sd": float(pilot_sd),
+        "pilot_accuracy_source": pilot_source,
+        "max_sd_formula": (
+            "SESOI * sqrt(planned_n) / z(mode, alpha, power); "
+            "z is two-sided for superiority, one-sided for noninferiority, "
+            "and TOST for equivalence"),
+        "rows": rows,
+        "accuracy_underpowered": underpowered,
+        "all_accuracy_plans_powered": all_powered,
+        "note": (
+            "Prospective sensitivity budget from the pre-registered SESOIs "
+            "and the baseline-ladder pilot variance. A metric with no "
+            "pilot (non-accuracy mechanism readout) reports only the "
+            "largest SD the planned N can tolerate; it is not certified. "
+            "An underpowered row means a null result is uninformative at "
+            "this N, not that the effect is absent."),
+        "hypotheses_sha256": _hypotheses_sha(),
+        **_stamp(settings),
+    }
+    _write_json(out_dir / f"{tag}_design_plan.json", payload)
+    print(f"\n[{tag}] prospective sensitivity plan (written before the grid; "
+          f"alpha={alpha:g} per registered test mode, power={target:g}, "
+          f"n={n} seeds)")
+    if _finite(pilot_sd):
+        print(f"  accuracy pilot SD={pilot_sd:.4f} "
+              f"({pilot_source}); the largest rung SD is used so the plan "
+              f"cannot certify an underpowered design from a lucky rung")
+    else:
+        print("  accuracy pilot unavailable: the design plan reports the "
+              "tolerable SD but cannot certify power; run `--only "
+              "baselines` first")
+    print(f"  {'metric':>34} {'mode':>12} {'SESOI':>8} {'maxSD':>8} "
+          f"{'pilotSD':>8} {'need_n':>7} {'power':>7} {'status':>16}")
+    for row in rows:
+        required = row["required_seeds"]
+        need = "-" if required is None else str(required)
+        power = row["power_at_planned"]
+        power_s = f"{power:.2f}" if _finite(power) else "-"
+        pilot_s = (f"{row['pilot_sd']:.3f}"
+                   if _finite(row["pilot_sd"]) else "-")
+        print(f"  {row['metric']:>34} {row['mode']:>12} "
+              f"{row['sesoi']:>8.4g} "
+              f"{row['max_sd_for_power']:>8.4g} {pilot_s:>8} "
+              f"{need:>7} {power_s:>7} {row['status']:>16}")
+    if underpowered:
+        print(f"  WARNING: planned n={n} is below the pilot-based "
+              f"requirement for {', '.join(underpowered)}: add seeds or "
+              f"pre-register a larger SESOI before claiming a null; the "
+              f"grid still runs under the pre-registered rule")
+    elif accuracy_rows:
+        print("  accuracy contrasts: the planned seed count clears the "
+              "pilot-based requirement at the registered SESOI")
     return payload
 
 
@@ -9611,42 +10122,61 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     # the marks are stamped into every record via _run_context).
     verdict = _enforce_baseline_verdict(settings, out_dir, "e1")
     _write_manifest(settings, out_dir, "e1")
+    _design_sensitivity_plan(settings, verdict, out_dir, "e1")
     _audit_data_splits(settings, out_dir, "e1", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e1")
     _enforce_overfit_gate(settings, out_dir, "e1")
     lr = _resolve_lr(settings, out_dir, "e1")
     runs = []
     examples = {}
-    for gate in GATES:
-        for seed in settings.seeds:
-            # The full calib cell is labelled too, so the audit can see that
-            # the ablation contrasts vary exactly the calibration-term flag.
-            extra = {"calib_variant": "full"} if gate == "calib" else {}
-            rec, errors = _e1_run(settings, seed, lr, gate, extra)
-            if gate not in examples or \
-                    errors["summary"]["n_errors"] > examples[gate][0]:
-                ranked = sorted(errors["cases"],
-                                key=lambda c: -float(c["confidence"]))
-                examples[gate] = (errors["summary"]["n_errors"], ranked[:3])
-            for case in errors["cases"]:
-                _write_result(out_dir / "e1_error_cases.jsonl",
-                              {"experiment": "e1", **_stamp(settings),
-                               "gate": gate, "seed": seed,
-                               "lr": lr, **case})
-            _write_result(out_dir / "e1_runs.jsonl", rec)
-            runs.append(rec)
+    main_cells = tuple(GATES)
+    main_order = _blocked_run_order(
+        main_cells, settings.seeds, settings.run_order_seed,
+        shuffle=settings.randomize_run_order)
+    _write_run_order(settings, out_dir, "e1", main_order, main_cells,
+                     settings.seeds)
+    for gate, seed, block, position in main_order:
+        # The full calib cell is labelled too, so the audit can see that
+        # the ablation contrasts vary exactly the calibration-term flag.
+        extra = {"calib_variant": "full"} if gate == "calib" else {}
+        extra.update({"run_block": block, "run_position": position})
+        rec, errors = _e1_run(settings, seed, lr, gate, extra)
+        if gate not in examples or \
+                errors["summary"]["n_errors"] > examples[gate][0]:
+            ranked = sorted(errors["cases"],
+                            key=lambda c: -float(c["confidence"]))
+            examples[gate] = (errors["summary"]["n_errors"], ranked[:3])
+        for case in errors["cases"]:
+            _write_result(out_dir / "e1_error_cases.jsonl",
+                          {"experiment": "e1", **_stamp(settings),
+                           "gate": gate, "seed": seed,
+                           "lr": lr, **case})
+        _write_result(out_dir / "e1_runs.jsonl", rec)
+        runs.append(rec)
     ablation_runs = {}
-    for label, overrides in _E1_CALIB_ABLATION + _E1_CALIB_PLACEBO:
-        for seed in settings.seeds:
-            rec, errors = _e1_run(settings, seed, lr, "calib",
-                                  {"calib_variant": label}, **overrides)
-            for case in errors["cases"]:
-                _write_result(out_dir / "e1_error_cases.jsonl",
-                              {"experiment": "e1", **_stamp(settings),
-                               "gate": "calib", "ablation": label,
-                               "seed": seed, "lr": lr, **case})
-            _write_result(out_dir / "e1_runs.jsonl", rec)
-            ablation_runs.setdefault(label, []).append(rec)
+    ablation_cells = tuple(
+        label for label, _ in _E1_CALIB_ABLATION + _E1_CALIB_PLACEBO)
+    ablation_overrides = {
+        label: overrides
+        for label, overrides in _E1_CALIB_ABLATION + _E1_CALIB_PLACEBO}
+    ablation_order = _blocked_run_order(
+        ablation_cells, settings.seeds, settings.run_order_seed,
+        shuffle=settings.randomize_run_order)
+    _write_run_order(settings, out_dir, "e1_ablation", ablation_order,
+                     ablation_cells, settings.seeds)
+    for label, seed, block, position in ablation_order:
+        rec, errors = _e1_run(
+            settings, seed, lr, "calib",
+            {"calib_variant": label, "run_block": block,
+             "run_position": position},
+            **ablation_overrides[label])
+        for case in errors["cases"]:
+            _write_result(out_dir / "e1_error_cases.jsonl",
+                          {"experiment": "e1", **_stamp(settings),
+                           "gate": "calib", "ablation": label,
+                           "seed": seed, "lr": lr, **case})
+        _write_result(out_dir / "e1_runs.jsonl", rec)
+        ablation_runs.setdefault(label, []).append(rec)
     by_gate = {g: [r for r in runs if r["gate"] == g] for g in GATES}
     table = {g: _aggregate_runs(rs) for g, rs in by_gate.items()}
     ablation_coverage = _report_ablation_coverage(
@@ -11613,6 +12143,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     # HB1/HB3/HB4/HB5 hard gate (see run_e1).
     verdict = _enforce_baseline_verdict(settings, out_dir, "e2")
     _write_manifest(settings, out_dir, "e2")
+    _design_sensitivity_plan(settings, verdict, out_dir, "e2")
     _audit_data_splits(settings, out_dir, "e2", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e2")
     _enforce_overfit_gate(settings, out_dir, "e2")
@@ -11648,156 +12179,167 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     eval_seed, stats_seed = TEST_SEED, STATS_SEED
     runs = []
     examples = {}
-    for label, gate, record_extra, model_overrides in _E2_VARIANTS:
-        for seed in settings.seeds:
-            model, params, base_metrics, curve, model_cfg = _train_and_eval(
-                settings, seed, lr, eval_seed=eval_seed, gate=gate,
-                **model_overrides)
-            rec = {"experiment": "e2",
-                   "hypotheses": ["H2a", "H2b", "H2c", "H2d", "H2e", "H2f",
-                                   "H2g"],
-                   "gate": gate, "variant": label, "seed": seed, "lr": lr,
-                   "eval_seed": eval_seed, "stats_seed": stats_seed,
-                   "params": params, "model_cfg": model_cfg,
-                   "eval_n": int(base_metrics["n"]),
-                   **{k: v for k, v in base_metrics.items() if k != "n"},
-                   "metrics_by_length": {},
-                   "accuracy_by_length": {}, "eval_n_by_length": {},
-                   "balanced_accuracy_by_length": {},
-                   "f1_macro_by_length": {}, "f1_weighted_by_length": {},
-                   "entropy_by_length": {}, "entropy_norm_by_length": {},
-                   "maxprob_by_length": {}, "gate_by_length": {},
-                   "gate_vs_entropy_by_length": {},
-                   "gate_vs_maxprob_by_length": {},
-                   "difficulty_standardized_accuracy_by_length": {},
-                   "difficulty_standardized_coverage_by_length": {},
-                   "difficulty_standardized_effective_n_by_length": {},
-                   "difficulty_standardized_min_stratum_n_by_length": {},
-                   "difficulty_mix_tv_by_length": {},
-                   **_run_context(settings),
-                   **record_extra,
-                   **_training_record(settings, lr),
-                   **curve}
-            errors = None
-            for length in lengths:
-                metrics = (base_metrics if length == settings.n_pairs else
-                           eval_metrics(model, length, settings.vocab,
-                                        settings.device,
-                                        batch=settings.eval_batch,
-                                        batches=settings.eval_batches,
-                                        seed=eval_seed))
-                want_errors = length == lengths[-1]
-                # Only the last length also collects the error-mining
-                # record.
-                stats, last_errors = collect_stats_and_errors(
-                    model, length, settings.vocab, settings.device,
-                    batch=settings.stats_batch,
-                    batches=settings.stats_batches, seed=stats_seed,
-                    max_cases=(settings.max_error_cases if want_errors
-                               else None))
-                if want_errors:
-                    errors = last_errors
-                rec["accuracy_by_length"][length] = metrics["accuracy"]
-                rec["balanced_accuracy_by_length"][length] = (
-                    metrics["recall_macro"])
-                rec["f1_macro_by_length"][length] = metrics["f1_macro"]
-                rec["f1_weighted_by_length"][length] = (
-                    metrics["f1_weighted"])
-                rec["eval_n_by_length"][length] = int(metrics["n"])
-                rec["metrics_by_length"][length] = {
-                    k: v for k, v in metrics.items() if k != "n"}
-                rec["entropy_by_length"][length] = float(stats["entropy"].mean())
-                rec["entropy_norm_by_length"][length] = (
-                    rec["entropy_by_length"][length]
-                    / math.log(max(2 * length + 2, 2)))
-                rec["maxprob_by_length"][length] = float(stats["maxprob"].mean())
-                if stats.get("gate") is not None:
-                    rec["gate_by_length"][length] = float(stats["gate"].mean())
-                # The gate hypothesis is about tracking the attention
-                # distribution, not only about mean entropy drift.  Reuse
-                # the statistics already collected at this length (no new
-                # runs) to ask whether the within-layer association is
-                # present and stable across the sweep, exactly as E1 reads
-                # it at the training length.
-                corr_by_len = gate_stat_correlations(stats)
-                if corr_by_len:
-                    rec["gate_vs_entropy_by_length"][length] = (
-                        corr_by_len.get("gate_vs_entropy", float("nan")))
-                    rec["gate_vs_maxprob_by_length"][length] = (
-                        corr_by_len.get("gate_vs_maxprob", float("nan")))
-            # Difficulty-composition control.  A length sweep is not a pure
-            # length manipulation: more pairs per sequence also raise the
-            # chance that the answer value repeats and that the query token
-            # appears later as a value, so raw accuracy at a longer length
-            # mixes the length effect with a harder data mix.  Re-weight
-            # every length's per-stratum accuracy to the *base-length*
-            # stratum mix (post-stratification on a pre-treatment
-            # covariate).  This is an exploratory robustness companion;
-            # the pre-registered H2 decision rows remain the raw readouts.
-            _stamp_difficulty_standardization(
-                rec, settings.n_pairs, lengths)
-            # Mechanism manipulation check for H2b (no new run/grid point):
-            # the trained length and concentration coefficients say whether
-            # the gate actually implements the explicit log-T / entropy
-            # correction the hypothesis names.
-            coefficients = _calibration_coefficients(model)
-            rec["calib_coefficients"] = coefficients
-            rec["concentration_signal"] = coefficients.get(
-                "concentration_signal")
-            # Top-level scalar coefficients: H2f is a one-sample contrast
-            # across training seeds, so the per-run values have to be
-            # readable by ``_one_sample_contrast`` (the nested per-layer
-            # table stays for the manipulation breakdown).
-            for coeff_key in ("a_mean", "c_mean", "c_effective_mean",
-                              "scale_mean", "tau_effective_mean"):
-                value = coefficients.get(coeff_key)
-                if _finite(value):
-                    rec[coeff_key] = float(value)
-            base_acc = rec["accuracy_by_length"][settings.n_pairs]
-            long_acc = rec["accuracy_by_length"][lengths[-1]]
-            rec["accuracy_at_base"] = base_acc
-            rec["accuracy_at_longest"] = long_acc
-            rec["accuracy_drop"] = base_acc - long_acc
-            # Degradation *shape*, not only the endpoint: fit accuracy on
-            # log(T) across the measured sweep.  A mid-sweep reversal can
-            # leave the base-to-longest drop unchanged while contradicting
-            # "degrades more slowly"; this readout uses data already
-            # collected, no extra grid point.
-            rec["accuracy_slope_log_len"] = _linear_slope(
-                [math.log(max(2 * L + 2, 2)) for L in lengths],
-                [rec["accuracy_by_length"][L] for L in lengths])
-            base_bal = rec["balanced_accuracy_by_length"][settings.n_pairs]
-            long_bal = rec["balanced_accuracy_by_length"][lengths[-1]]
-            rec["balanced_accuracy_at_base"] = base_bal
-            rec["balanced_accuracy_at_longest"] = long_bal
-            rec["balanced_accuracy_drop"] = base_bal - long_bal
-            rec["rule_ceiling_by_length"] = {
-                L: rule_ceiling_by_length[L]["accuracy"] for L in lengths}
-            rec["rule_unique_key_rate_by_length"] = {
-                L: rule_ceiling_by_length[L]["unique_key_rate"]
-                for L in lengths}
-            rec["ceiling_gap_by_length"] = {
-                L: rule_ceiling_by_length[L]["accuracy"]
-                - rec["accuracy_by_length"][L] for L in lengths}
-            rec["ceiling_gap_at_longest"] = rec["ceiling_gap_by_length"][lengths[-1]]
-            rec["entropy_drift"] = (rec["entropy_by_length"][lengths[-1]]
-                                    - rec["entropy_by_length"][settings.n_pairs])
-            rec["entropy_norm_drift"] = (
-                rec["entropy_norm_by_length"][lengths[-1]]
-                - rec["entropy_norm_by_length"][settings.n_pairs])
-            rec.update({f"err_{k}": v for k, v in errors["summary"].items()})
-            for case in errors["cases"]:
-                _write_result(out_dir / "e2_error_cases.jsonl",
-                              {"experiment": "e2", **_stamp(settings),
-                               "gate": gate, "variant": label, "seed": seed,
-                               "length": lengths[-1], "lr": lr, **case})
-            if label not in examples or \
-                    errors["summary"]["n_errors"] > examples[label][0]:
-                ranked = sorted(errors["cases"],
-                                key=lambda c: -float(c["confidence"]))
-                examples[label] = (errors["summary"]["n_errors"], ranked[:3])
-            _write_result(out_dir / "e2_runs.jsonl", rec)
-            runs.append(rec)
+    cells = tuple(label for label, *_ in _E2_VARIANTS)
+    by_label = {label: (label, gate, record_extra, model_overrides)
+                for label, gate, record_extra, model_overrides
+                in _E2_VARIANTS}
+    order = _blocked_run_order(
+        cells, settings.seeds, settings.run_order_seed,
+        shuffle=settings.randomize_run_order)
+    _write_run_order(settings, out_dir, "e2", order, cells,
+                     settings.seeds)
+    for label, seed, block, position in order:
+        label, gate, record_extra, model_overrides = by_label[label]
+        record_extra = {**record_extra, "run_block": block,
+                        "run_position": position}
+        model, params, base_metrics, curve, model_cfg = _train_and_eval(
+            settings, seed, lr, eval_seed=eval_seed, gate=gate,
+            **model_overrides)
+        rec = {"experiment": "e2",
+               "hypotheses": ["H2a", "H2b", "H2c", "H2d", "H2e", "H2f",
+                               "H2g"],
+               "gate": gate, "variant": label, "seed": seed, "lr": lr,
+               "eval_seed": eval_seed, "stats_seed": stats_seed,
+               "params": params, "model_cfg": model_cfg,
+               "eval_n": int(base_metrics["n"]),
+               **{k: v for k, v in base_metrics.items() if k != "n"},
+               "metrics_by_length": {},
+               "accuracy_by_length": {}, "eval_n_by_length": {},
+               "balanced_accuracy_by_length": {},
+               "f1_macro_by_length": {}, "f1_weighted_by_length": {},
+               "entropy_by_length": {}, "entropy_norm_by_length": {},
+               "maxprob_by_length": {}, "gate_by_length": {},
+               "gate_vs_entropy_by_length": {},
+               "gate_vs_maxprob_by_length": {},
+               "difficulty_standardized_accuracy_by_length": {},
+               "difficulty_standardized_coverage_by_length": {},
+               "difficulty_standardized_effective_n_by_length": {},
+               "difficulty_standardized_min_stratum_n_by_length": {},
+               "difficulty_mix_tv_by_length": {},
+               **_run_context(settings),
+               **record_extra,
+               **_training_record(settings, lr),
+               **curve}
+        errors = None
+        for length in lengths:
+            metrics = (base_metrics if length == settings.n_pairs else
+                       eval_metrics(model, length, settings.vocab,
+                                    settings.device,
+                                    batch=settings.eval_batch,
+                                    batches=settings.eval_batches,
+                                    seed=eval_seed))
+            want_errors = length == lengths[-1]
+            # Only the last length also collects the error-mining
+            # record.
+            stats, last_errors = collect_stats_and_errors(
+                model, length, settings.vocab, settings.device,
+                batch=settings.stats_batch,
+                batches=settings.stats_batches, seed=stats_seed,
+                max_cases=(settings.max_error_cases if want_errors
+                           else None))
+            if want_errors:
+                errors = last_errors
+            rec["accuracy_by_length"][length] = metrics["accuracy"]
+            rec["balanced_accuracy_by_length"][length] = (
+                metrics["recall_macro"])
+            rec["f1_macro_by_length"][length] = metrics["f1_macro"]
+            rec["f1_weighted_by_length"][length] = (
+                metrics["f1_weighted"])
+            rec["eval_n_by_length"][length] = int(metrics["n"])
+            rec["metrics_by_length"][length] = {
+                k: v for k, v in metrics.items() if k != "n"}
+            rec["entropy_by_length"][length] = float(stats["entropy"].mean())
+            rec["entropy_norm_by_length"][length] = (
+                rec["entropy_by_length"][length]
+                / math.log(max(2 * length + 2, 2)))
+            rec["maxprob_by_length"][length] = float(stats["maxprob"].mean())
+            if stats.get("gate") is not None:
+                rec["gate_by_length"][length] = float(stats["gate"].mean())
+            # The gate hypothesis is about tracking the attention
+            # distribution, not only about mean entropy drift.  Reuse
+            # the statistics already collected at this length (no new
+            # runs) to ask whether the within-layer association is
+            # present and stable across the sweep, exactly as E1 reads
+            # it at the training length.
+            corr_by_len = gate_stat_correlations(stats)
+            if corr_by_len:
+                rec["gate_vs_entropy_by_length"][length] = (
+                    corr_by_len.get("gate_vs_entropy", float("nan")))
+                rec["gate_vs_maxprob_by_length"][length] = (
+                    corr_by_len.get("gate_vs_maxprob", float("nan")))
+        # Difficulty-composition control.  A length sweep is not a pure
+        # length manipulation: more pairs per sequence also raise the
+        # chance that the answer value repeats and that the query token
+        # appears later as a value, so raw accuracy at a longer length
+        # mixes the length effect with a harder data mix.  Re-weight
+        # every length's per-stratum accuracy to the *base-length*
+        # stratum mix (post-stratification on a pre-treatment
+        # covariate).  This is an exploratory robustness companion;
+        # the pre-registered H2 decision rows remain the raw readouts.
+        _stamp_difficulty_standardization(
+            rec, settings.n_pairs, lengths)
+        # Mechanism manipulation check for H2b (no new run/grid point):
+        # the trained length and concentration coefficients say whether
+        # the gate actually implements the explicit log-T / entropy
+        # correction the hypothesis names.
+        coefficients = _calibration_coefficients(model)
+        rec["calib_coefficients"] = coefficients
+        rec["concentration_signal"] = coefficients.get(
+            "concentration_signal")
+        # Top-level scalar coefficients: H2f is a one-sample contrast
+        # across training seeds, so the per-run values have to be
+        # readable by ``_one_sample_contrast`` (the nested per-layer
+        # table stays for the manipulation breakdown).
+        for coeff_key in ("a_mean", "c_mean", "c_effective_mean",
+                          "scale_mean", "tau_effective_mean"):
+            value = coefficients.get(coeff_key)
+            if _finite(value):
+                rec[coeff_key] = float(value)
+        base_acc = rec["accuracy_by_length"][settings.n_pairs]
+        long_acc = rec["accuracy_by_length"][lengths[-1]]
+        rec["accuracy_at_base"] = base_acc
+        rec["accuracy_at_longest"] = long_acc
+        rec["accuracy_drop"] = base_acc - long_acc
+        # Degradation *shape*, not only the endpoint: fit accuracy on
+        # log(T) across the measured sweep.  A mid-sweep reversal can
+        # leave the base-to-longest drop unchanged while contradicting
+        # "degrades more slowly"; this readout uses data already
+        # collected, no extra grid point.
+        rec["accuracy_slope_log_len"] = _linear_slope(
+            [math.log(max(2 * L + 2, 2)) for L in lengths],
+            [rec["accuracy_by_length"][L] for L in lengths])
+        base_bal = rec["balanced_accuracy_by_length"][settings.n_pairs]
+        long_bal = rec["balanced_accuracy_by_length"][lengths[-1]]
+        rec["balanced_accuracy_at_base"] = base_bal
+        rec["balanced_accuracy_at_longest"] = long_bal
+        rec["balanced_accuracy_drop"] = base_bal - long_bal
+        rec["rule_ceiling_by_length"] = {
+            L: rule_ceiling_by_length[L]["accuracy"] for L in lengths}
+        rec["rule_unique_key_rate_by_length"] = {
+            L: rule_ceiling_by_length[L]["unique_key_rate"]
+            for L in lengths}
+        rec["ceiling_gap_by_length"] = {
+            L: rule_ceiling_by_length[L]["accuracy"]
+            - rec["accuracy_by_length"][L] for L in lengths}
+        rec["ceiling_gap_at_longest"] = rec["ceiling_gap_by_length"][lengths[-1]]
+        rec["entropy_drift"] = (rec["entropy_by_length"][lengths[-1]]
+                                - rec["entropy_by_length"][settings.n_pairs])
+        rec["entropy_norm_drift"] = (
+            rec["entropy_norm_by_length"][lengths[-1]]
+            - rec["entropy_norm_by_length"][settings.n_pairs])
+        rec.update({f"err_{k}": v for k, v in errors["summary"].items()})
+        for case in errors["cases"]:
+            _write_result(out_dir / "e2_error_cases.jsonl",
+                          {"experiment": "e2", **_stamp(settings),
+                           "gate": gate, "variant": label, "seed": seed,
+                           "length": lengths[-1], "lr": lr, **case})
+        if label not in examples or \
+                errors["summary"]["n_errors"] > examples[label][0]:
+            ranked = sorted(errors["cases"],
+                            key=lambda c: -float(c["confidence"]))
+            examples[label] = (errors["summary"]["n_errors"], ranked[:3])
+        _write_result(out_dir / "e2_runs.jsonl", rec)
+        runs.append(rec)
 
     by_variant = {label: [r for r in runs if r["variant"] == label]
                   for label, *_ in _E2_VARIANTS}
@@ -12994,6 +13536,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     # HB1/HB3/HB4/HB5 hard gate (see run_e1).
     verdict = _enforce_baseline_verdict(settings, out_dir, "e3")
     _write_manifest(settings, out_dir, "e3")
+    _design_sensitivity_plan(settings, verdict, out_dir, "e3")
     _audit_data_splits(settings, out_dir, "e3", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e3")
     _enforce_overfit_gate(settings, out_dir, "e3")
@@ -13047,58 +13590,65 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     runs = []
     examples = {}
     eval_seed, stats_seed = TEST_SEED, STATS_SEED
-    for gate in ("query", "calib"):
-        for norm in NORMS:
-            for layer_scale in (None, 1e-2):
-                for seed in settings.seeds:
-                    model, params, metrics, curve, model_cfg = _train_and_eval(
-                        settings, seed, lr, eval_seed=eval_seed, gate=gate,
-                        norm=norm, layer_scale=layer_scale)
-                    # The same diagnostic pass feeds the mechanism
-                    # statistics and the bad-case mining, so the E3 grid
-                    # gets the same error attribution (label error vs
-                    # structural ambiguity vs retrieval miss vs readout)
-                    # as E1/E2 instead of residual-norm readouts alone.
-                    stats, errors = collect_stats_and_errors(
-                        model, settings.n_pairs, settings.vocab,
-                        settings.device, batch=settings.stats_batch,
-                        batches=settings.stats_batches, seed=stats_seed,
-                        max_cases=settings.max_error_cases)
-                    resid = stats["resid_norm"].mean(dim=0)
-                    cell = (gate, norm, layer_scale)
-                    if cell not in examples or \
-                            errors["summary"]["n_errors"] > examples[cell][0]:
-                        ranked = sorted(errors["cases"],
-                                        key=lambda c: -float(c["confidence"]))
-                        examples[cell] = (errors["summary"]["n_errors"],
-                                          ranked[:1])
-                    for case in errors["cases"]:
-                        _write_result(out_dir / "e3_error_cases.jsonl",
-                                      {"experiment": "e3", **_stamp(settings),
-                                       "gate": gate, "norm": norm,
-                                       "layer_scale": layer_scale,
-                                       "seed": seed, "lr": lr, **case})
-                    rec = {
-                        "experiment": "e3",
-                        "hypotheses": ["H3a", "H3b", "H3c"],
-                        "gate": gate, "norm": norm,
-                        "layer_scale": layer_scale, "seed": seed, "lr": lr,
-                        "eval_seed": eval_seed, "stats_seed": stats_seed,
-                        "params": params, "model_cfg": model_cfg,
-                        "eval_n": int(metrics["n"]),
-                        **{k: v for k, v in metrics.items() if k != "n"},
-                        "gate_depth_ratio": gate_depth_ratio(stats),
-                        "resid_norm_by_layer": resid.tolist(),
-                        "resid_norm_last_over_first": float(
-                            resid[-1] / resid[0].clamp_min(1e-12)),
-                        **{f"err_{k}": v
-                           for k, v in errors["summary"].items()},
-                        **_training_record(settings, lr),
-                        **_run_context(settings),
-                        **curve,
-                    }
-                    _write_result(out_dir / "e3_runs.jsonl", rec)
-                    runs.append(rec)
+    cells = tuple((gate, norm, layer_scale)
+                  for gate in ("query", "calib")
+                  for norm in NORMS
+                  for layer_scale in (None, 1e-2))
+    order = _blocked_run_order(
+        cells, settings.seeds, settings.run_order_seed,
+        shuffle=settings.randomize_run_order)
+    _write_run_order(settings, out_dir, "e3", order, cells,
+                     settings.seeds)
+    for (gate, norm, layer_scale), seed, block, position in order:
+        model, params, metrics, curve, model_cfg = _train_and_eval(
+            settings, seed, lr, eval_seed=eval_seed, gate=gate,
+            norm=norm, layer_scale=layer_scale)
+        # The same diagnostic pass feeds the mechanism
+        # statistics and the bad-case mining, so the E3 grid
+        # gets the same error attribution (label error vs
+        # structural ambiguity vs retrieval miss vs readout)
+        # as E1/E2 instead of residual-norm readouts alone.
+        stats, errors = collect_stats_and_errors(
+            model, settings.n_pairs, settings.vocab,
+            settings.device, batch=settings.stats_batch,
+            batches=settings.stats_batches, seed=stats_seed,
+            max_cases=settings.max_error_cases)
+        resid = stats["resid_norm"].mean(dim=0)
+        cell = (gate, norm, layer_scale)
+        if cell not in examples or \
+                errors["summary"]["n_errors"] > examples[cell][0]:
+            ranked = sorted(errors["cases"],
+                            key=lambda c: -float(c["confidence"]))
+            examples[cell] = (errors["summary"]["n_errors"],
+                              ranked[:1])
+        for case in errors["cases"]:
+            _write_result(out_dir / "e3_error_cases.jsonl",
+                          {"experiment": "e3", **_stamp(settings),
+                           "gate": gate, "norm": norm,
+                           "layer_scale": layer_scale,
+                           "seed": seed, "lr": lr, **case})
+        rec = {
+            "experiment": "e3",
+            "hypotheses": ["H3a", "H3b", "H3c"],
+            "gate": gate, "norm": norm,
+            "layer_scale": layer_scale, "seed": seed, "lr": lr,
+            "run_block": block, "run_position": position,
+            "eval_seed": eval_seed, "stats_seed": stats_seed,
+            "params": params, "model_cfg": model_cfg,
+            "eval_n": int(metrics["n"]),
+            **{k: v for k, v in metrics.items() if k != "n"},
+            "gate_depth_ratio": gate_depth_ratio(stats),
+            "resid_norm_by_layer": resid.tolist(),
+            "resid_norm_last_over_first": float(
+                resid[-1] / resid[0].clamp_min(1e-12)),
+            **{f"err_{k}": v
+               for k, v in errors["summary"].items()},
+            **_training_record(settings, lr),
+            **_run_context(settings),
+            **curve,
+        }
+        _write_result(out_dir / "e3_runs.jsonl", rec)
+        runs.append(rec)
 
     print(f"\n[e3] {'gate':>5} {'norm':>9} {'ls':>5} {'accuracy':>16} "
           f"{'bal_acc':>16} "
