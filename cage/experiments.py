@@ -15786,21 +15786,23 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     e2_summary["_difficulty_standardized"] = {
         label: {
             str(L): _mean_std([
-                (r.get("difficulty_standardized_accuracy_by_length") or {})
-                .get(L) for r in by_variant[label]])
+                _length_entry(
+                    r.get("difficulty_standardized_accuracy_by_length"), L)
+                for r in by_variant[label]])
             for L in lengths}
         for label, *_ in _E2_VARIANTS}
     e2_summary["_difficulty_standardized_coverage"] = {
         label: {
             str(L): _mean_std([
-                (r.get("difficulty_standardized_coverage_by_length") or {})
-                .get(L) for r in by_variant[label]])
+                _length_entry(
+                    r.get("difficulty_standardized_coverage_by_length"), L)
+                for r in by_variant[label]])
             for L in lengths}
         for label, *_ in _E2_VARIANTS}
     e2_summary["_difficulty_mix_tv"] = {
         label: {
             str(L): _mean_std([
-                (r.get("difficulty_mix_tv_by_length") or {}).get(L)
+                _length_entry(r.get("difficulty_mix_tv_by_length"), L)
                 for r in by_variant[label]])
             for L in lengths}
         for label, *_ in _E2_VARIANTS}
