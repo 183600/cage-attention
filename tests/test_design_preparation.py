@@ -16,7 +16,9 @@ import math
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
+from cage import experiments
 from cage.experiments import (
     Settings,
     _calib_cell,
@@ -290,6 +292,21 @@ class DesignPlanTest(unittest.TestCase):
             self.assertIs(stored["all_accuracy_plans_powered"], False)
             self.assertEqual(payload["accuracy_underpowered"],
                              stored["accuracy_underpowered"])
+
+    def test_unpowerable_accuracy_row_is_not_reported_as_powered(self):
+        settings = Settings.quick()
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(
+                    experiments, "_required_seeds",
+                    return_value=float("inf")):
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _design_sensitivity_plan(
+                    settings, self._verdict(sd=0.05), pathlib.Path(tmp),
+                    "e1")
+        row = next(r for r in payload["rows"] if r["metric"] == "accuracy")
+        self.assertEqual(row["status"], "unpowerable")
+        self.assertIn("accuracy", payload["accuracy_unpowerable"])
+        self.assertIs(payload["all_accuracy_plans_powered"], False)
 
     def test_plan_passes_when_pilot_sd_is_small(self):
         settings = Settings.quick()

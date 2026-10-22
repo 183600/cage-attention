@@ -2657,15 +2657,22 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
             })
         rows.append(row)
     accuracy_rows = [r for r in rows if "accuracy" in r["metric"]
-                     and r["status"] in ("powered", "underpowered")]
+                     and r["status"] in ("powered", "underpowered",
+                                         "unpowerable")]
     underpowered = sorted({r["metric"] for r in accuracy_rows
                            if r["status"] == "underpowered"})
+    unpowerable = sorted({r["metric"] for r in accuracy_rows
+                          if r["status"] == "unpowerable"})
     stream_limited = sorted({r["metric"] for r in accuracy_rows
                              if r.get("stream_limited_worst_case")})
     if not accuracy_rows:
         all_powered = None
     else:
-        all_powered = not underpowered
+        # ``unpowerable`` is not a powered plan: including it only in the
+        # status list while treating "no underpowered rows" as success
+        # would certify a design whose SESOI resolution is not even
+        # representable.
+        all_powered = all(r["status"] == "powered" for r in accuracy_rows)
     payload = {
         "experiment": tag,
         "planned_n": n,
@@ -2694,6 +2701,7 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
             "and TOST for equivalence"),
         "rows": rows,
         "accuracy_underpowered": underpowered,
+        "accuracy_unpowerable": unpowerable,
         "accuracy_stream_limited_worst_case": stream_limited,
         "all_accuracy_plans_powered": all_powered,
         "note": (
@@ -2752,11 +2760,12 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
               f"{row['sesoi']:>8.4g} "
               f"{row['max_sd_for_power']:>8.4g} {arm_sd:>8} "
               f"{pair_sd:>8} {need:>7} {power_s:>7} {row['status']:>16}")
-    if underpowered:
-        print(f"  WARNING: planned n={n} is below the paired-variance "
-              f"requirement for {', '.join(underpowered)}: add seeds or "
-              f"pre-register a larger SESOI before claiming a null; the "
-              f"grid still runs under the pre-registered rule")
+    if underpowered or unpowerable:
+        names = ", ".join(underpowered + unpowerable)
+        print(f"  WARNING: planned n={n} does not clear the paired-variance "
+              f"requirement for {names}: add seeds or pre-register a larger "
+              f"SESOI before claiming a null; the grid still runs under the "
+              f"pre-registered rule")
     elif accuracy_rows:
         print("  accuracy contrasts: the planned seed count clears the "
               "paired-variance requirement at the registered SESOI")
