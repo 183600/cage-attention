@@ -1318,7 +1318,13 @@ def seeds_for_power(sd, effect, alpha: float = 0.05,
         return float("inf")
     nd = NormalDist()
     z = nd.inv_cdf(1.0 - alpha / 2.0) + nd.inv_cdf(power)
-    return (z * sd / abs(effect)) ** 2
+    try:
+        return float((z * sd / abs(effect)) ** 2)
+    except OverflowError:
+        # A finite but practically zero effect needs more seeds than a float
+        # can represent.  The planning contract is "inf = unattainable", not
+        # an OverflowError escaping into a results report.
+        return float("inf")
 
 
 def benjamini_hochberg(p_values, q: float = 0.05) -> list:

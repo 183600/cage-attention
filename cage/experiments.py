@@ -2279,7 +2279,13 @@ def _required_seeds(mode: str, sd, bound, alpha: float, power: float):
             and float(bound) > 0.0):
         return None
     z = _power_z(mode, alpha, power)
-    return float((z * float(sd) / float(bound)) ** 2)
+    try:
+        return float((z * float(sd) / float(bound)) ** 2)
+    except OverflowError:
+        # A finite but vanishingly small SESOI needs an unrepresentable
+        # number of seeds; report "unattainable" (inf) rather than letting
+        # the design plan crash on an OverflowError.
+        return float("inf")
 
 
 def _power_at_effect(mode: str, effect, sd, n: int, alpha: float,
