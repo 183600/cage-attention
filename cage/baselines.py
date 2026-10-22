@@ -482,6 +482,14 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     ``hb2_state``, ``p_above_chance`` and ``seeds_for_certification``.
     """
     chance = float(chance)
+    # The pre-registered HB2 bound is "below 2x chance".  For chance >= 0.5
+    # that bound is at or above 1.0, so even a perfect probe would be
+    # "certified"; a negative/non-finite chance is not a probability.  Fail
+    # closed instead of returning a vacuous pass.
+    if not (math.isfinite(chance) and 0.0 <= chance < 0.5):
+        raise ValueError(
+            f"chance must be a finite probability in [0, 0.5), got "
+            f"{chance!r}; the 2x-chance certificate is vacuous otherwise")
     accs = [float(a) for a in accuracies if math.isfinite(float(a))]
     margins = [a - chance for a in accs]
     # ``paired_bootstrap_ci``/``bootstrap_upper_p`` degrade to NaN readouts
@@ -614,11 +622,16 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
             # the plain seed-only estimate by sd_seed^2 / sd_seed^2/n,
             # i.e. by the current seed count.
             z = 2.8015852
-            floor = z * float(ci.get("sd_binomial", 0.0))
-            if margin > floor:
-                target_se = (margin - floor) / z
+            # The interval uses
+            #   se_effective^2 = sd_seed^2 / n + sd_binomial^2,
+            # so invert that variance model rather than subtracting the
+            # stream SD from the margin linearly.
+            target_var = (margin / z) ** 2
+            stream_var = float(ci.get("sd_binomial", 0.0)) ** 2
+            denom = target_var - stream_var
+            if denom > 0.0 and sd_seed > 0.0:
                 ci["seeds_for_certification"] = float(
-                    (sd_seed / target_se) ** 2)
+                    sd_seed ** 2 / denom)
             else:
                 ci["seeds_for_certification"] = float("inf")
         else:
