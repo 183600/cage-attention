@@ -9,9 +9,11 @@ Design principles
    hyperparameter sweep: each contrast answers a mechanism question.  E2
    additionally reads the trained calibration coefficients (and their
    implied length/concentration contributions at the base and longest
-   lengths), so the claim that calib *explicitly* corrects ``log T``
-   entropy growth is checked on the learned gate rather than inferred from
-   endpoint accuracy alone.
+   lengths), and H2f turns the mechanism claim into a one-sample test that
+   the learned length and concentration coefficients are positive - so the
+   claim that calib *explicitly* corrects ``log T`` entropy growth is
+   checked on the learned gate rather than inferred from endpoint accuracy
+   alone.
 2. **Tuned baselines and sanity checks before complex models.**  The
    complexity ladder is explicit and every rung is tuned: the rule
    system (exact ceiling), the trivial floor, a wide-grid-tuned linear
@@ -211,7 +213,7 @@ from .train import (
 HYPO_IDS = ("HB0", "HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7",
             "H1a", "H1b",
             "H1c", "H1d", "H1e", "H1f", "H2a", "H2b", "H2c", "H2d", "H2e",
-            "H3a", "H3b", "H3c")
+            "H2f", "H3a", "H3b", "H3c")
 
 # Every hypothesis entry may carry ``"sesoi"``: the smallest effect size of
 # interest per metric (same metric keys as the pre-registered contrasts).
@@ -752,6 +754,36 @@ HYPOTHESES = {
         # directional prediction of the main-effect rows.
         "direction": {"concentration_accuracy_at_longest": "+",
                       "concentration_accuracy_drop": "-"},
+    },
+    "H2f": {
+        "experiment": "e2",
+        "question": "Does the full calibrated gate actually learn the "
+                    "explicit corrections its mechanism claim names?",
+        "hypothesis": "The calibrated gate is defined as "
+                      "sigmoid((W_g x - a*log T - c*scale*Hbar)/tau).  The "
+                      "mechanism claim is therefore an explicit correction "
+                      "with a>0 (subtract the log-length entropy growth) and "
+                      "c*scale>0 (subtract the normalised concentration).  "
+                      "A full-calib arm whose learned a or c*scale is "
+                      "non-positive is not implementing that correction, "
+                      "whatever its endpoint accuracy.",
+        "prediction": "one-sample across training seeds: a_mean > 0 and "
+                      "c_effective_mean > 0; a gate that passes the "
+                      "endpoint accuracy test with a non-positive "
+                      "coefficient is a capacity effect, not the claimed "
+                      "explicit calibration",
+        "decision": "one-sample bootstrap 95% CI excludes 0 in the "
+                    "registered direction after Benjamini-Hochberg FDR "
+                    "control across the E2 contrasts (q=0.05).  This is a "
+                    "mechanism-manipulation check: failure annotates H2a/H2b "
+                    "(and the E2 coefficients table) as not showing the "
+                    "named explicit correction, even when an endpoint "
+                    "accuracy contrast passes",
+        # Coefficients are in pre-sigmoid gate units; 0.01 is a deliberately
+        # small practical floor so a numerically non-zero but negligible
+        # coefficient is not sold as an implemented mechanism.
+        "sesoi": {"a_mean": 0.01, "c_effective_mean": 0.01},
+        "direction": {"a_mean": "+", "c_effective_mean": "+"},
     },
     "H3a": {
         "experiment": "e3",
@@ -10349,7 +10381,7 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
 
 
 def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("H2a", "H2b", "H2c", "H2d", "H2e"))
+    _announce(("H2a", "H2b", "H2c", "H2d", "H2e", "H2f"))
     # HB1/HB3/HB4/HB5 hard gate (see run_e1).
     verdict = _enforce_baseline_verdict(settings, out_dir, "e2")
     _write_manifest(settings, out_dir, "e2")
@@ -10394,7 +10426,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 settings, seed, lr, eval_seed=eval_seed, gate=gate,
                 **model_overrides)
             rec = {"experiment": "e2",
-                   "hypotheses": ["H2a", "H2b", "H2c", "H2d", "H2e"],
+                   "hypotheses": ["H2a", "H2b", "H2c", "H2d", "H2e", "H2f"],
                    "gate": gate, "variant": label, "seed": seed, "lr": lr,
                    "eval_seed": eval_seed, "stats_seed": stats_seed,
                    "params": params, "model_cfg": model_cfg,
@@ -10449,7 +10481,17 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             # the trained length and concentration coefficients say whether
             # the gate actually implements the explicit log-T / entropy
             # correction the hypothesis names.
-            rec["calib_coefficients"] = _calibration_coefficients(model)
+            coefficients = _calibration_coefficients(model)
+            rec["calib_coefficients"] = coefficients
+            # Top-level scalar coefficients: H2f is a one-sample contrast
+            # across training seeds, so the per-run values have to be
+            # readable by ``_one_sample_contrast`` (the nested per-layer
+            # table stays for the manipulation breakdown).
+            for coeff_key in ("a_mean", "c_mean", "c_effective_mean",
+                              "scale_mean", "tau_effective_mean"):
+                value = coefficients.get(coeff_key)
+                if _finite(value):
+                    rec[coeff_key] = float(value)
             base_acc = rec["accuracy_by_length"][settings.n_pairs]
             long_acc = rec["accuracy_by_length"][lengths[-1]]
             rec["accuracy_at_base"] = base_acc
@@ -10748,7 +10790,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     if balance_ok is None:
         balance_ok = eval_balance.get("all_uniform")
     print("\n[e2] pre-registered contrasts:")
-    clog = ContrastLog("e2", hypotheses=("H2a", "H2b", "H2c", "H2d", "H2e"),
+    clog = ContrastLog("e2", hypotheses=("H2a", "H2b", "H2c", "H2d", "H2e",
+                                       "H2f"),
                        min_seeds=settings.min_seeds_for_claim,
                        competence=competence,
                        coverage=(ablation_coverage, design_coverage),
@@ -10821,6 +10864,25 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             gate_used, (gate_by_seed,))
         clog.print_equivalence_ci("calib gate drift vs 0", "H2b",
                                   "gate_drift", gate_ci, warn=calib_warn)
+    # H2f: the mechanism is an *explicit* additive correction, so the
+    # trained coefficients themselves must point the right way.  This is a
+    # one-sample test across seeds (no new grid point): a full-calib arm
+    # with a<=0 or c*scale<=0 cannot be said to implement the length /
+    # concentration correction, whatever the endpoint accuracy says.
+    print(f"\n[e2] H2f explicit-correction manipulation check (one-sample "
+          f"across training seeds): the gate is "
+          f"sigmoid((W_g x - a*log T - c*scale*Hbar)/tau), so a>0 and "
+          f"c*scale>0 are the learned coefficients that implement the named "
+          f"correction.  A full calib arm with a non-positive coefficient is "
+          f"a capacity/accuracy effect, not the claimed explicit "
+          f"calibration:")
+    for metric, label in (
+        ("a_mean", "calib length coefficient a"),
+        ("c_effective_mean", "calib concentration coefficient c*scale"),
+    ):
+        clog.print(f"{label} vs 0", "H2f", metric,
+                   _one_sample_contrast(calib_runs, metric),
+                   warn=calib_warn)
     print(f"\n[e2] H2c length-term ablation contrasts (each ablation arm "
           f"removes additive terms from the full gate at identical recipe; "
           f"only the calibration-term flags vary, so the full 2x2 is "
@@ -10891,7 +10953,45 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             e2_factorial_cells["calib_no_terms"], metric)
         clog.print("length x concentration interaction (2x2)", "H2e", metric,
                    ci, warn=factorial_warn)
-    clog.finalize(out_dir, q=settings.fdr_q)
+    e2_contrast_payload = clog.finalize(out_dir, q=settings.fdr_q)
+    h2f_rows = [row for row in (e2_contrast_payload.get("rows") or [])
+                if row.get("hypothesis") == "H2f"]
+    h2f_supported = bool(h2f_rows) and all(
+        row.get("supports_hypothesis") for row in h2f_rows)
+    if not h2f_supported:
+        print(f"[e2] WARNING: H2f not supported - the full calib arm did "
+              f"not show both learned corrections (a>0 and c*scale>0) with "
+              f"FDR-significant, practically-sized coefficients.  The "
+              f"H2a/H2b endpoint and entropy-drift rows remain their own "
+              f"tests, but the 'explicit correction' mechanism reading is "
+              f"not established by the trained coefficients.")
+    learned_correction_check = {
+        "hypothesis": "H2f",
+        "supported": h2f_supported,
+        "rows": [{
+            "metric": row.get("metric"), "mean": row.get("mean"),
+            "lo": row.get("lo"), "hi": row.get("hi"),
+            "p_value": row.get("p_value"), "p_adj": row.get("p_adj"),
+            "sesoi": row.get("sesoi"), "n": row.get("n"),
+            "seeds_used": row.get("seeds_used"),
+            "supports_hypothesis": row.get("supports_hypothesis"),
+            "verdict": ("supported" if row.get("supports_hypothesis")
+                        else "not supported"),
+        } for row in h2f_rows],
+        "by_arm": {
+            label: {
+                key: _mean_std([r.get(key) for r in by_variant[label]])
+                for key in ("a_mean", "c_effective_mean",
+                            "tau_effective_mean")
+            }
+            for label, *_ in _E2_VARIANTS if label.startswith("calib")
+        },
+        "note": ("mechanism-manipulation check on the trained gate: a "
+                 "positive a is the explicit log-T correction and a positive "
+                 "c*scale is the concentration correction; H2f is tested in "
+                 "the same E2 FDR family and is not replaced by endpoint "
+                 "accuracy"),
+    }
     length_contrasts = _e2_per_length_contrasts(
         settings, out_dir, by_variant, lengths)
     endpoint_companions = _e2_endpoint_class_companions(by_variant, lengths)
@@ -10934,6 +11034,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         if label.startswith("calib")
     }
     e2_summary["_calibration_term_contributions"] = term_contributions
+    e2_summary["_learned_correction_check"] = learned_correction_check
     e2_summary["_efficiency"] = length_efficiency
     e2_summary["_class_frequency_companions"] = endpoint_companions
     e2_summary["_provenance"] = _stamp(settings)
