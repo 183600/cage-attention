@@ -134,12 +134,22 @@ Design principles
     training seeds cannot remove it, so a stream-limited warning asks for a
     wider evaluation stream.  An underpowered plan is
     flagged at preparation time instead of being discovered as an
-    "inconclusive" after the compute is spent.  The runs themselves are
-    scheduled as randomised complete blocks (one block per training seed,
-    every cell once per block, recorded in ``<tag>_run_order.json``), so a
-    slow machine drift cannot be aliased with one treatment arm; the
-    schedule is deterministic from ``Settings.run_order_seed`` and never
-    perturbs the data/dropout RNG streams.
+    "inconclusive" after the compute is spent.  The plan separately reports
+    whether the planned N clears ``Settings.min_seeds_for_claim``: power at
+    n=2 is not a claim licence when the registered floor is 3, and a quick
+    pipeline check must not be mistaken for evidence.  The plan is frozen
+    once the first outcome row exists (same design may be rechecked;
+    changed seeds/SESOIs/test modes raise ``DesignPlanError``), with every
+    pre-outcome revision kept in ``<tag>_design_plan_history.jsonl``.  The
+    runs themselves are scheduled as randomised complete blocks (one block
+    per training seed, every cell once per block, recorded in
+    ``<tag>_run_order.json``), so a slow machine drift cannot be aliased
+    with one treatment arm; the schedule is deterministic from
+    ``Settings.run_order_seed`` and never perturbs the data/dropout RNG
+    streams.  After the grid, ``<tag>_run_order_realized.json`` checks the
+    rows' recorded block/position against that frozen schedule: a resumed
+    or reordered loop is caught instead of being certified from the plan
+    alone.
 7. **Replication and claim-level synthesis.**  Two readings sit on top of
    the per-contrast decision without changing it.  First, every row carries
    a t-based **same-size replication interval** for a future study's mean
@@ -1741,6 +1751,135 @@ def _write_run_order(settings: Settings, out_dir: pathlib.Path, tag: str,
     return payload
 
 
+def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
+    """Compare the realised result rows with the frozen block schedule.
+
+    Writing a randomised schedule is not the same as running it.  An
+    interrupted-and-resumed grid, a manual retry, or a loop that iterates
+    its own cell list instead of the schedule can leave a complete-looking
+    record file whose treatment arms are aliased with time.  The result
+    rows already carry ``run_block`` / ``run_position``, so the schedule can
+    be verified after the fact without rerunning anything.
+
+    ``matches_schedule`` is true only when every planned
+    (cell, seed, block, position) tuple appears exactly once and no
+    unplanned tuple or malformed index appears.  Missing rows are reported
+    as an incomplete run, not silently ignored: the caller decides whether
+    that is a hard failure or just a partial grid.
+    """
+    cells = list(cells)
+    seeds = list(seeds)
+
+    def _integer(value):
+        if isinstance(value, bool):
+            return None
+        try:
+            return operator.index(value)
+        except TypeError:
+            return None
+
+    expected = []
+    invalid_order = []
+    for index, row in enumerate(order):
+        if not isinstance(row, (tuple, list)) or len(row) != 4:
+            invalid_order.append({
+                "order_index": index,
+                "reason": "schedule row is not a 4-tuple",
+            })
+            continue
+        cell, seed, block, position = row
+        seed_i = _integer(seed)
+        block_i = _integer(block)
+        position_i = _integer(position)
+        if seed_i is None or block_i is None or position_i is None:
+            invalid_order.append({
+                "order_index": index,
+                "reason": "non-integral seed/block/position in schedule",
+            })
+            continue
+        expected.append((_coverage_cell_key(cell), seed_i,
+                         block_i, position_i))
+    expected_set = set(expected)
+
+    observed = []
+    invalid = []
+    for index, run in enumerate(runs):
+        if not isinstance(run, Mapping):
+            invalid.append({"run_index": index,
+                            "reason": "record is not a JSON object"})
+            continue
+        try:
+            cell = cell_of(run)
+        except Exception as exc:  # noqa: BLE001 - report malformed records
+            invalid.append({"run_index": index,
+                            "reason": f"cell extractor raised: {exc}"})
+            continue
+        seed = _integer(run.get("seed"))
+        block = _integer(run.get("run_block"))
+        position = _integer(run.get("run_position"))
+        if cell is None or seed is None or block is None or position is None:
+            invalid.append({
+                "run_index": index, "cell": _coverage_cell_key(cell),
+                "reason": "missing or non-integral cell/seed/block/position",
+                "seed": repr(run.get("seed")),
+                "block": repr(run.get("run_block")),
+                "position": repr(run.get("run_position")),
+            })
+            continue
+        observed.append((_coverage_cell_key(cell), seed, block, position))
+
+    counts = {}
+    for key in observed:
+        counts[key] = counts.get(key, 0) + 1
+    observed_set = set(observed)
+    missing = sorted(expected_set - observed_set, key=repr)
+    unexpected = sorted(observed_set - expected_set, key=repr)
+    duplicates = sorted(
+        (key for key, count in counts.items() if count > 1), key=repr)
+
+    def _row(key):
+        return {"cell": key[0], "seed": key[1],
+                "block": key[2], "position": key[3]}
+
+    matches = bool(
+        expected and not missing and not unexpected and not duplicates
+        and not invalid and not invalid_order)
+    return {
+        "cells": [_coverage_cell_key(c) for c in cells],
+        "seeds": [s if _integer(s) is not None else repr(s) for s in seeds],
+        "n_expected": len(expected),
+        "n_observed": len(observed),
+        "matches_schedule": matches,
+        "missing": [_row(key) for key in missing],
+        "unexpected": [_row(key) for key in unexpected],
+        "duplicates": [_row(key) for key in duplicates],
+        "invalid": invalid,
+        "invalid_order": invalid_order,
+    }
+
+
+def _report_realized_run_order(out_dir: pathlib.Path, tag: str, runs,
+                               order, cells, seeds, cell_of) -> dict:
+    """Persist and warn about the realised schedule audit."""
+    audit = _realized_order_audit(runs, order, cells, seeds, cell_of)
+    payload = {"experiment": tag, **audit}
+    _write_json(pathlib.Path(out_dir) / f"{tag}_run_order_realized.json",
+                payload)
+    if not audit["matches_schedule"]:
+        print(f"[{tag}] WARNING: realised run order deviates from the "
+              f"frozen complete-block schedule "
+              f"(missing={len(audit['missing'])}, "
+              f"unexpected={len(audit['unexpected'])}, "
+              f"duplicates={len(audit['duplicates'])}, "
+              f"invalid={len(audit['invalid'])}, "
+              f"invalid_schedule={len(audit['invalid_order'])}); "
+              f"treatment arms may be aliased with run time")
+    else:
+        print(f"[{tag}] realised run order matches the frozen complete-block "
+              f"schedule ({audit['n_observed']} runs)")
+    return payload
+
+
 def _mean_std(values):
     vals = [float(v) for v in values if _finite(v)]
     if not vals:
@@ -2522,6 +2661,14 @@ def _power_z(mode: str, alpha: float, power: float) -> float:
     accuracy claims are null/reverse checks, not superiority claims: planning
     them with the two-sided superiority formula would overstate their power.
     """
+    if mode not in ("superiority", "noninferior", "equivalence") \
+            or not (_finite(alpha) and _finite(power)) \
+            or not (0.0 < float(alpha) < 1.0
+                    and 0.0 < float(power) < 1.0):
+        # An unknown test mode or an out-of-range planning probability is
+        # not a design: return an unusable multiplier rather than silently
+        # falling back to the two-sided superiority formula.
+        return float("nan")
     nd = NormalDist()
     alpha = float(alpha)
     power = float(power)
@@ -2534,10 +2681,14 @@ def _power_z(mode: str, alpha: float, power: float) -> float:
 
 def _required_seeds(mode: str, sd, bound, alpha: float, power: float):
     """Normal-approximation seed count for one registered test mode."""
+    if mode not in ("superiority", "noninferior", "equivalence"):
+        return None
     if not (_finite(sd) and _finite(bound) and float(sd) > 0.0
             and float(bound) > 0.0):
         return None
     z = _power_z(mode, alpha, power)
+    if not (_finite(z) and float(z) > 0.0):
+        return None
     try:
         return float((z * float(sd) / float(bound)) ** 2)
     except OverflowError:
@@ -2558,13 +2709,21 @@ def _power_at_effect(mode: str, effect, sd, n: int, alpha: float,
     non-inferiority rejects when the lower confidence limit clears
     ``-bound`` and TOST when the whole interval lies inside ``+-bound``.
     """
+    if mode not in ("superiority", "noninferior", "equivalence"):
+        return float("nan")
+    n = _positive_integer(n)
+    if n is None:
+        # A bool or fractional unit count is a flag/label, not a number of
+        # independent seeds; truncating it would silently plan a different
+        # experiment than the caller named.
+        return float("nan")
     needed = [_finite(effect), _finite(sd), _finite(alpha)]
     if mode in ("equivalence", "noninferior"):
         needed.append(_finite(bound))
-    if not (all(needed) and float(sd) > 0.0 and int(n) > 0
+    if not (all(needed) and float(sd) > 0.0
             and 0.0 < float(alpha) < 1.0):
         return float("nan")
-    se = float(sd) / math.sqrt(int(n))
+    se = float(sd) / math.sqrt(n)
     if se <= 0.0:
         return float("nan")
     nd = NormalDist()
@@ -2581,6 +2740,179 @@ def _power_at_effect(mode: str, effect, sd, n: int, alpha: float,
         shifted = float(effect) / se
         power = 1.0 - nd.cdf(cutoff - shifted) + nd.cdf(-cutoff - shifted)
     return min(1.0, max(0.0, float(power)))
+
+
+class DesignPlanError(RuntimeError):
+    """A pre-registered design plan would be revised after data collection."""
+
+
+_DESIGN_PLAN_FINGERPRINT_KEYS = (
+    "experiment", "planned_n", "planned_seeds", "alpha", "power_target",
+    "min_seeds_for_claim", "planned_eval_items", "hypotheses_sha256",
+)
+
+
+def _design_plan_fingerprint(payload) -> str | None:
+    """Content hash of the *design-relevant* part of a plan.
+
+    The plan file also carries invocation provenance (run id, environment,
+    timestamps), which legitimately changes on every invocation.  The
+    pre-registration is the planned sample, the registered SESOIs/modes and
+    the claim floor, so only those fields enter this hash.  A missing or
+    malformed plan returns ``None``; callers must treat that as "cannot
+    certify this design", not as "unchanged".
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    raw_rows = payload.get("rows")
+    if raw_rows is None:
+        raw_rows = []
+    if isinstance(raw_rows, (str, bytes, Mapping)):
+        return None
+    try:
+        raw_rows = list(raw_rows)
+    except TypeError:
+        return None
+    rows = []
+    for row in raw_rows:
+        if not isinstance(row, Mapping):
+            return None
+        hypotheses = row.get("hypotheses")
+        if hypotheses is None:
+            hypotheses = []
+        if not isinstance(hypotheses, list):
+            return None
+        rows.append({
+            "metric": row.get("metric"),
+            "sesoi": row.get("sesoi"),
+            "mode": row.get("mode"),
+            "hypotheses": [str(h) for h in hypotheses],
+        })
+    seeds = payload.get("planned_seeds")
+    if seeds is None:
+        seeds = []
+    if isinstance(seeds, (str, bytes, Mapping)):
+        return None
+    try:
+        seeds = list(seeds)
+    except TypeError:
+        return None
+    design = {key: payload.get(key)
+              for key in _DESIGN_PLAN_FINGERPRINT_KEYS if key != "rows"}
+    design["planned_seeds"] = seeds
+    design["rows"] = rows
+    try:
+        encoded = json.dumps(design, ensure_ascii=False, sort_keys=True,
+                             default=str)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _design_plan_outcomes_exist(out_dir: pathlib.Path, tag: str) -> bool:
+    """Whether result evidence for this experiment is already on disk.
+
+    The plan is prospective only while no outcome row exists.  A missing or
+    unreadable outcome file is treated as "no outcome"; a non-empty run or
+    contrast file is decisive, so a second invocation with a different
+    design cannot silently turn a post-hoc analysis into a "planned" one.
+    """
+    for suffix in ("_runs.jsonl", "_contrasts.json"):
+        path = pathlib.Path(out_dir) / f"{tag}{suffix}"
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                return True
+        except OSError:
+            # A path we cannot inspect may be evidence; fail closed.
+            return True
+    return False
+
+
+def _record_design_plan_event(settings: Settings, out_dir: pathlib.Path,
+                              tag: str, event: str, design_sha256: str,
+                              supersedes: str | None = None) -> None:
+    """Append one prep-registration event to an auditable history."""
+    record = {
+        "experiment": tag,
+        "event": event,
+        "design_sha256": design_sha256,
+        "supersedes_design_sha256": supersedes,
+        "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        **_stamp(settings),
+    }
+    _write_result(pathlib.Path(out_dir)
+                  / f"{tag}_design_plan_history.jsonl", record)
+
+
+def _publish_design_plan(settings: Settings, out_dir: pathlib.Path,
+                         tag: str, payload: dict) -> dict:
+    """Publish a prospective design plan, refusing post-outcome revisions.
+
+    Before the first outcome row, a plan may be revised (preparation is
+    still preparation); the revision is recorded in a history file and the
+    superseded hash is stamped on the new plan.  Once a run or contrast file
+    for this experiment is non-empty, the design hash is frozen: changing
+    the planned seeds, SESOIs, test modes or claim floor now would be an
+    adaptive redesign, so it raises :class:`DesignPlanError` instead of
+    silently overwriting the artifact that was supposed to pre-register the
+    study.  Re-running an identical design is allowed.
+    """
+    payload = dict(payload)
+    path = pathlib.Path(out_dir) / f"{tag}_design_plan.json"
+    new_hash = _design_plan_fingerprint(payload)
+    if new_hash is None:
+        raise DesignPlanError(
+            f"{tag}: refusing to publish a design plan with no readable "
+            f"design fingerprint")
+    payload["design_sha256"] = new_hash
+    old = None
+    if path.exists():
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            old = None
+    outcomes = _design_plan_outcomes_exist(out_dir, tag)
+    old_hash = _design_plan_fingerprint(old) if old is not None else None
+    if outcomes and not path.exists():
+        raise DesignPlanError(
+            f"{tag}: outcome rows already exist but no registered design "
+            f"plan does; a plan written now would be post-hoc, so restore "
+            f"the original plan or start the study in a fresh --out "
+            f"directory")
+    if path.exists() and outcomes:
+        if old_hash is None:
+            raise DesignPlanError(
+                f"{tag}: an unreadable existing design plan cannot be "
+                f"verified after outcome rows were written; restore the "
+                f"registered plan or use a fresh --out directory")
+        if old_hash != new_hash:
+            raise DesignPlanError(
+                f"{tag}: refusing to revise the registered design "
+                f"{old_hash} -> {new_hash} after outcome rows exist; a "
+                f"changed sample size/SESOI/test mode is a post-hoc "
+                f"redesign, so use a fresh --out directory and report it "
+                f"as a separate study")
+    # Link every subsequent run record (and the manifest) to the accepted
+    # pre-registration.  Do this only after the freeze checks pass: a
+    # refused revision must not leave a rejected design id on the Settings
+    # object.  The context cache may have been built before the plan
+    # existed, so invalidate it rather than leaving records that cannot be
+    # joined back to their design.
+    settings._design_sha256 = new_hash
+    settings._run_context_cache = None
+    settings._run_context_cache_key = None
+    if path.exists() and old_hash is not None and old_hash != new_hash:
+        payload["supersedes_design_sha256"] = old_hash
+        _record_design_plan_event(
+            settings, out_dir, tag, "amended", new_hash, old_hash)
+    elif not path.exists():
+        _record_design_plan_event(
+            settings, out_dir, tag, "created", new_hash)
+    elif old_hash is None:
+        _record_design_plan_event(
+            settings, out_dir, tag, "replaced_malformed", new_hash)
+    _write_json(path, payload)
+    return payload
 
 
 def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
@@ -2600,11 +2932,31 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
 
     It does **not** change the pre-registered decision rule: an
     underpowered plan is a warning that a null read is uninformative, not a
-    licence to drop the contrast.
+    licence to drop the contrast.  Power is also not claim eligibility: a
+    design below ``min_seeds_for_claim`` is marked ineligible even when its
+    sensitivity budget is met.  The published artifact is frozen once
+    outcome rows exist (see :func:`_publish_design_plan`), so a later
+    invocation cannot silently rewrite the study it is analysing.
     """
+    # Re-validate at the boundary: the CLI and tests mutate Settings
+    # attributes after construction, and a malformed seed set or claim floor
+    # must not silently size the study (or crash halfway through the plan).
+    settings.seeds = _validate_training_seeds(settings.seeds)
     n = len(settings.seeds)
+    floor = _positive_integer(settings.min_seeds_for_claim)
+    if floor is None:
+        raise ValueError(
+            f"min_seeds_for_claim must be a positive integer, got "
+            f"{settings.min_seeds_for_claim!r}")
+    meets_floor = n >= floor
     alpha = float(settings.design_alpha)
     target = float(settings.power_target)
+    for name, value in (("design_alpha", alpha),
+                        ("power_target", target)):
+        if not (_finite(value) and 0.0 < value < 1.0):
+            raise ValueError(
+                f"{name} must be a finite number strictly between 0 and 1, "
+                f"got {value!r}")
     # Two different pilot quantities answer two different questions:
     #   * the single-arm SD is the legacy, optimistic scale (it assumes
     #     the two arms' seed effects are perfectly correlated);
@@ -2647,6 +2999,8 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
             "hypotheses": item["hypotheses"],
             "z_for_mode": z,
             "max_sd_for_power": max_sd,
+            "min_seeds_for_claim": floor,
+            "claim_floor_met": meets_floor,
         }
         # The pilot is an accuracy-scale quantity; applying it to a metric
         # with different units would be a fabricated variance.
@@ -2691,9 +3045,15 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
             target_var = (bound / z) ** 2
             if target_var > 0.0:
                 items_needed = stream_item_var / target_var
-                row["stream_items_for_sesoi"] = int(math.ceil(items_needed))
+                try:
+                    items_for_sesoi = int(math.ceil(items_needed))
+                except (OverflowError, ValueError):
+                    # A SESOI so small that the required stream is not
+                    # representable is unattainable, not a huge integer.
+                    items_for_sesoi = None
+                row["stream_items_for_sesoi"] = items_for_sesoi
                 row["stream_limited_worst_case"] = bool(
-                    items_needed > planned_items)
+                    _finite(items_needed) and items_needed > planned_items)
         if not _finite(sd):
             row.update({"required_seeds": None, "power_at_planned": None,
                         "powered": None, "status": "no_pilot"})
@@ -2751,10 +3111,35 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
         # would certify a design whose SESOI resolution is not even
         # representable.
         all_powered = all(r["status"] == "powered" for r in accuracy_rows)
+    # Power and claim eligibility are different questions.  A design can
+    # clear its sensitivity budget at n=5 yet still be below the
+    # pre-registered independent-seed floor; the contrast layer would mark
+    # every row INELIGIBLE, so preparation must say that now rather than
+    # let the run spend compute on a claim it cannot make.  Quick configs
+    # (n=2) deliberately fail this check.
+    seed_floor_blocked = ([] if meets_floor else
+                          sorted({str(r["metric"]) for r in rows}))
+    if not meets_floor:
+        # The seed floor blocks a claim even when no accuracy pilot exists:
+        # this is a property of the planned sample, not of the pilot.
+        all_claim_seed_eligible = False
+        all_claims_ready = False
+    elif not accuracy_rows:
+        all_claim_seed_eligible = None
+        all_claims_ready = None
+    else:
+        all_claim_seed_eligible = True
+        all_claims_ready = bool(all_powered)
     payload = {
         "experiment": tag,
         "planned_n": n,
         "planned_seeds": [int(s) for s in settings.seeds],
+        "min_seeds_for_claim": floor,
+        "planned_n_meets_claim_floor": meets_floor,
+        "claim_floor_shortfall": max(0, floor - n),
+        "claim_floor_blocked_metrics": seed_floor_blocked,
+        "all_accuracy_claims_seed_eligible": all_claim_seed_eligible,
+        "all_accuracy_claims_ready": all_claims_ready,
         "alpha": alpha,
         "power_target": target,
         # Legacy single-arm field (kept for readers of older plans) and the
@@ -2802,7 +3187,7 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
         "hypotheses_sha256": _hypotheses_sha(),
         **_stamp(settings),
     }
-    _write_json(out_dir / f"{tag}_design_plan.json", payload)
+    payload = _publish_design_plan(settings, out_dir, tag, payload)
     print(f"\n[{tag}] prospective sensitivity plan (written before the grid; "
           f"alpha={alpha:g} per registered test mode, power={target:g}, "
           f"n={n} seeds)")
@@ -2822,6 +3207,12 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
         print(f"  finite-stream floor (worst case, independent arm errors): "
               f"items={planned_items}, p={p_level:.3f}, SE="
               f"{stream_item_sd:.4f}")
+    if not meets_floor:
+        print(f"  WARNING: planned n={n} is below the pre-registered "
+              f"min_seeds_for_claim={floor}; every contrast will be "
+              f"INELIGIBLE for a claim at this sample size "
+              f"(shortfall={max(0, floor - n)} seed(s)).  Use this plan "
+              f"for a pipeline check, not for reported evidence.")
     print(f"  {'metric':>34} {'mode':>12} {'SESOI':>8} {'maxSD':>8} "
           f"{'armSD':>8} {'pairSD':>8} {'need_n':>7} {'power':>7} "
           f"{'status':>16}")
@@ -8154,6 +8545,11 @@ def _run_context(settings: Settings) -> dict:
         "config": config,
         "seeding": dict(_SEEDING_POLICY),
         "data_fingerprints": fingerprints,
+        # Frozen prospective design-plan id (``None`` before the plan is
+        # published, e.g. while the baselines runner is producing its
+        # verdict).  Excluded from the setup hash: the plan is a design
+        # commitment, not a numerical recipe.
+        "design_sha256": getattr(settings, "_design_sha256", None),
         # Validity-gate summary stamped by ``_enforce_baseline_verdict``
         # (None for the baselines runner itself, which is the producer).
         # Deliberately excluded from the setup hash above: the verdict
@@ -11569,7 +11965,11 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     for label, overrides in _sanity_configs(settings):
         _write_result(out_dir / "baselines_runs.jsonl",
                       {**record, "name": f"overfit_sanity_{label}",
-                       "config": label,
+                       # ``config`` is the full resolved-Settings context
+                       # merged in by ``record``; overwriting it with a
+                       # label made the row's own setup hash unverifiable.
+                       # Keep the arm label in its own field instead.
+                       "sanity_config": label,
                        "gate": overrides.get("gate"),
                        **sanity_by_config[label]})
 
@@ -12904,8 +13304,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     # (their pre-registered semantics invalidate everything above them;
     # the marks are stamped into every record via _run_context).
     verdict = _enforce_baseline_verdict(settings, out_dir, "e1")
-    _write_manifest(settings, out_dir, "e1")
     _design_sensitivity_plan(settings, verdict, out_dir, "e1")
+    _write_manifest(settings, out_dir, "e1")
     _audit_data_splits(settings, out_dir, "e1", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e1")
     _enforce_overfit_gate(settings, out_dir, "e1")
@@ -12936,6 +13336,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                            "lr": lr, **case})
         _write_result(out_dir / "e1_runs.jsonl", rec)
         runs.append(rec)
+    _report_realized_run_order(
+        out_dir, "e1", runs, main_order, main_cells, settings.seeds,
+        lambda run: run.get("gate"))
     ablation_runs = {}
     ablation_cells = tuple(
         label for label, _ in _E1_CALIB_ABLATION + _E1_CALIB_PLACEBO)
@@ -12960,6 +13363,11 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                            "seed": seed, "lr": lr, **case})
         _write_result(out_dir / "e1_runs.jsonl", rec)
         ablation_runs.setdefault(label, []).append(rec)
+    ablation_flat = [r for rs in ablation_runs.values() for r in rs]
+    _report_realized_run_order(
+        out_dir, "e1_ablation", ablation_flat, ablation_order,
+        ablation_cells, settings.seeds,
+        lambda run: run.get("calib_variant"))
     by_gate = {g: [r for r in runs if r["gate"] == g] for g in GATES}
     table = {g: _aggregate_runs(rs) for g, rs in by_gate.items()}
     ablation_coverage = _report_ablation_coverage(
@@ -14955,8 +15363,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H2a", "H2b", "H2c", "H2d", "H2e", "H2f", "H2g"))
     # HB1/HB3/HB4/HB5 hard gate (see run_e1).
     verdict = _enforce_baseline_verdict(settings, out_dir, "e2")
-    _write_manifest(settings, out_dir, "e2")
     _design_sensitivity_plan(settings, verdict, out_dir, "e2")
+    _write_manifest(settings, out_dir, "e2")
     _audit_data_splits(settings, out_dir, "e2", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e2")
     _enforce_overfit_gate(settings, out_dir, "e2")
@@ -15156,6 +15564,9 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             examples[label] = (errors["summary"]["n_errors"], ranked[:3])
         _write_result(out_dir / "e2_runs.jsonl", rec)
         runs.append(rec)
+    _report_realized_run_order(
+        out_dir, "e2", runs, order, cells, settings.seeds,
+        lambda run: run.get("variant"))
 
     by_variant = {label: [r for r in runs if r["variant"] == label]
                   for label, *_ in _E2_VARIANTS}
@@ -16387,8 +16798,8 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H3a", "H3b", "H3c"))
     # HB1/HB3/HB4/HB5 hard gate (see run_e1).
     verdict = _enforce_baseline_verdict(settings, out_dir, "e3")
-    _write_manifest(settings, out_dir, "e3")
     _design_sensitivity_plan(settings, verdict, out_dir, "e3")
+    _write_manifest(settings, out_dir, "e3")
     _audit_data_splits(settings, out_dir, "e3", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e3")
     _enforce_overfit_gate(settings, out_dir, "e3")
@@ -16501,6 +16912,10 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
         }
         _write_result(out_dir / "e3_runs.jsonl", rec)
         runs.append(rec)
+    _report_realized_run_order(
+        out_dir, "e3", runs, order, cells, settings.seeds,
+        lambda run: (run.get("gate"), run.get("norm"),
+                     run.get("layer_scale")))
 
     print(f"\n[e3] {'gate':>5} {'norm':>9} {'ls':>5} {'accuracy':>16} "
           f"{'bal_acc':>16} "
@@ -17006,7 +17421,7 @@ def main(argv=None) -> int:
             run_e3(settings, out_dir)
         else:
             run_all(settings, out_dir)
-    except (OverfitSanityError, ReproducibilityError,
+    except (DesignPlanError, OverfitSanityError, ReproducibilityError,
             SplitAuditError, BaselineVerdictError) as e:
         status = "aborted"
         print(f"[runner] ABORTED before grid training: {e}")

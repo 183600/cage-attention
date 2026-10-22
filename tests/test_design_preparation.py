@@ -20,15 +20,22 @@ from unittest import mock
 
 from cage import experiments
 from cage.experiments import (
+    DesignPlanError,
     Settings,
     _calib_cell,
     _controlled_audit,
     _blocked_run_order,
+    _design_plan_fingerprint,
+    _design_plan_outcomes_exist,
     _design_sensitivity_plan,
     _pilot_accuracy_level,
     _pilot_accuracy_sd,
     _pilot_paired_accuracy_sd,
     _power_at_effect,
+    _power_z,
+    _realized_order_audit,
+    _report_realized_run_order,
+    _required_seeds,
     _run_order_audit,
     _verdict_seed_floor,
 )
@@ -541,6 +548,284 @@ class DesignPlanTest(unittest.TestCase):
         self.assertEqual(Settings(probe_steps_grid=()).probe_steps_grid, ())
         self.assertEqual(
             Settings(depth_step_multipliers=()).depth_step_multipliers, ())
+
+
+class ClaimFloorPlanTest(unittest.TestCase):
+    """Power and claim eligibility must be separate preparation readouts."""
+
+    @staticmethod
+    def _verdict(sd=0.001):
+        return {"depth_ladder": {"by_depth": {
+            "2": {"accuracy_by_seed": {"0": 0.9, "1": 0.9 + sd},
+                  "unmeasured": False},
+        }}}
+
+    def test_below_floor_plan_is_powered_but_not_claim_eligible(self):
+        settings = Settings.quick()  # two seeds, claim floor is three
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                payload = _design_sensitivity_plan(
+                    settings, self._verdict(sd=0.0001), out, "e1")
+            history = out / "e1_design_plan_history.jsonl"
+            self.assertTrue(history.exists())
+            events = [json.loads(line) for line in
+                      history.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(events[0]["event"], "created")
+        self.assertIs(payload["all_accuracy_plans_powered"], True)
+        self.assertEqual(payload["planned_n"], 2)
+        self.assertEqual(payload["min_seeds_for_claim"], 3)
+        self.assertIs(payload["planned_n_meets_claim_floor"], False)
+        self.assertEqual(payload["claim_floor_shortfall"], 1)
+        self.assertIs(payload["all_accuracy_claims_seed_eligible"], False)
+        self.assertIs(payload["all_accuracy_claims_ready"], False)
+        self.assertIn("accuracy", payload["claim_floor_blocked_metrics"])
+        for row in payload["rows"]:
+            self.assertIs(row["claim_floor_met"], False)
+        self.assertIn("below the pre-registered min_seeds_for_claim",
+                      printed.getvalue())
+        self.assertRegex(payload["design_sha256"], r"^[0-9a-f]{16}$")
+
+    def test_no_pilot_does_not_hide_an_unmet_claim_floor(self):
+        settings = Settings.quick()
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _design_sensitivity_plan(
+                    settings, {}, pathlib.Path(tmp), "e3")
+        self.assertIs(payload["all_accuracy_plans_powered"], None)
+        self.assertIs(payload["all_accuracy_claims_seed_eligible"], False)
+        self.assertIs(payload["all_accuracy_claims_ready"], False)
+
+    def test_plan_at_or_above_floor_is_claim_eligible(self):
+        settings = Settings(seeds=(0, 1, 2))
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _design_sensitivity_plan(
+                    settings, self._verdict(sd=0.0001),
+                    pathlib.Path(tmp), "e2")
+        self.assertIs(payload["planned_n_meets_claim_floor"], True)
+        self.assertEqual(payload["claim_floor_shortfall"], 0)
+        self.assertEqual(payload["claim_floor_blocked_metrics"], [])
+        self.assertIs(payload["all_accuracy_claims_seed_eligible"], True)
+        self.assertIs(payload["all_accuracy_claims_ready"], True)
+
+
+class DesignPlanFreezeTest(unittest.TestCase):
+    """A design may be revised while preparing, never after outcome rows."""
+
+    @staticmethod
+    def _verdict():
+        return {"depth_ladder": {"by_depth": {
+            "2": {"accuracy_by_seed": {"0": 0.9, "1": 0.905},
+                  "unmeasured": False},
+        }}}
+
+    def test_before_outcomes_revision_is_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            first = Settings.quick()
+            with contextlib.redirect_stdout(io.StringIO()):
+                plan_a = _design_sensitivity_plan(
+                    first, self._verdict(), out, "e1")
+            second = Settings.quick()
+            second.seeds = (0, 1, 2)
+            self.assertFalse(_design_plan_outcomes_exist(out, "e1"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                plan_b = _design_sensitivity_plan(
+                    second, self._verdict(), out, "e1")
+            self.assertNotEqual(plan_a["design_sha256"],
+                                plan_b["design_sha256"])
+            self.assertEqual(plan_b["supersedes_design_sha256"],
+                             plan_a["design_sha256"])
+            events = [json.loads(line) for line in
+                      (out / "e1_design_plan_history.jsonl")
+                      .read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([e["event"] for e in events],
+                             ["created", "amended"])
+
+    def test_after_outcomes_a_changed_design_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            settings = Settings.quick()
+            with contextlib.redirect_stdout(io.StringIO()):
+                plan = _design_sensitivity_plan(
+                    settings, self._verdict(), out, "e1")
+            (out / "e1_runs.jsonl").write_text(
+                json.dumps({"value": 1}) + "\n", encoding="utf-8")
+            changed = Settings.quick()
+            changed.seeds = (0, 1, 2)
+            with self.assertRaises(DesignPlanError):
+                _design_sensitivity_plan(
+                    changed, self._verdict(), out, "e1")
+            # The refused revision must not have rewritten the registered
+            # artifact: the prospective hash is still the original one.
+            stored = json.loads(
+                (out / "e1_design_plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["design_sha256"],
+                             plan["design_sha256"])
+
+    def test_after_outcomes_an_identical_design_may_be_rechecked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            settings = Settings.quick()
+            with contextlib.redirect_stdout(io.StringIO()):
+                plan = _design_sensitivity_plan(
+                    settings, self._verdict(), out, "e1")
+            (out / "e1_runs.jsonl").write_text("{}\n", encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                again = _design_sensitivity_plan(
+                    settings, self._verdict(), out, "e1")
+            self.assertEqual(again["design_sha256"],
+                             plan["design_sha256"])
+            self.assertNotIn("supersedes_design_sha256", again)
+
+    def test_after_outcomes_a_malformed_plan_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            (out / "e1_runs.jsonl").write_text("{}\n", encoding="utf-8")
+            (out / "e1_design_plan.json").write_text(
+                "{not json", encoding="utf-8")
+            with self.assertRaises(DesignPlanError):
+                _design_sensitivity_plan(
+                    Settings.quick(), self._verdict(), out, "e1")
+
+    def test_outcomes_without_a_plan_cannot_get_a_post_hoc_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            (out / "e1_runs.jsonl").write_text("{}\n", encoding="utf-8")
+            with self.assertRaises(DesignPlanError):
+                _design_sensitivity_plan(
+                    Settings.quick(), self._verdict(), out, "e1")
+
+    def test_before_outcomes_a_malformed_plan_is_replaced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            (out / "e1_design_plan.json").write_text(
+                "{not json", encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _design_sensitivity_plan(
+                    Settings.quick(), self._verdict(), out, "e1")
+            self.assertRegex(payload["design_sha256"], r"^[0-9a-f]{16}$")
+            stored = json.loads(
+                (out / "e1_design_plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored["design_sha256"],
+                             payload["design_sha256"])
+
+    def test_fingerprint_ignores_invocation_provenance(self):
+        base = {"experiment": "e1", "planned_n": 2,
+                "planned_seeds": [0, 1], "alpha": 0.05,
+                "power_target": 0.8, "min_seeds_for_claim": 3,
+                "planned_eval_items": 128, "hypotheses_sha256": "abc",
+                "rows": [{"metric": "accuracy", "sesoi": 0.01,
+                          "mode": "superiority", "hypotheses": ["H1a"]}],
+                "run_id": "run-a", "created_utc": "yesterday"}
+        changed = dict(base, run_id="run-b", created_utc="today")
+        self.assertEqual(_design_plan_fingerprint(base),
+                         _design_plan_fingerprint(changed))
+        changed["planned_n"] = 3
+        self.assertNotEqual(_design_plan_fingerprint(base),
+                            _design_plan_fingerprint(changed))
+        self.assertIsNone(_design_plan_fingerprint("not a plan"))
+
+
+class RealizedRunOrderAuditTest(unittest.TestCase):
+    CELLS = ("none", "query")
+    SEEDS = (0, 1)
+
+    def _records(self, order):
+        return [{"cell": cell, "seed": seed, "run_block": block,
+                 "run_position": position}
+                for cell, seed, block, position in order]
+
+    def test_matching_records_are_certified(self):
+        order = _blocked_run_order(self.CELLS, self.SEEDS, 7,
+                                   shuffle=False)
+        audit = _realized_order_audit(
+            self._records(order), order, self.CELLS, self.SEEDS,
+            lambda run: run["cell"])
+        self.assertIs(audit["matches_schedule"], True)
+        self.assertEqual(audit["n_observed"], len(order))
+        self.assertEqual(audit["missing"], [])
+
+    def test_missing_reordered_and_duplicate_rows_are_flagged(self):
+        order = _blocked_run_order(self.CELLS, self.SEEDS, 7,
+                                   shuffle=False)
+        records = self._records(order)
+        missing = _realized_order_audit(
+            records[:-1], order, self.CELLS, self.SEEDS,
+            lambda run: run["cell"])
+        self.assertIs(missing["matches_schedule"], False)
+        self.assertEqual(len(missing["missing"]), 1)
+
+        reordered = self._records(order)
+        reordered[0] = dict(reordered[0], run_position=99)
+        changed = _realized_order_audit(
+            reordered, order, self.CELLS, self.SEEDS,
+            lambda run: run["cell"])
+        self.assertIs(changed["matches_schedule"], False)
+        self.assertTrue(changed["missing"])
+        self.assertTrue(changed["unexpected"])
+
+        duplicated = self._records(order) + [self._records(order)[0]]
+        dup = _realized_order_audit(
+            duplicated, order, self.CELLS, self.SEEDS,
+            lambda run: run["cell"])
+        self.assertIs(dup["matches_schedule"], False)
+        self.assertEqual(len(dup["duplicates"]), 1)
+
+    def test_boolean_and_fractional_indices_are_invalid(self):
+        order = _blocked_run_order(self.CELLS, self.SEEDS, 7,
+                                   shuffle=False)
+        records = self._records(order)
+        records[0] = dict(records[0], run_block=True)
+        records[1] = dict(records[1], run_position=1.5)
+        audit = _realized_order_audit(
+            records, order, self.CELLS, self.SEEDS,
+            lambda run: run["cell"])
+        self.assertIs(audit["matches_schedule"], False)
+        self.assertEqual(len(audit["invalid"]), 2)
+
+    def test_malformed_schedule_rows_are_not_certified(self):
+        order = _blocked_run_order(self.CELLS, self.SEEDS, 7,
+                                   shuffle=False)
+        broken = list(order)
+        broken[0] = ("none", True, 0, 0)
+        broken[1] = ("query", 1, 1)
+        audit = _realized_order_audit(
+            self._records(order), broken, self.CELLS, self.SEEDS,
+            lambda run: run["cell"])
+        self.assertIs(audit["matches_schedule"], False)
+        self.assertEqual(len(audit["invalid_order"]), 2)
+
+    def test_report_writes_the_audit_next_to_the_runs(self):
+        order = _blocked_run_order(self.CELLS, self.SEEDS, 7,
+                                   shuffle=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                payload = _report_realized_run_order(
+                    out, "e1", self._records(order), order,
+                    self.CELLS, self.SEEDS, lambda run: run["cell"])
+            stored = json.loads(
+                (out / "e1_run_order_realized.json").read_text(
+                    encoding="utf-8"))
+        self.assertIs(payload["matches_schedule"], True)
+        self.assertEqual(stored["matches_schedule"], True)
+        self.assertIn("matches the frozen", printed.getvalue())
+
+
+class PowerArgumentValidationTest(unittest.TestCase):
+    def test_boolean_or_fractional_seed_count_is_not_power_planned(self):
+        for bad_n in (True, 2.5, 0, -1):
+            with self.subTest(n=bad_n):
+                self.assertTrue(math.isnan(_power_at_effect(
+                    "superiority", 0.01, 0.01, bad_n, 0.05)))
+
+    def test_unknown_mode_or_probability_abstains(self):
+        self.assertTrue(math.isnan(_power_z("bogus", 0.05, 0.8)))
+        self.assertTrue(math.isnan(_power_z("superiority", True, 0.8)))
+        self.assertIsNone(_required_seeds(
+            "bogus", 0.1, 0.01, 0.05, 0.8))
 
 
 if __name__ == "__main__":
