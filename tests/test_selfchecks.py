@@ -121,6 +121,42 @@ class CorrelationInputValidationTest(unittest.TestCase):
             self.assertTrue(math.isnan(float(fn(y, x))))
 
 
+class BootstrapOverflowTest(unittest.TestCase):
+    def test_unrepresentable_bootstrap_moments_abstain(self):
+        from cage.metrics import (
+            bootstrap_upper_p,
+            equivalence_test,
+            minimum_effect_test,
+            noninferiority_test,
+            paired_bootstrap_ci,
+        )
+
+        # Every input is finite, but the sum/SD overflows float64.  The
+        # result must not present an infinite effect with a tiny p-value.
+        huge = [1e308, 1e308, 1e308, 1e308]
+        for test, keys in (
+                (lambda: paired_bootstrap_ci(huge, n_boot=200),
+                 ("mean", "lo", "hi", "p_value")),
+                (lambda: equivalence_test(huge, 0.1, n_boot=200),
+                 ("mean", "lo", "hi", "p_value")),
+                (lambda: noninferiority_test(huge, 0.1, n_boot=200),
+                 ("mean", "lo", "hi", "p_value")),
+                (lambda: minimum_effect_test(huge, 0.1, n_boot=200),
+                 ("mean", "lo", "hi", "p_value"))):
+            out = test()
+            for key in keys:
+                self.assertTrue(math.isnan(out[key]), (key, out))
+            self.assertFalse(out.get("equivalent", False))
+            self.assertFalse(out.get("noninferior", False))
+            self.assertFalse(out.get("beyond_sesoi", False))
+        self.assertTrue(math.isnan(bootstrap_upper_p(huge, 0.1, n_boot=200)))
+        # Mixed signs overflow resampled sums even though the full-sample
+        # mean is zero and the full-sample SD is finite.
+        mixed = [-1e308, 1e308, 1e308, -1e308]
+        self.assertTrue(math.isnan(
+            paired_bootstrap_ci(mixed, n_boot=200)["lo"]))
+
+
 class BaselineArgumentValidationTest(unittest.TestCase):
     def test_probe_chance_must_be_a_real_probability(self):
         from cage.baselines import probe_vs_chance_test

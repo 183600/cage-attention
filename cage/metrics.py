@@ -817,6 +817,24 @@ def _bootstrap_means(d: torch.Tensor, n_boot: int,
     return d[idx].mean(dim=1)
 
 
+def _finite_moments(d: torch.Tensor) -> bool:
+    """Whether the sample mean and SD are representable in float64.
+
+    Finite inputs can still overflow their sum (e.g. several ``1e308``
+    differences), and a finite mean with a non-finite SD cannot produce a
+    meaningful interval either.  Callers use this to abstain instead of
+    reporting an infinite effect with a spuriously small bootstrap p-value.
+    """
+    try:
+        if not math.isfinite(float(d.mean())):
+            return False
+        if d.numel() > 1 and not math.isfinite(float(d.std(unbiased=True))):
+            return False
+    except (RuntimeError, ValueError, OverflowError):
+        return False
+    return True
+
+
 def _bootstrap_summary(d: torch.Tensor, means: torch.Tensor,
                        alpha: float) -> dict:
     """Percentile CI and dispersion of a bootstrap-mean distribution."""
@@ -999,7 +1017,7 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 "bootstrap_below_sign_flip_floor": False,
                 **signflip}
     n = d.numel()
-    if not bool(torch.isfinite(d).all()):
+    if not bool(torch.isfinite(d).all()) or not _finite_moments(d):
         return {"mean": float("nan"), "lo": float("nan"),
                 "hi": float("nan"), "n": int(n), "sd": float("nan"),
                 "half_width": float("nan"), "mde80": float("nan"),
@@ -1027,6 +1045,22 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 **signflip}
     n_boot = int(float(n_boot))
     means = _bootstrap_means(d, n_boot, seed)
+    if not bool(torch.isfinite(means).all()):
+        # A resample overshot the float64 range even though the observed
+        # values were finite: quantiles/p-values from this distribution are
+        # not representable, so abstain rather than report a spurious
+        # near-zero p-value.
+        return {"mean": float("nan"), "lo": float("nan"),
+                "hi": float("nan"), "n": int(n), "sd": float("nan"),
+                "half_width": float("nan"), "mde80": float("nan"),
+                "p_value": float("nan"), "sign_consistency": float("nan"),
+                "alpha": alpha,
+                "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
+                "loo_sign_flip": False, "lo_bca": float("nan"),
+                "hi_bca": float("nan"), "bca_agrees": None,
+                "cohens_d": float("nan"), "hedges_g": float("nan"),
+                "bootstrap_below_sign_flip_floor": False,
+                **signflip}
     out = _bootstrap_summary(d, means, alpha)
     out.update(signflip)
     p_lo = float((means <= 0.0).to(torch.float64).mean())
@@ -1121,6 +1155,7 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         **signflip,
     }
     if d.numel() < 2 or not bool(torch.isfinite(d).all()) \
+            or not _finite_moments(d) \
             or not math.isfinite(bound) or bound <= 0.0 \
             or not _bootstrap_args_ok(n_boot, alpha):
         if d.numel() == 1 and bool(torch.isfinite(d).all()):
@@ -1132,6 +1167,8 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         return out
     n_boot = int(float(n_boot))
     means = _bootstrap_means(d, n_boot, seed)
+    if not bool(torch.isfinite(means).all()):
+        return out
     out.update(_bootstrap_summary(d, means, alpha))
     p_below = float((means <= -bound).to(torch.float64).mean())
     p_above = float((means >= bound).to(torch.float64).mean())
@@ -1198,6 +1235,7 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         **signflip,
     }
     if d.numel() < 2 or not bool(torch.isfinite(d).all()) \
+            or not _finite_moments(d) \
             or not math.isfinite(bound) or bound <= 0.0 \
             or not _bootstrap_args_ok(n_boot, alpha):
         if d.numel() == 1 and bool(torch.isfinite(d).all()):
@@ -1206,6 +1244,8 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         return out
     n_boot = int(float(n_boot))
     means = _bootstrap_means(d, n_boot, seed)
+    if not bool(torch.isfinite(means).all()):
+        return out
     out.update(_bootstrap_summary(d, means, alpha))
     p_below = float((means <= -bound).to(torch.float64).mean())
     out["p_value"] = min(1.0, (p_below * n_boot + 1.0) / (n_boot + 1.0))
@@ -1243,11 +1283,14 @@ def bootstrap_upper_p(diffs, bound, n_boot: int = 10000, seed: int = 0) -> float
     d = _flatten_float(diffs)
     bound = _float_or_nan(bound)
     if d.numel() == 0 or not bool(torch.isfinite(d).all()) \
+            or not _finite_moments(d) \
             or not math.isfinite(bound) \
             or not _bootstrap_args_ok(n_boot, 0.05):
         return float("nan")
     n_boot = int(float(n_boot))
     means = _bootstrap_means(d, n_boot, seed)
+    if not bool(torch.isfinite(means).all()):
+        return float("nan")
     p = float((means >= bound).to(torch.float64).mean())
     return min(1.0, (p * n_boot + 1.0) / (n_boot + 1.0))
 
@@ -1306,6 +1349,7 @@ def minimum_effect_test(diffs, bound, direction: str = "+",
     }
     if direction not in ("+", "-") or d.numel() < 2 \
             or not bool(torch.isfinite(d).all()) \
+            or not _finite_moments(d) \
             or not math.isfinite(bound) or bound <= 0.0 \
             or not _bootstrap_args_ok(n_boot, alpha):
         if direction in ("+", "-") and d.numel() == 1 \
@@ -1317,6 +1361,8 @@ def minimum_effect_test(diffs, bound, direction: str = "+",
         return out
     n_boot = int(float(n_boot))
     means = _bootstrap_means(d, n_boot, seed)
+    if not bool(torch.isfinite(means).all()):
+        return out
     out.update(_bootstrap_summary(d, means, alpha))
     if direction == "+":
         p_wrong_side = float((means <= bound).to(torch.float64).mean())
