@@ -220,6 +220,24 @@ def _positive_integer(value):
     return int(number)
 
 
+def _bootstrap_seed(seed) -> int:
+    """Validate a resampling seed instead of silently truncating it.
+
+    ``int(True)``/``int(0.5)`` would alias a boolean or fractional request to
+    a different stream, and ``torch.Generator.manual_seed`` otherwise raises
+    an incidental ``RuntimeError``.  Bootstrap seeds are part of the
+    reproducibility contract, so translate every non-integral value into the
+    documented ``ValueError`` before drawing any replicate.
+    """
+    if isinstance(seed, bool):
+        raise ValueError(f"bootstrap seed must be an integer, got {seed!r}")
+    try:
+        return int(operator.index(seed))
+    except TypeError as exc:
+        raise ValueError(
+            f"bootstrap seed must be an integer, got {seed!r}") from exc
+
+
 def _float_or_nan(value) -> float:
     """Coerce a scalar argument to float; NaN when it is not a number.
 
@@ -404,7 +422,8 @@ def roc_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
         return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
                 "n": int(y.numel())}
     n_boot = _positive_integer(n_boot)
-    gen = torch.Generator(device=s.device).manual_seed(int(seed))
+    gen = torch.Generator(device=s.device).manual_seed(
+        _bootstrap_seed(seed))
     boots = []
     for _ in range(n_boot):
         idx = torch.randint(0, s.numel(), (s.numel(),), generator=gen,
@@ -445,7 +464,8 @@ def pr_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
         return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
                 "n": int(y.numel())}
     n_boot = _positive_integer(n_boot)
-    gen = torch.Generator(device=s.device).manual_seed(int(seed))
+    gen = torch.Generator(device=s.device).manual_seed(
+        _bootstrap_seed(seed))
     boots = []
     for _ in range(n_boot):
         idx = torch.randint(0, s.numel(), (s.numel(),), generator=gen,
@@ -501,7 +521,8 @@ def auc_paired_bootstrap_ci(scores_a, scores_b, positives, n_boot: int = 10000,
         return {"mean_diff": point, "lo": float("nan"),
                 "hi": float("nan"), "n": int(sa.numel())}
     n_boot = _positive_integer(n_boot)
-    gen = torch.Generator(device=sa.device).manual_seed(int(seed))
+    gen = torch.Generator(device=sa.device).manual_seed(
+        _bootstrap_seed(seed))
     diffs = []
     n = sa.numel()
     for _ in range(n_boot):
@@ -855,7 +876,8 @@ def _bootstrap_means(d: torch.Tensor, n_boot: int,
                      seed: int) -> torch.Tensor:
     """Bootstrap distribution of the mean of the paired values ``d``."""
     n = d.numel()
-    gen = torch.Generator(device=d.device).manual_seed(seed)
+    gen = torch.Generator(device=d.device).manual_seed(
+        _bootstrap_seed(seed))
     idx = torch.randint(0, n, (n_boot, n), generator=gen, device=d.device)
     return d[idx].mean(dim=1)
 
@@ -2128,7 +2150,7 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     p_stream = (boundary if mean_acc <= 0.0 else
                 1.0 - boundary if mean_acc >= 1.0 else mean_acc)
     se_stream = math.sqrt(max(p_stream * (1.0 - p_stream) / n_stream, 0.0))
-    gen = torch.Generator().manual_seed(int(seed))
+    gen = torch.Generator().manual_seed(_bootstrap_seed(seed))
     idx = torch.randint(0, units, (n_boot_int, units), generator=gen)
     mean_star = p[idx].mean(dim=1)
     draw_p = torch.where(mean_star <= 0.0, boundary,
@@ -2260,7 +2282,7 @@ def crossed_cluster_bootstrap_ci(correct_a, correct_b, n_boot: int = 4000,
 
     d = a - b
     mean = float(d.mean())
-    gen = torch.Generator().manual_seed(int(seed))
+    gen = torch.Generator().manual_seed(_bootstrap_seed(seed))
     # Bound the advanced-index temporary: chunk x n_units x n_items stays
     # near one million elements even when the evaluation stream is large.
     per_draw = max(1, n_units * n_items)

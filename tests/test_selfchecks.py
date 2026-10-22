@@ -222,6 +222,59 @@ class MetricInputValidationTest(unittest.TestCase):
                 self.assertTrue(out["reason"])
 
 
+class BootstrapSeedValidationTest(unittest.TestCase):
+    def test_fractional_or_boolean_resampling_seeds_are_rejected(self):
+        from cage.baselines import probe_vs_chance_test
+        from cage.metrics import (
+            auc_paired_bootstrap_ci,
+            bootstrap_upper_p,
+            clustered_proportion_ci,
+            crossed_cluster_bootstrap_ci,
+            equivalence_test,
+            minimum_effect_test,
+            noninferiority_test,
+            paired_bootstrap_ci,
+            pr_auc_ci,
+            roc_auc_ci,
+        )
+        from cage.train import _two_sample_bootstrap_ci
+
+        calls = (
+            lambda seed: roc_auc_ci([1.0, 2.0, 0.0], [0, 1, 0],
+                                    n_boot=10, seed=seed),
+            lambda seed: pr_auc_ci([1.0, 2.0, 0.0], [0, 1, 0],
+                                   n_boot=10, seed=seed),
+            lambda seed: auc_paired_bootstrap_ci(
+                [1.0, 2.0, 0.0], [2.0, 1.0, 0.0], [0, 1, 0],
+                n_boot=10, seed=seed),
+            lambda seed: paired_bootstrap_ci([0.1, 0.2, 0.3],
+                                             n_boot=10, seed=seed),
+            lambda seed: equivalence_test([0.1, 0.2, 0.3], 0.5,
+                                          n_boot=10, seed=seed),
+            lambda seed: noninferiority_test([0.1, 0.2, 0.3], 0.5,
+                                             n_boot=10, seed=seed),
+            lambda seed: minimum_effect_test([0.1, 0.2, 0.3], 0.01,
+                                             n_boot=10, seed=seed),
+            lambda seed: bootstrap_upper_p([0.1, 0.2, 0.3], 0.5,
+                                           n_boot=10, seed=seed),
+            lambda seed: clustered_proportion_ci([1, 0], [2, 2],
+                                                 n_boot=10, seed=seed),
+            lambda seed: crossed_cluster_bootstrap_ci(
+                [[1, 0], [0, 1]], [[0, 1], [1, 0]],
+                n_boot=10, seed=seed),
+            lambda seed: probe_vs_chance_test(
+                [0.01, 0.02], 0.01, n_boot=10, seed=seed,
+                n_per_seed=100),
+            lambda seed: _two_sample_bootstrap_ci(
+                [1.0, 2.0], [0.0, 1.0], n_boot=10, seed=seed),
+        )
+        for seed in (True, 0.5, 1.0, "1", None, object()):
+            for index, call in enumerate(calls):
+                with self.subTest(seed=seed, call=index):
+                    with self.assertRaises(ValueError):
+                        call(seed)
+
+
 class NegativeControlPermutationTest(unittest.TestCase):
     def test_permuted_labels_never_keep_a_rows_own_answer(self):
         import torch

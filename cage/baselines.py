@@ -54,6 +54,7 @@ from .data import (
     validate_batch,
 )
 from .metrics import (
+    _bootstrap_seed,
     _float_or_nan,
     _positive_integer,
     bootstrap_upper_p,
@@ -518,6 +519,10 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
         raise ValueError(
             f"chance must be a finite probability in [0, 0.5), got "
             f"{chance!r}; the 2x-chance certificate is vacuous otherwise")
+    # The resampling seed is part of the reproducibility contract: reject a
+    # bool/fractional value instead of letting ``int()``/torch alias it to a
+    # different bootstrap stream.
+    seed = _bootstrap_seed(seed)
     # A malformed accuracy sample (non-numeric container, complex value)
     # must abstain, not escape as a TypeError from a report companion.
     # ``torch.as_tensor`` also flattens a nested/tensor input consistently.

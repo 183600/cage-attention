@@ -29,6 +29,7 @@ from .data import (
 )
 from .metrics import (
     _bootstrap_args_ok,
+    _bootstrap_seed,
     _float_or_nan,
     _positive_integer,
     average_ranks,
@@ -3258,7 +3259,8 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
                 "half_width": float("nan"), "mde80": float("nan"),
                 "p_value": float("nan"), "alpha": alpha}
     n_boot = int(float(n_boot))
-    gen = torch.Generator(device=a.device).manual_seed(int(seed))
+    gen = torch.Generator(device=a.device).manual_seed(
+        _bootstrap_seed(seed))
     idx_a = torch.randint(0, n_a, (n_boot, n_a), generator=gen,
                           device=a.device)
     idx_b = torch.randint(0, n_b, (n_boot, n_b), generator=gen,
