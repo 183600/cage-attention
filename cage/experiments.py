@@ -1571,15 +1571,18 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
             out["reason"] = f"missing run for seed {seed}"
             return out
         ea, eb = ra.get("correct_bitmask"), rb.get("correct_bitmask")
-        na = ra.get("n", ra.get("eval_n"))
-        nb = rb.get("n", rb.get("eval_n"))
+        na = _positive_integer(ra.get("n", ra.get("eval_n")))
+        nb = _positive_integer(rb.get("n", rb.get("eval_n")))
         if not isinstance(ea, str) or not isinstance(eb, str):
             out["reason"] = "per-item correctness not recorded on both sides"
             return out
-        if not _finite(na) or not _finite(nb) or int(na) != int(nb):
+        if na is None or nb is None:
+            out["reason"] = "evaluation item counts are not positive integers"
+            return out
+        if na != nb:
             out["reason"] = "evaluation item counts differ"
             return out
-        n = int(na)
+        n = na
         try:
             ma = decode_correct_mask(ea, n)
             mb = decode_correct_mask(eb, n)
