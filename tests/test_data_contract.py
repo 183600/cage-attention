@@ -36,6 +36,17 @@ class UniformityInputTest(unittest.TestCase):
             answer_uniformity_test(torch.tensor([True, False]))
 
 
+class SplitAuditInputTest(unittest.TestCase):
+    def test_non_iterable_train_seeds_raise_value_error(self):
+        from cage.data import split_leakage_audit
+
+        for bad in (None, 5, "x"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    split_leakage_audit(3, 17, batch=4, batches=1,
+                                        train_seeds=bad)
+
+
 class TimeOrderInputTest(unittest.TestCase):
     def test_malformed_timestamp_container_raises_value_error(self):
         from cage.data import assert_time_ordered

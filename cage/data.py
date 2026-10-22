@@ -2372,8 +2372,19 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
             f"estimate a sampling-noise floor, got batch={batch} x "
             f"batches={batches}=1; the floor would be NaN and the TV/floor "
             f"check would silently pass")
+    if isinstance(train_seeds, (str, bytes)) or isinstance(
+            train_seeds, Mapping):
+        raise ValueError(
+            "train_seeds must be an iterable of integer seeds, got "
+            f"{type(train_seeds).__name__}")
+    try:
+        train_seed_iter = iter(train_seeds)
+    except TypeError as exc:
+        raise ValueError(
+            "train_seeds must be an iterable of integer seeds, got "
+            f"{type(train_seeds).__name__}") from exc
     unique = {}
-    for seed in train_seeds:
+    for seed in train_seed_iter:
         unique.setdefault(stream_seed_key(seed), int(seed))
     train_seeds = tuple(unique.values())
     if not train_seeds:
