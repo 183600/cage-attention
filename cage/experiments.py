@@ -2703,6 +2703,9 @@ def _controlled_audit(runs_a, runs_b):
     return audit
 
 
+_STREAM_DIGEST_HEX = frozenset("0123456789abcdefABCDEF")
+
+
 def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
     """Exact paired test on the shared finite evaluation stream.
 
@@ -2779,12 +2782,15 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
                     f"evaluation-stream digest on side {side} is not a "
                     f"string")
                 return out
-            if not value.strip():
-                # An empty/blank stamp is a malformed record, not a
-                # verifiable digest: treating it as a present value would
-                # let two unversioned runs pass as "verified".
+            # ``stream_content_digest`` only ever emits hexadecimal
+            # SHA-256 prefixes.  A blank or arbitrary string is a
+            # malformed stamp, not evidence that the two item streams
+            # match: accepting it would let two unversioned records pass
+            # as "verified".
+            if not value or any(ch not in _STREAM_DIGEST_HEX for ch in value):
                 out["reason"] = (
-                    f"evaluation-stream digest on side {side} is empty")
+                    f"evaluation-stream digest on side {side} is not a "
+                    f"hexadecimal content digest")
                 return out
         if da is not None and db is not None:
             # Both sides stamped the digest: only this pair can verify that
