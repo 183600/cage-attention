@@ -2826,7 +2826,10 @@ def _fmt_ci(ci) -> str:
 # the companions that remain interpretable under a skewed stream.
 _ACCURACY_METRICS = {
     "accuracy", "accuracy_at_base", "accuracy_at_longest", "accuracy_drop",
-    "norm_accuracy",
+    # The E2 whole-sweep slope is fitted to accuracy, so the same balance
+    # premise applies; omitting it would let the slope rows survive an
+    # answer-skew gate that invalidates the endpoint/drop rows.
+    "accuracy_slope_log_len", "norm_accuracy",
 }
 
 CURVE_INVALID_VERDICTS = (
