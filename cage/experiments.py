@@ -8264,6 +8264,37 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                 row[metric] = ci
         contrasts[f"calib - {baseline}"] = row
 
+    tuned_states = {name: row["accuracy"]["state"]
+                    for name, row in contrasts.items()}
+    unmeasured = [name for name, state in tuned_states.items()
+                  if state == "unmeasured"]
+    above = [name for name, state in tuned_states.items()
+             if state == "above tuned baseline by SESOI"]
+    below = [name for name, state in tuned_states.items()
+             if state == "tuned baseline better"]
+    if unmeasured:
+        readout = ("not determinable for "
+                   + ", ".join(unmeasured)
+                   + ": at least one side has no curve-valid paired seed")
+    elif below:
+        readout = ("NOT robust to per-variant tuning: "
+                   + ", ".join(below)
+                   + " is confidently better than calib")
+    elif len(above) == len(tuned_states) and tuned_states:
+        readout = ("robust: calib is above every tuned baseline by the "
+                   "pre-registered accuracy SESOI")
+    else:
+        readout = ("not established: calib is not above every tuned "
+                   "baseline by the accuracy SESOI")
+    calib_advantage = {
+        "by_baseline": tuned_states,
+        "all_baselines_beaten_by_sesoi": bool(
+            tuned_states and len(above) == len(tuned_states)),
+        "any_tuned_baseline_better": bool(below),
+        "unmeasured": unmeasured,
+        "readout": readout,
+    }
+
     controlled = {}
     if reference_runs:
         for baseline in ("none", "query", "null"):
@@ -8337,6 +8368,7 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                      if _finite(ctl.get("mean")) else "n/a")
             print(f"{name:>18} {metric:>22} {ctl_s:>28} "
                   f"{_fmt_ci(tuned):>28} {tuned.get('state', ''):>34}")
+    print(f"[e1] per-variant tuned accuracy conclusion: {readout}")
     payload = {
         "available": True,
         "selection_seed": VAL_SEED,
@@ -8349,6 +8381,7 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
         } for gate, row in by_arm.items()},
         "contrasts": contrasts,
         "controlled_contrasts": controlled,
+        "calib_advantage": calib_advantage,
         "comparison": "per_variant_tuned_benchmark",
         "note": ("exploratory fairness companion, not a controlled mechanism "
                  "contrast and not part of the pre-registered FDR family: "
