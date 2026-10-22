@@ -797,6 +797,31 @@ class RealizedRunOrderAuditTest(unittest.TestCase):
         self.assertIs(audit["matches_schedule"], False)
         self.assertEqual(len(audit["invalid_order"]), 2)
 
+    def test_duplicate_schedule_tuple_is_not_certified(self):
+        order = _blocked_run_order(self.CELLS, self.SEEDS, 7,
+                                   shuffle=False)
+        duplicated_order = list(order) + [order[0]]
+        audit = _realized_order_audit(
+            self._records(order), duplicated_order, self.CELLS,
+            self.SEEDS, lambda run: run["cell"])
+        self.assertIs(audit["matches_schedule"], False)
+        self.assertEqual(len(audit["duplicate_order"]), 1)
+        self.assertTrue(audit["duplicate_order"][0].get("cell"))
+
+    def test_schedule_outside_declared_cells_or_seeds_is_not_certified(self):
+        order = _blocked_run_order(self.CELLS, self.SEEDS, 7,
+                                   shuffle=False)
+        for cell, seed in (("unplanned", self.SEEDS[0]),
+                           (self.CELLS[0], 99)):
+            with self.subTest(cell=cell, seed=seed):
+                broken = list(order)
+                broken[0] = (cell, seed, 0, 0)
+                audit = _realized_order_audit(
+                    self._records(order), broken, self.CELLS,
+                    self.SEEDS, lambda run: run["cell"])
+                self.assertIs(audit["matches_schedule"], False)
+                self.assertTrue(audit["invalid_order"])
+
     def test_report_writes_the_audit_next_to_the_runs(self):
         order = _blocked_run_order(self.CELLS, self.SEEDS, 7,
                                    shuffle=False)

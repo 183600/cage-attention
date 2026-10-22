@@ -1778,8 +1778,12 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
         except TypeError:
             return None
 
+    declared_cells = {_coverage_cell_key(cell) for cell in cells}
+    declared_seeds = {_integer(seed) for seed in seeds}
     expected = []
     invalid_order = []
+    seen_order = {}
+    duplicate_order = []
     for index, row in enumerate(order):
         if not isinstance(row, (tuple, list)) or len(row) != 4:
             invalid_order.append({
@@ -1797,8 +1801,28 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
                 "reason": "non-integral seed/block/position in schedule",
             })
             continue
-        expected.append((_coverage_cell_key(cell), seed_i,
-                         block_i, position_i))
+        key = (_coverage_cell_key(cell), seed_i, block_i, position_i)
+        if key[0] not in declared_cells:
+            invalid_order.append({
+                "order_index": index, "cell": key[0],
+                "reason": "schedule cell was not declared",
+            })
+            continue
+        if key[1] not in declared_seeds:
+            invalid_order.append({
+                "order_index": index, "seed": key[1],
+                "reason": "schedule seed was not declared",
+            })
+            continue
+        if key in seen_order:
+            # A duplicate in the frozen schedule would otherwise collapse
+            # through ``expected_set`` and certify a run row as if every
+            # planned tuple had appeared exactly once.  Record the schedule
+            # duplicate explicitly so the audit cannot pass.
+            duplicate_order.append({"order_index": index, "cell": key[0], "seed": key[1], "block": key[2], "position": key[3]})
+            continue
+        seen_order[key] = index
+        expected.append(key)
     expected_set = set(expected)
 
     observed = []
@@ -1843,7 +1867,7 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
 
     matches = bool(
         expected and not missing and not unexpected and not duplicates
-        and not invalid and not invalid_order)
+        and not invalid and not invalid_order and not duplicate_order)
     return {
         "cells": [_coverage_cell_key(c) for c in cells],
         "seeds": [s if _integer(s) is not None else repr(s) for s in seeds],
@@ -1853,6 +1877,7 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
         "missing": [_row(key) for key in missing],
         "unexpected": [_row(key) for key in unexpected],
         "duplicates": [_row(key) for key in duplicates],
+        "duplicate_order": duplicate_order,
         "invalid": invalid,
         "invalid_order": invalid_order,
     }
