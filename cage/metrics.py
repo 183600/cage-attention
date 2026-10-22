@@ -132,6 +132,38 @@ def _flatten_float(x) -> torch.Tensor:
     return torch.as_tensor(x, dtype=torch.float64).detach().reshape(-1)
 
 
+def _binary_labels(values, device=None):
+    """Flatten boolean/0-1 labels, or return ``None`` for anything else.
+
+    The ranking and McNemar helpers used to call ``.bool()`` unconditionally:
+    ``-1``/``0.5``/``2`` then silently became a positive label, fabricating
+    a class the caller never named.  Only true booleans and integral 0/1
+    values are accepted (``evaluation_fold_audit`` already enforces the same
+    contract); malformed input makes the companion abstain instead.
+    """
+    try:
+        raw = torch.as_tensor(values)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        return None
+    if raw.is_complex():
+        return None
+    if raw.dtype == torch.bool:
+        out = raw.detach().reshape(-1)
+    else:
+        try:
+            numeric = raw.detach().reshape(-1).to(torch.float64)
+        except (TypeError, ValueError, RuntimeError, OverflowError):
+            return None
+        if not bool(torch.isfinite(numeric).all()):
+            return None
+        if not bool(((numeric == 0.0) | (numeric == 1.0)).all()):
+            return None
+        out = numeric.eq(1.0)
+    if device is not None:
+        out = out.to(device)
+    return out
+
+
 def _positive_integer(value):
     if isinstance(value, bool):
         return None
@@ -189,8 +221,9 @@ def roc_auc(scores, positives) -> float:
     Returns ``nan`` when only one class is present.
     """
     s = _flatten_float(scores)
-    y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
-    if y.numel() != s.numel() or not bool(torch.isfinite(s).all()):
+    y = _binary_labels(positives, s.device)
+    if y is None or y.numel() != s.numel() \
+            or not bool(torch.isfinite(s).all()):
         return float("nan")
     n_pos = int(y.sum())
     n_neg = y.numel() - n_pos
@@ -210,8 +243,9 @@ def pr_auc(scores, positives) -> float:
     not depend on the arbitrary sort order within a tie.
     """
     s = _flatten_float(scores)
-    y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
-    if y.numel() != s.numel() or not bool(torch.isfinite(s).all()):
+    y = _binary_labels(positives, s.device)
+    if y is None or y.numel() != s.numel() \
+            or not bool(torch.isfinite(s).all()):
         return float("nan")
     n_pos = int(y.sum())
     if n_pos == 0:
@@ -251,9 +285,10 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
     baseline.
     """
     s = _flatten_float(scores)
-    y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
+    y = _binary_labels(positives, s.device)
     n = s.numel()
-    if n == 0 or y.numel() != n or not bool(torch.isfinite(s).all()):
+    if y is None or n == 0 or y.numel() != n \
+            or not bool(torch.isfinite(s).all()):
         return {"frac": float("nan"), "k": 0, "recall": float("nan"),
                 "precision": float("nan"), "lift": float("nan"),
                 "threshold": float("nan")}
@@ -295,11 +330,11 @@ def roc_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
     """
     alpha = _float_or_nan(alpha)
     s = _flatten_float(scores)
-    y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
-    if y.numel() != s.numel() or y.numel() == 0 \
+    y = _binary_labels(positives, s.device)
+    if y is None or y.numel() != s.numel() or y.numel() == 0 \
             or not bool(torch.isfinite(s).all()):
         return {"auc": float("nan"), "lo": float("nan"), "hi": float("nan"),
-                "n": int(y.numel())}
+                "n": 0 if y is None else int(y.numel())}
     n_pos = int(y.sum())
     n_neg = y.numel() - n_pos
     if n_pos == 0 or n_neg == 0:
@@ -337,11 +372,11 @@ def pr_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
     """Bootstrap confidence interval for PR-AUC (average precision)."""
     alpha = _float_or_nan(alpha)
     s = _flatten_float(scores)
-    y = torch.as_tensor(positives).reshape(-1).to(s.device).bool()
-    if y.numel() != s.numel() or y.numel() == 0 \
+    y = _binary_labels(positives, s.device)
+    if y is None or y.numel() != s.numel() or y.numel() == 0 \
             or not bool(torch.isfinite(s).all()):
         return {"auc": float("nan"), "lo": float("nan"), "hi": float("nan"),
-                "n": int(y.numel())}
+                "n": 0 if y is None else int(y.numel())}
     n_pos = int(y.sum())
     if n_pos == 0:
         auc = pr_auc(s, y)
@@ -382,9 +417,9 @@ def auc_paired_bootstrap_ci(scores_a, scores_b, positives, n_boot: int = 10000,
     # The three row-aligned inputs must live on one device: callers can
     # legitimately pass CUDA scores with a CPU boolean mask (or vice versa),
     # and the bootstrap indexes all three with one device-local index.
-    y = torch.as_tensor(positives).reshape(-1).to(sa.device).bool()
+    y = _binary_labels(positives, sa.device)
     sb = sb.to(sa.device)
-    if sa.numel() != sb.numel() or sa.numel() != y.numel() \
+    if y is None or sa.numel() != sb.numel() or sa.numel() != y.numel() \
             or sa.numel() == 0 or not bool(torch.isfinite(sa).all()) \
             or not bool(torch.isfinite(sb).all()):
         return {"mean_diff": float("nan"), "lo": float("nan"), "hi": float("nan")}
@@ -478,11 +513,15 @@ def mcnemar_test(correct_a, correct_b) -> dict:
     exact binomial p-value (mid-p not required, use standard exact for
     small b+c) and the continuity-corrected chi-square approximation.
     """
-    ca = torch.as_tensor(correct_a).reshape(-1).bool()
-    cb = torch.as_tensor(correct_b).reshape(-1).bool()
-    if ca.numel() != cb.numel() or ca.numel() == 0:
-        return {"n": int(ca.numel()), "b": 0, "c": 0, "chi2_cc": float("nan"),
+    ca = _binary_labels(correct_a)
+    cb = _binary_labels(correct_b)
+    if ca is None or cb is None or ca.numel() != cb.numel() \
+            or ca.numel() == 0:
+        return {"n": 0 if ca is None else int(ca.numel()),
+                "b": 0, "c": 0, "chi2_cc": float("nan"),
                 "p_chi2_cc": float("nan"), "p_exact": float("nan")}
+    if cb.device != ca.device:
+        cb = cb.to(ca.device)
     b = int((~ca & cb).sum())
     c = int((ca & ~cb).sum())
     n_dis = b + c
@@ -629,7 +668,12 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     f1_weighted = float((f1 * (tgt_counts / support.clamp_min(1.0))).sum())
     tp_t, fp_t, fn_t = tp.sum(), fp.sum(), fn.sum()
     f1_micro = float(2 * tp_t / (2 * tp_t + fp_t + fn_t).clamp_min(1.0))
-    nll = float(torch.nn.functional.cross_entropy(logits.float(), targets))
+    # Do not force float32 here: a float64 logit panel (and extreme but
+    # finite logits) must be scored at the precision it was recorded in.
+    # ``cross_entropy`` needs a floating dtype, so only truly integer input
+    # is promoted.
+    nll_logits = logits if logits.is_floating_point() else logits.float()
+    nll = float(torch.nn.functional.cross_entropy(nll_logits, targets))
 
     return {
         "n": int(n),
@@ -671,7 +715,11 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     # accuracy (and the implied calibration error).
     if not bool(((c == 0.0) | (c == 1.0)).all()):
         return float("nan")
-    p = p.clamp(0.0, 1.0)
+    # A probability outside [0, 1] is not a confidence.  Clamping it would
+    # silently turn e.g. 2.0 into 1.0 and report perfect calibration for an
+    # impossible input, so abstain as the non-finite branch already does.
+    if not bool(((p >= 0.0) & (p <= 1.0)).all()):
+        return float("nan")
     bin_id = (p * n_bins).long().clamp(max=n_bins - 1)
     counts = torch.bincount(bin_id, minlength=n_bins).float()
     conf = torch.bincount(bin_id, weights=p, minlength=n_bins)
@@ -693,6 +741,10 @@ def brier_score(probs, correct) -> float:
     # e.g. 0.5 or 2.0 would report a Brier score for a different question.
     if not bool(((c == 0.0) | (c == 1.0)).all()):
         return float("nan")
+    # As with ECE, a probability outside [0, 1] is not a confidence and
+    # must not be scored as if it were one.
+    if not bool(((p >= 0.0) & (p <= 1.0)).all()):
+        return float("nan")
     return float(((p - c) ** 2).mean())
 
 
@@ -711,7 +763,10 @@ def _bootstrap_summary(d: torch.Tensor, means: torch.Tensor,
     lo = float(torch.quantile(means, alpha / 2.0))
     hi = float(torch.quantile(means, 1.0 - alpha / 2.0))
     n = d.numel()
-    sd = float(d.std(unbiased=True)) if n > 1 else 0.0
+    # The sample SD (and therefore the MDE) is not estimable from a single
+    # paired unit.  Reporting 0.0 there would make the design look
+    # infinitely powered: ``mde80 == 0`` claims every effect is resolvable.
+    sd = float(d.std(unbiased=True)) if n > 1 else float("nan")
     return {
         "mean": float(d.mean()),
         "lo": lo,
@@ -719,7 +774,8 @@ def _bootstrap_summary(d: torch.Tensor, means: torch.Tensor,
         "n": int(n),
         "sd": sd,
         "half_width": (hi - lo) / 2.0,
-        "mde80": 2.8015852 * sd / math.sqrt(n) if n else float("nan"),
+        "mde80": (2.8015852 * sd / math.sqrt(n)
+                  if n > 1 and math.isfinite(sd) else float("nan")),
         "alpha": float(alpha),
     }
 
@@ -887,7 +943,8 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
     if not _bootstrap_args_ok(n_boot, alpha):
         return {"mean": float(d.mean()), "lo": float("nan"),
                 "hi": float("nan"), "n": int(n),
-                "sd": (float(d.std(unbiased=True)) if n > 1 else 0.0),
+                "sd": (float(d.std(unbiased=True)) if n > 1
+                       else float("nan")),
                 "half_width": float("nan"), "mde80": float("nan"),
                 "p_value": float("nan"), "sign_consistency": float("nan"),
                 "alpha": alpha,
@@ -903,8 +960,9 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
     out.update(signflip)
     p_lo = float((means <= 0.0).to(torch.float64).mean())
     p_hi = float((means >= 0.0).to(torch.float64).mean())
-    out["p_value"] = min(
+    out["p_value"] = (min(
         1.0, 2.0 * (min(p_lo, p_hi) * n_boot + 1.0) / (n_boot + 1.0))
+        if n > 1 else float("nan"))
     floor = out.get("sign_flip_min_p_two_sided", float("nan"))
     out["bootstrap_below_sign_flip_floor"] = bool(
         math.isfinite(out["p_value"]) and math.isfinite(float(floor))
@@ -991,9 +1049,15 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         "bca_agrees": None,
         **signflip,
     }
-    if d.numel() == 0 or not bool(torch.isfinite(d).all()) \
+    if d.numel() < 2 or not bool(torch.isfinite(d).all()) \
             or not math.isfinite(bound) or bound <= 0.0 \
             or not _bootstrap_args_ok(n_boot, alpha):
+        if d.numel() == 1 and bool(torch.isfinite(d).all()):
+            # Report the observed point but not a decision: one paired unit
+            # cannot establish equivalence (the exact sign-flip companion
+            # already has p=0.5 in this case).
+            out["mean"] = float(d.mean())
+            out["n"] = 1
         return out
     n_boot = int(float(n_boot))
     means = _bootstrap_means(d, n_boot, seed)
@@ -1062,9 +1126,12 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         "bca_agrees": None,
         **signflip,
     }
-    if d.numel() == 0 or not bool(torch.isfinite(d).all()) \
+    if d.numel() < 2 or not bool(torch.isfinite(d).all()) \
             or not math.isfinite(bound) or bound <= 0.0 \
             or not _bootstrap_args_ok(n_boot, alpha):
+        if d.numel() == 1 and bool(torch.isfinite(d).all()):
+            out["mean"] = float(d.mean())
+            out["n"] = 1
         return out
     n_boot = int(float(n_boot))
     means = _bootstrap_means(d, n_boot, seed)
@@ -1437,14 +1504,23 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     sd_between = float(p.std(unbiased=True)) if units > 1 else 0.0
     se_between = sd_between / math.sqrt(units)
     n_stream = float(n.min())
-    se_stream = math.sqrt(max(mean_acc * (1.0 - mean_acc) / n_stream, 0.0))
+    # A plug-in Binomial(n, 1) has zero variance, so a perfect (or
+    # perfectly failed) stream would be reported as infinitely precise.
+    # Keep half a pseudo-observation of each outcome in the draw
+    # probability (Haldane/Jeffreys-style boundary smoothing): interior
+    # accuracies are untouched, while the endpoints retain the finite
+    # stream's resolution and the CI stays inside [0, 1].
+    boundary = 0.5 / n_stream
+    p_stream = min(max(mean_acc, boundary), 1.0 - boundary)
+    se_stream = math.sqrt(max(p_stream * (1.0 - p_stream) / n_stream, 0.0))
     gen = torch.Generator().manual_seed(int(seed))
     idx = torch.randint(0, units, (n_boot_int, units), generator=gen)
     mean_star = p[idx].mean(dim=1)
+    draw_p = mean_star.clamp(min=boundary, max=1.0 - boundary)
     # One shared finite-stream draw per replicate, not one per seed: the
     # evaluation examples are common to every training seed.
     stream = torch.binomial(
-        torch.full_like(mean_star, n_stream), mean_star, generator=gen
+        torch.full_like(draw_p, n_stream), draw_p, generator=gen
     ) / n_stream
     lo = float(torch.quantile(stream, lo_q).item())
     hi = float(torch.quantile(stream, hi_q).item())
