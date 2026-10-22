@@ -4785,7 +4785,10 @@ def _run_context(settings: Settings) -> dict:
     the runner applies ``--seeds`` that way - is still refused when it is
     not duplicate-free / disjoint from the reserved evaluation streams.
     """
-    _validate_training_seeds(settings.seeds)
+    # Keep the validated/normalised tuple: a caller may have assigned a
+    # one-shot iterable after construction, and validating it would consume
+    # the iterator before the config/fingerprint loops below read it.
+    settings.seeds = _validate_training_seeds(settings.seeds)
     config = {name: getattr(settings, name)
               for name in Settings.__dataclass_fields__ if name != "out_dir"}
     cache_key = _config_cache_key(settings)
