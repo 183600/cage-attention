@@ -5963,6 +5963,8 @@ def _verdict_seed_floor(verdict: dict, settings: Settings) -> dict:
     such, never silently certified), matching the decision layer of the
     contrast families where a 2-seed "win" is marked INELIGIBLE.
     """
+    if not isinstance(verdict, dict):
+        verdict = {}
     floor = int(settings.min_seeds_for_claim)
     stored = verdict.get("seed_floor")
     if not isinstance(stored, dict):
@@ -6032,8 +6034,10 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
     if stale:
         raise BaselineVerdictError(
             f"{tag}: {stale}; refusing to train on an uncertified protocol")
+    # Require the literal JSON boolean True: a hand-edited string such as
+    # ``"False"`` is truthy and must not pass a validity gate.
     failed = [key for key in _BLOCKING_VERDICT_GATES
-              if not verdict.get(key)]
+              if verdict.get(key) is not True]
     # HB4 is a three-state validity gate: only a *violated* control (the
     # whole interval above tolerance) invalidates the grid.  An
     # inconclusive interval must not be read as leakage - with a finite
@@ -6051,6 +6055,9 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
         # pass would let a hand-edited verdict bypass the negative-control
         # gate entirely.
         failed.append(f"HB4 (unrecognised state {hb4_state!r})")
+    elif hb4_state == "supported" and verdict.get("hb4_supported") is not True:
+        failed.append(
+            "HB4 (state says supported but the supported boolean is not true)")
     if failed:
         raise BaselineVerdictError(
             f"{tag}: baseline validity gate(s) {', '.join(failed)} failed "
