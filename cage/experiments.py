@@ -1041,7 +1041,20 @@ def _validate_training_seeds(seeds):
     attribute assignment - the CLI applies ``--seeds`` that way - cannot
     bypass it either.
     """
-    seeds = tuple(seeds)
+    # A bare integer / None is not a seed sequence; string-like and mapping
+    # objects are iterable but do not name seeds either (``bytes`` would
+    # silently become its integer byte values).  Translate these into the
+    # documented ValueError instead of leaking ``tuple()``'s TypeError.
+    if isinstance(seeds, (str, bytes)) or isinstance(seeds, Mapping):
+        raise ValueError(
+            "seeds must be an iterable of training seeds, got "
+            f"{type(seeds).__name__}")
+    try:
+        seeds = tuple(seeds)
+    except TypeError as exc:
+        raise ValueError(
+            "seeds must be an iterable of training seeds, got "
+            f"{type(seeds).__name__}") from exc
     if not seeds:
         raise ValueError(
             "seeds must be a non-empty sequence of training seeds")

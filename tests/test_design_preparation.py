@@ -425,6 +425,16 @@ class DesignPlanTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             Settings(run_order_seed=True)
 
+    def test_settings_reject_non_sequence_or_byte_seeds(self):
+        # ``bytes`` is iterable and would otherwise silently turn into its
+        # integer byte values; a bare int/None is not a seed sequence.
+        for bad in (5, None, object(), b"\x00\x01", {"seed": 0}):
+            with self.subTest(seeds=bad):
+                with self.assertRaises(ValueError):
+                    Settings(seeds=bad)
+        # A normal iterable is still canonicalised to a tuple of ints.
+        self.assertEqual(Settings(seeds=range(3)).seeds, (0, 1, 2))
+
     def test_settings_reject_invalid_numeric_configuration(self):
         for field, values in {
             "batch": (0, -1, 1.5, True, "8"),
