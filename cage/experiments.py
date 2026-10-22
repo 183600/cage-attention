@@ -5165,6 +5165,12 @@ print(json.dumps({"data": fingerprint,
 _REPRO_AUDIT_KEYS = (
     ("data_same_seed_identical", "same seed draws byte-identical batches"),
     ("data_diff_seed_differs", "a different seed draws different data"),
+    ("data_seed_alias_same_stream",
+     "aliased seeds with the same canonical 32-bit stream key draw the "
+     "identical realization (fingerprint)"),
+    ("eval_seed_alias_identical",
+     "aliased evaluation seeds read the same held-out batches and replay "
+     "identical metrics"),
     ("data_draw_leaves_global_rng_untouched",
      "data draws do not consume the global RNG (stream-owns-its-state)"),
     ("eval_leaves_global_rng_untouched",
@@ -5389,6 +5395,8 @@ def _reproducibility_audit(settings: Settings) -> dict:
     fp_same_a = batch_fingerprint(*_draw(seed))
     fp_same_b = batch_fingerprint(*_draw(seed))
     fp_other = batch_fingerprint(*_draw(other))
+    alias_seed = seed + 2 ** 32
+    fp_alias = batch_fingerprint(*_draw(alias_seed))
 
     torch_state = torch.get_rng_state()
     py_state = random.getstate()
@@ -5459,6 +5467,9 @@ def _reproducibility_audit(settings: Settings) -> dict:
                                  device, **kwargs)
         metrics_b = eval_metrics(model, settings.n_pairs, settings.vocab,
                                  device, **kwargs)
+        alias_kwargs = dict(kwargs, seed=alias_seed)
+        metrics_alias = eval_metrics(
+            model, settings.n_pairs, settings.vocab, device, **alias_kwargs)
         eval_accuracy(model, settings.n_pairs, settings.vocab, device,
                       **kwargs)
         collect_stats(model, settings.n_pairs, settings.vocab, device,
@@ -5477,9 +5488,11 @@ def _reproducibility_audit(settings: Settings) -> dict:
                 zip(torch.cuda.get_rng_state_all(), cuda_before))
         modes_ok = all(bool(m.training) == modes[id(m)]
                        for m in model.modules())
-        return rng_ok, modes_ok, _same_metrics(metrics_a, metrics_b)
+        return (rng_ok, modes_ok, _same_metrics(metrics_a, metrics_b),
+                _same_metrics(metrics_a, metrics_alias))
 
-    eval_rng_ok, eval_modes_ok, eval_replay_ok = _eval_isolation()
+    (eval_rng_ok, eval_modes_ok, eval_replay_ok,
+     eval_alias_ok) = _eval_isolation()
 
     def _trajectory(s, rng_noise=False, model_cfg=None):
         if rng_noise:
@@ -5515,6 +5528,8 @@ def _reproducibility_audit(settings: Settings) -> dict:
         "batch": _REPRO_AUDIT_BATCH,
         "data_same_seed_sha256": fp_same_a,
         "data_diff_seed_sha256": fp_other,
+        "data_alias_seed_sha256": fp_alias,
+        "eval_seed_alias_identical": bool(eval_alias_ok),
         "init_same_seed_sha256": init_same_a,
         "trajectory_losses": traj_a,
         "rngs_probed": sorted(rng_a),
@@ -5523,6 +5538,7 @@ def _reproducibility_audit(settings: Settings) -> dict:
         "trajectory_dropout_losses": traj_drop_a,
         "data_same_seed_identical": bool(fp_same_a == fp_same_b),
         "data_diff_seed_differs": bool(fp_same_a != fp_other),
+        "data_seed_alias_same_stream": bool(fp_same_a == fp_alias),
         "data_draw_leaves_global_rng_untouched": rng_untouched,
         "eval_leaves_global_rng_untouched": bool(eval_rng_ok),
         "eval_restores_module_modes": bool(eval_modes_ok),
