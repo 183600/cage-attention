@@ -5755,13 +5755,19 @@ def _reproducibility_audit(settings: Settings) -> dict:
      eval_alias_ok) = _eval_isolation()
 
     def _trajectory(s, rng_noise=False, model_cfg=None):
-        if rng_noise:
-            torch.manual_seed(s + 777)
-            random.seed(s + 777)
         with contextlib.redirect_stdout(io.StringIO()):
+            # Initialise the model under the controlled seed, then perturb
+            # the *global* RNG immediately before the training entry point.
+            # The entry must re-seed (``train_model`` does), otherwise the
+            # perturbation would reach the dropout masks and change the
+            # trajectory.  Seeding after the perturbation here would make
+            # the check vacuous: it would erase the noise itself.
             seed_everything(s, deterministic=settings.deterministic)
             model = build(model_cfg if model_cfg is not None else cfg,
                           compile=False)
+            if rng_noise:
+                torch.manual_seed(s + 777)
+                random.seed(s + 777)
             hist = train_model(model, steps=_REPRO_AUDIT_STEPS,
                                batch=_REPRO_AUDIT_BATCH,
                                n_pairs=settings.n_pairs, lr=1e-3,
@@ -5772,11 +5778,15 @@ def _reproducibility_audit(settings: Settings) -> dict:
 
     traj_a = _trajectory(seed)
     traj_replay = _trajectory(seed)
-    traj_noisy = _trajectory(seed, rng_noise=True)
     traj_other = _trajectory(other)
     traj_drop_a = _trajectory(seed, model_cfg=cfg_drop)
     traj_drop_replay = _trajectory(seed, model_cfg=cfg_drop)
     traj_drop_other = _trajectory(other, model_cfg=cfg_drop)
+    # The dropout trajectory is the one that actually consumes the global
+    # RNG, so the "noise before the entry is erased by the entry's own
+    # re-seeding" claim must be checked on it (a dropout=0 trajectory is
+    # deterministically independent of the global RNG either way).
+    traj_drop_noisy = _trajectory(seed, rng_noise=True, model_cfg=cfg_drop)
 
     cross = _cross_process_replay(settings, seed, cfg, fp_same_a, traj_a)
 
@@ -5796,6 +5806,7 @@ def _reproducibility_audit(settings: Settings) -> dict:
         "rng_draws_same_seed": rng_a,
         "dropout": float(cfg_drop["dropout"]),
         "trajectory_dropout_losses": traj_drop_a,
+        "trajectory_dropout_noise_losses": traj_drop_noisy,
         "data_same_seed_identical": bool(fp_same_a == fp_same_b),
         "data_diff_seed_differs": bool(fp_same_a != fp_other),
         "data_seed_alias_same_stream": bool(fp_same_a == fp_alias),
@@ -5808,7 +5819,8 @@ def _reproducibility_audit(settings: Settings) -> dict:
         "init_same_seed_identical": bool(init_same_a == init_same_b),
         "init_diff_seed_differs": bool(init_same_a != init_other),
         "trajectory_same_seed_identical": bool(traj_a == traj_replay),
-        "trajectory_after_global_rng_noise_identical": bool(traj_a == traj_noisy),
+        "trajectory_after_global_rng_noise_identical": bool(
+            traj_drop_a == traj_drop_noisy),
         "trajectory_diff_seed_differs": bool(traj_a != traj_other),
         "trajectory_dropout_same_seed_identical": bool(
             traj_drop_a == traj_drop_replay),
