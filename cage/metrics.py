@@ -85,6 +85,7 @@ Metric choices (and why)
 from __future__ import annotations
 
 import math
+import operator
 from statistics import NormalDist
 
 import torch
@@ -106,6 +107,7 @@ __all__ = [
     "noninferiority_test",
     "bootstrap_upper_p",
     "clustered_proportion_ci",
+    "evaluation_fold_audit",
     "selection_at_fraction",
     "seeds_for_power",
     "standardized_proportion",
@@ -1438,6 +1440,208 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     }
 
 
+def evaluation_fold_audit(correct_a, correct_b, n_folds=8) -> dict:
+    """Fold jackknife over the finite evaluation stream.
+
+    The independent units of the experiment are training seeds, but every
+    seed is scored on the *same* finite stream of evaluation items.  The
+    seed-level bootstrap answers "would the contrast replicate over new
+    training runs on this stream"; it cannot ask whether the measured item
+    difference is stable over the *items*.  This companion partitions the
+    evaluation items into ``n_folds`` contiguous blocks (pseudo-batches),
+    recomputes the paired effect in every block, and leaves one block out at
+    a time.  A sign flip under either operation means the item-level effect
+    is concentrated in one slice of the stream, so the reported difference
+    is not a property of the evaluation population as a whole.
+
+    ``correct_a`` / ``correct_b`` are boolean/0-1 arrays with shape
+    ``(n_items,)`` for one seed or ``(n_units, n_items)`` when several
+    training seeds share the same items (rows are seeds, columns are the
+    common items).  The item ordering must be the common consumption order;
+    contiguous folds then approximate the generator's batches.  ``n_folds``
+    is capped at ``n_items // 2`` so every fold is non-empty, and at least
+    two folds are required.
+
+    The return value carries the per-fold effects and sizes, the
+    leave-one-fold-out effects, the sign of the overall item effect, the
+    share of the absolute effect carried by the most influential fold, and
+    per-seed fold-sign-flip counts.  ``fragile`` is True when dropping one
+    fold reverses the sign of the pooled effect or when a single fold
+    carries more than half of the absolute effect (with at least three
+    folds).  This is a *data-level sensitivity companion*: it is reported
+    next to the pre-registered seed-level decision and does not replace it.
+    Malformed or empty input returns ``valid=False`` with a reason instead
+    of raising, matching the other reporting companions.
+    """
+    out = {
+        "valid": False, "reason": "",
+        "n_units": 0, "n_items": 0, "n_folds": 0, "requested_folds": 0,
+        "overall_effect": float("nan"), "b": 0, "c": 0,
+        "fold_sizes": [], "fold_effects": [],
+        "fold_effect_mean": float("nan"), "fold_effect_sd": float("nan"),
+        "fold_effect_min": float("nan"), "fold_effect_max": float("nan"),
+        "fold_sign_consistency": float("nan"),
+        "fold_all_same_sign": False,
+        "loo_effects": [], "loo_effect_min": float("nan"),
+        "loo_effect_max": float("nan"), "loo_sign_flip": False,
+        "dominant_fold_share": float("nan"),
+        "unit_effects": [], "unit_fold_sign_flips": [],
+        "unit_fold_sign_consistency": [],
+        "n_unit_fold_sign_flips": 0,
+        "fragile": False,
+    }
+    try:
+        a = torch.as_tensor(correct_a)
+        b = torch.as_tensor(correct_b)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        out["reason"] = "correctness inputs must be numeric arrays"
+        return out
+    if a.numel() == 0 or b.numel() == 0:
+        out["reason"] = "empty correctness arrays"
+        return out
+    if a.shape != b.shape:
+        out["reason"] = "correctness arrays must have the same shape"
+        return out
+    if a.dim() == 1:
+        a = a.unsqueeze(0)
+        b = b.unsqueeze(0)
+    if a.dim() != 2:
+        out["reason"] = "correctness arrays must be 1-D or 2-D"
+        return out
+    for name, values in (("correct_a", a), ("correct_b", b)):
+        if values.is_complex():
+            out["reason"] = f"{name} must be real booleans/0-1"
+            return out
+        if values.is_floating_point() and (
+                not bool(torch.isfinite(values).all())
+                or not bool(values.eq(values.round()).all())):
+            out["reason"] = f"{name} must be integral booleans/0-1"
+            return out
+        if not bool(((values == 0) | (values == 1)).all()):
+            out["reason"] = f"{name} must contain only 0/1 (or booleans)"
+            return out
+    a = a.to(torch.bool)
+    b = b.to(torch.bool)
+    n_units, n_items = int(a.size(0)), int(a.size(1))
+    if n_items < 4:
+        out["reason"] = "need at least four evaluation items for folds"
+        out["n_units"] = n_units
+        out["n_items"] = n_items
+        return out
+    if isinstance(n_folds, bool):
+        out["reason"] = "n_folds must be an integer, not bool"
+        return out
+    try:
+        requested = operator.index(n_folds)
+    except TypeError:
+        out["reason"] = "n_folds must be an integer"
+        return out
+    if requested < 2:
+        out["reason"] = "n_folds must be at least two"
+        return out
+    k = min(int(requested), n_items // 2)
+    if k < 2:
+        out["reason"] = "not enough items for two non-empty folds"
+        return out
+    folds = torch.tensor_split(torch.arange(n_items), k)
+    if any(int(fold.numel()) == 0 for fold in folds):
+        out["reason"] = "fold construction produced an empty fold"
+        return out
+    diff = a.to(torch.float64) - b.to(torch.float64)
+    total = diff.sum()
+    # ``diff`` is (n_units, n_items): the item-level effect pools every
+    # seed's evaluation of the common items, so the denominator is
+    # n_units * n_items, not n_items alone.
+    overall = float(total / (n_units * n_items))
+    unit_effects = diff.mean(dim=1)
+    eps = 1e-12
+
+    def _sign(value: float) -> int:
+        return 1 if value > eps else (-1 if value < -eps else 0)
+
+    overall_sign = _sign(overall)
+    fold_effects, fold_sizes, loo_effects = [], [], []
+    for fold in folds:
+        size = int(fold.numel())
+        fold_effect = float(diff[:, fold].mean())
+        fold_effects.append(fold_effect)
+        fold_sizes.append(size)
+        loo_effects.append(
+            float((total - diff[:, fold].sum())
+                  / (n_units * (n_items - size))))
+    fold_effect_t = torch.tensor(fold_effects, dtype=torch.float64)
+    if overall_sign == 0:
+        consistency = float("nan")
+    else:
+        nonzero = [f for f in fold_effects if abs(f) > eps]
+        consistency = (sum(1 for f in fold_effects
+                           if _sign(f) == overall_sign) / len(nonzero)
+                       if nonzero else float("nan"))
+    all_same = bool(
+        overall_sign != 0 and all(_sign(f) in (0, overall_sign)
+                                  for f in fold_effects))
+    loo_sign_flip = bool(
+        overall_sign != 0
+        and any(_sign(value) not in (0, overall_sign) for value in loo_effects))
+    contributions = [size * abs(effect)
+                     for size, effect in zip(fold_sizes, fold_effects)]
+    contribution_sum = sum(contributions)
+    dominant = (max(contributions) / contribution_sum
+                if contribution_sum > eps else float("nan"))
+    unit_fold_flips, unit_consistency = [], []
+    for unit in range(n_units):
+        unit_sign = _sign(float(unit_effects[unit]))
+        if unit_sign == 0:
+            unit_consistency.append(float("nan"))
+            continue
+        flips = False
+        matching = 0
+        nonzero = 0
+        for fold in folds:
+            effect = float(diff[unit, fold].mean())
+            if abs(effect) <= eps:
+                continue
+            nonzero += 1
+            if _sign(effect) == unit_sign:
+                matching += 1
+            else:
+                flips = True
+        unit_consistency.append(matching / nonzero if nonzero else float("nan"))
+        if flips:
+            unit_fold_flips.append(int(unit))
+    fragile = bool(
+        overall_sign != 0
+        and (loo_sign_flip
+             or (k >= 3 and math.isfinite(dominant) and dominant > 0.5)))
+    out.update({
+        "valid": True, "reason": "",
+        "n_units": n_units, "n_items": n_items, "n_folds": k,
+        "requested_folds": int(requested),
+        "overall_effect": overall,
+        "b": int((~a & b).sum()),
+        "c": int((a & ~b).sum()),
+        "fold_sizes": fold_sizes, "fold_effects": fold_effects,
+        "fold_effect_mean": float(fold_effect_t.mean()),
+        "fold_effect_sd": (float(fold_effect_t.std(unbiased=True))
+                           if k > 1 else float("nan")),
+        "fold_effect_min": float(fold_effect_t.min()),
+        "fold_effect_max": float(fold_effect_t.max()),
+        "fold_sign_consistency": consistency,
+        "fold_all_same_sign": all_same,
+        "loo_effects": loo_effects,
+        "loo_effect_min": min(loo_effects),
+        "loo_effect_max": max(loo_effects),
+        "loo_sign_flip": loo_sign_flip,
+        "dominant_fold_share": dominant,
+        "unit_effects": [float(v) for v in unit_effects],
+        "unit_fold_sign_flips": unit_fold_flips,
+        "unit_fold_sign_consistency": unit_consistency,
+        "n_unit_fold_sign_flips": len(unit_fold_flips),
+        "fragile": fragile,
+    })
+    return out
+
+
 def sign_flip_test(diffs, alternative: str = "two-sided",
                    n_random: int = 10000, seed: int = 0,
                    max_exact: int = 16) -> dict:
@@ -1999,6 +2203,31 @@ def _self_test() -> int:
     bad_alpha_cluster = clustered_proportion_ci([50] * 5, [100] * 5,
                                                lower_alpha=2.0)
     check("cluster_bad_quantile_no_claim", not bad_alpha_cluster["valid"])
+
+    # Evaluation-stream fold audit: a uniform item effect across all folds
+    # must not be called fragile, while a concentrated effect that flips
+    # sign under leave-one-fold-out must be.
+    fold_uniform = evaluation_fold_audit([1] * 16, [0] * 16, n_folds=4)
+    check("fold_uniform_not_fragile",
+          fold_uniform["valid"] and not fold_uniform["fragile"]
+          and fold_uniform["overall_effect"] == 1.0)
+    a_fold = [1, 1, 1, 1] + [0] * 12
+    b_fold = [0, 0, 0, 0, 1, 1, 1] + [0] * 9
+    fold_concentrated = evaluation_fold_audit(a_fold, b_fold, n_folds=4)
+    check("fold_concentrated_flagged",
+          fold_concentrated["valid"] and fold_concentrated["fragile"]
+          and fold_concentrated["loo_sign_flip"])
+    fold_multi = evaluation_fold_audit(
+        [[1] * 16, a_fold],
+        [[0] * 16, b_fold], n_folds=4)
+    check("fold_multi_unit_pooled_mean",
+          fold_multi["valid"]
+          and abs(fold_multi["overall_effect"] - 17.0 / 32.0) < 1e-12
+          and fold_multi["unit_fold_sign_flips"] == [1])
+    check("fold_malformed_no_claim",
+          not evaluation_fold_audit([1, 0, 1], [1, 0, 0])["valid"]
+          and not evaluation_fold_audit([1] * 8, [0] * 8,
+                                        n_folds=1)["valid"])
 
     # Post-stratification: reweighting to a common reference mix must
     # reproduce the pooled rate with self-weights, apply the reference

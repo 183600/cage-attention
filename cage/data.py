@@ -948,6 +948,92 @@ def batch_fingerprint(idx, tgt, meta) -> str:
     return h.hexdigest()[:16]
 
 
+def _metadata_signature(meta) -> str:
+    """Stable, content-level representation of one batch's metadata.
+
+    ``batch_fingerprint`` deliberately hashes only the context, targets and
+    answers (the tensors model fitting depends on).  The evaluation-stream
+    digest also needs to catch a corrupted ``query_pos`` / ``key_pos`` or
+    an extra metadata field, so this helper serialises *all* metadata
+    entries in sorted-key order.  Tensors are converted to plain Python
+    values first; non-tensor entries are included via ``repr``.
+    """
+    if not isinstance(meta, Mapping):
+        raise ValueError(
+            f"batch meta must be a mapping, got {type(meta).__name__}")
+    parts = []
+    for key in sorted(meta, key=str):
+        value = meta[key]
+        if torch.is_tensor(value):
+            parts.append((str(key), value.detach().cpu().tolist()))
+        else:
+            parts.append((str(key), repr(value)))
+    return repr(parts)
+
+
+def stream_content_digest(batches) -> dict:
+    """Order-sensitive digest of a *complete* realized data stream.
+
+    ``stream_fingerprint`` versions a stream by its first batch, which is
+    the right cheap summary for the generator protocol.  Evaluation and
+    training, however, consume a whole sequence of batches, and a change
+    that only affects a later batch (an accidental re-seed, a different
+    ``eval_batches`` loop, or a corrupted metadata field) would leave that
+    prefix digest unchanged.  This helper hashes every batch in consumption
+    order, including its shape and the *full* metadata signature, so two
+    runs can verify that their per-item correctness masks (``McNemar`` /
+    fold companions) were computed on byte-identical data.
+
+    ``batches`` is an iterable of ``(idx, targets, meta)`` triples, exactly
+    as returned by :func:`make_batch`.  Each batch must be a 2-D integer
+    context with an equally shaped integer target tensor and a mapping
+    metadata object carrying a 1-D ``answer`` tensor; optional position
+    tensors are length-checked too.  Invalid input raises ``ValueError``
+    rather than versioning an unvalidated draw.  An empty iterable has a
+    well-defined digest (of nothing) with ``n_batches == 0``; callers that
+    require data check that count before using the digest.
+    """
+    h = hashlib.sha256()
+    n_batches = 0
+    n_rows = 0
+    for batch in batches:
+        if not isinstance(batch, (tuple, list)) or len(batch) != 3:
+            raise ValueError(
+                "each stream batch must be an (idx, targets, meta) triple")
+        idx, tgt, meta = batch
+        if not _is_integer_tensor(idx) or idx.dim() != 2:
+            raise ValueError(
+                "stream batch idx must be a 2-D integer tensor")
+        batch_size, _ = idx.shape
+        if not _is_integer_tensor(tgt) or tgt.shape != idx.shape:
+            raise ValueError(
+                "stream batch targets must be an integer tensor with the "
+                "same shape as idx")
+        if not isinstance(meta, Mapping) or "answer" not in meta:
+            raise ValueError(
+                "stream batch meta must be a mapping with an 'answer' entry")
+        answer = meta["answer"]
+        if not _is_integer_tensor(answer) or answer.shape != (batch_size,):
+            raise ValueError(
+                "stream batch answer must be a 1-D integer tensor with one "
+                "entry per row")
+        for name in ("query_pos", "key_pos"):
+            if name in meta:
+                value = meta[name]
+                if not _is_integer_tensor(value) or value.shape != (batch_size,):
+                    raise ValueError(
+                        f"stream batch {name} must be a 1-D integer tensor "
+                        f"with one entry per row")
+        shape = (int(batch_size), int(idx.size(1)))
+        h.update(
+            (f"{n_batches}:{shape}:{batch_fingerprint(idx, tgt, meta)}:"
+             f"{_metadata_signature(meta)};").encode("utf-8"))
+        n_batches += 1
+        n_rows += int(batch_size)
+    return {"sha256": h.hexdigest()[:16], "n_batches": int(n_batches),
+            "n_rows": int(n_rows)}
+
+
 def stream_fingerprint(n_pairs, vocab, device="cpu", batch=8, seed=TEST_SEED):
     """Content hash of the first batch of a data stream (dataset versioning).
 
@@ -2781,6 +2867,33 @@ def _self_test() -> int:
         check("fingerprint_impossible_geometry_rejected", False)
     except ValueError:
         check("fingerprint_impossible_geometry_rejected", True)
+
+    # A full-stream digest must cover every consumption batch, not only the
+    # first one, and must be stable for the same generator sequence.
+    def _digest_batches(seed):
+        gen = torch.Generator().manual_seed(seed)
+        return [make_batch(4, 3, 32, "cpu", gen=gen) for _ in range(2)]
+
+    digest_a = stream_content_digest(_digest_batches(123))
+    digest_b = stream_content_digest(_digest_batches(123))
+    check("stream_digest_repeatable", digest_a == digest_b)
+    check("stream_digest_batch_count",
+          digest_a["n_batches"] == 2 and digest_a["n_rows"] == 8)
+    batches_rev = list(reversed(_digest_batches(123)))
+    check("stream_digest_order_sensitive",
+          stream_content_digest(batches_rev)["sha256"]
+          != digest_a["sha256"])
+    tampered = [(idx.clone(), tgt.clone(), dict(meta))
+                for idx, tgt, meta in _digest_batches(123)]
+    tampered[-1][1][0, 0] = (tampered[-1][1][0, 0] + 1) % 30
+    check("stream_digest_covers_later_batches",
+          stream_content_digest(tampered)["sha256"] != digest_a["sha256"])
+    try:
+        stream_content_digest([(_digest_batches(123)[0][0].reshape(-1),) +
+                               _digest_batches(123)[0][1:]])
+        check("stream_digest_bad_shape_rejected", False)
+    except ValueError:
+        check("stream_digest_bad_shape_rejected", True)
 
     # Sealed-stream guard: selection may read the validation stream only.
     # Both the test and the statistics streams are held out, so using

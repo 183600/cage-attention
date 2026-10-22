@@ -73,6 +73,33 @@ sign_flip_disagrees        bootstrap 与精确检验结论是否相反
 等价的零预测（TOST）与非劣性检验也携带精确 sign-flip 版本
 （`sign_flip_p` / `sign_flip_p_lower` / `sign_flip_p_upper`）。
 
+## 3.5 评测数据的流指纹与 fold 稳健性
+
+种子层推断把训练种子当作独立单位，但所有种子共享**同一条有限评测流**。
+因此还需要在“数据”这一层回答两个问题：两条记录是否真的评了同一批样本？
+结论是否被评测流中的某一小段样本单独撑起来？
+
+- **流内容指纹**：每次 `eval_metrics` 对实际消费的整条评测流（所有 batch、
+  上下文、标签、`query_pos` / `key_pos` / `answer`）计算
+  `stream_digest`，而不是只散列第一批。逐项 McNemar / fold 伴随读数按位置
+  比较正确性；若两侧指纹不一致，伴随读数直接
+  `applicable=False`，不会把两组不同样本当成同一批 item 配对。旧记录缺少
+  指纹时保留读数但标记 `digest_verified=False`，不冒充已验证。
+- **fold jackknife**：把评测 item 按消费顺序切成 `k` 个连续块
+  （`k=min(8, n_items//2)`），报告每块内的配对效应、逐种子 fold 符号是否
+  翻转、去掉任意一块后的效应范围，以及最大块占全部绝对效应的比例。
+  `fold_audit.fragile=True` 表示“去掉一块就翻符号”或“单块贡献超过一半”；
+  `n_unit_fold_sign_flips` 表示有多少训练种子的 fold 效应方向不一致。
+- **解释层级**：上述两项都是**数据层敏感性伴随读数**，不替代第 2 节的
+  预注册种子层决策，也不改变 FDR 结论。支持的对照若 fold 脆弱，应写成
+  “在该评测流上支持，但数据层泛化需更宽或独立的评测流”，不能写成机制已
+  被普遍证实。逐项 McNemar 的 pooled p 仍只作描述，因为同一条评测流会被
+  每个种子重复评分。
+
+实现位于 `cage.data.stream_content_digest`、`cage.metrics.evaluation_fold_audit`
+与 `cage.experiments._paired_stream_test`；相应字段随每个对照写入
+`<tag>_contrasts.json` 的 `stream_test` / `stream_fold_audit`。
+
 ## 4. 预设功效与批次顺序
 
 - 每个网格在训练前写 `<tag>_design_plan.json`：用基线阶梯的 pilot 方差把
@@ -93,7 +120,10 @@ sign_flip_disagrees        bootstrap 与精确检验结论是否相反
 3. bootstrap 95% CI 与 BH 校正 p；
 4. 精确 sign-flip p 与最小可达 p；
 5. jackknife 区间、BCa 是否与主决策一致；
-6. 前提门禁状态（能力、覆盖、曲线、答案平衡、逐项符号）。
+6. 前提门禁状态（能力、覆盖、曲线、答案平衡、逐项符号）；
+7. 评测流指纹是否验证（`stream_digest_verified`）与 fold 稳健性
+   （`stream_fold_loo_sign_flip`、`stream_fold_dominant_share`、
+   `stream_fold_fragile`），脆弱时给出数据层解释边界。
 
 结论措辞：
 

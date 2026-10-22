@@ -18,6 +18,7 @@ from .data import (
     batch_fingerprint,
     check_train_seed,
     difficulty_strata,
+    stream_content_digest,
     difficulty_stratum_labels,
     make_batch,
     stream_seed_key,
@@ -2156,9 +2157,14 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     try:
         model.eval()
         logits_all, tgt_all, strata_all = [], [], []
+        digest_batches = []
         for i in range(batches):
             idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
             validate_batch(idx, tgt, meta, vocab, diagnostics=False)
+            # Keep the validated realization so the metric record can
+            # version the *whole* evaluation stream, not only its first
+            # batch.  The tensors are tiny next to the logits panel.
+            digest_batches.append((idx, tgt, meta))
             logits, _, _ = model(idx)
             logits_all.append(logits.squeeze(1).float())
             tgt_all.append(meta["answer"])
@@ -2198,6 +2204,15 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         # finite stream is a real source of uncertainty for paired contrasts
         # (see ``cage.experiments._paired_diff``).
         out["correct_bitmask"] = encode_correct_mask(pred == tgt_cat)
+        # Content digest of the exact evaluation realization the mask was
+        # computed on.  The item-level McNemar / fold companions compare
+        # correctness *by position*; without a digest, two runs that
+        # evaluated different data at the same item count would be paired
+        # as if they had scored identical items.
+        stream_digest = stream_content_digest(digest_batches)
+        out["stream_digest"] = stream_digest["sha256"]
+        out["stream_n_batches"] = stream_digest["n_batches"]
+        out["stream_n_rows"] = stream_digest["n_rows"]
         # Per-stratum recall by *pre-treatment* difficulty: retrieval
         # position (relative tertile) x structural ambiguity.  A length
         # sweep changes the ambiguity mix by construction (more pairs ->

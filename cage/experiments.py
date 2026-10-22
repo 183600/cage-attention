@@ -202,6 +202,7 @@ from .metrics import (
     mcnemar_test,
     clustered_proportion_ci,
     equivalence_test,
+    evaluation_fold_audit,
     noninferiority_test,
     paired_bootstrap_ci,
     seeds_for_power,
@@ -2734,11 +2735,16 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
            "seed_sign_positive": 0, "seed_sign_negative": 0,
            "seed_sign_zero": 0, "seed_sign_test_p": None,
            "seed_sign_consistent_with_mean": None,
-           "per_seed_direction_agreement": None}
+           "per_seed_direction_agreement": None,
+           "stream_digest": None, "digest_verified": False,
+           "fold_audit": {"valid": False, "applicable": False,
+                          "reason": "not computed"}}
     if metric != "accuracy":
         out["reason"] = "only accuracy stores per-item correctness"
         return out
     masks_a, masks_b, ns = [], [], []
+    digests_a, digests_b = set(), set()
+    digest_fields_present = 0
     for seed in used:
         ra, rb = by_a.get(seed), by_b.get(seed)
         if ra is None or rb is None:
@@ -2763,6 +2769,33 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
         except (TypeError, ValueError) as exc:
             out["reason"] = f"invalid correctness mask: {exc}"
             return out
+        da = ra.get("stream_digest")
+        db = rb.get("stream_digest")
+        for side, value in (("a", da), ("b", db)):
+            if value is not None and not isinstance(value, str):
+                out["reason"] = (
+                    f"evaluation-stream digest on side {side} is not a "
+                    f"string")
+                return out
+        if da is not None and db is not None:
+            digest_fields_present += 1
+            digests_a.add(da)
+            digests_b.add(db)
+            if da != db:
+                out["reason"] = (
+                    "evaluation-stream content digests differ between the "
+                    "paired sides; the item masks were not computed on the "
+                    "same data")
+                return out
+        elif da is not None or db is not None:
+            # Legacy/mixed records: one side did not stamp the digest, so
+            # item-by-item pairing cannot be verified.  Keep the companion
+            # available but disclose the weaker evidence.
+            digest_fields_present += 1
+            if da is not None:
+                digests_a.add(da)
+            if db is not None:
+                digests_b.add(db)
         masks_a.append(ma)
         masks_b.append(mb)
         ns.append(n)
@@ -2778,6 +2811,21 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
             f"evaluation item counts differ across paired seeds: "
             f"{sorted(set(ns))}")
         return out
+    # A content digest identifies the actual realization behind each mask;
+    # identical item counts are not enough to pair items if a record was
+    # produced by a different stream/geometry.  A disagreement *within* one
+    # side is also a protocol violation: the paired seeds must all be
+    # scored on one common stream.
+    if len(digests_a) > 1 or len(digests_b) > 1 or (
+            digests_a and digests_b and digests_a != digests_b):
+        out["reason"] = (
+            "evaluation-stream content digests are not identical across "
+            "the paired runs")
+        return out
+    stream_digest = (next(iter(digests_a | digests_b))
+                     if digests_a or digests_b else None)
+    digest_verified = bool(
+        digest_fields_present == len(used) and stream_digest is not None)
     ca = torch.cat(masks_a)
     cb = torch.cat(masks_b)
     if ca.numel() != cb.numel() or ca.numel() == 0:
@@ -2822,9 +2870,13 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
         sign_p = min(1.0, 2.0 * tail / (2 ** len(nonzero)))
     else:
         sign_p = None
+    fold_audit = evaluation_fold_audit(
+        torch.stack(masks_a), torch.stack(masks_b), n_folds=8)
     out.update({
         "applicable": True, "n": int(ca.numel()),
         "n_seeds": len(masks_a), "n_per_seed": sorted(set(ns)),
+        "stream_digest": stream_digest,
+        "digest_verified": digest_verified,
         "b": mc["b"], "c": mc["c"],
         "p_exact": mc["p_exact"], "p_chi2_cc": mc["p_chi2_cc"],
         "item_mean_diff": item_mean, "direction_agrees": agrees,
@@ -2840,6 +2892,7 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
         "seed_sign_zero": int(zero), "seed_sign_test_p": sign_p,
         "seed_sign_consistent_with_mean": consistent,
         "per_seed_direction_agreement": agreement,
+        "fold_audit": fold_audit,
     })
     return out
 
@@ -4207,6 +4260,24 @@ class ContrastLog:
                 ci.get("stream_test") or {}).get("seed_sign_negative"),
             "stream_direction_agrees":
                 (ci.get("stream_test") or {}).get("direction_agrees"),
+            "stream_digest": (ci.get("stream_test") or {}).get(
+                "stream_digest"),
+            "stream_digest_verified": (ci.get("stream_test") or {}).get(
+                "digest_verified"),
+            # Data-level fold jackknife over the shared evaluation items.
+            # This is a sensitivity companion, not a decision rule: the
+            # pre-registered seed-level verdict is left unchanged.
+            "stream_fold_audit": (ci.get("stream_test") or {}).get(
+                "fold_audit"),
+            "stream_fold_fragile": bool(
+                ((ci.get("stream_test") or {}).get("fold_audit") or {}).get(
+                    "fragile")),
+            "stream_fold_loo_sign_flip": bool(
+                ((ci.get("stream_test") or {}).get("fold_audit") or {}).get(
+                    "loo_sign_flip")),
+            "stream_fold_dominant_share": (
+                (ci.get("stream_test") or {}).get("fold_audit") or {}).get(
+                    "dominant_fold_share"),
             "stream_sign_conflict": False,
         })
         line = f"  [{hyp}] {rule} ({metric}): {_fmt_ci(ci)}"
@@ -4255,6 +4326,24 @@ class ContrastLog:
                      f"independent-seed sign p={sign_p_s}]")
         elif stream.get("reason"):
             line += f"  [finite-stream test n/a: {stream['reason']}]"
+        fold = stream.get("fold_audit") or {}
+        if fold.get("valid"):
+            loo = "yes" if fold.get("loo_sign_flip") else "no"
+            fragile = ("  [FRAGILE: one stream slice drives the effect]"
+                       if fold.get("fragile") else "")
+            line += (
+                f"  [stream folds: k={fold['n_folds']}, "
+                f"effect={fold['overall_effect']:+.4f}, "
+                f"range=[{fold['fold_effect_min']:+.4f}, "
+                f"{fold['fold_effect_max']:+.4f}], "
+                f"LOO sign flip={loo}, dominant fold share="
+                f"{fold['dominant_fold_share']:.2f}; "
+                f"per-seed fold sign flips="
+                f"{fold['n_unit_fold_sign_flips']}; "
+                f"digest verified={stream.get('digest_verified')}]"
+                f"{fragile}")
+        elif fold.get("reason") and fold.get("reason") != "not computed":
+            line += (f"  [stream-fold companion n/a: {fold['reason']}]")
         if _finite(sf_p):
             floor = (f", floor={float(sf_min):.4g}"
                      if _finite(sf_min) else "")
@@ -4773,6 +4862,8 @@ class ContrastLog:
             r for r in supporting
             if r.get("stream_direction_agrees") is not None
             and r.get("stream_seed_sign_consistent") is False]
+        stream_fold_fragile = [
+            r for r in supporting if r.get("stream_fold_fragile")]
         if stream_uncorroborated:
             print(f"[{self.tag}] WARNING: {len(stream_uncorroborated)} "
                   f"supported accuracy contrast(s) have per-seed item-level "
@@ -4780,6 +4871,18 @@ class ContrastLog:
                   f"pooled McNemar p reuses the same sealed items across "
                   f"seeds and is descriptive only, so it cannot corroborate "
                   f"the claim; report the per-seed counts next to it")
+        if stream_fold_fragile:
+            names = ", ".join(
+                f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                for r in stream_fold_fragile)
+            print(f"[{self.tag}] WARNING: {len(stream_fold_fragile)} "
+                  f"supported accuracy contrast(s) have an item-level "
+                  f"effect that is fragile to one evaluation-stream fold "
+                  f"(a leave-one-fold-out sign flip or one fold carrying "
+                  f"more than half of the absolute effect): {names}; the "
+                  f"seed-level verdict stands, but the data-level "
+                  f"generalisation of the effect needs a wider or "
+                  f"independent evaluation stream")
         curve_invalid_gated = [r for r in testable
                                if r.get("curve_invalid_removes_support")]
         balance_gated = [r for r in testable
@@ -4961,6 +5064,7 @@ class ContrastLog:
                    "n_loo_flip_decision": len(loo_flips),
                    "n_bca_disagree": len(bca_differs),
                    "n_low_resolution": len(low_resolution),
+                   "n_stream_fold_fragile": len(stream_fold_fragile),
                    "n_sign_flip_supporting": len(sign_flip_supporting),
                    "n_sign_flip_disagree": len(sign_flip_conflicts),
                    "n_sign_flip_unfalsifiable":
@@ -4973,6 +5077,9 @@ class ContrastLog:
                    "curve_invalid_gated_contrasts": [
                        f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                        for r in curve_invalid_gated],
+                   "stream_fold_fragile_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in stream_fold_fragile],
                    "seed_coverage_loss_contrasts": [
                        f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                        for r in coverage_loss],
@@ -8736,6 +8843,7 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
             "accuracy_hi": metrics["accuracy_hi"], "n": n,
             "correct": int(round(metrics["accuracy"] * n)),
             "correct_bitmask": metrics["correct_bitmask"],
+            "stream_digest": metrics.get("stream_digest"),
             "params": params, "curve_verdict": curve["curve_verdict"],
         })
         _write_result(out_dir / "baselines_runs.jsonl",
@@ -8768,6 +8876,8 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
         "accuracy_by_seed": {str(r["seed"]): r["accuracy"] for r in valid},
         "correct_bitmask_by_seed": {
             str(r["seed"]): r["correct_bitmask"] for r in valid},
+        "stream_digest_by_seed": {
+            str(r["seed"]): r.get("stream_digest") for r in valid},
         "eval_n_by_seed": {str(r["seed"]): int(r["n"]) for r in valid},
         "cluster_ci": cluster, "above_chance": above,
         "unmeasured": not bool(valid),
@@ -10917,6 +11027,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         matched_runs = []
         matched_by_seed = matched.get("accuracy_by_seed") or {}
         matched_masks = matched.get("correct_bitmask_by_seed") or {}
+        matched_digests = matched.get("stream_digest_by_seed") or {}
         matched_ns = matched.get("eval_n_by_seed") or {}
         for key, acc in matched_by_seed.items():
             try:
@@ -10927,8 +11038,11 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             mask = matched_masks.get(str(seed))
             if n <= 0 or not isinstance(mask, str):
                 continue
-            matched_runs.append({"seed": seed, "accuracy": float(acc),
-                                 "n": n, "correct_bitmask": mask})
+            matched_runs.append({
+                "seed": seed, "accuracy": float(acc), "n": n,
+                "correct_bitmask": mask,
+                "stream_digest": matched_digests.get(str(seed)),
+            })
         if (matched_runs and matched.get("above_chance")
                 and not matched.get("unmeasured", False)):
             matched_ref_name = (
@@ -11925,6 +12039,7 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
                 return dict(
                     r, accuracy=r["accuracy_by_length"][length],
                     correct_bitmask=metrics.get("correct_bitmask"),
+                    stream_digest=metrics.get("stream_digest"),
                     n=(r.get("eval_n_by_length") or {}).get(length))
             tagged_a = [_at_length(r) for r in runs_a]
             tagged_b = [_at_length(r) for r in runs_b]
@@ -13536,6 +13651,7 @@ def _e2_endpoint_class_companions(by_variant: dict,
                 "f1_macro": metrics.get("f1_macro"),
                 "f1_weighted": metrics.get("f1_weighted"),
                 "correct_bitmask": metrics.get("correct_bitmask"),
+                "stream_digest": metrics.get("stream_digest"),
                 "n": (run.get("eval_n_by_length") or {}).get(endpoint),
             })
         return out
