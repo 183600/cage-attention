@@ -143,6 +143,36 @@ class ContrastExactAuditTest(unittest.TestCase):
         self.assertIn("H1a", payload["sign_flip_disagree_contrasts"][0])
         self.assertIn("bootstrap_below_exact_floor_contrasts", payload)
 
+    def test_exact_floor_is_not_inflated_by_the_family_size(self):
+        # With two exact p-values at the same attainable floor, BH compares
+        # the larger one at rank 2 where its adjusted p equals p itself
+        # (<= q), so it is not unfalsifiable.  Scaling the floor by the
+        # family size (q/2 here) wrongly flagged both rows and contradicted
+        # their own ``sign_flip_supports`` verdicts.
+        log = ContrastLog("e3", hypotheses=("H3b",), min_seeds=3)
+        ci_a = self._ci([1.0] * 6)
+        ci_b = self._ci([1.0] * 6)
+        for ci, p in ((ci_a, 0.001), (ci_b, 0.03125)):
+            for key in ("sign_flip_p", "sign_flip_p_greater",
+                        "sign_flip_p_less", "sign_flip_p_two_sided"):
+                ci[key] = p
+            for key in ("sign_flip_min_p", "sign_flip_min_p_greater",
+                        "sign_flip_min_p_less",
+                        "sign_flip_min_p_two_sided"):
+                ci[key] = 0.03125
+        ci_a["p_value"] = 0.001
+        ci_b["p_value"] = 0.03
+        with contextlib.redirect_stdout(io.StringIO()):
+            log.print("row A", "H3b", "resid_norm_last_over_first", ci_a)
+            log.print("row B", "H3b", "resid_norm_last_over_first", ci_b)
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = log.finalize(pathlib.Path(tmp), q=0.05)
+        rows = payload["rows"]
+        self.assertTrue(all(row["sign_flip_supports"] for row in rows))
+        self.assertFalse(any(row["sign_flip_cannot_reject"] for row in rows))
+        self.assertEqual(payload["n_sign_flip_unfalsifiable"], 0)
+
     def test_two_sided_claim_is_flagged_unfalsifiable_at_five_seeds(self):
         # H3b registers no direction, so the exact alternative is
         # two-sided; its floor at n=5 is 0.0625 > q=0.05.

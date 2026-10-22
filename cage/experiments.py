@@ -4461,14 +4461,17 @@ class ContrastLog:
                 _finite(row.get("sign_flip_min_p"))
                 and float(row["sign_flip_min_p"]) > q)
         testable = [r for r in self.rows if math.isfinite(r["p_adj"])]
-        # A contrast is unfalsifiable by the exact test when even the
-        # smallest attainable p is above the BH family's most permissive
-        # rejection threshold (q / number of testable contrasts).
-        exact_family_floor = q / max(1, len(testable))
+        # A contrast is unfalsifiable by the exact test when even its
+        # smallest attainable p is above ``q``.  The per-row BH threshold is
+        # at most ``q`` (a row with p <= q can reject when it is compared at
+        # the most permissive rank), so the family size does not raise the
+        # floor for a particular row; using q / n_testable here labelled
+        # rejectable rows as unfalsifiable whenever another exact p was
+        # smaller.
         for exact_row in testable:
             exact_row["sign_flip_cannot_reject"] = bool(
                 _finite(exact_row.get("sign_flip_min_p"))
-                and float(exact_row["sign_flip_min_p"]) > exact_family_floor)
+                and float(exact_row["sign_flip_min_p"]) > q)
         surviving = [r for r in testable if r["fdr_reject"]]
         supporting = [r for r in testable if r["supports_hypothesis"]]
         loo_flips = [r for r in testable if r.get("loo_flips_decision")]
@@ -4846,7 +4849,7 @@ class ContrastLog:
             print(f"[{self.tag}] WARNING: {len(sign_flip_unfalsifiable)} "
                   f"contrast(s) cannot be rejected by their exact sign-flip "
                   f"test even in principle after BH across this family at "
-                  f"q={q:g} (min attainable p > q/{len(testable)}; "
+                  f"q={q:g} (min attainable p > q; "
                   f"{names}): their direction is not falsifiable with the "
                   f"current seed count, so add seeds rather than reading the "
                   f"bootstrap p as confirmation")
