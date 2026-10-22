@@ -383,8 +383,16 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
             mean = (sum(accs) / len(accs)) if accs else float("nan")
             var = (sum((a - mean) ** 2 for a in accs)
                    / (len(accs) - 1) if len(accs) > 1 else 0.0)
+            # A row with even one diverged seed is not a completed-run
+            # measurement.  Averaging the surviving seeds only would let a
+            # high-accuracy row measured on one seed beat a fully measured
+            # row; treat the row as ineligible for selection instead (the
+            # documented ``-inf`` convention), while keeping the completed
+            # mean/std/count in the table for transparency.
+            selection_mean = float("-inf") if diverged else mean
             row = {"lr": lr, "steps": train_steps,
-                   "val_accuracy_mean": mean,
+                   "val_accuracy_mean": selection_mean,
+                   "completed_accuracy_mean": mean,
                    "val_accuracy_std": var ** 0.5, "n_seeds": len(accs),
                    "diverged_runs": diverged, "runs": runs}
             if diverged_accs:
@@ -401,11 +409,12 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
                    if math.isfinite(row["val_accuracy_mean"])]
     if not finite_rows:
         raise RuntimeError(
-            f"linear probe tuning produced no finite validation accuracy "
-            f"across grid lr={tuple(lr_grid)} x steps={step_values}: every "
-            f"probe run diverged or returned NaN, so no recipe can be "
-            f"selected (inspect the training histories; no HB2 near-chance "
-            f"read from this run is interpretable)")
+            f"linear probe tuning produced no completed finite validation "
+            f"accuracy across grid lr={tuple(lr_grid)} x steps={step_values}: "
+            f"every grid point either diverged on at least one training seed "
+            f"or returned NaN, so no fully measured recipe can be selected "
+            f"(inspect the training histories; no HB2 near-chance read from "
+            f"this run is interpretable)")
     best = max(finite_rows, key=lambda row: row["val_accuracy_mean"])
     return best["lr"], int(best["steps"]), table
 

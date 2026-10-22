@@ -2755,6 +2755,12 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
             reliable = reliable and curve_invalid_best == 0
         if diverged_best is not None:
             reliable = reliable and diverged_best == 0
+    elif curve_invalid_best or diverged_best:
+        # The noise-based decision can be unavailable (e.g. a one-seed
+        # winner), but a winning row that contains diverged or curve-invalid
+        # runs is demonstrably not a completed measurement - it must not be
+        # left as the neutral ``None`` state that callers read as "open".
+        reliable = False
     out.update({"best_index": int(i_best), "second_index": int(i_second),
                 "best": float(r_best[metric]),
                 "runner_up": float(r_second[metric]), "margin": margin,
@@ -2793,7 +2799,11 @@ def _curve_valid_selection_rows(table):
 
 def _selection_warn(label, selection) -> str:
     """Human-readable annotation for an unreliable selection, or ""."""
-    if not selection or selection.get("reliable") is not False:
+    if not selection:
+        return ""
+    if (selection.get("reliable") is not False
+            and not selection.get("diverged_runs_best")
+            and not selection.get("curve_invalid_best")):
         return ""
     reasons = []
     if selection.get("best_at_grid_boundary"):
