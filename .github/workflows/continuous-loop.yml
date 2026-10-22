@@ -232,12 +232,13 @@ jobs:
           # ================= 科研方法改进阶段（sci）：提示词池，每次运行时随机选一个 =================
           # SCI_1 为通用提示词：只要求改进科研方法，不指定改进哪一方面；
           # SCI_2~SCI_6 各自只聚焦一个方面：实验设计与准备 / 数据处理 / 可复现性与工程规范 / 对比实验与消融 / 结果分析。
-          PROMPT_SCI_1='改进这个项目的科研方法。本项目研究校准门控注意力与归一化/激活的协同：门控不只看 query，还按注意力熵（经 log T 归一化）与序列长度校准，让深层残差流愿意写有效内容；实验契约为 E1 四种 gate 对比、E2 长度泛化、E3 归一化协同（见 docs/design_notes.md），指标定义不得漂移。改进前先对照契约检查实现与统计口径的缺口——对照是否公平、种子是否足够、相关性指标是否只给了点估计，发现缺口就实际修改代码补齐。改进必须保持 docs/design_notes.md 中【固定】设计的实现方式与语义不变，不得借改进之名切换已固定的实现或做无意义的等价重写；每次改动后运行 python3 ci_gate.py 自检，不通过就自己修好。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；LICENSE、README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README）、docs/design_notes.md、ci_gate.py、算力申请.md 同样绝对不能删除、修改或移动。'
-          PROMPT_SCI_2='从实验设计与准备的角度改进这个项目的科研方法：检查基线是否公平——none/query/null 是结论赖以成立的对照基线，不是陪跑；calib 的优势要在基线也经合理调优（学习率、calib_tau 等关键超参）的前提下成立，同超参受控对照与各自调优两种口径分开下结论。检查评估指标是否对齐主张——E1 不能只看联想回忆准确率：校准门的核心主张是假集中（max-prob 高但回答错误）时关门，必须报告 false_conc_rate、gate_on_false_conc 与 gate_on_correct 的对比、gate_vs_entropy 与 gate_vs_maxprob 的逐层 Pearson 相关（Fisher z 平均）；query 门理论上不应与熵强相关、calib 应显著相关，这正是变体差异的证据；null 变体另报 null_mass。检查假设驱动——E2 的假设是 calib 显式修正 log T 熵增长、长度外推退化更慢，改进要服务可检验的假设而不是盲目加网格点。发现以上问题就实际修改代码与实验脚本来改进。改进必须保持 docs/design_notes.md 中【固定】设计的实现方式与语义不变，不得借改进之名切换已固定的实现或做无意义的等价重写；每次改动后运行 python3 ci_gate.py 自检，不通过就自己修好。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；LICENSE、README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README）、docs/design_notes.md、ci_gate.py、算力申请.md 同样绝对不能删除、修改或移动。'
-          PROMPT_SCI_3='从数据处理的角度改进这个项目的科研方法：本项目用联想回忆合成任务，数据风险集中在题面构造——key-value 对的生成种子必须固定，四种 gate 变体与各长度扫描点用同一批题面（跨变体配对，不让题面差异混入门控差异）；构造要控制巧合匹配（重复 key、干扰 key 的数量与分布要成对），难度参数跨长度点校准，长度扫描的退化曲线才可比；训练数据与评估题面严格分离，评估题面绝不进入训练流；生成器实现的任何改动都会改变题面分布，必须当数据版本记录并在跨 run 比较时核对；同一批训练中各变体消费相同的批次序列。发现以上问题就实际修改代码来改进。改进必须保持 docs/design_notes.md 中【固定】设计的实现方式与语义不变，不得借改进之名切换已固定的实现或做无意义的等价重写；每次改动后运行 python3 ci_gate.py 自检，不通过就自己修好。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；LICENSE、README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README）、docs/design_notes.md、ci_gate.py、算力申请.md 同样绝对不能删除、修改或移动。'
-          PROMPT_SCI_4='从可复现性与工程规范的角度改进这个项目的科研方法：检查随机种子是否全部固定——Python/NumPy/PyTorch/CUDA 与 cuDNN 确定性开关按设计约定落实，同机同种子重跑统计量稳定（跨硬件架构不苛求逐位一致）；补充小规模 sanity check——正式长度扫描前先确认模型在训练长度上能解联想回忆任务、前向反向数值有限、门控参数真的接进计算图（逐参数梯度覆盖，防总梯度范数正常但门控断流的静默 bug）；改进实验追踪——每轮实验落盘 config、种子、逐评测点曲线与全部统计量（门控-熵相关性、null_mass 等），汇总可从产物再生成，做到可复现可追溯。发现以上问题就实际修改代码来改进。改进必须保持 docs/design_notes.md 中【固定】设计的实现方式与语义不变，不得借改进之名切换已固定的实现或做无意义的等价重写；每次改动后运行 python3 ci_gate.py 自检，不通过就自己修好。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；LICENSE、README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README）、docs/design_notes.md、ci_gate.py、算力申请.md 同样绝对不能删除、修改或移动。'
-          PROMPT_SCI_5='从对比实验与消融的角度改进这个项目的科研方法：检查对比实验是否严格控制变量——四种 gate 变体除门控模块外，优化器、学习率策略、训练步数、数据批次序列必须完全一致；门控的赢很多时候只是超参红利而不是机制优势。检查消融实验是否完整——E3 协同设计是 gate 与 norm 与 LayerScale 的全因子网格（2×4×2 共 16 格），每格都要有数据且种子数足够，缺格就无法支撑协同结论；E2 长度扫描点要覆盖足够间隔并报告熵/max-prob/门控值的漂移，而不只是准确率终点。检查统计可靠性——关键对比至少 3~5 个随机种子、汇报 Mean 与 Std；相关性结论（gate_vs_entropy 等）要给区间或显著性而不只是点估计；提升小于种子方差不支持优越性结论。发现以上问题就实际修改实验代码来改进。改进必须保持 docs/design_notes.md 中【固定】设计的实现方式与语义不变，不得借改进之名切换已固定的实现或做无意义的等价重写；每次改动后运行 python3 ci_gate.py 自检，不通过就自己修好。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；LICENSE、README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README）、docs/design_notes.md、ci_gate.py、算力申请.md 同样绝对不能删除、修改或移动。'
-          PROMPT_SCI_6='从结果分析的角度改进这个项目的科研方法：检查假集中案例是否真正被分析——把 false_conc 样本（max-prob 高但答错）逐个打印，看 calib 门是否如假设那样关门而 query 门不关，这是区分机制与拟合的最直接证据，也是提出改进的最重要来源。检查长度泛化曲线——不只报各长度准确率，还要报熵/max-prob/门控值随长度的漂移形态，退化拐点是否对应 log T 校正失效。检查深层健康度——逐层残差范数增长与 gate_depth_ratio（深层/浅层门控均值比）是 E3 的核心诊断，比值大于 1 才说明深层愿意写内容；配合曲线形态判断是欠拟合还是深层贡献不足。数值异常按固定路径排查——手写 kernel 的数值稳定、log(0)、除零、softmax 溢出、fp16/bf16 下溢，NaN 不许靠重启了事。发现以上问题就实际修改代码与实验脚本来改进。改进必须保持 docs/design_notes.md 中【固定】设计的实现方式与语义不变，不得借改进之名切换已固定的实现或做无意义的等价重写；每次改动后运行 python3 ci_gate.py 自检，不通过就自己修好。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；LICENSE、README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README）、docs/design_notes.md、ci_gate.py、算力申请.md 同样绝对不能删除、修改或移动。'
+          PROMPT_SCI_1='改进这个项目的科研方法。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README） 是项目说明文档，同样绝对不能删除或移动。'
+          PROMPT_SCI_2='从实验设计与准备的角度改进这个项目的科研方法。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README） 是项目说明文档，同样绝对不能删除或移动。'
+          PROMPT_SCI_3='从数据处理的角度改进这个项目的科研方法。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README） 是项目说明文档，同样绝对不能删除或移动。'
+          PROMPT_SCI_4='从可复现性与工程规范的角度改进这个项目的科研方法。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README） 是项目说明文档，同样绝对不能删除或移动。'
+          PROMPT_SCI_5='从对比实验与消融的角度改进这个项目的科研方法。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README） 是项目说明文档，同样绝对不能删除或移动。'
+          PROMPT_SCI_6='从结果分析的角度改进这个项目的科研方法。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README） 是项目说明文档，同样绝对不能删除或移动。'
+          PROMPT_SINGLE='确保需要是单因素实验的实验都是单因素实验。另外，.github 目录是 CI 配置，绝对不要删除、修改或移动其中任何文件；README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README） 是项目说明文档，同样绝对不能删除或移动。'
           PROMPT_APPLY='检查算力申请.md是否有错误，如果有就改好。不要删除或移动算力申请.md，也不要删除或移动 README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README）、docs/design_notes.md 和 ci_gate.py。'
           PROMPT_CLEAN='不要删除、修改或移动算力申请.md——它是算力申请材料，其中的算力规模与预算估算属于申请所需信息，不属于“多余的内容”，也不属于“关于预算、花费的记录”。确保远程仓库里没有实验结果文件、REPORTxx.md 以及 autodl_budgetxx.json；确保 docs 目录只保留 design_notes.md；确保远程仓库中没有任何关于性能、预算、花费、修复了哪些bug和显存占用的记录（包括注释，但算力申请.md除外）。删除所有其他多余的内容。注意：.github 目录是 CI 配置，必须原样保留，绝对不能删除、修改或移动其中任何文件，它不属于“多余的内容”；LICENSE 是开源许可证文件，同样必须原样保留，绝对不能删除、修改或移动，也不属于“多余的内容”；README*.md（含 README_zh.md、README_en.md 等所有语言版本的 README） 是项目说明文档，同样必须原样保留，绝对不能删除或移动，也不属于“多余的内容”；docs/design_notes.md 是固定的设计决策文档、ci_gate.py 是 CI 质量门禁脚本，两者都必须原样保留，绝对不能删除、修改或移动。'
 
@@ -245,6 +246,7 @@ jobs:
           PERF_TIMEOUT=$((3*3600))     # 3h
           BUG_TIMEOUT=$((3*3600))      # 3h
           SCI_TIMEOUT=$((3*3600))      # 3h
+          SINGLE_TIMEOUT=$((3600))     # 1h（单因素实验检查）
           CLEAN_TIMEOUT=$((3*3600))    # 3h
           APPLY_TIMEOUT=$((3*3600))    # 3h
 
@@ -933,7 +935,7 @@ jobs:
           }
 
           # ================= 测试门（每次提交后都跑，不再抽样）=================
-          # 在 bug / sci 阶段的 opencode 调用提交之后触发（调用点见主循环）。
+          # 在 bug / sci / single 阶段的 opencode 调用提交之后触发（调用点见主循环）。
           # 跑一遍本仓库的测试；跑不通 → 调用 dsh 修复 → 修复结果按本仓库既有提交路径落到 main/master。
           maybe_run_tests() {
             local iter="$1"
@@ -1018,9 +1020,9 @@ jobs:
               break
             fi
 
-            # ----- 阶段：perf 与 clean 已停用 → bug -> sci -> apply（clean 的清理工作交给收尾的 shell 步骤）-----
-            # for phase in perf bug sci clean apply; do
-            for phase in bug sci apply; do
+            # ----- 阶段：perf 与 clean 已停用 → bug -> sci -> single -> apply（clean 的清理工作交给收尾的 shell 步骤）-----
+            # for phase in perf bug sci single clean apply; do
+            for phase in bug sci single apply; do
               case "$phase" in
                 perf)  P="$PROMPT_PERF";  T="$PERF_TIMEOUT"  ;;
                 bug)   P="$PROMPT_BUG";   T="$BUG_TIMEOUT"   ;;
@@ -1039,6 +1041,7 @@ jobs:
                   echo "[info] sci 阶段随机选中科研方法提示词 #$SCI_ROLL：$SCI_LABEL"
                 ;;
                 clean) P="$PROMPT_CLEAN"; T="$CLEAN_TIMEOUT" ;;
+                single) P="$PROMPT_SINGLE"; T="$SINGLE_TIMEOUT" ;;
                 apply) P="$PROMPT_APPLY"; T="$APPLY_TIMEOUT" ;;
               esac
 
@@ -1065,9 +1068,9 @@ jobs:
                 reject_phase
               fi
 
-              # ⭐ 测试门：bug / sci 阶段提交后都跑一遍全量测试，详见 maybe_run_tests
+              # ⭐ 测试门：bug / sci / single 阶段提交后都跑一遍全量测试，详见 maybe_run_tests
               case "$phase" in
-                bug|sci) maybe_run_tests "$i" ;;
+                bug|sci|single) maybe_run_tests "$i" ;;
               esac
 
               sleep 5
