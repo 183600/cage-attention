@@ -53,6 +53,31 @@ _GRAD_CLIP_MAX_NORM = 1.0
 _ETA_MIN_FACTOR = 0.1
 
 
+def _validated_lr(value):
+    """Validate a learning rate before it reaches an optimizer.
+
+    ``torch.optim`` accepts ``inf`` (and ``0.0``) without complaint, so a
+    bad rate does not fail at construction: it either freezes training or
+    corrupts every parameter on the first update while the run record still
+    looks like a legitimate recipe.  Both training entry points normalise
+    and reject such values up front, like the other numeric options.
+    """
+    raw = value
+    if isinstance(raw, bool):
+        raise ValueError(
+            f"learning rate must be a finite positive number, got {raw!r}")
+    try:
+        lr = float(raw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"learning rate must be a finite positive number, got "
+            f"{raw!r}") from exc
+    if not (math.isfinite(lr) and lr > 0.0):
+        raise ValueError(
+            f"learning rate must be a finite positive number, got {raw!r}")
+    return lr
+
+
 def _make_adamw(params, lr):
     """AdamW on the current device."""
     params = list(params)
@@ -820,6 +845,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     if batch is None:
         raise ValueError(
             f"batch must be a positive integer, got {raw_batch!r}")
+    lr = _validated_lr(lr)
     raw_log_every = log_every
     if isinstance(raw_log_every, bool):
         raise ValueError(

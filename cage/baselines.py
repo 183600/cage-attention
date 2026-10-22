@@ -61,7 +61,7 @@ from .metrics import (
     wilson_ci,
 )
 from .repro import seed_everything, stream_generator
-from .train import _make_adamw
+from .train import _make_adamw, _validated_lr
 
 __all__ = [
     "LinearBagProbe",
@@ -231,6 +231,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     if batch is None:
         raise ValueError(
             f"batch must be a positive integer, got {raw_batch!r}")
+    lr = _validated_lr(lr)
     applied = seed_everything(seed, deterministic=deterministic)
     if seed_info is not None:
         seed_info.update(applied)
