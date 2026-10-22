@@ -153,6 +153,23 @@ class DifficultyStrataTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             difficulty_features(self.idx, self.answer, True)
 
+    def test_missing_or_duplicated_query_key_is_rejected(self):
+        # No key matches the final query token: argmax would otherwise
+        # label pair 0, inventing an easy retrieval sample.
+        no_match = self.idx.clone()
+        no_match[:, -1] = 31
+        with self.assertRaises(ValueError):
+            difficulty_features(no_match, self.answer, 3)
+        # Two keys equal the query: the paired answer is ambiguous.
+        duplicate = self.idx.clone()
+        duplicate[:, 2] = duplicate[:, 0]
+        with self.assertRaises(ValueError):
+            difficulty_features(duplicate, self.answer, 3)
+
+    def test_answer_must_match_the_paired_value(self):
+        with self.assertRaises(ValueError):
+            difficulty_features(self.idx, self.answer + 1, 3)
+
 
 class StandardizedProportionTest(unittest.TestCase):
     def test_self_weights_reproduce_pooled_rate(self):

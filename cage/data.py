@@ -1330,12 +1330,29 @@ def difficulty_features(idx, answer, n_pairs):
     query = idx[:, -1]
     keys = idx[:, :2 * n_pairs:2]
     match = keys.eq(query.unsqueeze(1))
+    # A batch with no matching key (or a duplicated key) has no defined
+    # retrieval position; ``argmax`` would silently label it as an easy
+    # early-key sample.  Refuse it instead, matching the geometry checks.
+    # ``meta`` tensors carry no values to read back (they are a shape-only
+    # device), so they skip the two value checks while preserving placement.
+    readable = idx.device.type != "meta"
+    if readable and int(idx.size(0)) and not bool(
+            match.sum(dim=1).eq(1).all()):
+        raise ValueError(
+            "idx must contain exactly one key equal to the final query "
+            "token in every sequence")
     key_pos = match.to(torch.int64).argmax(dim=1)
     values = idx[:, 1:2 * n_pairs:2]
     # ``answer`` is normally already on ``idx``'s device, but the helper is
     # public: align it rather than failing a valid CPU-metadata/CUDA-batch
     # call (or, worse, broadcasting the wrong side).
     answer = answer.to(device=idx.device)
+    paired_value = values.gather(1, key_pos.unsqueeze(1)).squeeze(1)
+    if readable and int(idx.size(0)) and not bool(
+            paired_value.eq(answer).all()):
+        raise ValueError(
+            "answer does not match the value paired with the query key; "
+            "difficulty features would describe a different label")
     value_repeats = (values.eq(answer.unsqueeze(1)).sum(dim=1)
                      > 1).to(torch.int64)
     # Position indices must live on the batch's device: the comparison
