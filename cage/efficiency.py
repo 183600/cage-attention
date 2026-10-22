@@ -24,6 +24,7 @@ import math
 import platform
 import statistics
 import time
+from dataclasses import asdict
 
 import torch
 
@@ -195,12 +196,15 @@ def measure_config(cfg, device, seq_len: int, batch: int = 1,
                    warmup: int = 3, repeats: int = 10) -> dict:
     """Build ``cfg`` on ``device`` and return :func:`measure_forward`."""
     device = torch.device(device)
+    # ``measure_forward`` accepts a Cfg or a mapping; normalise here too so
+    # ``dict(cfg)`` is never called on the dataclass itself.
+    cfg = _as_cfg(cfg)
     cuda_ids = []
     if device.type == "cuda":
         cuda_ids = [device.index if device.index is not None
                     else torch.cuda.current_device()]
     with torch.random.fork_rng(devices=cuda_ids):
-        model = build(dict(cfg), compile=False).to(device)
+        model = build(asdict(cfg), compile=False).to(device)
         record = measure_forward(model, cfg, seq_len, device, batch=batch,
                                  warmup=warmup, repeats=repeats)
     release_eval_scratch()
