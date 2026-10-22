@@ -130,6 +130,15 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertTrue(math.isnan(outside[1]["p"]))
         self.assertTrue(outside[2]["reject"])
 
+    def test_out_of_range_selection_fraction_abstains(self):
+        for frac in (-0.1, 1.5, float("inf")):
+            with self.subTest(frac=frac):
+                out = metrics.selection_at_fraction(
+                    [1.0, 2.0, 3.0], [False, True, True], frac=frac)
+                self.assertEqual(out["k"], 0)
+                self.assertTrue(math.isnan(out["frac"]))
+                self.assertTrue(math.isnan(out["precision"]))
+
     def test_malformed_cluster_inputs_abstain(self):
         for successes, totals in ((["not-a-count"], [1]),
                                   ([1], ["not-a-count"]),

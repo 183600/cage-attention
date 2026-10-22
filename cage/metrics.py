@@ -340,11 +340,14 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
                 "precision": float("nan"), "lift": float("nan"),
                 "threshold": float("nan")}
     frac = _float_or_nan(frac)
-    if math.isnan(frac):
+    # ``frac`` is a fraction of the evaluated rows.  Clamping an
+    # out-of-range value would silently answer a different question (e.g.
+    # -0.1 -> flag nothing, 1.5 -> flag everything), so abstain just like a
+    # malformed value.  A NaN already follows this branch.
+    if not (math.isfinite(frac) and 0.0 <= frac <= 1.0):
         return {"frac": float("nan"), "k": 0, "recall": float("nan"),
                 "precision": float("nan"), "lift": float("nan"),
                 "threshold": float("nan")}
-    frac = min(max(frac, 0.0), 1.0)
     # ``frac * n`` can land a few ulps above an exact integer (0.07 * 100 is
     # 7.000000000000001 in IEEE-754), which would make ``ceil`` overcount by
     # one; snapping the product to 9 decimals restores the documented
