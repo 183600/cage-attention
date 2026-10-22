@@ -943,9 +943,20 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
     cross-group pairs only, so re-reading one split at two geometries
     cannot fail the gate.
 
+    Content overlap alone is not sufficient for this task: a split is a
+    seed-owned stream, and ``make_batch``'s draws are shape-dependent, so
+    the *same* seed read at two different batch sizes can produce two
+    disjoint realizations.  Reusing a training seed as a held-out stream
+    at a different geometry would therefore show zero duplicate rows while
+    still training and evaluating on the same underlying stream.  The
+    audit separately compares the canonical 32-bit seed keys of every
+    stream pair and reports ``cross_group_seed_collisions``; any such
+    collision across groups is leakage even when the content matrices are
+    empty.
+
     It returns per-stream row/duplicate counts and the pairwise overlap
-    matrix over row-content fingerprints.  Any cross-group overlap is
-    leakage; the caller decides how to gate on it.
+    matrix over row-content fingerprints.  Any cross-group overlap or
+    seed-key collision is leakage; the caller decides how to gate on it.
     """
     train_specs = dict(train_specs or {})
     heldout_specs = dict(heldout_specs or {})
@@ -958,7 +969,7 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
         raise ValueError(
             "stream names must be unique across train_specs and "
             f"heldout_specs; duplicated: {shared_names}")
-    key_sets, streams, groups = {}, {}, {}
+    key_sets, streams, groups, seed_keys = {}, {}, {}, {}
     all_specs = ([(name, spec, "train")
                   for name, spec in train_specs.items()]
                  + [(name, spec, "heldout")
@@ -968,15 +979,18 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
         if spec.get(unit_key) is None:
             raise ValueError(
                 f"{kind} spec {name!r} needs {unit_key!r}")
+        seed_key = stream_seed_key(spec["seed"])
         keys, n_rows = _draw_stream_keys(
             spec["seed"], n_pairs, vocab, device, spec["batch"],
             spec[unit_key])
         key_sets[name] = keys
+        seed_keys[name] = seed_key
         groups[name] = str(spec.get(
             "group", "train" if kind == "train" else name))
         streams[name] = {
             "kind": kind, "group": groups[name],
-            "seed": int(spec["seed"]), "batch": int(spec["batch"]),
+            "seed": int(spec["seed"]), "stream_key": seed_key,
+            "batch": int(spec["batch"]),
             "units": int(spec[unit_key]),
             "n_rows": int(n_rows), "n_unique_rows": int(len(keys)),
             "n_duplicate_rows": int(n_rows - len(keys)),
@@ -984,13 +998,20 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
 
     names = list(key_sets)
     pairwise = {}
+    pairwise_seed_collision = {}
     cross_group = []
+    seed_collisions = []
     for i, a in enumerate(names):
         for b in names[i + 1:]:
             overlap = len(key_sets[a] & key_sets[b])
-            pairwise[f"{a}|{b}"] = overlap
+            pair = f"{a}|{b}"
+            pairwise[pair] = overlap
+            collision = seed_keys[a] == seed_keys[b]
+            pairwise_seed_collision[pair] = collision
             if groups[a] != groups[b]:
                 cross_group.append(overlap)
+                if collision:
+                    seed_collisions.append(pair)
     train_names = list(train_specs)
     heldout_names = list(heldout_specs)
     train_vs_heldout = [
@@ -1003,6 +1024,8 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
         "heldout_specs": {k: dict(v) for k, v in heldout_specs.items()},
         "streams": streams,
         "pairwise_overlap": pairwise,
+        "pairwise_seed_collision": pairwise_seed_collision,
+        "cross_group_seed_collisions": seed_collisions,
         "train_vs_heldout_max": max(train_vs_heldout, default=0),
         "heldout_vs_heldout_max": max(heldout_vs_heldout, default=0),
         "max_overlap": max(cross_group, default=0),
@@ -2208,6 +2231,39 @@ def _self_test() -> int:
     check("same_group_prefix_overlap_observed", same_pair > 0)
     check("same_group_overlap_not_leakage",
           same_split["max_overlap"] == 0 and same_pair > 0)
+    # A split is a seed-owned stream, but make_batch's draws are
+    # shape-dependent: the same seed at a different batch size produces a
+    # disjoint realization.  Reusing a training seed as a held-out stream
+    # at another geometry therefore has zero content overlap while still
+    # training and evaluating on the same stream.  The canonical seed key
+    # must flag the cross-group collision on its own.
+    seed_collision = actual_stream_overlap_audit(
+        4, 64, "cpu",
+        train_specs={"train:0": {"seed": 6, "batch": 8, "steps": 2,
+                                 "group": "train"}},
+        heldout_specs={"val": {"seed": 6, "batch": 9, "batches": 2,
+                               "group": "val"}})
+    check("seed_collision_has_no_content_overlap",
+          seed_collision["max_overlap"] == 0
+          and seed_collision["pairwise_overlap"]["train:0|val"] == 0)
+    check("cross_group_seed_collision_detected",
+          seed_collision["cross_group_seed_collisions"] == ["train:0|val"])
+    alias_collision = actual_stream_overlap_audit(
+        4, 64, "cpu",
+        train_specs={"train:0": {"seed": 6, "batch": 8, "steps": 2,
+                                 "group": "train"}},
+        heldout_specs={"test": {"seed": 6 + 2 ** 32, "batch": 9,
+                                "batches": 2, "group": "test"}})
+    check("seed_alias_collision_detected",
+          alias_collision["cross_group_seed_collisions"] == ["train:0|test"])
+    same_group_seed = actual_stream_overlap_audit(
+        4, 64, "cpu",
+        train_specs={"train:0": {"seed": 6, "batch": 8, "steps": 2,
+                                 "group": "train"}},
+        heldout_specs={"train_geom2": {"seed": 6, "batch": 9, "batches": 2,
+                                       "group": "train"}})
+    check("same_group_seed_reuse_not_leakage",
+          same_group_seed["cross_group_seed_collisions"] == [])
     # A shared name would overwrite one stream in the replay map and make
     # the train-vs-held-out pairwise lookup raise ``KeyError``; names must
     # be rejected explicitly while the caller can still fix the spec.

@@ -5553,7 +5553,10 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
     sparse fields (a few hundred answer classes at ~1e3 samples) because
     the tolerance approaches the maximum possible TV, so the calibrated
     test - not an arbitrary constant - carries the decision.  The
-    TV/floor pair stays in the report as a descriptive companion.
+    TV/floor pair stays in the report as a descriptive companion.  The
+    replay also compares canonical stream seed keys: a split is a
+    seed-owned stream, so the same seed reused by two groups is leakage
+    even when shape-dependent draws leave their row fingerprints disjoint.
 
     A second, train-fitted gate covers what the marginal tests cannot: an
     *atypical-sample* tail.  ``split_leakage_audit`` scores every sample by
@@ -5658,6 +5661,8 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
             })
         audit["actual_stream_overlap"] = actual
         audit["max_actual_stream_overlap"] = actual["max_overlap"]
+        audit["actual_stream_seed_collisions"] = actual[
+            "cross_group_seed_collisions"]
         # Training-stationarity diagnostic (train-only halves): reported and
         # BH-adjusted across its own family, but it warns rather than blocks,
         # because a drifting training stream is a property to disclose, not
@@ -5690,6 +5695,7 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
         audit["hb3_supported"] = bool(
             audit["max_pairwise_duplicate_overlap"] == 0
             and actual["max_overlap"] == 0
+            and not actual["cross_group_seed_collisions"]
             and not any(item["reject"] for item in shift_tests.values())
             # A held-out split whose difficulty *tail* has moved passes the
             # marginal tests; the conservative train-fitted tail-rate bound
@@ -5733,7 +5739,9 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
               f"{audit['max_pairwise_duplicate_overlap']} over "
               f"{len(audit['pairwise_duplicate_overlap'])} stream pairs; "
               f"actual stream replay={actual['n_rows_total']} rows, "
-              f"cross-split overlap max={actual['max_overlap']}; "
+              f"cross-split overlap max={actual['max_overlap']}, "
+              f"cross-group seed collisions="
+              f"{actual['cross_group_seed_collisions'] or 'none'}; "
               f"TV noise floor [{floor_txt}]; calibrated shift test "
               f"(BH q={settings.fdr_q:g}) adjusted p: [{adj_txt}]; "
               f"atypical-sample rate train="
@@ -5788,16 +5796,20 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
                 audit["max_pairwise_duplicate_overlap"],
             "max_actual_stream_overlap":
                 audit.get("max_actual_stream_overlap"),
+            "cross_group_seed_collisions":
+                audit.get("actual_stream_seed_collisions"),
             "split_audit": audit,
             **_run_context(settings),
         })
         raise SplitAuditError(
             f"{tag}: HB3 failed (max pairwise duplicate overlap="
             f"{audit['max_pairwise_duplicate_overlap']}, max actual-stream "
-            f"overlap={audit.get('max_actual_stream_overlap')}, rejected "
-            f"shift tests={rejected or 'none'}); a data protocol with "
-            f"leakage or a held-out distribution shift cannot support any "
-            f"grid result")
+            f"overlap={audit.get('max_actual_stream_overlap')}, cross-group "
+            f"seed collisions="
+            f"{audit.get('actual_stream_seed_collisions') or 'none'}, "
+            f"rejected shift tests={rejected or 'none'}); a data protocol "
+            f"with leakage or a held-out distribution shift cannot support "
+            f"any grid result")
     return audit
 
 
