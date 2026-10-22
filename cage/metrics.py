@@ -192,6 +192,11 @@ def _float_or_nan(value) -> float:
     level" verdict is an exception instead of a NaN readout, so every
     entry point normalises first and lets the guard reject the NaN.
     """
+    if isinstance(value, bool):
+        # ``float(True)`` is 1.0, which would turn a boolean "bound" or
+        # "fraction" into a legitimate-looking numeric threshold.  Booleans
+        # are semantic flags, not effect sizes or probabilities.
+        return float("nan")
     try:
         return float(value)
     except (TypeError, ValueError, OverflowError):
