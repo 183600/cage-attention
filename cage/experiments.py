@@ -8031,14 +8031,16 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
                     "available": False,
                     "reason": f"{type(exc).__name__}: {exc}"}
                 continue
-            acc = _mean_std([r["accuracy_by_length"][length]
-                             for r in runs
-                             if _finite((r.get("accuracy_by_length")
-                                         or {}).get(length))])
-            valid_acc = _mean_std([r["accuracy_by_length"][length]
-                                   for r in valid_runs
-                                   if _finite((r.get("accuracy_by_length")
-                                               or {}).get(length))])
+            acc = _mean_std([
+                _length_entry(r.get("accuracy_by_length"), length)
+                for r in runs
+                if _finite(_length_entry(r.get("accuracy_by_length"),
+                                         length))])
+            valid_acc = _mean_std([
+                _length_entry(r.get("accuracy_by_length"), length)
+                for r in valid_runs
+                if _finite(_length_entry(r.get("accuracy_by_length"),
+                                         length))])
             rec["accuracy_mean"] = acc["mean"]
             rec["accuracy_std"] = acc["std"]
             rec["accuracy_n"] = acc["n"]
