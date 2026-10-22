@@ -267,6 +267,50 @@ class EmptySweepCompanionTest(unittest.TestCase):
         self.assertIn("empty length sweep", tuned["reason"])
 
 
+class MalformedLengthRecordTest(unittest.TestCase):
+    def test_companions_abstain_on_non_mapping_length_rows(self):
+        from cage.experiments import (
+            _E2_VARIANTS,
+            _counterfactual_companion,
+            _e2_difficulty_companions,
+            _e2_endpoint_class_companions,
+            _stamp_difficulty_standardization,
+        )
+
+        def run(gate):
+            return {
+                "seed": 0, "gate": gate, "model_cfg": {"gate": gate},
+                "accuracy": 0.4,
+                "accuracy_at_longest": 0.3,
+                "accuracy_drop": 0.1,
+                "metrics_by_length": {3: "not-a-record",
+                                      6: ["not", "a", "record"]},
+                "accuracy_by_length": {3: 0.4, 6: 0.3},
+                "eval_n_by_length": {3: 10, 6: 10},
+                "cf_value_follow_rate": 0.5,
+                "cf_distractor_unchanged_rate": 1.0,
+                "cf_relocation_unchanged_rate": 1.0,
+            }
+
+        by_variant = {label: [run(gate)]
+                      for label, gate, *_ in _E2_VARIANTS}
+        with contextlib.redirect_stdout(io.StringIO()):
+            diff = _e2_difficulty_companions(by_variant, [3, 6])
+            endpoint = _e2_endpoint_class_companions(by_variant, [3, 6])
+            with tempfile.TemporaryDirectory() as tmp:
+                cf = _counterfactual_companion(
+                    pathlib.Path(tmp), "e2", by_variant, lengths=[3, 6],
+                    reference="none")
+        self.assertIn("calib - none", diff["contrasts"])
+        self.assertTrue(endpoint["rows"])
+        self.assertIn("calib - none", cf["contrasts"])
+        rec = {"metrics_by_length": {3: "not-a-record",
+                                     6: "not-a-record"}}
+        _stamp_difficulty_standardization(rec, 3, [3, 6])
+        self.assertTrue(math.isnan(
+            rec["difficulty_standardized_accuracy_at_base"]))
+
+
 class StandardizedProportionTest(unittest.TestCase):
     def test_self_weights_reproduce_pooled_rate(self):
         out = standardized_proportion([9, 1], [10, 10])

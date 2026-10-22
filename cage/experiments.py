@@ -1810,6 +1810,18 @@ def _length_entry(mapping, length):
     return mapping.get(str(length))
 
 
+def _length_mapping(mapping, length):
+    """Per-length record as a mapping, or ``None`` when malformed.
+
+    ``_length_entry`` already resolves the int/JSON-string key.  This helper
+    additionally rejects a value that is not a mapping: reporting companions
+    must abstain on a corrupted per-length row instead of raising
+    ``AttributeError`` halfway through a results table.
+    """
+    entry = _length_entry(mapping, length)
+    return entry if isinstance(entry, Mapping) else None
+
+
 def _difficulty_vectors(difficulty):
     """Extract ``(totals, corrects)`` from an ``eval_metrics`` difficulty block.
 
@@ -1926,8 +1938,8 @@ def _stamp_difficulty_standardization(rec, base_length, lengths):
         metrics_by_length = {}
 
     def _block(length):
-        entry = _length_entry(metrics_by_length, length)
-        return entry.get("difficulty") if isinstance(entry, dict) else None
+        entry = _length_mapping(metrics_by_length, length)
+        return entry.get("difficulty") if entry is not None else None
 
     def _bucket(name):
         bucket = rec.get(name)
@@ -4045,7 +4057,7 @@ def _counterfactual_companion(out_dir, tag, by_arm, lengths=None,
     def value(run, metric, length):
         if length is None:
             return run.get(metric)
-        block = _length_entry(run.get("metrics_by_length"), length) or {}
+        block = _length_mapping(run.get("metrics_by_length"), length) or {}
         return block.get(metric)
 
     arm_map = {arm_label(label): (label, runs)
@@ -14376,7 +14388,7 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
         rule_rows = []
         for length in lengths:
             def _at_length(r):
-                metrics = _length_entry(
+                metrics = _length_mapping(
                     r.get("metrics_by_length"), length) or {}
                 return dict(
                     r,
@@ -15857,7 +15869,7 @@ def _e2_difficulty_companions(by_variant: dict, lengths: list) -> dict:
             # the base length (the training/evaluation length), so leaving
             # them in place paired base-length McNemar/fold/crossed
             # bootstrap results with endpoint accuracy.
-            metrics = _length_entry(
+            metrics = _length_mapping(
                 run.get("metrics_by_length"), endpoint) or {}
             rows.append({
                 **run,
@@ -16009,7 +16021,7 @@ def _e2_endpoint_class_companions(by_variant: dict,
     def tagged(runs):
         out = []
         for run in runs:
-            metrics = _length_entry(
+            metrics = _length_mapping(
                 run.get("metrics_by_length"), endpoint) or {}
             out.append({
                 **run,
