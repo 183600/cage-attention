@@ -8327,9 +8327,25 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
           f"{tune_seeds}.  The controlled rows above freeze one recipe for "
           f"all arms - this table asks whether calib still wins when the "
           f"none/query/null baselines also get their own best shot:")
+    def _sel_flag(selection):
+        if not selection or selection.get("applicable") is False:
+            return "n/a"
+        if selection.get("reliable") is True:
+            return "ok"
+        if selection.get("reliable") is False:
+            reasons = []
+            if selection.get("within_noise"):
+                reasons.append("noise")
+            if selection.get("best_at_grid_boundary"):
+                reasons.append("boundary")
+            if selection.get("curve_invalid_best"):
+                reasons.append("curve")
+            return "/".join(reasons) or "unreliable"
+        return "n/a"
+
     print(f"{'arm':>6} {'lr':>10} {'tau':>7} {'val_acc':>17} "
           f"{'val_n':>6} {'curve_invalid':>13} {'test_acc':>17} "
-          f"{'reused':>7}")
+          f"{'reused':>7} {'lr_sel':>12} {'tau_sel':>12}")
     for gate in GATES:
         row = by_arm[gate]
         recipe = row["recipe"]
@@ -8347,9 +8363,17 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
         print(f"{gate:>6} {recipe['lr']:>10g} {tau:>7} {val_s:>17} "
               f"{int(val.get('n_seeds', 0)):>6} "
               f"{row['curve_invalid_runs']:>13} {test_s:>17} "
-              f"{'yes' if row['reused_reference_runs'] else 'no':>7}")
+              f"{'yes' if row['reused_reference_runs'] else 'no':>7} "
+              f"{_sel_flag(row.get('lr_selection')):>12} "
+              f"{_sel_flag(row.get('tau_selection')):>12}")
         if row.get("fallback"):
             print(f"       fallback: {row['fallback']}")
+    print("  (lr_sel/tau_sel = selection reliability audit: 'noise' = "
+          "winner inside the seed spread of the runner-up, 'boundary' = "
+          "winner at the end of the grid, 'curve' = winning runs had an "
+          "invalid training curve; a tuned baseline with an unreliable "
+          "winner is under-tuned in the conservative direction for the "
+          "gate claim)")
     print(f"\n[e1] two accounting conventions side by side (accuracy and "
           f"mechanism readouts; controlled = same frozen recipe, tuned = "
           f"each arm's own validation-selected recipe).  The pre-registered "
