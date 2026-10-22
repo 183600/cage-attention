@@ -1378,6 +1378,25 @@ def _stamp_difficulty_standardization(rec, base_length, lengths):
     base_difficulty = _block(base_length)
     reference_totals, _ = _difficulty_vectors(base_difficulty)
     base_std = float("nan")
+    if not lengths:
+        # No sweep: still record the (undefined) summary fields rather than
+        # indexing ``lengths[-1]`` and aborting the caller.
+        for name in ("difficulty_standardized_accuracy_by_length",
+                     "difficulty_standardized_coverage_by_length",
+                     "difficulty_standardized_effective_n_by_length",
+                     "difficulty_standardized_min_stratum_n_by_length",
+                     "difficulty_mix_tv_by_length"):
+            _bucket(name)
+        rec["difficulty_standardized_accuracy_at_base"] = base_std
+        for key in ("difficulty_standardized_accuracy_at_longest",
+                    "difficulty_standardized_accuracy_drop",
+                    "difficulty_standardized_accuracy_slope_log_len",
+                    "difficulty_standardized_coverage_at_longest",
+                    "difficulty_standardized_effective_n_at_longest",
+                    "difficulty_mix_tv_at_longest"):
+            rec[key] = float("nan")
+        rec["difficulty_standardized_min_stratum_n_at_longest"] = 0
+        return rec
     for length in lengths:
         block = _block(length)
         totals, correct = _difficulty_vectors(block)

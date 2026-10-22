@@ -226,6 +226,18 @@ class MissingDifficultyRecordTest(unittest.TestCase):
                     rec["difficulty_standardized_accuracy_at_longest"]))
                 self.assertEqual(rec["difficulty_standardized_coverage_by_length"][3], 0.0)
 
+    def test_stamp_abstains_on_an_empty_sweep(self):
+        from cage.experiments import _stamp_difficulty_standardization
+
+        rec = {"metrics_by_length": {3: {"difficulty": {
+            "strata": [{"id": 0, "n": 2, "correct": 1}]}}}}
+        _stamp_difficulty_standardization(rec, 3, [])
+        self.assertTrue(math.isnan(
+            rec["difficulty_standardized_accuracy_at_base"]))
+        self.assertTrue(math.isnan(
+            rec["difficulty_standardized_accuracy_slope_log_len"]))
+        self.assertEqual(rec["difficulty_standardized_min_stratum_n_at_longest"], 0)
+
 
 class EvalDifficultyRecordTest(unittest.TestCase):
     def test_eval_metrics_stamps_per_stratum_counts(self):
