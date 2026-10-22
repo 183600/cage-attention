@@ -63,7 +63,7 @@ def analytic_matmul_flops(cfg, seq_len: int, batch: int = 1,
     mlp = 2 * (d * 4 * d + 4 * d * d) * t
     gate = 2 * d * d * t if cfg.gate in ("query", "calib") else 0
     if cfg.gate == "null":
-        attention = 2 * d * t * (t + 5)
+        attention = 2 * d * t * (t + 3)
     else:
         attention = 2 * d * t * (t + 1)
     norm_scale = 2 * (2 * d * d * t) if cfg.norm == "seednorm" else 0
