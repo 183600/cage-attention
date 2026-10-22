@@ -7262,10 +7262,17 @@ def _overfit_sanity_by_config(settings: Settings) -> dict:
                                    settings.vocab, settings.device, gen=gen)
     validate_batch(sidx, stgt, smeta, settings.vocab, diagnostics=False)
     by_config = {}
+    # The miniature width is 48 whenever that is a valid head multiple, but
+    # an arbitrary ``n_heads`` (e.g. 5 or 7) must not make the HB5 pre-flight
+    # itself unbuildable: round up to the next multiple of the head count.
+    heads = max(1, int(settings.n_heads))
+    mini_d_model = 48
+    if mini_d_model % heads:
+        mini_d_model = heads * ((mini_d_model + heads - 1) // heads)
     for label, overrides in _sanity_configs(settings):
         seed_everything(SANITY_SEED, deterministic=settings.deterministic)
         tiny = build(_model_cfg(
-            settings, **{"d_model": 48, "n_layers": 2, **overrides}),
+            settings, **{"d_model": mini_d_model, "n_layers": 2, **overrides}),
             compile=False)
         row = overfit_sanity_check(
             tiny, sidx, stgt, smeta, lr=settings.overfit_lr,
