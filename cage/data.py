@@ -449,7 +449,11 @@ def assert_time_ordered(times, splits) -> None:
         raise ValueError(
             f"time values must be real numeric timestamps, got dtype "
             f"{raw.dtype}")
-    t = raw.to(torch.float64)
+    # Keep integer timestamps in their integer dtype: nanosecond Unix
+    # timestamps exceed 2**53, so casting int64 to float64 collapses
+    # distinct instants and can silently accept a chronological violation.
+    # Floating timestamps are widened for the comparison as before.
+    t = raw.to(torch.float64) if raw.is_floating_point() else raw
     if not bool(torch.isfinite(t).all()):
         raise ValueError("time values must be finite (no NaN/Inf): a "
                          "non-finite timestamp makes the ordering undefined")
@@ -471,7 +475,9 @@ def assert_time_ordered(times, splits) -> None:
         idx = _as_indices(splits[name], int(t.numel()))
         if idx.numel() == 0:
             continue
-        spans.append((float(t[idx].min()), float(t[idx].max()), name))
+        # ``item()`` keeps integer timestamps exact (a Python int); the
+        # comparison below never routes them through float64.
+        spans.append((t[idx].min().item(), t[idx].max().item(), name))
     for (lo_a, hi_a, a), (lo_b, hi_b, b) in zip(spans, spans[1:]):
         if hi_a > lo_b:
             raise ValueError(
@@ -2079,6 +2085,17 @@ def _self_test() -> int:
         check("time_unknown_split_name_rejected", False)
     except ValueError:
         check("time_unknown_split_name_rejected", True)
+    # Integer timestamps above 2**53 must be compared exactly.  Casting
+    # them to float64 collapses adjacent nanosecond instants and would let
+    # a training row newer than a validation row pass the chronology gate.
+    ns_times = torch.tensor([1_700_000_000_000_000_001,
+                             1_700_000_000_000_000_000], dtype=torch.int64)
+    try:
+        assert_time_ordered(ns_times, {"train": [0], "val": [1],
+                                       "test": []})
+        check("time_int64_precision_leakage_rejected", False)
+    except ValueError:
+        check("time_int64_precision_leakage_rejected", True)
 
     # Group split contract: whole groups on one side, full coverage, and a
     # per-sample crossing assignment must be rejected.
