@@ -856,7 +856,20 @@ def stream_fingerprint(n_pairs, vocab, device="cpu", batch=8, seed=TEST_SEED):
     report the same fingerprint for two different realizations; including
     ``(n_pairs, vocab, batch, seed)`` makes "same fingerprint" mean "same
     protocol *and* same geometry", which is the claim run records rely on.
+
+    ``seed`` must be an integer (``stream_seed_key`` still canonicalises the
+    low 32 bits, so an aliased integer seed hashes identically); a
+    fractional seed would otherwise be silently truncated to a different
+    stream before hashing.
     """
+    raw_seed = seed
+    if isinstance(raw_seed, bool):
+        raise ValueError(f"seed must be an integer, got {raw_seed!r}")
+    try:
+        seed = operator.index(raw_seed)
+    except TypeError as exc:
+        raise ValueError(
+            f"seed must be an integer, got {raw_seed!r}") from exc
     key = stream_seed_key(seed)
     batch = _positive_audit_count(batch, "batch")
     check_data_geometry(n_pairs, vocab)
@@ -2437,6 +2450,14 @@ def _self_test() -> int:
     check("fingerprint_seed_alias_canonical",
           fp_alias["sha256"] == fp_a["sha256"]
           and fp_alias["stream_key"] == fp_a["stream_key"])
+    # A non-integral seed must not be truncated into a different stream
+    # before the digest is computed.
+    for bad_seed in (77.5, 77.0, "77", True, None):
+        try:
+            stream_fingerprint(4, 64, "cpu", batch=4, seed=bad_seed)
+            check(f"fingerprint_bad_seed_rejected_{bad_seed!r}", False)
+        except ValueError:
+            check(f"fingerprint_bad_seed_rejected_{bad_seed!r}", True)
     # Versioning must not hash an empty or unrealizable draw: such a digest
     # would certify a dataset the cleaning gate rejects.
     for bad_batch in (0, -1, True, 4.0, "4"):
