@@ -513,26 +513,38 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
             model.eval()
             with torch.inference_mode():
                 _, _, layer_stats = model(idx, stat_pos=stat_pos)
+            invalid_attn_stats = []
             for layer_idx, stat in enumerate(layer_stats or ()):
                 for key, value in stat.items():
                     if not torch.is_tensor(value) or not value.numel():
                         continue
+                    label = f"layer {layer_idx}.{key}"
                     if not bool(torch.isfinite(value).all()):
-                        report["nonfinite_attn_stats"].append(
-                            f"layer {layer_idx}.{key}")
+                        report["nonfinite_attn_stats"].append(label)
                     elif key == "maxprob" and (
                             float(value.min()) < 0.0
                             or float(value.max()) > 1.0):
                         report["notes"].append(
-                            f"layer {layer_idx}.maxprob outside [0, 1] "
+                            f"{label} outside [0, 1] "
                             f"([{float(value.min()):.3g}, "
                             f"{float(value.max()):.3g}]): softmax numerics "
                             f"are invalid")
+                        invalid_attn_stats.append(label)
                     elif key == "entropy" and float(value.min()) < 0.0:
                         report["notes"].append(
-                            f"layer {layer_idx}.entropy is negative "
+                            f"{label} is negative "
                             f"({float(value.min()):.3g}): log/div-by-zero "
                             f"inside the attention kernel")
+                        invalid_attn_stats.append(label)
+                    elif key in ("gate", "null_mass") and (
+                            float(value.min()) < 0.0
+                            or float(value.max()) > 1.0):
+                        report["notes"].append(
+                            f"{label} outside [0, 1] "
+                            f"([{float(value.min()):.3g}, "
+                            f"{float(value.max()):.3g}]): attention "
+                            f"statistic is not a probability")
+                        invalid_attn_stats.append(label)
         except Exception as e:  # noqa: BLE001 - report, never raise from triage
             mark("attention_stats", f"stats forward raised: {e}")
         finally:
@@ -544,6 +556,12 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
                  f"{report['nonfinite_attn_stats'][:6]} "
                  f"(check entropy log(0)/division and softmax overflow in "
                  f"the kernel)")
+        elif invalid_attn_stats:
+            mark("attention_stats",
+                 f"out-of-range attention statistics at "
+                 f"{invalid_attn_stats[:6]} (expected entropy >= 0 and "
+                 f"probabilities in [0, 1]; check the key clamps and the "
+                 f"softmax/entropy kernel)")
 
     # ---- 3. loss / logits ------------------------------------------------
     loss_ok = torch.is_tensor(loss) and bool(torch.isfinite(loss))
