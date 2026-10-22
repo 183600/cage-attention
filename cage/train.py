@@ -795,6 +795,34 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     if batch is None:
         raise ValueError(
             f"batch must be a positive integer, got {raw_batch!r}")
+    if nonfinite not in ("raise", "skip"):
+        raise ValueError(
+            f"nonfinite must be 'raise' or 'skip', got {nonfinite!r}: an "
+            f"unrecognised mode would silently take the skip branch")
+    raw_eval_every = eval_every
+    if isinstance(raw_eval_every, bool):
+        raise ValueError(
+            f"eval_every must be a non-negative integer, got "
+            f"{raw_eval_every!r}")
+    try:
+        eval_every_num = float(raw_eval_every)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"eval_every must be a non-negative integer, got "
+            f"{raw_eval_every!r}") from exc
+    if not (math.isfinite(eval_every_num) and eval_every_num >= 0.0
+            and eval_every_num == int(eval_every_num)):
+        raise ValueError(
+            f"eval_every must be a non-negative integer, got "
+            f"{raw_eval_every!r}")
+    eval_every = int(eval_every_num)
+    if early_stop_patience is not None:
+        raw_patience = early_stop_patience
+        early_stop_patience = _positive_integer(raw_patience)
+        if early_stop_patience is None:
+            raise ValueError(
+                f"early_stop_patience must be a positive integer, got "
+                f"{raw_patience!r}")
     if eval_every > 0:
         raw_val_batches = val_batches
         val_batches = _positive_integer(raw_val_batches)
