@@ -2243,7 +2243,18 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     the descriptive bound).  Degenerate input (no samples, fewer than
     two classes) returns NaN fields and ``uniform_supported=False``.
     """
-    raw = torch.as_tensor(counts).detach().reshape(-1)
+    empty = {"n": 0, "n_classes": 0, "expected_per_class": float("nan"),
+             "chi2": float("nan"), "df": 0, "p_value": float("nan"),
+             "uniform_supported": False}
+    try:
+        raw = torch.as_tensor(counts).detach().reshape(-1)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        # A non-numeric container is not a count vector.  Like the other
+        # reporting companions, abstain instead of letting ``as_tensor``
+        # escape as a TypeError/RuntimeError from an audit readout.
+        return empty
+    if raw.dtype == torch.bool:
+        raise ValueError("answer counts must be integers, not booleans")
     if raw.is_complex():
         raise ValueError("answer counts must be real integers")
     c = raw.to(torch.float64)
@@ -2630,6 +2641,15 @@ def _self_test() -> int:
     check("degenerate_input_not_supported",
           not degenerate["uniform_supported"]
           and math.isnan(degenerate["p_value"]))
+    malformed = answer_uniformity_test(object())
+    check("malformed_answer_counts_abstain",
+          not malformed["uniform_supported"]
+          and math.isnan(malformed["p_value"]))
+    try:
+        answer_uniformity_test(torch.tensor([True, False]))
+        check("boolean_answer_counts_rejected", False)
+    except ValueError:
+        check("boolean_answer_counts_rejected", True)
     for bad_counts in (torch.tensor([-1, 2]),
                        torch.tensor([float("nan"), 1.0]),
                        torch.tensor([0.5, 1.5])):

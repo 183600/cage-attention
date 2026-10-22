@@ -19,6 +19,23 @@ from cage.data import (
 )
 
 
+class UniformityInputTest(unittest.TestCase):
+    def test_malformed_container_abstains_instead_of_raising(self):
+        from cage.data import answer_uniformity_test
+
+        for bad in (None, "x", object()):
+            with self.subTest(bad=type(bad).__name__):
+                out = answer_uniformity_test(bad)
+                self.assertFalse(out["uniform_supported"])
+                self.assertTrue(out["p_value"] != out["p_value"])
+
+    def test_boolean_counts_are_rejected(self):
+        from cage.data import answer_uniformity_test
+
+        with self.assertRaises(ValueError):
+            answer_uniformity_test(torch.tensor([True, False]))
+
+
 class SplitContractTest(unittest.TestCase):
     def test_reserved_training_seed_is_refused(self):
         for seed in RESERVED_EVAL_SEEDS:
