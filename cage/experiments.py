@@ -4666,11 +4666,22 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
     each cell's recorded ``model_cfg`` rather than from the runner's current
     settings, so the cost row describes the model that actually trained.  A
     measurement failure is recorded as an unavailable row instead of
-    aborting an experiment whose real results are already on disk.
+    aborting an experiment whose real results are already on disk.  When a
+    ``reference`` cell is given, ``d_acc`` is the paired mean accuracy
+    difference against that cell; cost ratios and the accuracy difference
+    are read together, never as a new decision rule.
     """
     seq_len = _efficiency_seq_len(settings)
     measured = {}
     entries = {}
+    runs_by_label = {str(label): runs for label, runs in cells}
+    ref_runs = (runs_by_label.get(str(reference))
+                if reference is not None else None)
+    ref_accuracy = {}
+    for run in ref_runs or ():
+        seed = run.get("seed")
+        if seed is not None and _finite(run.get("accuracy")):
+            ref_accuracy[seed] = float(run["accuracy"])
     for label, runs in cells:
         label = str(label)
         cfg = next((r.get("model_cfg") for r in runs
@@ -4696,10 +4707,18 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
                 "reason": f"{type(exc).__name__}: {exc}",
             }
             continue
+        deltas = [
+            float(run["accuracy"]) - ref_accuracy[run["seed"]]
+            for run in runs
+            if run.get("seed") in ref_accuracy
+            and _finite(run.get("accuracy"))]
         rec.update({
             "accuracy_mean": acc["mean"],
             "accuracy_std": acc["std"],
             "accuracy_n": acc["n"],
+            "accuracy_delta_vs_reference": (
+                sum(deltas) / len(deltas) if deltas else float("nan")),
+            "accuracy_delta_n": len(deltas),
             "recorded_params": recorded[0] if len(recorded) == 1 else None,
             "params_match_run": (len(recorded) == 1
                                  and recorded[0] == rec["params"]),
@@ -4711,7 +4730,8 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
           f"median of {_EFFICIENCY_REPEATS} passes on {settings.device}; "
           f"ratios and cost are companions, not decision rules):")
     print(f"{'cell':>23} {'params':>9} {'param_x':>8} {'GFLOP':>8} "
-          f"{'gflop_x':>8} {'lat_ms':>8} {'lat_x':>7} {'acc':>7}")
+          f"{'gflop_x':>8} {'lat_ms':>8} {'lat_x':>7} {'d_acc':>8} "
+          f"{'acc':>7}")
     ref = entries.get(str(reference)) if reference is not None else None
     for label, _ in cells:
         label = str(label)
@@ -4732,10 +4752,12 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
         def ratio(value):
             return f"{value:.3f}" if _finite(value) else "-"
 
+        delta = rec.get("accuracy_delta_vs_reference")
+        delta_s = f"{delta:+.4f}" if _finite(delta) else "-"
         print(f"{label:>23} {rec['params']:>9} {ratio(param_x):>8} "
               f"{rec['analytic_matmul_gflops']:>8.4f} {ratio(flop_x):>8} "
               f"{rec['latency_ms_median']:>8.3f} {ratio(lat_x):>7} "
-              f"{rec['accuracy_mean']:>7.4f}")
+              f"{delta_s:>8} {rec['accuracy_mean']:>7.4f}")
 
     payload = {
         "experiment": experiment,
@@ -4743,8 +4765,9 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
         "reference": None if reference is None else str(reference),
         "comparison": "efficiency_companion",
         "note": ("cost/accuracy companion: analytic matmul FLOPs plus "
-                 "on-device latency and peak memory; it never changes a "
-                 "pre-registered decision rule"),
+                 "on-device latency and peak memory, with a paired "
+                 "accuracy difference against the reference cell; it never "
+                 "changes a pre-registered decision rule"),
         "cells": entries,
         "_provenance": _stamp(settings),
     }
