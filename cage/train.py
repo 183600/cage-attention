@@ -2935,6 +2935,12 @@ def pearson(x, y):
     y = y.to(torch.float64)
     if x.numel() == 0 or y.numel() != x.numel():
         return torch.tensor(float("nan"))
+    if not (bool(torch.isfinite(x).all())
+            and bool(torch.isfinite(y).all())):
+        # A non-finite observation has no rank or moment; returning a
+        # finite correlation after ranking NaN/Inf would fabricate an
+        # association from a malformed sample.
+        return torch.tensor(float("nan"))
     dx = x - x.mean()
     dy = y - y.mean()
     # A constant input is exactly the case with zero centered spread.  The
@@ -2966,6 +2972,11 @@ def spearman(x, y):
     x = x.to(torch.float64)
     y = y.to(torch.float64)
     if x.numel() == 0 or y.numel() != x.numel():
+        return torch.tensor(float("nan"))
+    if not (bool(torch.isfinite(x).all())
+            and bool(torch.isfinite(y).all())):
+        # ``average_ranks`` has no defined ordering for NaN/Inf, yet it
+        # would happily return ranks and a finite coefficient.
         return torch.tensor(float("nan"))
     rx = average_ranks(x)
     ry = average_ranks(y)

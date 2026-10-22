@@ -245,6 +245,21 @@ class CorrelationInputValidationTest(unittest.TestCase):
             self.assertTrue(math.isnan(float(fn(x, y))))
             self.assertTrue(math.isnan(float(fn(y, x))))
 
+    def test_nonfinite_correlations_abstain(self):
+        import torch
+
+        from cage.train import pearson, spearman
+
+        y = torch.tensor([1.0, 2.0, 3.0])
+        for bad in ([1.0, float("nan"), 3.0],
+                    [1.0, float("inf"), 3.0],
+                    [1.0, float("-inf"), 3.0]):
+            with self.subTest(bad=bad):
+                x = torch.tensor(bad)
+                for fn in (pearson, spearman):
+                    self.assertTrue(math.isnan(float(fn(x, y))))
+                    self.assertTrue(math.isnan(float(fn(y, x))))
+
 
 class BootstrapOverflowTest(unittest.TestCase):
     def test_unrepresentable_bootstrap_moments_abstain(self):
