@@ -1338,9 +1338,11 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     ``label_noise_rate`` also carry Wilson intervals, so small
     differences between variants are not read off binomial noise.
 
-    Returns ``(stats, errors)``; cases are capped at ``max_cases`` but the
-    summary aggregates every evaluated sample.  ``stats`` matches the
-    ``collect_stats`` return value exactly.
+    Returns ``(stats, errors)``; cases are capped at ``max_cases``, retaining
+    the highest-confidence errors across the whole diagnostic stream rather
+    than the first errors encountered, while the summary aggregates every
+    evaluated sample.  ``stats`` matches the ``collect_stats`` return value
+    exactly.
     """
     raw_batch, raw_batches = batch, batches
     batch = _positive_integer(raw_batch)
@@ -1391,8 +1393,8 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
 
     # Device-side accumulators for the per-batch reductions.
     n_total = 0
-    case_count = 0
     cases = []
+    case_order = []
     i64 = torch.int64
     flags_summary = {k: torch.zeros((), dtype=i64, device=device)
                      for k in ("high", "low", "in_ctx", "naive", "repeat")}
@@ -1470,6 +1472,7 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
             answer = meta["answer"]
             wrong = pred != answer
 
+            sample_offset = n_total
             n_total += idx.size(0)
             n_err += wrong.sum()
             label_ok = _label_audit(idx, meta)
@@ -1520,9 +1523,15 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
                 type_conf_sum[etype] += conf[mask].sum().double()
                 type_margin_sum[etype] += margin[mask].sum().double()
 
-            if case_count < max_cases:
-                rows = torch.nonzero(wrong, as_tuple=False).flatten().tolist()
-                if rows:
+            if max_cases > 0:
+                rows = torch.nonzero(wrong, as_tuple=False).flatten()
+                if rows.numel():
+                    if rows.numel() > max_cases:
+                        order = torch.argsort(
+                            conf.index_select(0, rows), descending=True,
+                            stable=True)
+                        rows = rows.index_select(0, order[:max_cases])
+                    rows_l = rows.tolist()
                     # Pull the per-sample vectors to host for the case
                     # loop below.
                     conf_l = conf.tolist()
@@ -1542,9 +1551,7 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
                     vr_l = flags["value_repeats"].tolist()
                     query_pos_l = meta["query_pos"].tolist()
                     key_pos_l = meta["key_pos"].tolist()
-                    for b in rows:
-                        if case_count >= max_cases:
-                            break
+                    for b in rows_l:
                         if not label_ok_l[b]:
                             etype = "label_error"
                         elif ambiguous_l[b]:
@@ -1575,7 +1582,15 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
                             "label_ok": bool(label_ok_l[b]),
                             "error_type": etype,
                         })
-                        case_count += 1
+                        case_order.append(sample_offset + int(b))
+                    if len(cases) > max_cases:
+                        ranked = sorted(
+                            zip(cases, case_order),
+                            key=lambda item: (
+                                -float(item[0]["confidence"]), item[1]))
+                        cases = [case for case, _ in ranked[:max_cases]]
+                        case_order = [order for _, order in
+                                      ranked[:max_cases]]
     finally:
         for hd in handles:
             hd.remove()
@@ -1589,6 +1604,11 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     release_eval_scratch()
     if not with_errors:
         return stats, None
+    if cases:
+        ranked = sorted(
+            zip(cases, case_order),
+            key=lambda item: (-float(item[0]["confidence"]), item[1]))
+        cases = [case for case, _ in ranked]
 
     n_err = int(n_err)
     n_label_err = int(n_label_err)
@@ -1677,7 +1697,8 @@ def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
 
     Single-purpose wrapper around ``collect_stats_and_errors``; returns
     ``{"cases": [...], "summary": {...}}`` with cases capped at
-    ``max_cases`` while the summary aggregates every evaluated sample.
+    ``max_cases``, keeping the highest-confidence errors across the stream,
+    while the summary aggregates every evaluated sample.
     """
     _, errors = collect_stats_and_errors(
         model, n_pairs, vocab, device, batch=batch, batches=batches, seed=seed,
