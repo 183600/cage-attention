@@ -2453,6 +2453,7 @@ def _fmt_ci(ci) -> str:
 # the companions that remain interpretable under a skewed stream.
 _ACCURACY_METRICS = {
     "accuracy", "accuracy_at_base", "accuracy_at_longest", "accuracy_drop",
+    "norm_accuracy",
 }
 
 CURVE_INVALID_VERDICTS = (
