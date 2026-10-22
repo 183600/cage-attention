@@ -35,6 +35,23 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertEqual(out["n"], 2)
         self.assertTrue(math.isfinite(out["accuracy"]))
 
+    def test_complex_metric_samples_are_rejected_not_truncated(self):
+        import torch
+
+        # ``Tensor.to(float64)`` silently discards the imaginary part with
+        # only a warning; a complex paired difference must not be read as
+        # its real projection.
+        with self.assertRaises(ValueError):
+            metrics.average_ranks(torch.tensor([1.0 + 2.0j, 3.0 + 4.0j]))
+        with self.assertRaises(ValueError):
+            metrics.paired_bootstrap_ci(torch.tensor([0.1 + 0.1j, 0.2 + 0j]))
+        # Companions that document an abstention instead of raising still
+        # abstain rather than silently truncating.
+        self.assertFalse(metrics.sign_flip_test(
+            torch.tensor([0.1 + 0.1j, 0.2 + 0j]))["valid"])
+        self.assertFalse(metrics.replication_interval(
+            torch.tensor([0.1 + 0.1j, 0.2 + 0j, 0.3 + 0j]))["valid"])
+
     def test_malformed_cluster_inputs_abstain(self):
         for successes, totals in ((["not-a-count"], [1]),
                                   ([1], ["not-a-count"]),

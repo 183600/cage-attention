@@ -143,7 +143,26 @@ def _flatten_float(x) -> torch.Tensor:
     # be captured as float32 (torch's default) and the later upcast would
     # only convert already-truncated values, inventing ties in the
     # rank-based metrics and rounding every seed-level statistic.
-    return torch.as_tensor(x, dtype=torch.float64).detach().reshape(-1)
+    # A complex dtype can be *silently* cast to float64 by torch, dropping
+    # the imaginary part (it only emits a warning).  A complex paired
+    # difference is not a real effect: accepting its real projection would
+    # fabricate a statistic the caller never supplied.  Reject it before the
+    # cast, like the audit-count/split helpers do.  Tensor inputs are checked
+    # directly; Python containers are converted with the target dtype (the
+    # ``dtype`` argument also prevents the initial float32 capture described
+    # above, and a complex container raises on that cast).
+    if torch.is_tensor(x):
+        if x.is_complex():
+            raise ValueError(
+                "metric inputs must be real-valued, not complex "
+                "(casting would discard the imaginary part)")
+        return x.detach().to(dtype=torch.float64).reshape(-1)
+    try:
+        return torch.as_tensor(x, dtype=torch.float64).detach().reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"metric inputs must be real numeric values, got "
+            f"{type(x).__name__}") from exc
 
 
 def _binary_labels(values, device=None):
