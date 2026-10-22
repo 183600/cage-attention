@@ -117,6 +117,33 @@ class MetricInputValidationTest(unittest.TestCase):
                 self.assertTrue(out["reason"])
 
 
+class NegativeControlPermutationTest(unittest.TestCase):
+    def test_permuted_labels_never_keep_a_rows_own_answer(self):
+        import torch
+
+        from cage.train import _permute_batch_labels
+
+        targets = torch.arange(32).view(8, 4)
+        gen = torch.Generator().manual_seed(0)
+        permuted = _permute_batch_labels(targets, gen)
+        self.assertFalse(torch.equal(permuted, targets))
+        for row in range(targets.size(0)):
+            self.assertFalse(torch.equal(permuted[row], targets[row]),
+                             f"row {row} kept its own labels")
+        # The control is still a permutation of the same label rows.
+        self.assertTrue(torch.equal(permuted.sort(dim=0).values,
+                                    targets.sort(dim=0).values))
+
+    def test_permutation_needs_a_partner_row(self):
+        import torch
+
+        from cage.train import _permute_batch_labels
+
+        with self.assertRaises(ValueError):
+            _permute_batch_labels(torch.arange(4).view(1, 4),
+                                  torch.Generator().manual_seed(0))
+
+
 class CorrelationInputValidationTest(unittest.TestCase):
     def test_complex_correlations_abstain(self):
         import torch

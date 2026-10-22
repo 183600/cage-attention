@@ -743,14 +743,28 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
 
 
 def _permute_batch_labels(tgt: torch.Tensor, gen: torch.Generator) -> torch.Tensor:
-    """Shuffle the supervised labels across the batch (negative-control mode).
+    """Derange the supervised labels across the batch (negative-control mode).
 
     Every row of ``tgt`` carries its own sample's label (or ``-1``), so a
-    row permutation swaps which answer each sample is trained to predict -
-    the resulting training signal cannot contain the sample's true answer.
+    row permutation swaps which answer each sample is trained to predict.
+    A plain random permutation can contain fixed points, and each fixed
+    point leaves that row's *true* label in the negative-control training
+    signal - with a finite batch this happens often enough (about one row
+    per 64) to weaken the leakage control it is meant to provide.  A
+    non-zero cyclic shift is a derangement: every row receives another
+    sample's labels, so no true answer is trained on.  ``batch < 2`` has
+    no other row to take labels from, so it is refused instead of silently
+    training the control on unpermuted labels.
     """
-    perm = torch.randperm(tgt.size(0), generator=gen, device=tgt.device)
-    return tgt[perm]
+    n = int(tgt.size(0))
+    if n < 2:
+        raise ValueError(
+            "permute_labels needs at least two rows so every sample can "
+            f"receive another sample's label, got batch={n}")
+    shift = int(torch.randint(1, n, (1,), generator=gen,
+                              device=tgt.device).item())
+    order = (torch.arange(n, device=tgt.device) + shift) % n
+    return tgt.index_select(0, order)
 
 
 def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
