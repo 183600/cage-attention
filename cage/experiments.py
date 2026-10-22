@@ -1248,18 +1248,66 @@ def _linear_slope(xs, ys):
     return sum((x - mx) * (y - my) for x, y in pairs) / denom
 
 
+def _difficulty_count(value) -> int | None:
+    """One non-negative integer count from a recorded stratum row.
+
+    ``bool`` and fractional values are rejected rather than truncated: a
+    count that is not a whole number cannot describe generated samples.
+    JSON round-trips may turn an integer into ``3.0``, so integral floats
+    are accepted.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float) and math.isfinite(value) and value == int(value):
+        return int(value) if value >= 0 else None
+    return None
+
+
 def _difficulty_vectors(difficulty):
     """Extract ``(totals, corrects)`` from an ``eval_metrics`` difficulty block.
 
-    Returns two equal-length integer lists indexed by stratum id.  A
-    missing/legacy block yields empty lists so a companion can abstain
-    instead of inventing a composition.
+    Returns two equal-length integer lists **indexed by stratum id**, so a
+    record whose ``strata`` rows are shuffled, or that only stores the
+    observed strata, still lines its counts up with the reference mix.  A
+    missing or malformed block yields empty lists so a companion can
+    abstain instead of inventing a composition.  Legacy blocks without
+    ``id`` entries fall back to row order (their only available encoding).
     """
     rows = (difficulty or {}).get("strata") or []
-    totals = [max(0, int(row.get("n", 0))) for row in rows]
-    correct = [max(0, int(row.get("correct", 0))) for row in rows]
-    if len(totals) != len(correct):
+    if not rows:
         return [], []
+    has_id = ["id" in row for row in rows]
+    if any(has_id) and not all(has_id):
+        return [], []
+    if all(has_id):
+        ids = []
+        for row in rows:
+            sid = row["id"]
+            if isinstance(sid, bool) or not isinstance(sid, int) or sid < 0:
+                return [], []
+            ids.append(sid)
+        if len(set(ids)) != len(ids):
+            return [], []
+        totals = [0] * (max(ids) + 1)
+        correct = [0] * (max(ids) + 1)
+        for sid, row in zip(ids, rows):
+            total = _difficulty_count(row.get("n", 0))
+            hit = _difficulty_count(row.get("correct", 0))
+            if total is None or hit is None or hit > total:
+                return [], []
+            totals[sid] += total
+            correct[sid] += hit
+        return totals, correct
+    totals, correct = [], []
+    for row in rows:
+        total = _difficulty_count(row.get("n", 0))
+        hit = _difficulty_count(row.get("correct", 0))
+        if total is None or hit is None or hit > total:
+            return [], []
+        totals.append(total)
+        correct.append(hit)
     return totals, correct
 
 
@@ -12516,8 +12564,11 @@ def _e2_difficulty_companions(by_variant: dict, lengths: list) -> dict:
             "difficulty_standardized_accuracy_drop": std_drop,
             "accuracy_sign_agreement": acc_signs,
             "drop_sign_agreement": drop_signs,
+            # An undetermined endpoint (no finite paired effect) is not
+            # agreement: calling it "consistent" would turn an unmeasured
+            # contrast into a robustness pass.
             "raw_and_standardized_agree": bool(
-                acc_signs != "REVERSED" and drop_signs != "REVERSED"),
+                acc_signs == "consistent" and drop_signs == "consistent"),
         }
         print(f"{rule:>18} {_fmt_ci(raw_acc):>28} {_fmt_ci(std_acc):>28} "
               f"{_fmt_ci(raw_drop):>28} {_fmt_ci(std_drop):>28} "

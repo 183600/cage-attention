@@ -217,3 +217,69 @@ class EvalDifficultyRecordTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DifficultyVectorAlignmentTest(unittest.TestCase):
+    def test_reordered_strata_are_aligned_by_id(self):
+        from cage.experiments import _difficulty_vectors
+
+        block = {"strata": [
+            {"id": 1, "n": 10, "correct": 9},
+            {"id": 0, "n": 90, "correct": 9},
+        ]}
+        totals, correct = _difficulty_vectors(block)
+        self.assertEqual(totals, [90, 10])
+        self.assertEqual(correct, [9, 9])
+
+    def test_partial_strata_keep_their_id_slot(self):
+        from cage.experiments import _difficulty_vectors
+
+        totals, correct = _difficulty_vectors(
+            {"strata": [{"id": 2, "n": 5, "correct": 1}]})
+        self.assertEqual(totals, [0, 0, 5])
+        self.assertEqual(correct, [0, 0, 1])
+
+    def test_legacy_rows_without_ids_fall_back_to_order(self):
+        from cage.experiments import _difficulty_vectors
+
+        totals, correct = _difficulty_vectors(
+            {"strata": [{"n": 10, "correct": 9}, {"n": 90, "correct": 9}]})
+        self.assertEqual((totals, correct), ([10, 90], [9, 9]))
+
+    def test_malformed_counts_abstain(self):
+        from cage.experiments import _difficulty_vectors
+
+        for block in (
+                {"strata": [{"id": 0, "n": -1, "correct": 0}]},
+                {"strata": [{"id": 0, "n": 2, "correct": 3}]},
+                {"strata": [{"id": 0, "n": 2.5, "correct": 1}]},
+                {"strata": [{"id": True, "n": 2, "correct": 1}]},
+                {"strata": [{"id": 0, "n": 2}, {"n": 2, "correct": 1}]}):
+            with self.subTest(block=block):
+                self.assertEqual(_difficulty_vectors(block), ([], []))
+
+    def test_undetermined_endpoint_is_not_reported_as_agreement(self):
+        from cage.experiments import _e2_difficulty_companions
+
+        def run(gate, raw_acc, std_acc, raw_drop, std_drop):
+            return {
+                "seed": 0, "gate": gate, "model_cfg": {"gate": gate},
+                "accuracy_at_longest": raw_acc,
+                "accuracy_drop": raw_drop,
+                "difficulty_standardized_accuracy_at_longest": std_acc,
+                "difficulty_standardized_accuracy_drop": std_drop,
+            }
+
+        from cage.experiments import _E2_VARIANTS
+
+        by_variant = {
+            label: [run(gate, 0.4, 0.45, 0.2, 0.15)]
+            for label, gate, *_ in _E2_VARIANTS
+        }
+        by_variant["calib"] = [run("calib", None, None, None, None)]
+        with contextlib.redirect_stdout(io.StringIO()):
+            payload = _e2_difficulty_companions(by_variant, [3, 6])
+        contrast = payload["contrasts"]["calib - none"]
+        self.assertEqual(contrast["accuracy_sign_agreement"], "undetermined")
+        self.assertEqual(contrast["drop_sign_agreement"], "undetermined")
+        self.assertFalse(contrast["raw_and_standardized_agree"])
