@@ -7142,13 +7142,25 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     # not be read as "needs more depth").
     if not ceiling_known or not ladder_competent:
         hb7_depth_required = None
-    elif saturation_depth is None and unmeasured_rungs:
-        # An unmeasured deeper rung could still saturate; without it the
-        # absence of a saturation point cannot be read as "depth required".
+    elif saturation_depth is None:
+        # An unmeasured rung could still saturate; without it the absence
+        # of a saturation point cannot be read as "depth required".
+        hb7_depth_required = None if unmeasured_rungs else True
+    elif saturation_depth <= 2:
+        # A *measured* saturation at depth <= 2 settles the registered
+        # question ("is depth beyond two layers required?") even if a
+        # shallower rung was unmeasured: d* can only move lower, so it
+        # cannot become > 2.
+        hb7_depth_required = False
+    elif any(d < saturation_depth for d in unmeasured_rungs):
+        # The measured saturation point is deeper than 2, but an
+        # unmeasured *shallower* rung could itself have saturated within
+        # SESOI.  In that case d* could be <= 2, so "depth beyond two
+        # layers is required" is not determinable.  Unmeasured rungs
+        # deeper than the measured saturation point cannot lower d*.
         hb7_depth_required = None
     else:
-        hb7_depth_required = bool(saturation_depth is None
-                                  or saturation_depth > 2)
+        hb7_depth_required = True
     adjacent = {}
     for a, b in zip(ladder, ladder[1:]):
         valid_a = [r for r in depths[a]["runs"]
