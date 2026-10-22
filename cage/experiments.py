@@ -3677,6 +3677,31 @@ def _print_conf_by_error_type(named_runs, title="[e1]"):
         print(f"{label:>{width}}" + "".join(f"{c:>{width}}" for c in cells))
 
 
+def _print_structural_decomposition(named_runs, title="[e1]"):
+    """Disjoint decomposition of the ``hard_structural`` error bucket.
+
+    ``naive_confusable`` (the query token also appears as a later value)
+    and ``value_repeats`` (the answer value occurs more than once) are
+    overlapping task properties; the primary taxonomy keeps their union as
+    ``hard_structural``.  This companion reports the disjoint naive-only /
+    repeat-only / both shares so one source cannot hide behind the other.
+    """
+    print(f"\n{title} hard-structural decomposition (share of errors; "
+          f"disjoint components of the unchanged ``hard_structural`` "
+          f"bucket):")
+    print(f"{'arm':>23} {'naive_only':>12} {'repeat_only':>12} "
+          f"{'both':>12}")
+    for label, rs in named_runs:
+        cells = []
+        for key in ("naive_only", "repeat_only", "both"):
+            agg = _mean_std([
+                r.get(f"err_taxonomy_hard_structural_{key}") for r in rs])
+            cells.append(f"{agg['mean']:.3f}" if _finite(agg["mean"])
+                         else "n/a")
+        print(f"{str(label):>23} " + " ".join(
+            f"{cell:>12}" for cell in cells))
+
+
 def _announce(hyp_ids):
     for hid in hyp_ids:
         h = HYPOTHESES[hid]
@@ -8733,6 +8758,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{tcell('err_taxonomy_found_then_lost'):>8} "
               f"{tcell('err_taxonomy_readout_wrong'):>8} "
               f"{tcell('err_label_noise_rate'):>12}")
+    _print_structural_decomposition(
+        [(gate, by_gate[gate]) for gate in GATES], title="[e1]")
     print(f"\n[e1] attention mass on the correct key by layer (mean over "
           f"stats samples; the last-layer miss vs the per-layer profile tells "
           f"'never found' apart from 'found mid-stack, lost again'):")
@@ -9232,6 +9259,9 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{ecell('err_taxonomy_readout_wrong'):>8} "
               f"{ecell('err_errors_key_missed_share'):>9} "
               f"{ecell('err_attn_mass_on_key_error'):>13}")
+    _print_structural_decomposition(
+        [(label, by_variant[label]) for label, *_ in _E2_VARIANTS],
+        title="[e2]")
     _print_conf_by_error_type([(label, by_variant[label])
                                for label, *_ in _E2_VARIANTS], title="[e2]")
     print("  most confident wrong samples per arm at the longest length:")
@@ -9961,6 +9991,11 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{ecell('err_taxonomy_readout_wrong'):>8} "
               f"{ecell('err_errors_key_missed_share'):>9} "
               f"{ecell('err_share_high_conf'):>10}")
+    structural_cells = []
+    for (gate, norm, layer_scale), rs in index.items():
+        ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
+        structural_cells.append((f"{gate}/{norm}/ls={ls_label}", rs))
+    _print_structural_decomposition(structural_cells, title="[e3]")
     print("  most confident wrong sample per cell:")
     for cell, (_n_err_cell, ranked) in examples.items():
         if not ranked:

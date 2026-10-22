@@ -1316,7 +1316,10 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
       (attention mass < 0.5 on the correct key in *every* block) >
       ``found_then_lost`` (mass >= 0.5 in some block but < 0.5 in the
       last one) > ``readout_wrong`` (key still found in the last block,
-      wrong value read out);
+      wrong value read out).  ``hard_structural`` is additionally split
+      into disjoint naive-only / repeat-only / both buckets so the two
+      structural sources can be read apart without changing the primary
+      taxonomy;
     * ``key_pair_idx``              - position of the matching pair;
       aggregated into early/mid/late error rates (long-range retrieval).
 
@@ -1400,6 +1403,9 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
                      for k in ("high", "low", "in_ctx", "naive", "repeat")}
     taxonomy = {k: torch.zeros((), dtype=i64, device=device)
                 for k in _ERROR_TYPES}
+    structural_split = {
+        k: torch.zeros((), dtype=i64, device=device)
+        for k in ("naive_only", "repeat_only", "both")}
     # Per-error-type confidence / margin sums: the taxonomy alone says
     # *what* failed; the confidence attached to each bucket says whether
     # the failure is a confident blind spot (high confidence on a wrong
@@ -1522,6 +1528,17 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
                 type_count[etype] += mask.sum()
                 type_conf_sum[etype] += conf[mask].sum().double()
                 type_margin_sum[etype] += margin[mask].sum().double()
+
+            naive_flag = flags["naive_confusable"]
+            repeat_flag = flags["value_repeats"]
+            structural = wrong & label_ok
+            split_masks = {
+                "naive_only": structural & naive_flag & ~repeat_flag,
+                "repeat_only": structural & ~naive_flag & repeat_flag,
+                "both": structural & naive_flag & repeat_flag,
+            }
+            for key, mask in split_masks.items():
+                structural_split[key] += mask.sum()
 
             if max_cases > 0:
                 rows = torch.nonzero(wrong, as_tuple=False).flatten()
@@ -1674,6 +1691,13 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
         summary[f"taxonomy_{etype}_count"] = int(taxonomy[etype])
         summary[f"taxonomy_{etype}_lo"] = ci["lo"]
         summary[f"taxonomy_{etype}_hi"] = ci["hi"]
+    for key, count in structural_split.items():
+        count = int(count)
+        ci = wilson_ci(count, n_err)
+        summary[f"taxonomy_hard_structural_{key}"] = _share(count)
+        summary[f"taxonomy_hard_structural_{key}_count"] = count
+        summary[f"taxonomy_hard_structural_{key}_lo"] = ci["lo"]
+        summary[f"taxonomy_hard_structural_{key}_hi"] = ci["hi"]
     summary["attn_mass_gap"] = summary["attn_mass_on_key_correct"] - \
         summary["attn_mass_on_key_error"]
     if layer_mass_err is not None:
