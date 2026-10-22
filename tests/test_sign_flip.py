@@ -189,6 +189,33 @@ class ContrastExactAuditTest(unittest.TestCase):
         self.assertTrue(row["sign_flip_cannot_reject"])
         self.assertEqual(payload["n_sign_flip_unfalsifiable"], 1)
 
+    def test_stream_limited_crossed_bootstrap_is_surfaced(self):
+        # The seed-level CI excludes 0, but the crossed seed x item
+        # bootstrap includes it: the row must keep its pre-registered
+        # verdict, record the companion, and count the limitation.
+        log = ContrastLog("e1", hypotheses=("H1a",), min_seeds=3)
+        ci = self._ci([0.20, 0.18, 0.19, 0.17, 0.21])
+        ci["stream_test"] = {
+            "crossed_bootstrap": {
+                "valid": True, "lo": -0.005, "hi": 0.25,
+                "seed_ci_excludes_zero": True,
+                "crossed_ci_excludes_zero": False,
+                "decision_agrees": False, "stream_limited": True,
+            },
+        }
+        with contextlib.redirect_stdout(io.StringIO()):
+            log.print("calib - query", "H1a", "abs_gate_vs_entropy", ci)
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = log.finalize(pathlib.Path(tmp), q=0.05)
+        row = payload["rows"][0]
+        self.assertTrue(row["supports_hypothesis"])
+        self.assertTrue(row["stream_crossed_stream_limited"])
+        self.assertFalse(row["stream_crossed_decision_agrees"])
+        self.assertEqual(payload["n_stream_crossed_stream_limited"], 1)
+        self.assertIn("H1a", payload[
+            "stream_crossed_stream_limited_contrasts"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

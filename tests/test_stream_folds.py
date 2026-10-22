@@ -14,8 +14,16 @@ import unittest
 import torch
 
 from cage.data import TEST_SEED
-from cage.experiments import Settings, _model_cfg, _paired_stream_test
-from cage.metrics import evaluation_fold_audit
+from cage.experiments import (
+    Settings,
+    _model_cfg,
+    _paired_diff,
+    _paired_stream_test,
+)
+from cage.metrics import (
+    crossed_cluster_bootstrap_ci,
+    evaluation_fold_audit,
+)
 from cage.model import build
 from cage.repro import seed_everything
 from cage.train import encode_correct_mask, eval_metrics
@@ -119,6 +127,62 @@ class EvaluationFoldAuditTest(unittest.TestCase):
                                           n_folds=bad_folds)["valid"])
 
 
+class CrossedClusterBootstrapTest(unittest.TestCase):
+    """Seed x item bootstrap: the stream is a second sampling axis."""
+
+    def test_uniform_effect_is_not_widened(self):
+        out = crossed_cluster_bootstrap_ci(
+            [[1] * 8, [1] * 8], [[0] * 8, [0] * 8], n_boot=500, seed=0)
+        self.assertTrue(out["valid"])
+        self.assertEqual(out["mean"], 1.0)
+        self.assertEqual(out["lo"], 1.0)
+        self.assertEqual(out["hi"], 1.0)
+        self.assertEqual(out["sd_total"], 0.0)
+        self.assertTrue(out["ci_excludes_zero"])
+
+    def test_single_item_effect_widens_the_interval(self):
+        # Every seed has the same +1/8 mean, so the seed-only interval is
+        # exactly [0.125, 0.125].  The gain nevertheless sits entirely in
+        # one evaluation item; resampling items must expose that a new
+        # stream would often show no effect at all.
+        out = crossed_cluster_bootstrap_ci(
+            [[1] + [0] * 7] * 4, [[0] * 8] * 4, n_boot=1000, seed=0)
+        self.assertTrue(out["valid"])
+        self.assertAlmostEqual(out["mean"], 0.125)
+        self.assertGreater(out["seed_lo"], 0.0)
+        self.assertLessEqual(out["item_lo"], 0.0)
+        self.assertLessEqual(out["lo"], 0.0)
+        self.assertEqual(out["dominant_axis"], "item")
+
+    def test_same_seed_is_deterministic(self):
+        first = crossed_cluster_bootstrap_ci(
+            [[1, 0, 1, 0], [0, 1, 0, 1]], [[0, 0, 0, 0], [1, 1, 1, 1]],
+            n_boot=200, seed=3)
+        second = crossed_cluster_bootstrap_ci(
+            [[1, 0, 1, 0], [0, 1, 0, 1]], [[0, 0, 0, 0], [1, 1, 1, 1]],
+            n_boot=200, seed=3)
+        self.assertEqual(first["lo"], second["lo"])
+        self.assertEqual(first["hi"], second["hi"])
+
+    def test_malformed_or_unestimable_input_abstains(self):
+        cases = [
+            ([], []),
+            ([1, 0, 1, 0], [0, 0, 1, 0]),          # one seed
+            ([[1], [1]], [[0], [0]]),               # one item
+            ([[1, 0], [1, 0]], [[0, 1]]),          # shape mismatch
+            ([[1, 0], [1, 0]], [[0, 1], [0, 0.5]]),  # non-binary
+        ]
+        for a, b in cases:
+            with self.subTest(a=a, b=b):
+                self.assertFalse(crossed_cluster_bootstrap_ci(a, b)["valid"])
+        for kwargs in ({"n_boot": 0}, {"n_boot": 2.5}, {"alpha": 2.0},
+                       {"alpha": 0.0}):
+            with self.subTest(kwargs=kwargs):
+                self.assertFalse(crossed_cluster_bootstrap_ci(
+                    [[1, 0], [1, 0]], [[0, 1], [0, 1]],
+                    **kwargs)["valid"])
+
+
 class EvalMetricsDigestTest(unittest.TestCase):
     def test_eval_metrics_stamps_the_whole_stream(self):
         settings = Settings.quick()
@@ -166,6 +230,25 @@ class PairedStreamDigestTest(unittest.TestCase):
         self.assertEqual(out["stream_digest"], "abc123")
         self.assertTrue(out["fold_audit"]["valid"])
         self.assertEqual(out["fold_audit"]["n_units"], 2)
+
+    def test_crossed_bootstrap_flags_a_single_item_effect(self):
+        # Four seeds all gain exactly one item and lose none.  The seed-level
+        # CI is therefore [1/8, 1/8] and excludes 0, while resampling items
+        # shows that the gain does not generalise beyond this stream.
+        n_items = 8
+        a = [[1] + [0] * (n_items - 1) for _ in range(4)]
+        b = [[0] * n_items for _ in range(4)]
+        by_a, by_b = self._records(a, b)
+        for seed in range(4):
+            by_a[seed]["accuracy"] = 1.0 / n_items
+            by_b[seed]["accuracy"] = 0.0
+        paired = _paired_diff(list(by_a.values()), list(by_b.values()),
+                              "accuracy")
+        crossed = paired["stream_test"]["crossed_bootstrap"]
+        self.assertTrue(crossed["valid"])
+        self.assertTrue(crossed["seed_ci_excludes_zero"])
+        self.assertTrue(crossed["stream_limited"])
+        self.assertFalse(crossed["decision_agrees"])
 
     def test_digest_mismatch_refuses_item_pairing(self):
         a = [[1] * 16]

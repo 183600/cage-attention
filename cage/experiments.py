@@ -202,6 +202,7 @@ from .metrics import (
     benjamini_hochberg,
     mcnemar_test,
     clustered_proportion_ci,
+    crossed_cluster_bootstrap_ci,
     equivalence_test,
     evaluation_fold_audit,
     noninferiority_test,
@@ -2741,6 +2742,7 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
            "seed_sign_consistent_with_mean": None,
            "per_seed_direction_agreement": None,
            "stream_digest": None, "digest_verified": False,
+           "crossed_bootstrap": {"valid": False, "reason": "not computed"},
            "fold_audit": {"valid": False, "applicable": False,
                           "reason": "not computed"}}
     if metric != "accuracy":
@@ -2899,6 +2901,8 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
         sign_p = None
     fold_audit = evaluation_fold_audit(
         torch.stack(masks_a), torch.stack(masks_b), n_folds=8)
+    crossed = crossed_cluster_bootstrap_ci(
+        torch.stack(masks_a), torch.stack(masks_b), n_boot=2000)
     out.update({
         "applicable": True, "n": int(ca.numel()),
         "n_seeds": len(masks_a), "n_per_seed": sorted(set(ns)),
@@ -2920,6 +2924,7 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
         "seed_sign_consistent_with_mean": consistent,
         "per_seed_direction_agreement": agreement,
         "fold_audit": fold_audit,
+        "crossed_bootstrap": crossed,
     })
     return out
 
@@ -3017,6 +3022,25 @@ def _paired_diff(runs_a, runs_b, metric):
     # sign still catches a gain that is only an artifact of the stream.
     ci["stream_test"] = _paired_stream_test(
         by_a, by_seed, used, metric, ci.get("mean"))
+    # Annotate the crossed (seed x item) bootstrap with the seed-level
+    # decision it is meant to audit.  The pre-registered CI conditions on
+    # the sealed stream; the crossed CI also resamples its items, so a
+    # verdict that survives the first but not the second is conditional on
+    # this particular evaluation stream rather than a property of the task.
+    crossed = ci["stream_test"].get("crossed_bootstrap") or {}
+    if crossed.get("valid"):
+        seed_lo, seed_hi = ci.get("lo"), ci.get("hi")
+        if _finite(seed_lo) and _finite(seed_hi):
+            seed_excludes = bool(seed_lo > 0.0 or seed_hi < 0.0)
+            crossed_excludes = bool(crossed.get("ci_excludes_zero"))
+            crossed["seed_ci_lo"] = float(seed_lo)
+            crossed["seed_ci_hi"] = float(seed_hi)
+            crossed["seed_ci_excludes_zero"] = seed_excludes
+            crossed["crossed_ci_excludes_zero"] = crossed_excludes
+            crossed["decision_agrees"] = bool(
+                seed_excludes == crossed_excludes)
+            crossed["stream_limited"] = bool(
+                seed_excludes and not crossed_excludes)
     # Raw per-seed differences: lets an equivalence companion reuse the
     # identical pairing instead of re-deriving it (and drifting from it).
     ci["diffs"] = list(diffs)
@@ -4305,6 +4329,23 @@ class ContrastLog:
             "stream_fold_dominant_share": (
                 (ci.get("stream_test") or {}).get("fold_audit") or {}).get(
                     "dominant_fold_share"),
+            # Crossed (training seed x evaluation item) bootstrap: does the
+            # seed-level verdict survive resampling the finite evaluation
+            # stream as well?  A companion, not a second decision rule.
+            "stream_crossed_bootstrap": (
+                (ci.get("stream_test") or {}).get("crossed_bootstrap")),
+            "stream_crossed_lo": (
+                (ci.get("stream_test") or {}).get(
+                    "crossed_bootstrap") or {}).get("lo"),
+            "stream_crossed_hi": (
+                (ci.get("stream_test") or {}).get(
+                    "crossed_bootstrap") or {}).get("hi"),
+            "stream_crossed_stream_limited": bool(
+                ((ci.get("stream_test") or {}).get(
+                    "crossed_bootstrap") or {}).get("stream_limited")),
+            "stream_crossed_decision_agrees": (
+                (ci.get("stream_test") or {}).get(
+                    "crossed_bootstrap") or {}).get("decision_agrees"),
             "stream_sign_conflict": False,
         })
         line = f"  [{hyp}] {rule} ({metric}): {_fmt_ci(ci)}"
@@ -4371,6 +4412,28 @@ class ContrastLog:
                 f"{fragile}")
         elif fold.get("reason") and fold.get("reason") != "not computed":
             line += (f"  [stream-fold companion n/a: {fold['reason']}]")
+        crossed = stream.get("crossed_bootstrap") or {}
+        if crossed.get("valid"):
+            def _crossed_ci(lo, hi):
+                if _finite(lo) and _finite(hi):
+                    return f"[{float(lo):+.4f}, {float(hi):+.4f}]"
+                return "[n/a]"
+            share = crossed.get("variance_share_seed")
+            share_s = f"{share:.2f}" if _finite(share) else "n/a"
+            limited = ("  [STREAM-LIMITED: seed-level CI excludes 0 but "
+                       "the seed x item CI includes 0]"
+                       if crossed.get("stream_limited") else "")
+            line += (
+                f"  [seed x item bootstrap: 95% CI="
+                f"{_crossed_ci(crossed.get('lo'), crossed.get('hi'))} "
+                f"(seed-only "
+                f"{_crossed_ci(crossed.get('seed_lo'), crossed.get('seed_hi'))}"
+                f", item-only "
+                f"{_crossed_ci(crossed.get('item_lo'), crossed.get('item_hi'))}"
+                f", seed variance share={share_s})]"
+                f"{limited}")
+        elif crossed.get("reason") and crossed.get("reason") != "not computed":
+            line += (f"  [seed x item bootstrap n/a: {crossed['reason']}]")
         if _finite(sf_p):
             floor = (f", floor={float(sf_min):.4g}"
                      if _finite(sf_min) else "")
@@ -4891,6 +4954,8 @@ class ContrastLog:
             and r.get("stream_seed_sign_consistent") is False]
         stream_fold_fragile = [
             r for r in supporting if r.get("stream_fold_fragile")]
+        stream_crossed_limited = [
+            r for r in supporting if r.get("stream_crossed_stream_limited")]
         if stream_uncorroborated:
             print(f"[{self.tag}] WARNING: {len(stream_uncorroborated)} "
                   f"supported accuracy contrast(s) have per-seed item-level "
@@ -4910,6 +4975,17 @@ class ContrastLog:
                   f"seed-level verdict stands, but the data-level "
                   f"generalisation of the effect needs a wider or "
                   f"independent evaluation stream")
+        if stream_crossed_limited:
+            names = ", ".join(
+                f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                for r in stream_crossed_limited)
+            print(f"[{self.tag}] WARNING: {len(stream_crossed_limited)} "
+                  f"supported accuracy contrast(s) have a seed-level 95% CI "
+                  f"that excludes 0 but a seed x evaluation-item bootstrap "
+                  f"CI that includes 0 ({names}): the effect is conditional "
+                  f"on this realized evaluation stream, so report it as "
+                  f"stream-limited and replicate on a wider or independent "
+                  f"stream before claiming it generalises to the task")
         curve_invalid_gated = [r for r in testable
                                if r.get("curve_invalid_removes_support")]
         balance_gated = [r for r in testable
@@ -5092,6 +5168,8 @@ class ContrastLog:
                    "n_bca_disagree": len(bca_differs),
                    "n_low_resolution": len(low_resolution),
                    "n_stream_fold_fragile": len(stream_fold_fragile),
+                   "n_stream_crossed_stream_limited":
+                       len(stream_crossed_limited),
                    "n_sign_flip_supporting": len(sign_flip_supporting),
                    "n_sign_flip_disagree": len(sign_flip_conflicts),
                    "n_sign_flip_unfalsifiable":
@@ -5107,6 +5185,9 @@ class ContrastLog:
                    "stream_fold_fragile_contrasts": [
                        f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                        for r in stream_fold_fragile],
+                   "stream_crossed_stream_limited_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in stream_crossed_limited],
                    "seed_coverage_loss_contrasts": [
                        f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                        for r in coverage_loss],

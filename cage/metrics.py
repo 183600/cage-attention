@@ -80,6 +80,11 @@ Metric choices (and why)
   validity companion that exposes when a "significant" bootstrap result
   is below the design's own resolution (e.g. two-sided p < 0.05 is
   impossible with n <= 5).
+* The seed-level interval conditions on the sealed evaluation stream.
+  ``crossed_cluster_bootstrap_ci`` resamples training seeds **and**
+  evaluation items, reporting the interval that also reflects finite-stream
+  sampling; a seed-level win whose crossed interval includes 0 is flagged
+  as *stream-limited* rather than generalised to the task population.
 """
 
 from __future__ import annotations
@@ -107,6 +112,7 @@ __all__ = [
     "noninferiority_test",
     "bootstrap_upper_p",
     "clustered_proportion_ci",
+    "crossed_cluster_bootstrap_ci",
     "evaluation_fold_audit",
     "selection_at_fraction",
     "seeds_for_power",
@@ -1440,6 +1446,165 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     }
 
 
+def crossed_cluster_bootstrap_ci(correct_a, correct_b, n_boot: int = 4000,
+                                 seed: int = 0, alpha: float = 0.05) -> dict:
+    """Two-way (training seed x evaluation item) bootstrap for a paired effect.
+
+    The pre-registered seed-level interval resamples *training seeds* while
+    holding the sealed evaluation stream fixed.  It therefore estimates
+    "would this contrast reproduce over new training runs **on this stream**",
+    not "would it reproduce over new training runs **and** new evaluation
+    items".  Those are different questions, and at the small seed counts used
+    here the second one can be materially less certain: a difference carried
+    by a handful of evaluation items is a property of the realized stream,
+    not of the task population.
+
+    ``correct_a`` / ``correct_b`` are boolean/0-1 arrays with shape
+    ``(n_units, n_items)`` (rows are training seeds, columns are the shared
+    evaluation items in consumption order); a 1-D array is read as one unit.
+    Each bootstrap replicate resamples **both** axes with replacement - seeds
+    to capture training variance, items to capture finite-stream variance -
+    and averages the paired difference over the resampled seed x item grid.
+    The returned percentile interval is a *data-level generalisation*
+    companion: it is reported next to the pre-registered seed-level decision,
+    never substituted for it.
+
+    The result also carries the one-axis bootstrap intervals (``seed_lo`` /
+    ``seed_hi`` keep all items, ``item_lo`` / ``item_hi`` keep all seeds) and
+    the corresponding bootstrap SDs, so a reader can see which axis dominates
+    the uncertainty.  ``variance_share_seed`` is the descriptive share
+    ``sd_seed^2 / (sd_seed^2 + sd_item^2)`` (NaN when both are zero); it is
+    not an ANOVA decomposition because the crossed bootstrap also contains
+    the seed x item interaction.
+
+    Both axes need at least two levels for their variance to be estimable;
+    malformed, non-binary, or degenerate input returns ``valid=False`` with a
+    reason instead of fabricating an interval, matching the other reporting
+    companions.  The routine is deterministic for a given ``seed``.
+    """
+    alpha = _float_or_nan(alpha)
+    empty = {
+        "mean": float("nan"), "lo": float("nan"), "hi": float("nan"),
+        "n_units": 0, "n_items": 0, "n_boot": 0, "alpha": alpha,
+        "seed_lo": float("nan"), "seed_hi": float("nan"),
+        "item_lo": float("nan"), "item_hi": float("nan"),
+        "sd_seed": float("nan"), "sd_item": float("nan"),
+        "sd_total": float("nan"), "variance_share_seed": float("nan"),
+        "dominant_axis": None, "ci_excludes_zero": False,
+        "valid": False, "reason": "",
+    }
+
+    def _binary_matrix(values, label):
+        try:
+            raw = torch.as_tensor(values)
+        except (TypeError, ValueError, RuntimeError, OverflowError):
+            return None, f"{label} must be numeric"
+        if raw.is_complex():
+            return None, f"{label} must be real-valued"
+        if raw.dtype == torch.bool:
+            raw = raw.to(torch.float64)
+        else:
+            try:
+                raw = raw.to(torch.float64)
+            except (TypeError, ValueError, RuntimeError, OverflowError):
+                return None, f"{label} must be numeric"
+        if raw.dim() == 1:
+            raw = raw.reshape(1, -1)
+        if raw.dim() != 2:
+            return None, f"{label} must be 1-D or 2-D"
+        if raw.numel() == 0:
+            return None, f"{label} is empty"
+        if not bool(torch.isfinite(raw).all()):
+            return None, f"{label} must be finite"
+        if not bool(((raw == 0.0) | (raw == 1.0)).all()):
+            return None, f"{label} must contain only 0/1 correctness values"
+        return raw, ""
+
+    a, why_a = _binary_matrix(correct_a, "correct_a")
+    b, why_b = _binary_matrix(correct_b, "correct_b")
+    if why_a or why_b:
+        empty["reason"] = why_a or why_b
+        return empty
+    if a.shape != b.shape:
+        empty["reason"] = (
+            "correct_a and correct_b must have the same (seed, item) shape")
+        return empty
+    n_units, n_items = int(a.shape[0]), int(a.shape[1])
+    empty["n_units"], empty["n_items"] = n_units, n_items
+    if n_units < 2:
+        empty["reason"] = (
+            "at least two training seeds are needed to estimate the "
+            "between-seed variance")
+        return empty
+    if n_items < 2:
+        empty["reason"] = (
+            "at least two evaluation items are needed to estimate the "
+            "between-item variance")
+        return empty
+    n_boot_int = _positive_integer(n_boot)
+    if n_boot_int is None:
+        empty["reason"] = "n_boot must be a positive integer"
+        return empty
+    if not (math.isfinite(alpha) and 0.0 < alpha < 1.0):
+        empty["reason"] = "alpha must lie strictly between 0 and 1"
+        return empty
+
+    d = a - b
+    mean = float(d.mean())
+    gen = torch.Generator().manual_seed(int(seed))
+    # Bound the advanced-index temporary: chunk x n_units x n_items stays
+    # near one million elements even when the evaluation stream is large.
+    per_draw = max(1, n_units * n_items)
+    chunk = max(1, min(512, 1_000_000 // per_draw))
+    crossed_parts, seed_parts, item_parts = [], [], []
+    remaining = n_boot_int
+    while remaining > 0:
+        size = min(chunk, remaining)
+        seed_idx = torch.randint(0, n_units, (size, n_units),
+                                 generator=gen)
+        item_idx = torch.randint(0, n_items, (size, n_items),
+                                 generator=gen)
+        crossed = d[seed_idx[:, :, None], item_idx[:, None, :]].mean(
+            dim=(1, 2))
+        seed_only = d[seed_idx].mean(dim=(1, 2))
+        item_only = d[:, item_idx].mean(dim=(0, 2))
+        crossed_parts.append(crossed)
+        seed_parts.append(seed_only)
+        item_parts.append(item_only)
+        remaining -= size
+    crossed = torch.cat(crossed_parts)
+    seed_dist = torch.cat(seed_parts)
+    item_dist = torch.cat(item_parts)
+    lo = float(torch.quantile(crossed, alpha / 2.0).item())
+    hi = float(torch.quantile(crossed, 1.0 - alpha / 2.0).item())
+    seed_lo = float(torch.quantile(seed_dist, alpha / 2.0).item())
+    seed_hi = float(torch.quantile(seed_dist, 1.0 - alpha / 2.0).item())
+    item_lo = float(torch.quantile(item_dist, alpha / 2.0).item())
+    item_hi = float(torch.quantile(item_dist, 1.0 - alpha / 2.0).item())
+    sd_seed = float(seed_dist.std(unbiased=True)) if n_boot_int > 1 else 0.0
+    sd_item = float(item_dist.std(unbiased=True)) if n_boot_int > 1 else 0.0
+    sd_total = (float(crossed.std(unbiased=True)) if n_boot_int > 1 else 0.0)
+    denom = sd_seed ** 2 + sd_item ** 2
+    if denom > 0.0:
+        share = sd_seed ** 2 / denom
+        axis = "seed" if sd_seed > sd_item else (
+            "item" if sd_item > sd_seed else "tie")
+    else:
+        share = float("nan")
+        axis = "none"
+    return {
+        "mean": mean, "lo": lo, "hi": hi,
+        "n_units": n_units, "n_items": n_items,
+        "n_boot": n_boot_int, "alpha": alpha,
+        "seed_lo": seed_lo, "seed_hi": seed_hi,
+        "item_lo": item_lo, "item_hi": item_hi,
+        "sd_seed": sd_seed, "sd_item": sd_item, "sd_total": sd_total,
+        "variance_share_seed": share, "dominant_axis": axis,
+        "ci_excludes_zero": bool(lo > 0.0 or hi < 0.0),
+        "valid": True, "reason": "",
+    }
+
+
 def evaluation_fold_audit(correct_a, correct_b, n_folds=8) -> dict:
     """Fold jackknife over the finite evaluation stream.
 
@@ -2234,6 +2399,45 @@ def _self_test() -> int:
           not evaluation_fold_audit([1, 0, 1], [1, 0, 0])["valid"]
           and not evaluation_fold_audit([1] * 8, [0] * 8,
                                         n_folds=1)["valid"])
+
+    # Crossed (seed x item) bootstrap: a uniform effect must stay exactly
+    # 1, while an effect carried by a single evaluation item must widen to
+    # include 0 even though every seed has the same positive mean.
+    crossed_uniform = crossed_cluster_bootstrap_ci(
+        [[1] * 8, [1] * 8], [[0] * 8, [0] * 8], n_boot=500, seed=0)
+    check("crossed_uniform_exact",
+          crossed_uniform["valid"] and crossed_uniform["mean"] == 1.0
+          and crossed_uniform["lo"] == 1.0
+          and crossed_uniform["hi"] == 1.0
+          and crossed_uniform["sd_total"] == 0.0
+          and crossed_uniform["ci_excludes_zero"] is True)
+    crossed_concentrated = crossed_cluster_bootstrap_ci(
+        [[1] + [0] * 7] * 4, [[0] * 8] * 4, n_boot=1000, seed=0)
+    check("crossed_item_sampling_widens",
+          crossed_concentrated["valid"]
+          and crossed_concentrated["seed_lo"] > 0.0
+          and crossed_concentrated["item_lo"] <= 0.0
+          and crossed_concentrated["lo"] <= 0.0
+          and crossed_concentrated["dominant_axis"] == "item")
+    crossed_again = crossed_cluster_bootstrap_ci(
+        [[1] + [0] * 7] * 4, [[0] * 8] * 4, n_boot=1000, seed=0)
+    check("crossed_deterministic",
+          crossed_again["lo"] == crossed_concentrated["lo"]
+          and crossed_again["hi"] == crossed_concentrated["hi"])
+    check("crossed_malformed_no_claim",
+          not crossed_cluster_bootstrap_ci([1, 0, 1, 0],
+                                            [0, 0, 1, 0])["valid"]
+          and not crossed_cluster_bootstrap_ci([[1, 0]], [[0, 0]])["valid"]
+          and not crossed_cluster_bootstrap_ci([[1, 0], [0, 1]],
+                                               [[0, 1], [0, 0.5]])["valid"]
+          and not crossed_cluster_bootstrap_ci([[1, 0], [1, 0]],
+                                               [[0, 1]])["valid"]
+          and not crossed_cluster_bootstrap_ci([[1, 0], [1, 0]],
+                                               [[0, 1], [0, 1]],
+                                               n_boot=0)["valid"]
+          and not crossed_cluster_bootstrap_ci([[1, 0], [1, 0]],
+                                               [[0, 1], [0, 1]],
+                                               alpha=2.0)["valid"])
 
     # Post-stratification: reweighting to a common reference mix must
     # reproduce the pooled rate with self-weights, apply the reference

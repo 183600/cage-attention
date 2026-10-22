@@ -100,6 +100,35 @@ sign_flip_disagrees        bootstrap 与精确检验结论是否相反
 与 `cage.experiments._paired_stream_test`；相应字段随每个对照写入
 `<tag>_contrasts.json` 的 `stream_test` / `stream_fold_audit`。
 
+## 3.6 种子 × 评测项交叉 bootstrap：区分“在这条流上”与“在任务总体上”
+
+第 1 节把训练种子当作独立单位，但预注册的种子层 bootstrap 在重采样种子时
+**固定**了整条 sealed 评测流。它回答的是“换一批训练种子、仍在这条流上评，
+效应会不会复现”，而不是“换一批训练种子、再换一条有限评测流，效应会不会
+复现”。后者多了一层 item 抽样方差；在 5 个种子、有限评测集的规模下，这一
+层可能正好决定显著性。
+
+`cage.metrics.crossed_cluster_bootstrap_ci` 对“种子 × item”两个轴同时有放回
+重采样：每个 replicate 先重采样训练种子，再重采样评测 item，然后在重采样后的
+种子上平均配对正确率差。返回的百分位区间是**数据层泛化伴随读数**：
+
+- `seed_lo` / `seed_hi`：只重采样种子、保留全部 item（对应“这条流上”的
+  种子层问题）；
+- `item_lo` / `item_hi`：只重采样 item、保留全部种子；
+- `sd_seed` / `sd_item` / `sd_total` 与 `variance_share_seed`：哪一轴主导
+  不确定性；`variance_share_seed` 只是描述性比例，不是 ANOVA 分解，因为
+  交叉 bootstrap 还包含 seed × item 交互；
+- `ci_excludes_zero` 与调用层写入的 `seed_ci_excludes_zero`、
+  `decision_agrees`、`stream_limited`。`stream_limited=True` 表示种子层
+  95% CI 排除 0，但种子 × item CI 包含 0：效应只在这条已实现的评测流上
+  成立，不能写成任务总体上的机制结论。
+
+两个轴都至少需要 2 个水平才能估计各自的方差；输入畸形、非 0/1、空矩阵或
+单种子/单 item 时返回 `valid=False` 与原因，不伪造区间。该伴随读数不替代
+第 2 节的预注册种子层决策，也不改变 FDR 结论；它只把“结论对评测流内容的
+依赖”显式化。字段随每个对照写入 `<tag>_contrasts.json` 的
+`stream_test.crossed_bootstrap` 及行级 `stream_crossed_*`。
+
 ## 4. 预设功效与批次顺序
 
 - 每个网格在训练前写 `<tag>_design_plan.json`：用基线阶梯的 pilot 方差把
@@ -121,9 +150,11 @@ sign_flip_disagrees        bootstrap 与精确检验结论是否相反
 4. 精确 sign-flip p 与最小可达 p；
 5. jackknife 区间、BCa 是否与主决策一致；
 6. 前提门禁状态（能力、覆盖、曲线、答案平衡、逐项符号）；
-7. 评测流指纹是否验证（`stream_digest_verified`）与 fold 稳健性
+7. 评测流指纹是否验证（`stream_digest_verified`）、fold 稳健性
    （`stream_fold_loo_sign_flip`、`stream_fold_dominant_share`、
-   `stream_fold_fragile`），脆弱时给出数据层解释边界。
+   `stream_fold_fragile`）与种子 × item 交叉 bootstrap（`stream_crossed_lo` /
+   `stream_crossed_hi` / `stream_crossed_stream_limited`）；脆弱或
+   `stream_limited` 时给出“只在该评测流上成立”的解释边界。
 
 结论措辞：
 
