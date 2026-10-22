@@ -2150,8 +2150,11 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     p_stream = (boundary if mean_acc <= 0.0 else
                 1.0 - boundary if mean_acc >= 1.0 else mean_acc)
     se_stream = math.sqrt(max(p_stream * (1.0 - p_stream) / n_stream, 0.0))
-    gen = torch.Generator().manual_seed(_bootstrap_seed(seed))
-    idx = torch.randint(0, units, (n_boot_int, units), generator=gen)
+    device = p.device
+    gen = torch.Generator(device=device).manual_seed(
+        _bootstrap_seed(seed))
+    idx = torch.randint(0, units, (n_boot_int, units), generator=gen,
+                        device=device)
     mean_star = p[idx].mean(dim=1)
     draw_p = torch.where(mean_star <= 0.0, boundary,
                          torch.where(mean_star >= 1.0, 1.0 - boundary,
@@ -2282,7 +2285,9 @@ def crossed_cluster_bootstrap_ci(correct_a, correct_b, n_boot: int = 4000,
 
     d = a - b
     mean = float(d.mean())
-    gen = torch.Generator().manual_seed(_bootstrap_seed(seed))
+    device = d.device
+    gen = torch.Generator(device=device).manual_seed(
+        _bootstrap_seed(seed))
     # Bound the advanced-index temporary: chunk x n_units x n_items stays
     # near one million elements even when the evaluation stream is large.
     per_draw = max(1, n_units * n_items)
@@ -2292,9 +2297,9 @@ def crossed_cluster_bootstrap_ci(correct_a, correct_b, n_boot: int = 4000,
     while remaining > 0:
         size = min(chunk, remaining)
         seed_idx = torch.randint(0, n_units, (size, n_units),
-                                 generator=gen)
+                                 generator=gen, device=device)
         item_idx = torch.randint(0, n_items, (size, n_items),
-                                 generator=gen)
+                                 generator=gen, device=device)
         crossed = d[seed_idx[:, :, None], item_idx[:, None, :]].mean(
             dim=(1, 2))
         seed_only = d[seed_idx].mean(dim=(1, 2))
