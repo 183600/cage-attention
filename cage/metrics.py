@@ -633,15 +633,30 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     if topk is None:
         raise ValueError(
             f"topk must be a positive integer, got {raw_topk!r}")
-    logits = torch.as_tensor(logits).detach()
-    raw_targets = torch.as_tensor(targets).detach().reshape(-1)
-    if logits.dim() == 1:
-        logits = logits.unsqueeze(0)
-    n, k = logits.shape
     keys = ["accuracy", "f1_micro", "f1_macro", "f1_weighted",
             "precision_macro", "recall_macro",
             "f1_macro_all_labels", "precision_macro_all_labels",
             "recall_macro_all_labels"]
+
+    def _abstain(k=None):
+        out = {"n": 0, "n_classes_present": 0, "nll": float("nan")}
+        out.update({key: float("nan") for key in keys})
+        out[f"top{topk if k is None else min(topk, k)}_accuracy"] = float("nan")
+        return out
+
+    # A malformed input container is not a logit panel; abstain instead of
+    # letting ``as_tensor``/tuple-unpacking escape as a TypeError from a
+    # reporting metric.
+    try:
+        logits = torch.as_tensor(logits).detach()
+        raw_targets = torch.as_tensor(targets).detach().reshape(-1)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        return _abstain()
+    if logits.dim() == 1:
+        logits = logits.unsqueeze(0)
+    if logits.dim() != 2:
+        return _abstain()
+    n, k = logits.shape
     # A target is a class *index*, so it must already be an integer.  A
     # float/ complex value cast with ``.long()`` would silently truncate
     # (1.9 -> 1, -0.5 -> 0), fabricating a label the caller never named;
@@ -653,17 +668,11 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
             not torch.isfinite(raw_targets).all()
             or not raw_targets.eq(raw_targets.round()).all())
     if bad_targets:
-        out = {"n": 0, "n_classes_present": 0, "nll": float("nan")}
-        out.update({key: float("nan") for key in keys})
-        out[f"top{min(topk, k)}_accuracy"] = float("nan")
-        return out
+        return _abstain(k)
     targets = raw_targets.to(torch.long)
     if (n == 0 or targets.numel() != n
             or bool((targets < 0).any()) or bool((targets >= k).any())):
-        out = {"n": 0, "n_classes_present": 0, "nll": float("nan")}
-        out.update({key: float("nan") for key in keys})
-        out[f"top{min(topk, k)}_accuracy"] = float("nan")
-        return out
+        return _abstain(k)
     # Row alignment does not imply device alignment: callers may hand in
     # CUDA logits with a CPU target/mask (or vice versa), and both top-k
     # comparison and cross-entropy require one device.

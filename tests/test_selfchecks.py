@@ -35,6 +35,19 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertEqual(out["n"], 2)
         self.assertTrue(math.isfinite(out["accuracy"]))
 
+    def test_malformed_multiclass_containers_abstain(self):
+        import torch
+
+        for logits, targets in ((None, [0]), ("x", [0]),
+                                (object(), [0]),
+                                (torch.zeros(2, 2, 2), [0, 1])):
+            with self.subTest(logits=type(logits).__name__,
+                              targets=targets):
+                out = metrics.multiclass_metrics(logits, targets)
+                self.assertEqual(out["n"], 0)
+                self.assertTrue(math.isnan(out["accuracy"]))
+                self.assertTrue(math.isnan(out["nll"]))
+
     def test_malformed_calibration_containers_abstain(self):
         for probs, correct in ((None, [1.0]), ("x", [1.0]),
                                ([0.5], object()),
