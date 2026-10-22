@@ -2988,6 +2988,15 @@ def _controlled_audit(runs_a, runs_b):
                 f"side {side} has {len(malformed_configs)} run(s) with a "
                 f"malformed config object (expected a mapping): the training "
                 f"recipe cannot be verified")
+        malformed_recipes = [
+            r for r in runs
+            if r.get("training_recipe") is not None
+            and not isinstance(r.get("training_recipe"), Mapping)]
+        if malformed_recipes:
+            audit["mismatches"].append(
+                f"side {side} has {len(malformed_recipes)} run(s) with a "
+                f"malformed training_recipe object (expected a mapping): "
+                f"the optimisation recipe cannot be verified")
         views = [_recipe_view(r) for r in runs]
         if not views:
             audit["mismatches"].append(f"side {side} has no runs")

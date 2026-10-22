@@ -181,6 +181,15 @@ class ControlledAuditProvenanceTest(unittest.TestCase):
                 run = self._run(calib_ent_norm=raw)
                 self.assertEqual(_calib_cell(run), "model_cfg_malformed")
 
+    def test_malformed_training_recipe_cannot_pass_the_recipe_audit(self):
+        good = self._run()
+        bad = self._run()
+        bad["training_recipe"] = "not-a-mapping"
+        audit = _controlled_audit([good], [bad])
+        self.assertFalse(audit["controlled"])
+        self.assertTrue(any("training_recipe" in msg
+                            for msg in audit["mismatches"]))
+
 
 class PilotSdTest(unittest.TestCase):
     def test_largest_rung_sd_is_used(self):
