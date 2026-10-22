@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import math
+import operator
 
 import torch
 import torch.nn as nn
@@ -1899,13 +1900,21 @@ def encode_correct_mask(correct: torch.Tensor) -> str:
 
 def decode_correct_mask(encoded: str, n: int) -> torch.Tensor:
     """Decode :func:`encode_correct_mask` back to a boolean row mask."""
-    n = int(n)
+    if isinstance(n, bool):
+        raise ValueError("n must be an integer, not bool")
+    try:
+        n = operator.index(n)
+    except TypeError as exc:
+        raise ValueError(f"n must be an integer, got {n!r}") from exc
     if n < 0:
         raise ValueError(f"n must be non-negative, got {n}")
     if not isinstance(encoded, str):
         raise TypeError(f"encoded mask must be str, got {type(encoded)}")
     if not encoded:
-        return torch.zeros(max(n, 0), dtype=torch.bool)
+        if n:
+            raise ValueError(
+                f"encoded mask is empty but n={n} bits were requested")
+        return torch.zeros(0, dtype=torch.bool)
     raw = base64.b64decode(encoded.encode("ascii"))
     values = torch.tensor(list(raw), dtype=torch.int64)
     shifts = torch.arange(7, -1, -1).to(torch.int64)
