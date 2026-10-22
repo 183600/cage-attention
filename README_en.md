@@ -55,3 +55,19 @@ cage/
 - `deep_gate_ratio > 1`: after co-designed normalization, deep layers write
   more than shallow ones, indicating the Pre-LN deep-layer
   under-contribution problem is mitigated.
+
+## Reproducibility and engineering checks
+
+- `make check` runs `ci_gate.py` (syntax + design pins + smoke) and then the
+  standard-library `unittest` suite under `tests/` (seed canonicalisation,
+  data contract, environment snapshot and results-directory integrity). The
+  tests need neither pytest nor numpy.
+- Every RNG and data stream consumes the same 32-bit canonical seed, so `s`
+  and `s + 2**32` are the same run; a bool or fractional seed is rejected
+  instead of being silently truncated.
+- Each result record carries its code revision/source hash, resolved config,
+  data-stream fingerprints and an environment snapshot (thread counts and
+  determinism switches included). `artifact_index.json` is cumulative across
+  invocations, and
+  `python3 -m cage.experiments --verify-artifacts --out <dir>` checks that
+  historical result files have not been truncated or edited.

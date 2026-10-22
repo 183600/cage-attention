@@ -46,3 +46,15 @@ cage/
   `gate_on_false_conc` vs `gate_on_correct` 看门控的"自我怀疑"能力。
 - `deep_gate_ratio > 1`：协同归一化后深层比浅层更愿意写内容，说明缓解了
   Pre-LN 深层贡献不足的问题。
+
+## 复现性与工程检查
+
+- `make check`：先运行 `ci_gate.py`（语法 + 设计固定项 + 冒烟），再运行
+  `tests/` 下的标准库 `unittest` 套件（种子规范化、数据契约、环境快照与
+  结果目录完整性）。测试不依赖 pytest/numpy。
+- 所有 RNG 与数据流使用同一个 32 位 canonical seed：`s` 与 `s + 2**32`
+  是同一次运行；bool/小数 seed 会被拒绝而不是静默截断。
+- 每次实验的结果记录附带代码版本/源码哈希、完整配置、数据流指纹、
+  线程与确定性开关等环境快照；`artifact_index.json` 是跨多次调用的累积
+  清单，`python3 -m cage.experiments --verify-artifacts --out <dir>` 可校验
+  历史结果文件是否被截断或篡改。

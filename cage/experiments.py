@@ -4161,9 +4161,17 @@ def _run_event(settings: Settings, experiment: str, event: str, **details) -> No
         }
         path = pathlib.Path(settings.out_dir) / "run_index.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Append directly rather than through ``_write_result``: a fallback
+        # context has no setup hash, and this lifecycle row must still be
+        # written when the environment probe itself failed.
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False,
                                 sort_keys=True) + "\n")
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:  # noqa: PERF203 - durability is best-effort
+                pass
         _register_artifact(path)
     except Exception as e:  # noqa: BLE001 - tracking must not kill a run
         print(f"[runner] WARNING: could not write run_index event "
@@ -4223,20 +4231,61 @@ def _write_result(path: pathlib.Path, record: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        fh.flush()
+        try:
+            os.fsync(fh.fileno())
+        except OSError:  # noqa: PERF203 - durability is best-effort
+            pass
     _register_artifact(path)
+
+
+def _atomic_write_text(path: pathlib.Path, text: str) -> None:
+    """Write ``text`` to ``path`` without exposing a half-written file.
+
+    Result and index files are evidence: a crash or full disk in the middle
+    of a plain ``write_text`` leaves a truncated JSON document that looks
+    like a corrupted run.  Writing a sibling temporary file and renaming it
+    over the target makes each artifact appear atomically.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:  # noqa: PERF203 - durability is best-effort
+                pass
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
 
 
 def _write_json(path: pathlib.Path, payload) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2,
-                               sort_keys=True), encoding="utf-8")
+    _atomic_write_text(
+        path, json.dumps(payload, ensure_ascii=False, indent=2,
+                         sort_keys=True))
     _register_artifact(path)
 
 
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
 def _git_sha() -> str:
+    """Commit hash of the repository that contains this package.
+
+    The probe is anchored at the package root instead of the process CWD:
+    a run launched from another checkout (or from a subdirectory that is
+    itself inside a different repository) would otherwise stamp a
+    ``git_sha`` that does not identify the code that produced the record.
+    """
     try:
-        return subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
-                              text=True, check=True).stdout.strip()
+        return subprocess.run(["git", "rev-parse", "HEAD"],
+                              cwd=str(_REPO_ROOT),
+                              capture_output=True, text=True,
+                              check=True).stdout.strip()
     except Exception:
         return "unknown"
 
@@ -4246,10 +4295,13 @@ def _git_dirty() -> bool:
 
     A result produced from a dirty tree cannot be rebuilt from its
     ``git_sha`` alone, so every run record says so explicitly instead of
-    silently attributing the numbers to the committed revision.
+    silently attributing the numbers to the committed revision.  The
+    status is read from the package's repository root for the same reason
+    as :func:`_git_sha`; a non-repository location fails closed (dirty).
     """
     try:
         out = subprocess.run(["git", "status", "--porcelain"],
+                             cwd=str(_REPO_ROOT),
                              capture_output=True, text=True, check=True).stdout
         return bool(out.strip())
     except Exception:
@@ -4292,31 +4344,78 @@ def _fallback_context(error: Exception) -> dict:
     }
 
 
+def _read_artifact_entries(index_path: pathlib.Path) -> tuple[dict, str | None]:
+    """Read the entries of an existing index, or return no entries + why.
+
+    A malformed index is not silently treated as empty: the new index keeps
+    the ``previous_index_error`` so a reader knows that artifacts from
+    earlier invocations are no longer covered.  The previous list is
+    dropped as a whole rather than partially trusted - a partially readable
+    integrity list is not a certificate.
+    """
+    if not index_path.exists():
+        return {}, None
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("index must be a JSON object")
+        artifacts = payload.get("artifacts")
+        if not isinstance(artifacts, list):
+            raise ValueError("artifacts must be a list")
+        entries = {}
+        for entry in artifacts:
+            if not isinstance(entry, dict):
+                raise ValueError("every artifact entry must be an object")
+            name = entry.get("file")
+            if not isinstance(name, str) or not name:
+                raise ValueError("every artifact entry needs a non-empty file")
+            entries[name] = entry
+        return entries, None
+    except (OSError, ValueError, TypeError, UnicodeError) as exc:
+        return {}, f"{type(exc).__name__}: {exc}"
+
+
 def _write_artifact_index(out_dir: pathlib.Path, settings: Settings,
                           experiment: str, completed: bool,
                           elapsed_seconds: float) -> dict:
-    """Hash every artifact this invocation wrote into one index file.
+    """Hash every artifact written so far into one cumulative index file.
 
     A results directory is append-only across invocations and can be
-    truncated or edited after the fact.  The index records the size,
-    line count and SHA-256 of each file written by *this* run together
-    with the usual provenance block, so a later reader can tell a complete
-    artifact set from a partial/corrupted one without trusting filenames
-    or timestamps.  The index itself is written last and is not listed.
+    truncated or edited after the fact.  The index records the size, line
+    count and SHA-256 of each file written by *this* run **and keeps the
+    entries of earlier runs that this invocation did not rewrite**, so
+    ``--verify-artifacts`` certifies the whole directory rather than only
+    its last invocation.  A rewritten/append-appended file replaces its own
+    entry (the current hash always wins).  The index itself is written last
+    and is not listed.
+
+    Entries are stored with paths relative to ``out_dir`` so artifacts in
+    nested directories are covered too.  A previous index that cannot be
+    parsed is reported in ``previous_index_error`` instead of being
+    mistaken for an empty directory.
     """
     root = pathlib.Path(out_dir).resolve()
-    entries = []
-    for path in sorted(p for p in _RUN_ARTIFACTS
-                       if p.exists() and p.parent == root):
+    previous, previous_error = _read_artifact_entries(
+        root / "artifact_index.json")
+    current = {}
+    for path in sorted(_RUN_ARTIFACTS):
+        try:
+            relative = path.resolve().relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not path.is_file():
+            continue
         data = path.read_bytes()
         entry = {
-            "file": path.name,
+            "file": relative.as_posix(),
             "bytes": len(data),
             "sha256": hashlib.sha256(data).hexdigest(),
         }
         if path.suffix == ".jsonl":
             entry["records"] = data.count(b"\n")
-        entries.append(entry)
+        current[entry["file"]] = entry
+    merged = {**previous, **current}
+    entries = [merged[name] for name in sorted(merged)]
     try:
         context = _run_context(settings)
     except Exception as e:  # noqa: BLE001 - an index must still be written
@@ -4326,20 +4425,27 @@ def _write_artifact_index(out_dir: pathlib.Path, settings: Settings,
         "completed": bool(completed),
         "elapsed_seconds": round(float(elapsed_seconds), 3),
         "artifact_count": len(entries),
+        "current_artifact_count": len(current),
+        "updated_entries": sorted(current),
         "artifacts": entries,
-        **context,
     }
-    (root / "artifact_index.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8")
+    if previous_error is not None:
+        payload["previous_index_error"] = previous_error
+    payload.update(context)
+    _atomic_write_text(
+        root / "artifact_index.json",
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     return payload
 
 
 def _verify_artifacts(out_dir) -> int:
-    """Check a results directory against its last artifact index.
+    """Check a results directory against its cumulative artifact index.
 
     Exit 0 when every listed file exists with the recorded size and hash,
-    1 when any file is missing/changed, 2 when no usable index exists.
+    1 when any file is missing/changed or an entry is malformed, 2 when no
+    usable index exists.  Because the index is cumulative, a file from an
+    earlier invocation is checked too; a missing entry therefore means the
+    results directory was truncated after that invocation.
     """
     root = pathlib.Path(out_dir).resolve()
     index_path = root / "artifact_index.json"
@@ -4353,36 +4459,65 @@ def _verify_artifacts(out_dir) -> int:
         artifacts = payload["artifacts"]
         if not isinstance(artifacts, list):
             raise ValueError("artifacts must be a list")
-        if any(not isinstance(entry, dict) for entry in artifacts):
-            raise ValueError("every artifact entry must be an object")
-    except (OSError, ValueError, KeyError, TypeError) as e:
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError) as e:
         print(f"[verify] unreadable artifact index {index_path}: {e}")
         return 2
     failures = []
+    seen = set()
     for entry in artifacts:
-        name = str(entry.get("file", ""))
+        if not isinstance(entry, dict):
+            failures.append(f"<malformed entry>: not an object")
+            continue
+        name = entry.get("file")
+        if not isinstance(name, str) or not name:
+            failures.append("<malformed entry>: missing non-empty file")
+            continue
+        if name in seen:
+            failures.append(f"{name}: duplicate entry in index")
+            continue
+        seen.add(name)
         try:
             path = (root / name).resolve()
             path.relative_to(root)
         except (OSError, RuntimeError, ValueError):
-            failures.append(
-                f"{name or '<empty>'}: outside results directory")
+            failures.append(f"{name}: outside results directory")
             continue
         if not path.is_file():
-            failures.append(f"{path.name}: missing")
+            failures.append(f"{name}: missing")
             continue
-        data = path.read_bytes()
-        if len(data) != entry.get("bytes"):
-            failures.append(f"{path.name}: size {len(data)} != "
-                            f"{entry.get('bytes')}")
+        if isinstance(entry.get("bytes"), bool) \
+                or not isinstance(entry.get("bytes"), int) \
+                or entry.get("bytes") < 0:
+            failures.append(f"{name}: invalid byte count")
+            continue
+        digest_expected = entry.get("sha256")
+        if not isinstance(digest_expected, str) \
+                or len(digest_expected) != 64 \
+                or any(c not in "0123456789abcdef" for c in digest_expected):
+            failures.append(f"{name}: invalid sha256")
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            failures.append(f"{name}: unreadable ({exc})")
+            continue
+        if len(data) != entry["bytes"]:
+            failures.append(f"{name}: size {len(data)} != "
+                            f"{entry['bytes']}")
         digest = hashlib.sha256(data).hexdigest()
-        if digest != entry.get("sha256"):
-            failures.append(f"{path.name}: sha256 {digest[:12]} != "
-                            f"{str(entry.get('sha256'))[:12]}")
+        if digest != digest_expected:
+            failures.append(f"{name}: sha256 {digest[:12]} != "
+                            f"{digest_expected[:12]}")
         lines = data.count(b"\n")
-        if path.suffix == ".jsonl" and lines != entry.get("records"):
-            failures.append(f"{path.name}: line count {lines} != "
-                            f"{entry.get('records')}")
+        if path.suffix == ".jsonl":
+            expected_lines = entry.get("records")
+            if isinstance(expected_lines, bool) \
+                    or not isinstance(expected_lines, int) \
+                    or expected_lines < 0:
+                failures.append(f"{name}: invalid line count")
+            elif lines != expected_lines:
+                failures.append(f"{name}: line count {lines} != "
+                                f"{expected_lines}")
     if failures:
         print(f"[verify] FAILED ({len(failures)} issue(s)) for run "
               f"{payload.get('run_id')} in {root}:")
@@ -4391,7 +4526,8 @@ def _verify_artifacts(out_dir) -> int:
         return 1
     print(f"[verify] ok: {len(artifacts)} artifact(s) match run "
           f"{payload.get('run_id')} (completed={payload.get('completed')}, "
-          f"schema={payload.get('schema_version')})")
+          f"schema={payload.get('schema_version')}, "
+          f"current={payload.get('current_artifact_count', 'n/a')})")
     return 0
 
 
@@ -4448,21 +4584,35 @@ def _environment_record(settings: Settings, git_dirty: bool | None = None) -> di
     """Software/hardware provenance for reproducibility.
 
     Beyond versions the record pins the numerical-behaviour switches a
-    rerun must match: CPU thread count (parallel reductions change the
-    summation order), cuDNN determinism/benchmark, whether deterministic
-    algorithms are on, the cuBLAS workspace config and the NumPy version
-    when installed.  The determinism switch is applied from
-    ``Settings.deterministic`` *before* it is read, so the recorded state is
-    the one this run will train under even when the context is built before
-    the first training call (a previous run in the same process may have
-    left the global flag in the other position).
+    rerun must match: CPU thread count and the BLAS/OpenMP environment
+    overrides that determine it (parallel reductions change the summation
+    order), the CPU model and OS release, cuDNN determinism/benchmark,
+    whether deterministic algorithms are on, the cuBLAS workspace config,
+    the torch build identity/backends and the NumPy version when installed.
+    The determinism switch is applied from ``Settings.deterministic``
+    *before* it is read, so the recorded state is the one this run will
+    train under even when the context is built before the first training
+    call (a previous run in the same process may have left the global flag
+    in the other position).
     """
     determinism = configure_determinism(settings.deterministic)
+    numeric_env = {}
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                 "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                 "CUBLAS_WORKSPACE_CONFIG"):
+        numeric_env[name] = os.environ.get(name)
     env = {
         "python": platform.python_version(),
         "python_executable": sys.executable,
+        "python_implementation": platform.python_implementation(),
+        "python_compiler": platform.python_compiler(),
         "torch": torch.__version__,
+        "torch_git_version": getattr(torch.version, "git_version", None),
+        "torch_debug": bool(getattr(torch.version, "debug", False)),
         "platform": platform.platform(),
+        "machine": platform.machine(),
+        "processor": platform.processor(),
+        "os_release": platform.release(),
         "device": settings.device,
         "cpu_count": os.cpu_count(),
         "cuda_available": bool(torch.cuda.is_available()),
@@ -4472,6 +4622,10 @@ def _environment_record(settings: Settings, git_dirty: bool | None = None) -> di
         "deterministic_algorithms": determinism["deterministic_algorithms"],
         "cublas_workspace_config": determinism["cublas_workspace_config"],
         "tf32": determinism["tf32"],
+        # Thread-count overrides are read by the BLAS/OpenMP runtimes before
+        # torch is imported, so they are part of the numerical recipe even
+        # though ``torch_num_threads`` records the resulting value.
+        "numeric_env": numeric_env,
         "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
         "hash_randomization": bool(sys.flags.hash_randomization),
         # How the run was launched is part of the recipe: the same config
@@ -4479,8 +4633,24 @@ def _environment_record(settings: Settings, git_dirty: bool | None = None) -> di
         # only rebuildable when its invocation is recorded.
         "argv": [str(arg) for arg in sys.argv],
         "cwd": os.getcwd(),
+        "repo_root": str(_REPO_ROOT),
         "git_dirty": (_git_dirty() if git_dirty is None else bool(git_dirty)),
     }
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.lower().startswith("model name"):
+                    env["cpu_model"] = line.split(":", 1)[1].strip()
+                    break
+    except OSError:
+        env.setdefault("cpu_model", None)
+    for name in ("mkldnn", "openmp"):
+        backend = getattr(torch.backends, name, None)
+        probe = getattr(backend, "is_available", None)
+        try:
+            env[f"torch_{name}"] = bool(probe()) if probe is not None else None
+        except Exception:  # noqa: BLE001 - probe must not fail a record
+            env[f"torch_{name}"] = None
     try:
         env["torch_num_interop_threads"] = int(torch.get_num_interop_threads())
     except Exception:  # noqa: BLE001 - older/limited builds may not expose it
@@ -4522,6 +4692,11 @@ _SEEDING_POLICY = {
         "cage.repro.seed_everything(seed): python random + numpy (when "
         "installed) + torch CPU and all CUDA devices; deterministic kernels "
         "are requested by default (Settings.deterministic=True)"),
+    "seed_canonicalisation": (
+        "every RNG (Python, NumPy, torch, CUDA) and every data-stream "
+        "generator consumes the same low-32-bit seed key, so s and "
+        "s + 2**32 are the same run; bool/fractional seeds are rejected "
+        "instead of silently truncated"),
     "determinism_switch": (
         "Settings.deterministic is applied by every seeding call, including "
         "train_model; it defaults to True and can be opted out via "

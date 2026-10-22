@@ -1240,7 +1240,10 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
     pass this pre-flight via a divergent copy.
     """
     if seed is not None:
-        seed_everything(int(seed), deterministic=deterministic)
+        # Pass the seed through unchanged: ``seed_everything`` rejects a
+        # bool/fractional seed instead of truncating it, so the pre-flight
+        # cannot silently run a different stream than the caller named.
+        seed_everything(seed, deterministic=deterministic)
     sample_every = max(1, steps // 10)
     regularization = {}
     grad_flow = {}

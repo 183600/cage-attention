@@ -16,6 +16,11 @@ re-seeding the global RNG elsewhere cannot shuffle the data underneath a
 run, and a future ``worker_init_fn`` would derive per-worker seeds from the
 same value.
 
+Seeds are canonicalised to the 32-bit key every stream generator uses
+(:func:`canonical_seed`), so ``s`` and ``s + 2**32`` are the same run for
+the global RNGs as well as for the data streams.  A bool or fractional
+seed is rejected instead of being silently truncated.
+
 Scope of the guarantee
 ----------------------
 Running the same configuration twice on the same machine with the same
@@ -27,6 +32,7 @@ for deterministic kernels where they exist.
 
 from __future__ import annotations
 
+import operator
 import os
 import random
 
@@ -115,6 +121,34 @@ def configure_determinism(deterministic: bool) -> dict:
     }
 
 
+def canonical_seed(seed) -> tuple[int, int]:
+    """Return ``(requested_seed, canonical_key)`` for a run seed.
+
+    Every RNG a run draws from must consume the *same* integer.  PyTorch's
+    data-stream generators keep only the low 32 bits of their seed
+    (:func:`cage.data.stream_seed_key`), and NumPy's legacy
+    ``numpy.random.seed`` rejects values outside ``[0, 2**32)``, so feeding
+    the unrestricted Python integer to some RNGs and the 32-bit key to
+    others makes aliased seeds (``s`` and ``s + 2**32``) draw identical data
+    but different dropout masks.  Canonicalising once here means an alias
+    is the same run, and a negative / oversized seed is accepted
+    consistently instead of failing only when NumPy happens to be
+    installed.
+
+    ``seed`` must be a true integer (``bool`` and floats are rejected): a
+    silent truncation would run a different stream than the one the caller
+    named.
+    """
+    if isinstance(seed, bool):
+        raise ValueError(f"run seed must be an integer, got {seed!r}")
+    try:
+        requested = operator.index(seed)
+    except TypeError as exc:
+        raise ValueError(
+            f"run seed must be an integer, got {seed!r}") from exc
+    return int(requested), int(requested) & 0xFFFFFFFF
+
+
 def seed_everything(seed: int, deterministic: bool = False) -> dict:
     """Seed Python, NumPy (if present) and PyTorch CPU + all CUDA devices.
 
@@ -137,13 +171,22 @@ def seed_everything(seed: int, deterministic: bool = False) -> dict:
     this helper pinned itself is refreshed on every call, so the recorded
     and exported value always describes the seed of the current call
     instead of the first one.
+
+    The seed is canonicalised with :func:`canonical_seed` before any RNG
+    is touched: ``seed`` and ``seed + 2**32`` are the same run, matching
+    the per-stream data generators.  The returned record carries both the
+    caller's integer (``requested_seed``) and the key actually used
+    (``seed`` / ``seed_key``), so an aliased invocation is visible rather
+    than silently relabelled.
     """
     global _HASHSEED_PINNED
-    seed = int(seed)
+    requested, seed = canonical_seed(seed)
     determinism_info = configure_determinism(deterministic)
     random.seed(seed)
     info = {
         "seed": seed,
+        "seed_key": seed,
+        "requested_seed": requested,
         "python_random": True,
         "numpy": False,
         "torch": True,
