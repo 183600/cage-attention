@@ -10438,6 +10438,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                    "f1_macro_by_length": {}, "f1_weighted_by_length": {},
                    "entropy_by_length": {}, "entropy_norm_by_length": {},
                    "maxprob_by_length": {}, "gate_by_length": {},
+                   "gate_vs_entropy_by_length": {},
+                   "gate_vs_maxprob_by_length": {},
                    **record_extra,
                    **_training_record(settings, lr),
                    **curve,
@@ -10477,6 +10479,18 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 rec["maxprob_by_length"][length] = float(stats["maxprob"].mean())
                 if stats.get("gate") is not None:
                     rec["gate_by_length"][length] = float(stats["gate"].mean())
+                # The gate hypothesis is about tracking the attention
+                # distribution, not only about mean entropy drift.  Reuse
+                # the statistics already collected at this length (no new
+                # runs) to ask whether the within-layer association is
+                # present and stable across the sweep, exactly as E1 reads
+                # it at the training length.
+                corr_by_len = gate_stat_correlations(stats)
+                if corr_by_len:
+                    rec["gate_vs_entropy_by_length"][length] = (
+                        corr_by_len.get("gate_vs_entropy", float("nan")))
+                    rec["gate_vs_maxprob_by_length"][length] = (
+                        corr_by_len.get("gate_vs_maxprob", float("nan")))
             # Mechanism manipulation check for H2b (no new run/grid point):
             # the trained length and concentration coefficients say whether
             # the gate actually implements the explicit log-T / entropy
@@ -10645,6 +10659,51 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
           "term on should show a finite 'c_eff'.  A full-calib run with "
           "a<=0 or c_eff<=0 is not implementing the correction H2a/H2b "
           "name, whatever its endpoint accuracy.)")
+
+    print(f"\n[e2] gate/attention-distribution association across the length "
+          f"sweep (within-layer Pearson, Fisher-z mean over layers, mean±std "
+          f"over seeds; computed from the same per-length statistics, no new "
+          f"runs).  The length-calibration claim predicts that the calib "
+          f"gate keeps reading entropy / max-prob at longer lengths; a "
+          f"query-only gate has no such pathway, so its association should "
+          f"stay weaker and flatter.  'drift' = longest - training length "
+          f"(positive = association strengthens with length):")
+    print(f"{'arm':>16} {'metric':>12}" + "".join(f"{L:>17}" for L in lengths)
+          + f"{'drift':>17}")
+    gate_corr_by_length = {}
+    for label, *_ in _E2_VARIANTS:
+        if not label.startswith("calib") and label != "query":
+            continue
+        for metric in ("gate_vs_entropy_by_length",
+                       "gate_vs_maxprob_by_length"):
+            cells = []
+            per_length_agg = {}
+            for length in lengths:
+                agg = _mean_std([
+                    (r.get(metric) or {}).get(length)
+                    for r in by_variant[label]])
+                per_length_agg[str(length)] = agg
+                cells.append(f"{agg['mean']:+.3f}±{agg['std']:.3f}"
+                             if _finite(agg["mean"]) else "n/a")
+            drift = _mean_std([
+                ((r.get(metric) or {}).get(lengths[-1])
+                 - (r.get(metric) or {}).get(settings.n_pairs))
+                for r in by_variant[label]])
+            drift_s = (f"{drift['mean']:+.3f}±{drift['std']:.3f}"
+                       if _finite(drift["mean"]) else "n/a")
+            label_metric = ("r_entropy" if metric.startswith("gate_vs_entropy")
+                            else "r_maxprob")
+            print(f"{label:>16} {label_metric:>12}"
+                  + "".join(f"{c:>17}" for c in cells)
+                  + f"{drift_s:>17}")
+            gate_corr_by_length[f"{label}:{label_metric}"] = {
+                "by_length": per_length_agg, "drift": drift,
+            }
+    print("  (this is a mechanism readout, not a second decision rule: "
+          "H2a/H2b/H2f above carry the pre-registered decisions; the table "
+          "checks that the calibrated arm's distribution pathway is actually "
+          "used at the extrapolated lengths rather than only at the training "
+          "length.)")
 
     # Decompose the trained gate into the two additive calibration terms at
     # the training and longest lengths.  This is derived from data already
@@ -11035,6 +11094,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     }
     e2_summary["_calibration_term_contributions"] = term_contributions
     e2_summary["_learned_correction_check"] = learned_correction_check
+    e2_summary["_gate_stat_correlations_by_length"] = gate_corr_by_length
     e2_summary["_efficiency"] = length_efficiency
     e2_summary["_class_frequency_companions"] = endpoint_companions
     e2_summary["_provenance"] = _stamp(settings)
