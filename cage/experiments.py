@@ -214,7 +214,6 @@ from .metrics import (
     evaluation_fold_audit,
     noninferiority_test,
     paired_bootstrap_ci,
-    seeds_for_power,
     standardized_proportion,
     wilson_ci,
 )

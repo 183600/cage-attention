@@ -141,6 +141,14 @@ class Cfg:
             raise ValueError(f"unknown gate {self.gate!r}; valid: {list(GATES)}")
         if self.norm not in NORMS:
             raise ValueError(f"unknown norm {self.norm!r}; valid: {list(NORMS)}")
+        # Ablation switches are semantic booleans; a string such as
+        # ``"False"`` is truthy and would silently enable/disable the wrong
+        # term (or gradient checkpointing).  Validate them at the boundary.
+        for name in ("calib_use_len", "calib_use_ent", "calib_shuffle_ent",
+                     "calib_ent_norm", "use_gradient_checkpointing"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(
+                    f"{name} must be a bool, got {getattr(self, name)!r}")
         # Geometry fields index embeddings/loops, so a float (or bool)
         # cannot be coerced later: torch would raise a TypeError halfway
         # through construction, after some parameters had already been
