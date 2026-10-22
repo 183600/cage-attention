@@ -4980,7 +4980,7 @@ def _load_baseline_verdict(out_dir: pathlib.Path):
         return None
     try:
         verdict = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     # A syntactically valid JSON array/scalar is not a verdict record; treat
     # it like a corrupt/missing file so the caller raises the documented
