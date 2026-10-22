@@ -1542,6 +1542,11 @@ class CAGE(nn.Module):
                 "targets contain no supervised position (all entries are "
                 "-1, or sup_pos selects only ignored positions): the loss "
                 "is undefined, so the batch must not be trained on")
+        if sup is not None and not bool(
+                (flat_t.index_select(0, sup) != -1).any()):
+            raise ValueError(
+                "the selected supervised targets are all -1: the loss is "
+                "undefined, so the batch must not be trained on")
         if torch.is_grad_enabled():
             x = self.tok(idx)
         else:
