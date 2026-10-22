@@ -1465,7 +1465,18 @@ def sign_flip_test(diffs, alternative: str = "two-sided",
     alt = str(alternative).strip().lower().replace("_", "-")
     if alt == "two sided":
         alt = "two-sided"
-    d = _flatten_float(diffs) if diffs is not None else _flatten_float([])
+    try:
+        d = (_flatten_float(diffs) if diffs is not None
+             else _flatten_float([]))
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        # The documented contract is an abstention, not an exception, for
+        # malformed input.  A non-numeric sequence (e.g. ``["a"]``) cannot
+        # be cast to a paired-difference sample, so return the NaN payload
+        # with a reason instead of letting torch's conversion escape.
+        d = _flatten_float([])
+        malformed = True
+    else:
+        malformed = False
     n = int(d.numel())
     out = {
         "p_value": float("nan"),
@@ -1481,6 +1492,9 @@ def sign_flip_test(diffs, alternative: str = "two-sided",
     }
     if alt not in ("two-sided", "greater", "less"):
         out["reason"] = f"unknown alternative {alternative!r}"
+        return out
+    if malformed:
+        out["reason"] = "paired differences must be numeric"
         return out
     if n == 0:
         out["reason"] = "empty paired sample"

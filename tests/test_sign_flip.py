@@ -78,6 +78,8 @@ class ExactSignFlipTest(unittest.TestCase):
             ([1.0, 2.0], {"seed": True}),
             ([1.0, 2.0], {"seed": 1.5}),
             ([1.0, 2.0], {"seed": 1.0}),
+            (["not-a-number"], {}),
+            ([object()], {}),
         ]
         for values, kwargs in cases:
             with self.subTest(values=values, kwargs=kwargs):
