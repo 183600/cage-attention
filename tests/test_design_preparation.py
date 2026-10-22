@@ -24,6 +24,7 @@ from cage.experiments import (
     _pilot_accuracy_sd,
     _power_at_effect,
     _run_order_audit,
+    _verdict_seed_floor,
 )
 
 
@@ -208,6 +209,28 @@ class DesignPlanTest(unittest.TestCase):
         equiv = _power_at_effect(
             "equivalence", 0.0, 0.01, 50, 0.05, bound=0.01)
         self.assertGreater(equiv, 0.5)
+
+    def test_malformed_seed_floor_fails_closed(self):
+        settings = Settings(seeds=(0, 1, 2))
+        # An explicit malformed per-mark count is not treated as absent:
+        # it drops only that mark's floor to zero and makes it ineligible.
+        audit = _verdict_seed_floor(
+            {"seed_floor": {"n_seeds": 3, "hb2_n_seeds": None}}, settings)
+        self.assertEqual(audit["hb2_n_seeds"], 0)
+        self.assertFalse(audit["hb2_claim_eligible"])
+        self.assertEqual(audit["hb4_n_seeds"], 3)
+        self.assertTrue(audit["hb4_claim_eligible"])
+        # A malformed total corrupts every fallback count.
+        audit = _verdict_seed_floor(
+            {"seed_floor": {"n_seeds": None}}, settings)
+        self.assertEqual(audit["n_seeds"], 0)
+        self.assertFalse(any(audit[f"{key}_claim_eligible"]
+                             for key in ("hb2", "hb4", "hb6", "hb7")))
+        # Non-bool eligibility flags fail closed instead of being truthy.
+        audit = _verdict_seed_floor(
+            {"seed_floor": {"n_seeds": 3,
+                            "hb2_claim_eligible": "False"}}, settings)
+        self.assertFalse(audit["hb2_claim_eligible"])
 
     def test_exact_selection_tie_is_unresolved_without_an_se(self):
         from cage.experiments import _selection_reliability

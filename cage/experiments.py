@@ -5960,23 +5960,35 @@ def _verdict_seed_floor(verdict: dict, settings: Settings) -> dict:
     contrast families where a 2-seed "win" is marked INELIGIBLE.
     """
     floor = int(settings.min_seeds_for_claim)
-    stored = verdict.get("seed_floor") or {}
-    n_seeds = stored.get("n_seeds")
-    if n_seeds is None:
-        n_seeds = len(settings.seeds)
-
-    def eligible(key: str, n) -> bool:
-        if f"{key}_claim_eligible" in stored:
-            return bool(stored[f"{key}_claim_eligible"])
-        return bool(int(n) >= floor)
-
-    out = {"min_seeds_for_claim": floor, "n_seeds": int(n_seeds)}
-    for key, n in (("hb2", stored.get("hb2_n_seeds", n_seeds)),
-                   ("hb4", stored.get("hb4_n_seeds", n_seeds)),
-                   ("hb6", stored.get("hb6_n_seeds", n_seeds)),
-                   ("hb7", stored.get("hb7_n_seeds", n_seeds))):
+    stored = verdict.get("seed_floor")
+    if not isinstance(stored, dict):
+        stored = {}
+    if "n_seeds" not in stored:
+        total = len(settings.seeds)
+    else:
+        total = _positive_integer(stored["n_seeds"])
+        # A corrupted count is not a licence to fall back to the configured
+        # seed set: mark the affected floor ineligible so a hand-edited
+        # verdict cannot silently certify a claim.
+        if total is None:
+            total = 0
+    out = {"min_seeds_for_claim": floor, "n_seeds": int(total)}
+    for key in ("hb2", "hb4", "hb6", "hb7"):
+        key_n = f"{key}_n_seeds"
+        if key_n not in stored:
+            n = total
+        else:
+            n = _positive_integer(stored[key_n])
+            if n is None:
+                n = 0
+        flag_key = f"{key}_claim_eligible"
+        if flag_key in stored:
+            flag = stored[flag_key]
+            eligible = flag if isinstance(flag, bool) else False
+        else:
+            eligible = bool(int(n) >= floor)
         out[f"{key}_n_seeds"] = int(n)
-        out[f"{key}_claim_eligible"] = eligible(key, n)
+        out[f"{key}_claim_eligible"] = bool(eligible)
     return out
 
 
