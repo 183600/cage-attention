@@ -1,0 +1,162 @@
+"""Exact small-sample inference for paired seed contrasts.
+
+The grids run with five training seeds.  At that size a percentile
+bootstrap p-value can be far smaller than anything the paired design can
+actually produce (all five differences in the predicted direction is an
+exact one-sided p of 1/32).  These tests pin the exact sign-flip test, its
+resolution floor, its Monte-Carlo fallback, and the contrast-level audit
+that keeps the pre-registered bootstrap decision separate from the exact
+companion.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import math
+import pathlib
+import tempfile
+import unittest
+
+from cage.experiments import ContrastLog
+from cage.metrics import (
+    equivalence_test,
+    noninferiority_test,
+    paired_bootstrap_ci,
+    sign_flip_test,
+)
+
+
+class ExactSignFlipTest(unittest.TestCase):
+    def test_five_positive_differences_hit_the_exact_floor(self):
+        result = sign_flip_test([1.0, 1.0, 1.0, 1.0, 1.0])
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["method"], "exact")
+        self.assertAlmostEqual(result["p_values"]["greater"], 1 / 32)
+        self.assertAlmostEqual(result["p_values"]["two-sided"], 2 / 32)
+        self.assertAlmostEqual(result["p_values"]["less"], 1.0)
+        self.assertAlmostEqual(result["min_attainable_p_values"]["greater"],
+                               1 / 32)
+        self.assertAlmostEqual(result["min_attainable_p_values"]["two-sided"],
+                               2 / 32)
+
+    def test_partial_sign_consistency_is_not_significant(self):
+        # Four positive and one negative: six of 32 sign assignments are at
+        # least this extreme, so p = 6/32 = 0.1875.  A bootstrap on the same
+        # sample can look much more significant than this.
+        result = sign_flip_test([1.0, 1.0, 1.0, 1.0, -1.0])
+        self.assertAlmostEqual(result["p_values"]["greater"], 6 / 32)
+        self.assertAlmostEqual(result["p_values"]["two-sided"], 12 / 32)
+
+    def test_two_sided_resolution_depends_on_n(self):
+        self.assertEqual(sign_flip_test([1.0] * 4)["p_values"]["two-sided"],
+                         2 / 16)
+        self.assertEqual(sign_flip_test([1.0] * 5)["p_values"]["two-sided"],
+                         2 / 32)
+        self.assertEqual(sign_flip_test([1.0] * 6)["p_values"]["two-sided"],
+                         2 / 64)
+
+    def test_monte_carlo_fallback_is_reproducible_and_bounded(self):
+        values = [float(i) for i in range(1, 21)]
+        first = sign_flip_test(values, n_random=2000, max_exact=10,
+                               seed=7)
+        second = sign_flip_test(values, n_random=2000, max_exact=10,
+                                seed=7)
+        self.assertEqual(first["method"], "monte-carlo")
+        self.assertEqual(first["p_value"], second["p_value"])
+        self.assertTrue(0.0 < first["p_value"] <= 1.0)
+        self.assertGreater(first["min_attainable_p"], 0.0)
+
+    def test_malformed_inputs_abstain(self):
+        cases = [
+            ([], {}),
+            ([1.0, float("nan")], {}),
+            ([1.0, float("inf")], {}),
+            ([1.0, 2.0], {"alternative": "up"}),
+            ([1.0, 2.0], {"n_random": 0}),
+            ([1.0, 2.0], {"max_exact": 0}),
+            ([1.0, 2.0], {"seed": True}),
+            ([1.0, 2.0], {"seed": 1.5}),
+            ([1.0, 2.0], {"seed": 1.0}),
+        ]
+        for values, kwargs in cases:
+            with self.subTest(values=values, kwargs=kwargs):
+                result = sign_flip_test(values, **kwargs)
+                self.assertFalse(result["valid"])
+                self.assertTrue(math.isnan(result["p_value"]))
+
+
+class BootstrapCompanionTest(unittest.TestCase):
+    def test_bootstrap_result_carries_exact_companions(self):
+        ci = paired_bootstrap_ci([1.0, 1.0, 1.0, 1.0, 1.0])
+        self.assertAlmostEqual(ci["sign_flip_p_greater"], 1 / 32)
+        self.assertAlmostEqual(ci["sign_flip_p_two_sided"], 2 / 32)
+        self.assertEqual(ci["sign_flip_method"], "exact")
+        # The bootstrap p is below the exact floor: this is precisely why
+        # the exact companion must travel with the result.
+        self.assertLess(ci["p_value"], ci["sign_flip_min_p_two_sided"])
+        self.assertTrue(ci["bootstrap_below_sign_flip_floor"])
+        self.assertFalse(paired_bootstrap_ci([])[
+            "bootstrap_below_sign_flip_floor"])
+
+    def test_null_prediction_tests_carry_an_exact_tost(self):
+        eq = equivalence_test([0.1, -0.05, 0.02, 0.0, 0.08], 0.5)
+        self.assertTrue(eq["sign_flip_valid"])
+        self.assertTrue(0.0 <= eq["sign_flip_p"] <= 1.0)
+        ni = noninferiority_test([0.1, -0.05, 0.02, 0.0, 0.08], 0.5)
+        self.assertTrue(ni["sign_flip_valid"])
+        self.assertTrue(0.0 <= ni["sign_flip_p"] <= 1.0)
+
+
+class ContrastExactAuditTest(unittest.TestCase):
+    @staticmethod
+    def _ci(diffs):
+        ci = paired_bootstrap_ci(diffs)
+        ci["controlled"] = {
+            "controlled": True,
+            "mismatches": [],
+            "varying_factors": {"gate": {"a": ["calib"], "b": ["query"]}},
+            "capacity": {"matched": True, "a": 10, "b": 10,
+                         "delta_b_minus_a": 0},
+        }
+        return ci
+
+    def test_exact_verdict_is_reported_next_to_the_bootstrap_verdict(self):
+        # 0.1875 exact one-sided p: the bootstrap can be significant, the
+        # exact design cannot corroborate it.  The row must say so instead
+        # of silently presenting the bootstrap p as the last word.
+        diffs = [0.20, 0.18, 0.19, 0.17, -0.01]
+        log = ContrastLog("e1", hypotheses=("H1a",), min_seeds=3)
+        with contextlib.redirect_stdout(io.StringIO()):
+            log.print("calib - query", "H1a", "abs_gate_vs_entropy",
+                      self._ci(diffs))
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = log.finalize(pathlib.Path(tmp), q=0.05)
+        row = payload["rows"][0]
+        self.assertTrue(row["supports_hypothesis"])
+        self.assertFalse(row["sign_flip_supports"])
+        self.assertTrue(row["sign_flip_disagrees"])
+        self.assertEqual(payload["n_sign_flip_disagree"], 1)
+        self.assertIn("H1a", payload["sign_flip_disagree_contrasts"][0])
+        self.assertIn("bootstrap_below_exact_floor_contrasts", payload)
+
+    def test_two_sided_claim_is_flagged_unfalsifiable_at_five_seeds(self):
+        # H3b registers no direction, so the exact alternative is
+        # two-sided; its floor at n=5 is 0.0625 > q=0.05.
+        log = ContrastLog("e3", hypotheses=("H3b",), min_seeds=3)
+        with contextlib.redirect_stdout(io.StringIO()):
+            log.print("LayerScale effect", "H3b",
+                      "resid_norm_last_over_first",
+                      self._ci([0.2, 0.21, 0.19, 0.22, 0.18]))
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = log.finalize(pathlib.Path(tmp), q=0.05)
+        row = payload["rows"][0]
+        self.assertAlmostEqual(row["sign_flip_min_p"], 2 / 32)
+        self.assertTrue(row["sign_flip_cannot_reject"])
+        self.assertEqual(payload["n_sign_flip_unfalsifiable"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

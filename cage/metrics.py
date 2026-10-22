@@ -70,6 +70,16 @@ Metric choices (and why)
   flagged/reviewed, how many errors are caught (recall) and how much
   better than prevalence is the flagged set (lift)?" is interpretable
   where a raw PR-AUC number is not.
+* At the default five training seeds the percentile bootstrap is a
+  *large-sample* approximation: its p-value can fall far below the
+  smallest p-value a paired design can actually produce.  Every contrast
+  therefore also carries an **exact paired sign-flip randomization test**
+  (``sign_flip_test``), enumerated over all ``2**n`` sign assignments for
+  small n and Monte-Carlo sampled above the exact threshold.  The
+  pre-registered bootstrap rule is unchanged; the exact test is a
+  validity companion that exposes when a "significant" bootstrap result
+  is below the design's own resolution (e.g. two-sided p < 0.05 is
+  impossible with n <= 5).
 """
 
 from __future__ import annotations
@@ -91,6 +101,7 @@ __all__ = [
     "expected_calibration_error",
     "brier_score",
     "paired_bootstrap_ci",
+    "sign_flip_test",
     "equivalence_test",
     "noninferiority_test",
     "bootstrap_upper_p",
@@ -810,10 +821,18 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
       accelerated interval and whether it reaches the same
       excludes-0 decision as the pre-registered percentile interval
       (``None`` below n=4, where the jackknife acceleration is not
-      estimable, and for degenerate bootstrap distributions).
+      estimable, and for degenerate bootstrap distributions);
+    * ``sign_flip_p_greater`` / ``sign_flip_p_less`` /
+      ``sign_flip_p_two_sided`` - exact (or Monte-Carlo above
+      ``max_exact`` units) paired sign-flip p-values, with the design's
+      ``sign_flip_min_p_*`` resolution floor.  These are validity
+      companions, not a replacement for the pre-registered bootstrap
+      decision; a bootstrap p below the exact floor is evidence that the
+      interval is using moment assumptions the seed count cannot support.
     """
     alpha = _float_or_nan(alpha)
     d = _flatten_float(diffs)
+    signflip = _sign_flip_companions(d)
     if d.numel() == 0:
         return {"mean": float("nan"), "lo": float("nan"),
                 "hi": float("nan"), "n": 0, "sd": float("nan"),
@@ -823,7 +842,9 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
                 "loo_sign_flip": False, "lo_bca": float("nan"),
                 "hi_bca": float("nan"), "bca_agrees": None,
-                "cohens_d": float("nan"), "hedges_g": float("nan")}
+                "cohens_d": float("nan"), "hedges_g": float("nan"),
+                "bootstrap_below_sign_flip_floor": False,
+                **signflip}
     n = d.numel()
     if not bool(torch.isfinite(d).all()):
         return {"mean": float("nan"), "lo": float("nan"),
@@ -834,7 +855,9 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
                 "loo_sign_flip": False, "lo_bca": float("nan"),
                 "hi_bca": float("nan"), "bca_agrees": None,
-                "cohens_d": float("nan"), "hedges_g": float("nan")}
+                "cohens_d": float("nan"), "hedges_g": float("nan"),
+                "bootstrap_below_sign_flip_floor": False,
+                **signflip}
     if not _bootstrap_args_ok(n_boot, alpha):
         return {"mean": float(d.mean()), "lo": float("nan"),
                 "hi": float("nan"), "n": int(n),
@@ -845,14 +868,21 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
                 "loo_sign_flip": False, "lo_bca": float("nan"),
                 "hi_bca": float("nan"), "bca_agrees": None,
-                "cohens_d": float("nan"), "hedges_g": float("nan")}
+                "cohens_d": float("nan"), "hedges_g": float("nan"),
+                "bootstrap_below_sign_flip_floor": False,
+                **signflip}
     n_boot = int(float(n_boot))
     means = _bootstrap_means(d, n_boot, seed)
     out = _bootstrap_summary(d, means, alpha)
+    out.update(signflip)
     p_lo = float((means <= 0.0).to(torch.float64).mean())
     p_hi = float((means >= 0.0).to(torch.float64).mean())
     out["p_value"] = min(
         1.0, 2.0 * (min(p_lo, p_hi) * n_boot + 1.0) / (n_boot + 1.0))
+    floor = out.get("sign_flip_min_p_two_sided", float("nan"))
+    out["bootstrap_below_sign_flip_floor"] = bool(
+        math.isfinite(out["p_value"]) and math.isfinite(float(floor))
+        and float(out["p_value"]) < float(floor))
     nonzero = d != 0.0
     if int(nonzero.sum()) == 0 or out["mean"] == 0.0:
         out["sign_consistency"] = float("nan")
@@ -914,11 +944,15 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
     create the apparent stability) and the BCa interval
     (``lo_bca``/``hi_bca``/``equivalent_bca``/``bca_agrees``), so an
     equivalence claim that is an artifact of one lucky seed or of
-    percentile-interval bias is flagged at the decision point.
+    percentile-interval bias is flagged at the decision point.  The exact
+    sign-flip TOST companion (``sign_flip_p`` / ``sign_flip_p_lower`` /
+    ``sign_flip_p_upper``) reports the same two boundary tests with a
+    finite-sample randomization distribution.
     """
     bound = _float_or_nan(bound)
     alpha = _float_or_nan(alpha)
     d = _flatten_float(diffs)
+    signflip = _sign_flip_tost_companions(d, bound, "equivalence")
     out = {
         "mean": float("nan"), "lo": float("nan"), "hi": float("nan"),
         "n": 0, "sd": float("nan"), "half_width": float("nan"),
@@ -929,6 +963,7 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         "loo_within_bound": False, "lo_bca": float("nan"),
         "hi_bca": float("nan"), "equivalent_bca": None,
         "bca_agrees": None,
+        **signflip,
     }
     if d.numel() == 0 or not bool(torch.isfinite(d).all()) \
             or not math.isfinite(bound) or bound <= 0.0 \
@@ -988,6 +1023,7 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
     bound = _float_or_nan(bound)
     alpha = _float_or_nan(alpha)
     d = _flatten_float(diffs)
+    signflip = _sign_flip_tost_companions(d, bound, "noninferiority")
     out = {
         "mean": float("nan"), "lo": float("nan"), "hi": float("nan"),
         "n": 0, "sd": float("nan"), "half_width": float("nan"),
@@ -998,6 +1034,7 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         "loo_above_bound": False, "lo_bca": float("nan"),
         "hi_bca": float("nan"), "noninferior_bca": None,
         "bca_agrees": None,
+        **signflip,
     }
     if d.numel() == 0 or not bool(torch.isfinite(d).all()) \
             or not math.isfinite(bound) or bound <= 0.0 \
@@ -1395,6 +1432,213 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     }
 
 
+def sign_flip_test(diffs, alternative: str = "two-sided",
+                   n_random: int = 10000, seed: int = 0,
+                   max_exact: int = 16) -> dict:
+    """Exact / Monte-Carlo paired sign-flip randomization test.
+
+    Under the null that the paired differences are symmetric around zero,
+    each difference's sign is exchangeable.  Enumerating all ``2**n`` sign
+    assignments gives a finite-sample exact p-value; above ``max_exact``
+    units the test samples sign assignments instead and reports its Monte
+    Carlo resolution.  ``max_exact`` is capped at 20 (≈1M assignments) so
+    the companion cannot accidentally become a denial of service.
+
+    This is the small-sample validity companion to
+    :func:`paired_bootstrap_ci`.  At the five seeds used by the grids the
+    percentile bootstrap's p-value can be several orders of magnitude
+    below the smallest p-value the design can produce (all five differences
+    in the predicted direction gives an exact one-sided p of
+    ``1/2**5 = 0.03125`` and an exact two-sided p of ``0.0625``).  The
+    bootstrap interval remains the pre-registered decision rule; this test
+    makes the resolution limit explicit instead of letting a moment
+    approximation claim precision the paired design does not have.
+
+    ``alternative`` is ``"two-sided"``, ``"greater"`` or ``"less"``.  The
+    returned ``p_values`` dict always carries all three alternatives so a
+    pre-registered direction can be read without re-running the test.
+    Returns ``valid=False`` with NaN fields for empty/non-finite input or
+    invalid arguments; it never raises on malformed data.
+    """
+    alt = str(alternative).strip().lower().replace("_", "-")
+    if alt == "two sided":
+        alt = "two-sided"
+    d = _flatten_float(diffs) if diffs is not None else _flatten_float([])
+    n = int(d.numel())
+    out = {
+        "p_value": float("nan"),
+        "p_values": {"greater": float("nan"), "less": float("nan"),
+                     "two-sided": float("nan")},
+        "min_attainable_p": float("nan"),
+        "min_attainable_p_values": {"greater": float("nan"),
+                                    "less": float("nan"),
+                                    "two-sided": float("nan")},
+        "n": n, "observed": float("nan"), "alternative": alternative,
+        "method": "none", "n_permutations": 0, "valid": False,
+        "reason": "",
+    }
+    if alt not in ("two-sided", "greater", "less"):
+        out["reason"] = f"unknown alternative {alternative!r}"
+        return out
+    if n == 0:
+        out["reason"] = "empty paired sample"
+        return out
+    if not bool(torch.isfinite(d).all()):
+        out["reason"] = "paired differences must be finite"
+        return out
+    n_random_int = _positive_integer(n_random)
+    if n_random_int is None:
+        out["reason"] = "n_random must be a positive integer"
+        return out
+    max_exact_int = _positive_integer(max_exact)
+    if max_exact_int is None:
+        out["reason"] = "max_exact must be a positive integer"
+        return out
+    if max_exact_int > 20:
+        # 2**20 sign assignments is already ≈1M rows; a larger exact
+        # threshold would turn a statistics companion into an accidental
+        # denial of service.  Callers that need more units get the
+        # Monte-Carlo fallback.
+        out["reason"] = "max_exact must be <= 20"
+        return out
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        out["reason"] = "seed must be a plain integer"
+        return out
+    seed_int = seed
+
+    obs = float(d.mean())
+    abs_obs = abs(obs)
+    tol = 1e-12 * max(1.0, abs_obs)
+    counts = {"greater": 0, "less": 0, "two-sided": 0}
+    if n <= max_exact_int:
+        total = 1 << n
+        chunk = min(total, 65536)
+        shifts = torch.arange(n, dtype=torch.int64, device=d.device)
+        for start in range(0, total, chunk):
+            stop = min(total, start + chunk)
+            idx = torch.arange(start, stop, dtype=torch.int64,
+                               device=d.device)
+            bits = (idx.unsqueeze(1) >> shifts) & 1
+            signs = bits.to(dtype=d.dtype) * 2.0 - 1.0
+            means = (signs * d).sum(dim=1) / float(n)
+            counts["greater"] += int((means >= obs - tol).sum())
+            counts["less"] += int((means <= obs + tol).sum())
+            counts["two-sided"] += int((means.abs() >= abs_obs - tol).sum())
+        p_values = {key: counts[key] / float(total) for key in counts}
+        # Two-sided tails contain the all-plus and all-minus assignments, so
+        # their exact floor is twice the one-sided floor (capped at 1).
+        min_values = {"greater": 1.0 / total, "less": 1.0 / total,
+                      "two-sided": min(1.0, 2.0 / total)}
+        method, n_perm = "exact", total
+    else:
+        gen = torch.Generator(device=d.device).manual_seed(
+            seed_int & 0xFFFFFFFF)
+        chunk = min(n_random_int, 20000)
+        done = 0
+        while done < n_random_int:
+            size = min(chunk, n_random_int - done)
+            signs = torch.randint(0, 2, (size, n),
+                                  generator=gen, device=d.device)
+            signs = signs.to(dtype=d.dtype) * 2.0 - 1.0
+            means = (signs * d).sum(dim=1) / float(n)
+            counts["greater"] += int((means >= obs - tol).sum())
+            counts["less"] += int((means <= obs + tol).sum())
+            counts["two-sided"] += int((means.abs() >= abs_obs - tol).sum())
+            done += size
+        # +1 smoothing makes the Monte-Carlo p strictly positive and keeps
+        # the test honest at the sampled resolution.
+        p_values = {key: (counts[key] + 1.0) / (n_random_int + 1.0)
+                    for key in counts}
+        min_values = {key: 1.0 / (n_random_int + 1.0) for key in counts}
+        method, n_perm = "monte-carlo", n_random_int
+    out.update({
+        "p_value": p_values[alt],
+        "p_values": p_values,
+        "min_attainable_p": min_values[alt],
+        "min_attainable_p_values": min_values,
+        "observed": obs,
+        "alternative": alt,
+        "method": method,
+        "n_permutations": n_perm,
+        "valid": True,
+        "reason": "",
+    })
+    return out
+
+
+def _sign_flip_companions(diffs, n_random: int = 10000,
+                          seed: int = 0, max_exact: int = 16) -> dict:
+    """All three exact sign-flip p-values in the shape contrasts store."""
+    result = sign_flip_test(diffs, "two-sided", n_random=n_random,
+                            seed=seed, max_exact=max_exact)
+    pv = result["p_values"]
+    mins = result["min_attainable_p_values"]
+    return {
+        # Convenience aliases for callers that do not know the registered
+        # direction: the default readout is the two-sided test.
+        "sign_flip_p": pv["two-sided"],
+        "sign_flip_min_p": mins["two-sided"],
+        "sign_flip_p_greater": pv["greater"],
+        "sign_flip_p_less": pv["less"],
+        "sign_flip_p_two_sided": pv["two-sided"],
+        "sign_flip_method": result["method"],
+        "sign_flip_n_permutations": result["n_permutations"],
+        "sign_flip_min_p_greater": mins["greater"],
+        "sign_flip_min_p_less": mins["less"],
+        "sign_flip_min_p_two_sided": mins["two-sided"],
+        "sign_flip_valid": result["valid"],
+    }
+
+
+def _sign_flip_tost_companions(diffs, bound, mode: str) -> dict:
+    """Exact sign-flip counterpart of the bootstrap TOST / NI decision.
+
+    For equivalence, the two one-sided boundaries are tested by shifting
+    the paired differences to the boundary (``d + bound`` for
+    ``H0: mean <= -bound`` and ``d - bound`` for ``H0: mean >= +bound``)
+    and applying the one-sided sign-flip test; TOST takes the maximum.
+    Non-inferiority only needs the lower boundary.  This is a companion:
+    the pre-registered decision remains the bootstrap CI rule.
+    """
+    empty = {
+        "sign_flip_p": float("nan"),
+        "sign_flip_p_lower": float("nan"),
+        "sign_flip_p_upper": float("nan"),
+        "sign_flip_method": "none",
+        "sign_flip_min_p": float("nan"),
+        "sign_flip_valid": False,
+    }
+    d = _flatten_float(diffs)
+    bound = _float_or_nan(bound)
+    if d.numel() == 0 or not bool(torch.isfinite(d).all()) \
+            or not math.isfinite(bound) or bound <= 0.0:
+        return empty
+    lower = sign_flip_test(d + bound, "greater")
+    if mode == "equivalence":
+        upper = sign_flip_test(d - bound, "less")
+        if not (lower["valid"] and upper["valid"]):
+            return empty
+        return {
+            "sign_flip_p": max(lower["p_value"], upper["p_value"]),
+            "sign_flip_p_lower": lower["p_value"],
+            "sign_flip_p_upper": upper["p_value"],
+            "sign_flip_method": lower["method"],
+            "sign_flip_min_p": max(lower["min_attainable_p"],
+                                   upper["min_attainable_p"]),
+            "sign_flip_valid": True,
+        }
+    if not lower["valid"]:
+        return empty
+    return {
+        "sign_flip_p": lower["p_value"],
+        "sign_flip_p_lower": lower["p_value"],
+        "sign_flip_p_upper": float("nan"),
+        "sign_flip_method": lower["method"],
+        "sign_flip_min_p": lower["min_attainable_p"],
+        "sign_flip_valid": True,
+    }
+
+
 def _self_test() -> int:
     """Deterministic self-checks of the inference machinery.
 
@@ -1414,6 +1658,45 @@ def _self_test() -> int:
     check("positive_loo_stable", ci["loo_sign_flip"] is False)
     check("positive_bca_available", math.isfinite(ci["lo_bca"]))
     check("positive_bca_agrees", ci["bca_agrees"] is True)
+
+    # Exact paired sign-flip: all five differences positive has an exact
+    # one-sided p of 1/32 and a two-sided p of 2/32.  The bootstrap p must
+    # not be read as if it had that resolution - exposing the gap is the
+    # point of the companion.
+    sf = sign_flip_test([1.0, 1.0, 1.0, 1.0, 1.0])
+    check("sign_flip_exact", sf["valid"] and sf["method"] == "exact")
+    check("sign_flip_greater_floor",
+          abs(sf["p_values"]["greater"] - 1.0 / 32.0) < 1e-12)
+    check("sign_flip_less_one",
+          abs(sf["p_values"]["less"] - 1.0) < 1e-12)
+    check("sign_flip_two_sided_floor",
+          abs(sf["p_values"]["two-sided"] - 2.0 / 32.0) < 1e-12)
+    check("sign_flip_below_floor",
+          ci["sign_flip_p_two_sided"] > ci["p_value"])
+    four = sign_flip_test([1.0, 1.0, 1.0, 1.0, -1.0])
+    check("sign_flip_four_of_five",
+          abs(four["p_values"]["greater"] - 6.0 / 32.0) < 1e-12)
+    check("sign_flip_symmetric_two_sided",
+          sign_flip_test([1.0] * 4)["p_values"]["two-sided"] == 2.0 / 16.0)
+    mc = sign_flip_test(list(range(1, 21)), n_random=2000, max_exact=10)
+    mc2 = sign_flip_test(list(range(1, 21)), n_random=2000, max_exact=10)
+    check("sign_flip_monte_carlo_deterministic",
+          mc["valid"] and mc["method"] == "monte-carlo"
+          and mc["p_value"] == mc2["p_value"])
+    check("sign_flip_monte_carlo_resolution",
+          math.isfinite(mc["min_attainable_p"])
+          and mc["min_attainable_p"] > 0.0)
+    check("sign_flip_empty_no_claim", not sign_flip_test([])["valid"])
+    check("sign_flip_nonfinite_no_claim",
+          not sign_flip_test([1.0, float("nan")])["valid"])
+    check("sign_flip_bad_alt_no_claim",
+          not sign_flip_test([1.0, 2.0], alternative="up")["valid"])
+    check("sign_flip_bad_boot_no_claim",
+          not sign_flip_test([1.0, 2.0], n_random=0)["valid"])
+    check("sign_flip_bad_exact_threshold_no_claim",
+          not sign_flip_test([1.0, 2.0], max_exact=0)["valid"])
+    check("sign_flip_bool_seed_no_claim",
+          not sign_flip_test([1.0, 2.0], seed=True)["valid"])
 
     # BCa needs at least four points: with fewer the jackknife acceleration
     # is not estimable, so the audit must abstain (not fabricate bounds).
@@ -1475,6 +1758,11 @@ def _self_test() -> int:
                                  n_boot=2000, seed=0)
     check("noninf_outside", ni_bad["noninferior"] is False)
     check("noninf_outside_loo", ni_bad["loo_above_bound"] is False)
+    check("equiv_has_sign_flip", eq["sign_flip_valid"] is True)
+    check("noninf_has_sign_flip", ni["sign_flip_valid"] is True)
+    check("sign_flip_tost_bounded",
+          0.0 <= eq["sign_flip_p"] <= 1.0
+          and 0.0 <= ni["sign_flip_p"] <= 1.0)
 
     # Degenerate inputs must not raise and must not claim anything.
     empty = paired_bootstrap_ci([])

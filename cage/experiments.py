@@ -101,7 +101,12 @@ Design principles
    carries a jackknife (leave-one-seed-out) diagnostic and a bias-corrected
    accelerated (BCa) interval, and the report flags any positive verdict
    whose decision flips when a single seed is dropped or dissents from the
-    BCa readout (see ``cage.metrics``).  The companions audit the
+    BCa readout (see ``cage.metrics``).  Because the percentile bootstrap
+    p-value can also fall below what a paired design can produce at this
+    n, every contrast carries an **exact paired sign-flip** p-value and
+    its attainable floor (``sign_flip_*``), with a parallel BH-corrected
+    exact family; a bootstrap-only verdict is reported as provisional
+    rather than as confirmation.  The companions audit the
     pre-registered decision rule; they never replace it.  A contrast also
     needs at least ``min_seeds_for_claim`` independent paired seeds
     (default 3, pre-registered in ``Settings``) before any verdict may
@@ -3554,6 +3559,9 @@ def _fmt_ci(ci) -> str:
         return "n/a"
     p = ci.get("p_value", float("nan"))
     p_s = f"p={p:.3f} " if math.isfinite(p) else ""
+    exact_p = ci.get("sign_flip_p", float("nan"))
+    if _finite(exact_p):
+        p_s += f"exact_p={float(exact_p):.3f} "
     if ci.get("test") == "equivalence":
         # Null-prediction contrast: a *small* TOST p and a CI inside the
         # bound both support the prediction, so the verdict wording is the
@@ -3931,7 +3939,13 @@ class ContrastLog:
     disagrees with the percentile readout, prints them as warnings, and
     writes the counts into the payload - the pre-registered decision rule
     itself is untouched, but a claim carried by one influential seed is
-    no longer invisible.
+    no longer invisible.  Every row additionally stores an exact paired
+    sign-flip p-value for its registered alternative and the minimum p the
+    seed count can attain; :meth:`finalize` runs a parallel BH family over
+    those exact p-values and flags disagreements, bootstrap p-values below
+    the exact floor, and contrasts that cannot be rejected by an exact
+    test even in principle.  This is a validity audit, not a second
+    decision rule.
 
     Seed floor: a contrast may only support a claim when at least
     ``min_seeds`` (default 3, pre-registered in ``Settings``) independent
@@ -4026,6 +4040,29 @@ class ContrastLog:
         # (the decision table itself always reads ``arms``).
         arms_all = ci.get("arms_all") or {}
         all_a, all_b = arms_all.get("a") or {}, arms_all.get("b") or {}
+        # Exact paired sign-flip companion.  The bootstrap p-value remains
+        # the pre-registered decision; the exact p is read in the direction
+        # the hypothesis registered (or as a TOST for null predictions), so
+        # a bootstrap "win" that is below the design's exact resolution is
+        # visible instead of being silently trusted.
+        sf_greater = ci.get("sign_flip_p_greater")
+        sf_less = ci.get("sign_flip_p_less")
+        sf_two = ci.get("sign_flip_p_two_sided")
+        if null_test:
+            sf_p = ci.get("sign_flip_p")
+            sf_min = ci.get("sign_flip_min_p")
+            sf_alt = ("equivalence" if equiv else "noninferiority")
+        elif direction == "+":
+            sf_p, sf_min, sf_alt = (sf_greater,
+                                    ci.get("sign_flip_min_p_greater"),
+                                    "greater")
+        elif direction == "-":
+            sf_p, sf_min, sf_alt = (sf_less,
+                                    ci.get("sign_flip_min_p_less"), "less")
+        else:
+            sf_p, sf_min, sf_alt = (sf_two,
+                                    ci.get("sign_flip_min_p_two_sided"),
+                                    "two-sided")
         self.rows.append({
             "rule": rule, "hypothesis": hyp, "metric": metric,
             "mean": ci.get("mean"), "lo": ci.get("lo"), "hi": ci.get("hi"),
@@ -4053,6 +4090,16 @@ class ContrastLog:
             "equivalent": ci.get("equivalent") if equiv else None,
             "noninferior": ci.get("noninferior") if noninf else None,
             "sign_consistency": ci.get("sign_consistency"),
+            # Exact paired sign-flip companion (see cage.metrics).  The
+            # stored p is the one for this row's registered alternative;
+            # the three alternatives stay available for audit.
+            "sign_flip_p": sf_p,
+            "sign_flip_alternative": sf_alt,
+            "sign_flip_p_greater": sf_greater,
+            "sign_flip_p_less": sf_less,
+            "sign_flip_p_two_sided": sf_two,
+            "sign_flip_method": ci.get("sign_flip_method"),
+            "sign_flip_min_p": sf_min,
             "loo_mean_min": ci.get("loo_mean_min"),
             "loo_mean_max": ci.get("loo_mean_max"),
             "loo_sign_flip": ci.get("loo_sign_flip"),
@@ -4154,6 +4201,11 @@ class ContrastLog:
                      f"independent-seed sign p={sign_p_s}]")
         elif stream.get("reason"):
             line += f"  [finite-stream test n/a: {stream['reason']}]"
+        if _finite(sf_p):
+            floor = (f", floor={float(sf_min):.4g}"
+                     if _finite(sf_min) else "")
+            line += (f"  [exact sign-flip {sf_alt} p={float(sf_p):.4g}"
+                     f"{floor}]")
         flags = small_n_flags(ci)
         if flags:
             line += f"  [{flags}]"
@@ -4382,11 +4434,56 @@ class ContrastLog:
             row["n_seeds_for_sesoi"] = (
                 float("inf") if sesoi is None
                 else seeds_for_power(row.get("sd"), sesoi))
+        # Parallel exact-test family: the same BH correction applied to the
+        # paired sign-flip p-values.  This is a companion, not a replacement
+        # for the pre-registered bootstrap decision; it answers "could this
+        # design have produced this p at all?".  It runs after every row has
+        # its final claim-eligibility flags, so the two verdicts are
+        # compared on the same eligible sample.
+        exact_adj = benjamini_hochberg(
+            [r.get("sign_flip_p") for r in self.rows], q=q)
+        for row, exact_a in zip(self.rows, exact_adj):
+            row["sign_flip_p_adj"] = exact_a["p_adj"]
+            row["sign_flip_fdr_reject"] = bool(
+                exact_a["reject"]
+                and row.get("controlled") is not False
+                and row.get("claim_eligible", True))
+            row["sign_flip_supports"] = bool(
+                row["sign_flip_fdr_reject"]
+                and row.get("practically_relevant")
+                and row.get("claim_eligible", True))
+            row["sign_flip_disagrees"] = bool(
+                _finite(row.get("p_adj"))
+                and _finite(row.get("sign_flip_p_adj"))
+                and bool(row["supports_hypothesis"])
+                != bool(row["sign_flip_supports"]))
+            row["sign_flip_cannot_reject"] = bool(
+                _finite(row.get("sign_flip_min_p"))
+                and float(row["sign_flip_min_p"]) > q)
         testable = [r for r in self.rows if math.isfinite(r["p_adj"])]
+        # A contrast is unfalsifiable by the exact test when even the
+        # smallest attainable p is above the BH family's most permissive
+        # rejection threshold (q / number of testable contrasts).
+        exact_family_floor = q / max(1, len(testable))
+        for exact_row in testable:
+            exact_row["sign_flip_cannot_reject"] = bool(
+                _finite(exact_row.get("sign_flip_min_p"))
+                and float(exact_row["sign_flip_min_p"]) > exact_family_floor)
         surviving = [r for r in testable if r["fdr_reject"]]
         supporting = [r for r in testable if r["supports_hypothesis"]]
         loo_flips = [r for r in testable if r.get("loo_flips_decision")]
         bca_differs = [r for r in testable if r.get("bca_disagrees")]
+        sign_flip_supporting = [
+            r for r in testable if r.get("sign_flip_supports")]
+        sign_flip_conflicts = [
+            r for r in testable if r.get("sign_flip_disagrees")]
+        sign_flip_unfalsifiable = [
+            r for r in testable if r.get("sign_flip_cannot_reject")]
+        sign_flip_below_floor = [
+            r for r in testable
+            if _finite(r.get("p_value"))
+            and _finite(r.get("sign_flip_min_p"))
+            and float(r["p_value"]) < float(r["sign_flip_min_p"])]
         low_resolution = [r for r in testable if r["n"] <= 5]
         # A refutation is a decision claim like any other: it needs the
         # pre-registered seed floor and an unconfounded contrast (the same
@@ -4509,9 +4606,14 @@ class ContrastLog:
             loo_lo, loo_hi = r.get("loo_mean_min"), r.get("loo_mean_max")
             loo_s = (f", loo=[{loo_lo:+.4f}, {loo_hi:+.4f}]"
                      if _finite(loo_lo) and _finite(loo_hi) else "")
+            exact_p = r.get("sign_flip_p")
+            exact_s = (f", exact p={float(exact_p):.4f}"
+                       f" (min {float(r['sign_flip_min_p']):.4f})"
+                       if _finite(exact_p) and _finite(r.get("sign_flip_min_p"))
+                       else "")
             print(f"  [{r['hypothesis']}] {r['rule']} ({r['metric']}): "
                   f"p={r['p_value']:.4f} -> p_adj={r['p_adj']:.4f} "
-                  f"{verdict} "
+                  f"{exact_s} {verdict} "
                   f"(effect={r['mean']:+.4f}{rel_s}{dz_s}, "
                   f"MDE80={r['mde80']:.4f}{', ' if sesoi_s else ''}"
                   f"{sesoi_s}, seeds={r['n']}, "
@@ -4706,8 +4808,48 @@ class ContrastLog:
                   f"testable contrast(s) rest on <=5 seeds; an exact "
                   f"two-sided sign test cannot reach p<0.05 below n=6, so "
                   f"direction reads rest on the bootstrap's moment "
-                  f"assumptions - the jackknife/BCa annotations above show "
-                  f"the exposure")
+                  f"assumptions - the exact sign-flip p/floor, jackknife and "
+                  f"BCa annotations above show the exposure")
+        if sign_flip_supporting or sign_flip_conflicts or sign_flip_below_floor:
+            below = (f"; {len(sign_flip_below_floor)} bootstrap p-value(s) "
+                     f"fall below the exact test's attainable floor, so the "
+                     f"bootstrap number overstates the design's resolution"
+                     if sign_flip_below_floor else "")
+            print(f"[{self.tag}] exact sign-flip family (companion, not the "
+                  f"pre-registered bootstrap decision): "
+                  f"{len(sign_flip_supporting)}/{len(testable)} testable "
+                  f"contrast(s) support their prediction under the exact "
+                  f"test; {len(sign_flip_conflicts)} disagree with the "
+                  f"bootstrap verdict{below}")
+        if sign_flip_conflicts:
+            shown = sign_flip_conflicts[:5]
+            names = ", ".join(
+                f"{r['hypothesis']}/{r['rule']} ({r['metric']}: "
+                f"bootstrap={'yes' if r.get('supports_hypothesis') else 'no'}"
+                f", exact={'yes' if r.get('sign_flip_supports') else 'no'})"
+                for r in shown)
+            if len(sign_flip_conflicts) > len(shown):
+                names += f", ... (+{len(sign_flip_conflicts) - len(shown)})"
+            print(f"[{self.tag}] WARNING: {len(sign_flip_conflicts)} "
+                  f"contrast(s) change verdict between the pre-registered "
+                  f"bootstrap rule and the exact sign-flip companion "
+                  f"({names}): treat the bootstrap-only verdict as "
+                  f"provisional and replicate at more seeds")
+        if sign_flip_unfalsifiable:
+            shown = sign_flip_unfalsifiable[:5]
+            names = ", ".join(
+                f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                for r in shown)
+            if len(sign_flip_unfalsifiable) > len(shown):
+                names += (f", ... (+{len(sign_flip_unfalsifiable) - len(shown)}"
+                          f" more)")
+            print(f"[{self.tag}] WARNING: {len(sign_flip_unfalsifiable)} "
+                  f"contrast(s) cannot be rejected by their exact sign-flip "
+                  f"test even in principle after BH across this family at "
+                  f"q={q:g} (min attainable p > q/{len(testable)}; "
+                  f"{names}): their direction is not falsifiable with the "
+                  f"current seed count, so add seeds rather than reading the "
+                  f"bootstrap p as confirmation")
         registered = list(self.hypotheses)
         covered = sorted({r["hypothesis"] for r in self.rows})
         uncovered = [h for h in registered if h not in covered]
@@ -4762,6 +4904,12 @@ class ContrastLog:
                    "n_loo_flip_decision": len(loo_flips),
                    "n_bca_disagree": len(bca_differs),
                    "n_low_resolution": len(low_resolution),
+                   "n_sign_flip_supporting": len(sign_flip_supporting),
+                   "n_sign_flip_disagree": len(sign_flip_conflicts),
+                   "n_sign_flip_unfalsifiable":
+                       len(sign_flip_unfalsifiable),
+                   "n_bootstrap_below_exact_floor":
+                       len(sign_flip_below_floor),
                    "direction_reversed_contrasts": [
                        f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                        for r in reversed_effects],
@@ -4777,6 +4925,15 @@ class ContrastLog:
                    "bca_disagree_contrasts": [
                        f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                        for r in bca_differs],
+                   "sign_flip_disagree_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in sign_flip_conflicts],
+                   "sign_flip_unfalsifiable_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in sign_flip_unfalsifiable],
+                   "bootstrap_below_exact_floor_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in sign_flip_below_floor],
                    "registered_hypotheses": registered,
                    "covered_hypotheses": covered,
                    "uncovered_hypotheses": uncovered,
