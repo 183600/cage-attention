@@ -4828,7 +4828,13 @@ def _complexity_cost_companion(settings: Settings, out_dir: pathlib.Path,
         except Exception as exc:  # noqa: BLE001 - cost is a companion
             cells["tuned_shallow"] = {
                 "available": False,
+                "role": f"tuned shallow ({shallow_depth} layer)",
                 "reason": f"{type(exc).__name__}: {exc}"}
+    elif shallow_depth > 0:
+        cells["tuned_shallow"] = {
+            "available": False,
+            "role": f"tuned shallow ({shallow_depth} layer)",
+            "reason": "reference rung is unmeasured (no accuracy_by_seed)"}
 
     wide_d = matched.get("d_model")
     if wide_d and matched.get("accuracy_by_seed"):
@@ -4854,7 +4860,13 @@ def _complexity_cost_companion(settings: Settings, out_dir: pathlib.Path,
         except Exception as exc:  # noqa: BLE001 - cost is a companion
             cells["matched_shallow"] = {
                 "available": False,
+                "role": "capacity-matched shallow",
                 "reason": f"{type(exc).__name__}: {exc}"}
+    elif wide_d:
+        cells["matched_shallow"] = {
+            "available": False,
+            "role": "capacity-matched shallow",
+            "reason": "reference rung is unmeasured (no accuracy_by_seed)"}
 
     deep = cells.get("deep_none") or {}
     deep_by_seed = {}
