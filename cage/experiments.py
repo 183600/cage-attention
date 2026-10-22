@@ -9349,6 +9349,43 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 print(f"{gate:>6} {label:>14}"
                       + "".join(f"{c:>9}" for c in cells))
 
+    # A significant calib-vs-query *difference* in |r| (the pre-registered
+    # H1a row) does not by itself show that calib's gate is correlated with
+    # its own attention statistics: both arms could be near zero.  These
+    # one-sample CIs and the paired max-prob difference make the mechanism
+    # leg readable at the correlation level.  They are exploratory (the
+    # FDR-controlled decision remains H1a's calib-vs-query |r| row).
+    corr_level = {}
+    print("\n[e1] H1a correlation-level check (exploratory, outside the FDR "
+          "family): |r|=0 is no association.  Calib's gate should be "
+          "clearly associated with its own entropy/max-prob; the query-only "
+          "gate has no access to that signal, so its |r| should stay weaker.  "
+          "A calib |r| CI including 0 means the mechanism path is not "
+          "established even if the calib-minus-query difference is positive:")
+    print(f"{'readout':>40} {'paired/one-sample diff':>30} {'n':>5}")
+    for metric, label in (("abs_gate_vs_entropy", "|r| entropy"),
+                          ("abs_gate_vs_maxprob", "|r| maxprob")):
+        for gate in ("query", "calib"):
+            ci = _one_sample_contrast(by_gate[gate], metric)
+            corr_level[f"{gate}:{metric}_vs_0"] = {
+                "mean": ci.get("mean"), "lo": ci.get("lo"),
+                "hi": ci.get("hi"), "n": ci.get("n"),
+                "seeds_used": ci.get("seeds_used"),
+                "seeds_dropped": ci.get("seeds_dropped"),
+            }
+            print(f"{gate + ' ' + label + ' vs 0':>40} {_fmt_ci(ci):>30} "
+                  f"{int(ci.get('n') or 0):>5}")
+        ci = _paired_diff(by_gate["calib"], by_gate["query"], metric)
+        corr_level[f"calib-query:{metric}"] = {
+            "mean": ci.get("mean"), "lo": ci.get("lo"), "hi": ci.get("hi"),
+            "n": ci.get("n"), "seeds_used": ci.get("seeds_used"),
+            "seeds_dropped": ci.get("seeds_dropped"),
+            "controlled": (ci.get("controlled") or {}).get("controlled"),
+        }
+        print(f"{'calib - query ' + label:>40} {_fmt_ci(ci):>30} "
+              f"{int(ci.get('n') or 0):>5}")
+    table["_correlation_level_check"] = corr_level
+
     print("\n[e1] H1b robustness: gate margin (correct - false-conc) across "
           "the high-maxprob threshold sweep (pre-registered decision point "
           "is thr=0.5; a sign flip at other cutoffs means the margin is a "
