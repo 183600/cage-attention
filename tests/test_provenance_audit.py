@@ -185,6 +185,14 @@ class ProvenanceAuditTest(unittest.TestCase):
         code, text = self._audit()
         self.assertEqual(code, 2, text)
 
+    def test_malformed_anchor_without_results_still_fails(self):
+        broken = copy.deepcopy(self.base)
+        broken["environment"]["torch"] = "0.0.0"
+        self._write_json("environment.json", broken)
+        code, text = self._audit()
+        self.assertEqual(code, 1, text)
+        self.assertIn("environment_sha256", text)
+
     def test_cli_route_writes_nothing(self):
         self._write_json("environment.json", self.base)
         self._write_jsonl("e1_runs.jsonl", [self._record()])

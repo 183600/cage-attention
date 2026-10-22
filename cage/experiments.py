@@ -7296,6 +7296,14 @@ def _audit_provenance(out_dir, require_homogeneous: bool = False) -> int:
         if path.is_file() and path.name.endswith(_RESULT_RECORD_SUFFIXES)
         and path != run_index_path)
     if not result_files:
+        if errors:
+            # A malformed anchor (environment/manifest/lifecycle index) is a
+            # provenance defect even when there are no result rows to scan;
+            # returning the "nothing to audit" code would hide it.
+            print(f"[provenance] FAILED ({len(errors)} issue(s)):")
+            for error in errors:
+                print(f"    {error}")
+            return 1
         print(f"[provenance] no result records under {root}; nothing to audit")
         return 2
 
