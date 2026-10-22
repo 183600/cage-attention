@@ -67,10 +67,16 @@ def analytic_matmul_flops(cfg, seq_len: int, batch: int = 1,
     proj = 2 * d * d * t
     mlp = 2 * (d * 4 * d + 4 * d * d) * t
     gate = 2 * d * d * t if cfg.gate in ("query", "calib") else 0
+    # The pinned kernel computes the *full* (B*H, T, T) score matrix and
+    # the full p @ v product before the causal mask is applied; both are
+    # 2*d*t^2 FLOPs.  Counting only the causal half would understate the
+    # actual matmul work by roughly 2x in the attention term.
     if cfg.gate == "null":
-        attention = 2 * d * t * (t + 3)
+        # One extra score (q . null_k) and one extra value term per row:
+        # 2*d*t each.
+        attention = 2 * d * t * (2 * t + 2)
     else:
-        attention = 2 * d * t * (t + 1)
+        attention = 2 * d * t * (2 * t)
     norm_scale = 2 * (2 * d * d * t) if cfg.norm == "seednorm" else 0
     final_scale = 2 * d * d * head_tokens if cfg.norm == "seednorm" else 0
     per_layer = qkv + proj + mlp + gate + attention + norm_scale
