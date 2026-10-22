@@ -6152,9 +6152,11 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     adjacent = {}
     for a, b in zip(ladder, ladder[1:]):
         valid_a = [r for r in depths[a]["runs"]
-                   if r.get("curve_verdict") not in CURVE_INVALID_VERDICTS]
+                   if r.get("seed") is not None
+                   and r.get("curve_verdict") not in CURVE_INVALID_VERDICTS]
         by_seed_b = {r["seed"]: r for r in depths[b]["runs"]
-                     if r.get("curve_verdict") not in CURVE_INVALID_VERDICTS}
+                     if r.get("seed") is not None
+                     and r.get("curve_verdict") not in CURVE_INVALID_VERDICTS}
         # Positive mean = the deeper rung gains accuracy over the shallower
         # one, matching the ``a->b`` arrow and the "paired gain" reading
         # below (the TOST is symmetric, so only the reported sign moves).
@@ -9045,9 +9047,13 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             bound=HYPOTHESES["H2b"]["sesoi"]["entropy_norm_drift"]),
         warn=calib_warn)
     if calib_runs[0]["gate_by_length"]:
-        gate_by_seed = {r["seed"]: r for r in calib_runs}
+        missing_gate = [r for r in calib_runs if r.get("seed") is None]
+        gate_by_seed = {r["seed"]: r for r in calib_runs
+                        if r.get("seed") is not None}
         gate_used, gate_drifts = [], []
         for r in calib_runs:
+            if r.get("seed") is None:
+                continue
             value = (r["gate_by_length"][lengths[-1]]
                      - r["gate_by_length"][settings.n_pairs])
             if _finite(value):
@@ -9055,12 +9061,14 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 gate_drifts.append(float(value))
         gate_ci = equivalence_test(
             gate_drifts, HYPOTHESES["H2b"]["sesoi"]["gate_drift"])
+        gate_undefined = sorted(set(gate_by_seed) - set(gate_used),
+                                key=_seed_order)
         gate_ci["diffs"] = list(gate_drifts)
         gate_ci["seeds_used"] = gate_used
-        gate_ci["seeds_dropped"] = sorted(set(gate_by_seed) - set(gate_used),
-                                           key=_seed_order)
-        gate_ci["seeds_unpaired"] = []
-        gate_ci["seeds_undefined"] = list(gate_ci["seeds_dropped"])
+        gate_ci["seeds_dropped"] = (gate_undefined
+                                    + [None] * len(missing_gate))
+        gate_ci["seeds_unpaired"] = [None] * len(missing_gate)
+        gate_ci["seeds_undefined"] = gate_undefined
         gate_ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(
             gate_used, (gate_by_seed,))
         clog.print_equivalence_ci("calib gate drift vs 0", "H2b",
