@@ -1199,6 +1199,14 @@ class Settings:
             raise ValueError(
                 f"randomize_run_order must be a bool, got "
                 f"{self.randomize_run_order!r}")
+        # ``configure_determinism`` coerces its argument with ``bool``, so a
+        # string such as ``"False"`` would silently *enable* deterministic
+        # kernels (and TF32 suppression) while the run record still showed
+        # the caller's value.  Validate the semantic switch at the
+        # configuration boundary, like the Cfg ablation flags.
+        if not isinstance(self.deterministic, bool):
+            raise ValueError(
+                f"deterministic must be a bool, got {self.deterministic!r}")
         if isinstance(self.run_order_seed, bool) or not isinstance(
                 self.run_order_seed, int):
             raise ValueError(
