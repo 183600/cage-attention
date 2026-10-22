@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import math
 import operator
+from collections.abc import Mapping
 
 import torch
 
@@ -1010,22 +1011,43 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
                     for name, spec in heldout_specs.items()])
     for name, spec, kind in all_specs:
         unit_key = "steps" if kind == "train" else "batches"
+        if not isinstance(spec, Mapping):
+            raise ValueError(
+                f"{kind} spec {name!r} must be a mapping with 'seed', "
+                f"'batch' and {unit_key!r}, got {type(spec).__name__}")
+        if spec.get("seed") is None:
+            raise ValueError(f"{kind} spec {name!r} needs 'seed'")
+        if spec.get("batch") is None:
+            raise ValueError(f"{kind} spec {name!r} needs 'batch'")
         if spec.get(unit_key) is None:
             raise ValueError(
                 f"{kind} spec {name!r} needs {unit_key!r}")
-        seed_key = stream_seed_key(spec["seed"])
+        raw_seed = spec["seed"]
+        if isinstance(raw_seed, bool):
+            raise ValueError(
+                f"{kind} spec {name!r} seed must be an integer, "
+                f"got {raw_seed!r}")
+        try:
+            seed = operator.index(raw_seed)
+        except TypeError as exc:
+            raise ValueError(
+                f"{kind} spec {name!r} seed must be an integer, "
+                f"got {raw_seed!r}") from exc
+        batch = _positive_audit_count(
+            spec["batch"], f"{kind} spec {name!r} batch")
+        units = _positive_audit_count(
+            spec[unit_key], f"{kind} spec {name!r} {unit_key}")
+        seed_key = stream_seed_key(seed)
         keys, n_rows = _draw_stream_keys(
-            spec["seed"], n_pairs, vocab, device, spec["batch"],
-            spec[unit_key])
+            seed, n_pairs, vocab, device, batch, units)
         key_sets[name] = keys
         seed_keys[name] = seed_key
         groups[name] = str(spec.get(
             "group", "train" if kind == "train" else name))
         streams[name] = {
             "kind": kind, "group": groups[name],
-            "seed": int(spec["seed"]), "stream_key": seed_key,
-            "batch": int(spec["batch"]),
-            "units": int(spec[unit_key]),
+            "seed": seed, "stream_key": seed_key,
+            "batch": batch, "units": units,
             "n_rows": int(n_rows), "n_unique_rows": int(len(keys)),
             "n_duplicate_rows": int(n_rows - len(keys)),
         }
@@ -2357,6 +2379,28 @@ def _self_test() -> int:
                 4, 64, "cpu",
                 train_specs={"train:0": train_spec},
                 heldout_specs={"val": heldout_spec})
+            check(f"{label}_rejected", False)
+        except ValueError:
+            check(f"{label}_rejected", True)
+
+    for label, train_spec in (
+            ("actual_nonmapping_spec", None),
+            ("actual_missing_seed",
+             {"batch": 8, "steps": 1}),
+            ("actual_null_seed",
+             {"seed": None, "batch": 8, "steps": 1}),
+            ("actual_missing_batch",
+             {"seed": 0, "steps": 1}),
+            ("actual_fractional_seed",
+             {"seed": 0.5, "batch": 8, "steps": 1}),
+            ("actual_fractional_batch",
+             {"seed": 0, "batch": 8.5, "steps": 1}),
+    ):
+        try:
+            actual_stream_overlap_audit(
+                4, 64, "cpu",
+                train_specs={"train:0": train_spec},
+                heldout_specs={"val": {"seed": 1, "batch": 8, "batches": 1}})
             check(f"{label}_rejected", False)
         except ValueError:
             check(f"{label}_rejected", True)
