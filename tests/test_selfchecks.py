@@ -35,6 +35,17 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertEqual(out["n"], 2)
         self.assertTrue(math.isfinite(out["accuracy"]))
 
+    def test_boolean_multiclass_targets_abstain(self):
+        import torch
+
+        # A boolean is a correctness flag, not a class id; casting it to
+        # long would silently invent the labels 1/0.
+        logits = torch.tensor([[2.0, 0.0], [0.0, 2.0]])
+        out = metrics.multiclass_metrics(logits,
+                                         torch.tensor([True, False]))
+        self.assertEqual(out["n"], 0)
+        self.assertTrue(math.isnan(out["accuracy"]))
+
     def test_malformed_multiclass_containers_abstain(self):
         import torch
 

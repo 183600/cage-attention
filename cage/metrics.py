@@ -665,7 +665,10 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     # (1.9 -> 1, -0.5 -> 0), fabricating a label the caller never named;
     # integral JSON-style floats (1.0) are accepted, everything else
     # abstains.
-    bad_targets = bool(raw_targets.is_complex())
+    # A boolean is a correctness flag, not a class index: casting it to
+    # long would silently turn ``[True, False]`` into labels 1 and 0.
+    bad_targets = bool(raw_targets.is_complex()
+                       or raw_targets.dtype == torch.bool)
     if not bad_targets and raw_targets.is_floating_point():
         bad_targets = bool(
             not torch.isfinite(raw_targets).all()
@@ -3056,6 +3059,10 @@ def _self_test() -> int:
     mm_neg = multiclass_metrics(torch.randn(2, 4), torch.tensor([-1, 0]))
     check("multiclass_negative_target_no_claim",
           mm_neg["n"] == 0 and math.isnan(mm_neg["accuracy"]))
+    mm_bool = multiclass_metrics(torch.randn(2, 4),
+                                 torch.tensor([True, False]))
+    check("multiclass_boolean_target_no_claim",
+          mm_bool["n"] == 0 and math.isnan(mm_bool["accuracy"]))
     check("brier_nonfinite_no_claim",
           math.isnan(brier_score([float("nan")], [True]))
           and math.isnan(brier_score([float("inf")], [True])))
