@@ -1837,9 +1837,11 @@ def _one_sample_contrast(runs, metric, bound=None):
     in the form :meth:`ContrastLog.finalize` already consumes.  ``bound``
     selects the bootstrap-TOST equivalence test instead of the directional
     CI (the return value then carries ``test='equivalence'`` from
-    :func:`equivalence_test`).
+    :func:`equivalence_test`).  Runs without a training seed cannot be
+    independent units; they are dropped and recorded like an unpaired seed.
     """
-    by_seed = {r["seed"]: r for r in runs}
+    missing = [r for r in runs if r.get("seed") is None]
+    by_seed = {r["seed"]: r for r in runs if r.get("seed") is not None}
     used, values = [], []
     for seed in sorted(by_seed, key=_seed_order):
         value = by_seed[seed].get(metric)
@@ -1848,11 +1850,12 @@ def _one_sample_contrast(runs, metric, bound=None):
             values.append(float(value))
     ci = (equivalence_test(values, bound) if bound is not None
           else paired_bootstrap_ci(values))
+    dropped = sorted(set(by_seed) - set(used), key=_seed_order)
     ci["diffs"] = list(values)
     ci["seeds_used"] = used
-    ci["seeds_dropped"] = sorted(set(by_seed) - set(used), key=_seed_order)
-    ci["seeds_unpaired"] = []
-    ci["seeds_undefined"] = list(ci["seeds_dropped"])
+    ci["seeds_dropped"] = dropped + [None] * len(missing)
+    ci["seeds_unpaired"] = [None] * len(missing)
+    ci["seeds_undefined"] = dropped
     ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(used, (by_seed,))
     return ci
 
@@ -1993,11 +1996,14 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     carries each marginal difference (a = a1-b1, b = a2-b2) with its mean
     +- std over the interaction sample, so the row shows the levels it
     differences; ``baseline_mean`` is the control marginal (b = a2-b2),
-    which is what the interaction modifies.
+    which is what the interaction modifies.  Runs without a training seed
+    cannot be paired; they are dropped and recorded as unpaired.
     """
     def _by_seed(rs):
-        return {r["seed"]: r for r in rs}
+        return {r["seed"]: r for r in rs if r.get("seed") is not None}
 
+    missing = [r for rs in (runs_a1, runs_b1, runs_a2, runs_b2)
+               for r in rs if r.get("seed") is None]
     m1a, m1b, m2a, m2b = (_by_seed(rs)
                           for rs in (runs_a1, runs_b1, runs_a2, runs_b2))
     planned = sorted(set(m1a) | set(m1b) | set(m2a) | set(m2b),
@@ -2047,8 +2053,10 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(
         used, (m1a, m1b, m2a, m2b))
     ci["seeds_used"] = sorted(used, key=_seed_order)
-    ci["seeds_dropped"] = sorted(dropped, key=_seed_order)
-    ci["seeds_unpaired"] = sorted(unpaired, key=_seed_order)
+    ci["seeds_dropped"] = (sorted(dropped, key=_seed_order)
+                           + [None] * len(missing))
+    ci["seeds_unpaired"] = (sorted(unpaired, key=_seed_order)
+                            + [None] * len(missing))
     ci["seeds_undefined"] = sorted(undefined, key=_seed_order)
     audits = [_controlled_audit(runs_a1, runs_b1),
               _controlled_audit(runs_a2, runs_b2),
@@ -2135,7 +2143,8 @@ def _factorial_main_effect(cells, metric, factor):
 
     The paired sample is the seeds where *all four* cells carry a finite
     value (the same seed must appear in every cell); the effective seed set
-    and every dropped seed are recorded.  The audit checks both within-level
+    and every dropped seed are recorded, including runs with no training
+    seed (they cannot be paired).  The audit checks both within-level
     pairwise contrasts (the two edges that vary only ``factor``), requires
     the resolved model config to differ only in that factor's flag, and
     verifies one global recipe and one seed set across all four cells - a
@@ -2148,7 +2157,10 @@ def _factorial_main_effect(cells, metric, factor):
     if missing:
         raise ValueError(
             f"{factor} main effect needs all 2x2 cells; missing {missing}")
-    by_cell = {c: {r["seed"]: r for r in cells[c]} for c in required}
+    missing_runs = [r for c in required for r in cells[c]
+                    if r.get("seed") is None]
+    by_cell = {c: {r["seed"]: r for r in cells[c]
+                   if r.get("seed") is not None} for c in required}
     planned = sorted(set().union(*(set(m) for m in by_cell.values())),
                      key=_seed_order)
     diffs, used, dropped, unpaired, undefined = [], [], [], [], []
@@ -2185,8 +2197,10 @@ def _factorial_main_effect(cells, metric, factor):
     ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(
         used, tuple(by_cell[c] for c in required))
     ci["seeds_used"] = sorted(used, key=_seed_order)
-    ci["seeds_dropped"] = sorted(dropped, key=_seed_order)
-    ci["seeds_unpaired"] = sorted(unpaired, key=_seed_order)
+    ci["seeds_dropped"] = (sorted(dropped, key=_seed_order)
+                           + [None] * len(missing_runs))
+    ci["seeds_unpaired"] = (sorted(unpaired, key=_seed_order)
+                            + [None] * len(missing_runs))
     ci["seeds_undefined"] = sorted(undefined, key=_seed_order)
 
     mismatches, factors = [], {}
@@ -2247,7 +2261,8 @@ def _grid_level_main_effect(metric, level_cells, baseline_cells):
     are averaged inside the paired difference (repeated-measures pairing:
     every control combination contributes exactly one level run and one
     baseline run per seed).  Effective seed set and dropped seeds are
-    recorded, and each cell pair is audited with the same
+    recorded (including runs with no training seed), and each cell pair is
+    audited with the same
     controlled-variable contract as a marginal contrast: the two cells must
     vary only the ``norm`` factor and share one recipe.  A main effect
     averaged over a cell with a different optimizer or with a non-norm
@@ -2258,8 +2273,12 @@ def _grid_level_main_effect(metric, level_cells, baseline_cells):
         raise ValueError(
             "grid-level main effect needs equally many level and baseline "
             f"cells (got {n} vs {len(baseline_cells)})")
-    maps = [({r["seed"]: r for r in rs}) for rs in level_cells]
-    base_maps = [({r["seed"]: r for r in rs}) for rs in baseline_cells]
+    missing_runs = [r for rs in level_cells + baseline_cells for r in rs
+                    if r.get("seed") is None]
+    maps = [({r["seed"]: r for r in rs if r.get("seed") is not None})
+            for rs in level_cells]
+    base_maps = [({r["seed"]: r for r in rs if r.get("seed") is not None})
+                 for rs in baseline_cells]
     planned = sorted(set().union(*(set(m) for m in maps + base_maps)),
                      key=_seed_order)
     diffs, used, dropped, unpaired, undefined = [], [], [], [], []
@@ -2305,8 +2324,10 @@ def _grid_level_main_effect(metric, level_cells, baseline_cells):
     ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(
         used, tuple(maps + base_maps))
     ci["seeds_used"] = sorted(used, key=_seed_order)
-    ci["seeds_dropped"] = sorted(dropped, key=_seed_order)
-    ci["seeds_unpaired"] = sorted(unpaired, key=_seed_order)
+    ci["seeds_dropped"] = (sorted(dropped, key=_seed_order)
+                           + [None] * len(missing_runs))
+    ci["seeds_unpaired"] = (sorted(unpaired, key=_seed_order)
+                            + [None] * len(missing_runs))
     ci["seeds_undefined"] = sorted(undefined, key=_seed_order)
 
     mismatches, factors = [], {}
