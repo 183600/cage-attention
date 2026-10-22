@@ -3090,6 +3090,8 @@ class ContrastLog:
                         f"seed-unbalanced cells {payload.get('unbalanced_cells')}")
             row["coverage_gate_failed"] = bool(coverage_failures)
             row["coverage_failures"] = coverage_failures
+            row["seed_floor_failed"] = bool(
+                (row.get("n") or 0) < self.min_seeds)
             row["claim_eligible"] = bool(
                 (row.get("n") or 0) >= self.min_seeds
                 and row["competence_passed"] is not False
@@ -3442,11 +3444,12 @@ class ContrastLog:
                   f"class-prior reading on that stream, so only the "
                   f"macro/PR-AUC companions can support a mechanism claim")
         low_seed = [r for r in testable
-                    if not r.get("claim_eligible", True)
+                    if r.get("seed_floor_failed")
                     and r.get("competence_passed") is not False
                     and not r.get("curve_invalid_removes_support")
                     and not r.get("coverage_gate_failed")
-                    and not r.get("accuracy_balance_failed")]
+                    and not r.get("accuracy_balance_failed")
+                    and not r.get("stream_sign_conflict")]
         if low_seed:
             print(f"[{self.tag}] WARNING: {len(low_seed)}/{len(testable)} "
                   f"testable contrast(s) rest on fewer than "
@@ -3560,9 +3563,9 @@ class ContrastLog:
                    "n_low_seed": len(low_seed),
                    "n_curve_invalid_gated": len(curve_invalid_gated),
                    "n_claim_ineligible_competence": len(competence_failed),
-                   "n_claim_ineligible": (len(low_seed)
-                                          + len(competence_failed)
-                                          + len(curve_invalid_gated)),
+                   "n_claim_ineligible": len(
+                       [r for r in testable
+                        if not r.get("claim_eligible", True)]),
                    "competence": self.competence,
                    "n_seed_coverage_loss": len(coverage_loss),
                    "n_seed_unpaired": len(unpaired_rows),
