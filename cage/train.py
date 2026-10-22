@@ -2181,10 +2181,14 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         raise ValueError(
             f"batches must be a positive integer, got {raw_batches!r}")
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
-    # With fewer pairs than the default tertile count, some key bins are
-    # unrealizable by construction; declaring all 12 strata would divide
-    # the coverage by cells that can never be observed.
-    n_key_bins = min(DEFAULT_DIFFICULTY_KEY_BINS, max(1, int(n_pairs)))
+    # Keep the stratum encoding independent of the current length so the
+    # same id means the same relative position across the whole sweep (the
+    # cross-length standardization relies on that).  With fewer pairs than
+    # the default tertile count some bins are simply unrealizable; report
+    # them separately rather than changing the encoding or dividing the
+    # coverage by cells that can never be observed.
+    n_key_bins = DEFAULT_DIFFICULTY_KEY_BINS
+    n_realizable_key_bins = min(n_key_bins, max(1, int(n_pairs)))
     training_states = {module: module.training for module in model.modules()}
     try:
         model.eval()
@@ -2255,6 +2259,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         # common reference mix (``cage.metrics.standardized_proportion``)
         # without a second model pass.
         n_strata = 4 * n_key_bins
+        n_realizable_strata = 4 * n_realizable_key_bins
         correct_rows = pred == tgt_cat
         strata_counts = torch.bincount(strata_cat, minlength=n_strata)
         strata_correct = torch.bincount(
@@ -2277,9 +2282,13 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         out["difficulty"] = {
             "n_pairs": int(n_pairs),
             "n_key_bins": int(n_key_bins),
+            "n_realizable_key_bins": int(n_realizable_key_bins),
             "n_strata": int(n_strata),
+            "n_realizable_strata": int(n_realizable_strata),
             "observed_strata": int(observed),
-            "coverage_of_possible": observed / n_strata,
+            "coverage_of_possible": (
+                observed / n_realizable_strata
+                if n_realizable_strata else float("nan")),
             "strata": strata_rows,
             "note": ("pre-treatment retrieval-position x ambiguity strata; "
                      "post-stratify across lengths with the base-length "
