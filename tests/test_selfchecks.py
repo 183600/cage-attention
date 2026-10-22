@@ -295,6 +295,17 @@ class BaselineArgumentValidationTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     probe_vs_chance_test([0.01, 0.02], chance)
 
+    def test_zero_between_seed_spread_reports_a_finite_power_plan(self):
+        from cage.baselines import probe_vs_chance_test
+
+        # Identical seed accuracies (zero between-seed SD) with a large
+        # probe stream are certified; the planning companion must not call
+        # that unattainable just because the seed term is zero.
+        out = probe_vs_chance_test([0.001] * 5, 0.01, n_per_seed=1000)
+        self.assertEqual(out["hb2_state"], "certified")
+        self.assertTrue(math.isfinite(out["seeds_for_certification"]))
+        self.assertLessEqual(out["seeds_for_certification"], 5)
+
     def test_malformed_probe_accuracies_abstain(self):
         from cage.baselines import probe_vs_chance_test
 

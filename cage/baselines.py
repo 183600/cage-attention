@@ -644,9 +644,15 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
             target_var = (margin / z) ** 2
             stream_var = float(ci.get("sd_binomial", 0.0)) ** 2
             denom = target_var - stream_var
-            if denom > 0.0 and sd_seed > 0.0:
-                ci["seeds_for_certification"] = float(
-                    sd_seed ** 2 / denom)
+            if denom > 0.0:
+                # A zero between-seed SD is a degenerate but *favorable*
+                # pilot: the seed term is already zero, so no additional
+                # seed variance is required (one independent seed remains
+                # the minimum for a real experiment).  Returning ``inf``
+                # here would say more seeds cannot certify a run that is
+                # already certified.
+                ci["seeds_for_certification"] = (
+                    float(sd_seed ** 2 / denom) if sd_seed > 0.0 else 1.0)
             else:
                 ci["seeds_for_certification"] = float("inf")
         else:
