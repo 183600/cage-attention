@@ -5778,15 +5778,34 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
             f"evaluation data must come from a stream that never trained "
             f"the model"
         )
+    raw_train_steps = settings.steps if steps is None else steps
+    train_steps = _positive_integer(raw_train_steps)
+    if train_steps is None:
+        raise ValueError(
+            f"steps must be a positive integer, got {raw_train_steps!r}")
+    raw_curve_points = settings.curve_points
+    if isinstance(raw_curve_points, bool):
+        raise ValueError(
+            f"curve_points must be a non-negative integer, got "
+            f"{raw_curve_points!r}")
+    try:
+        curve_points_num = float(raw_curve_points)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"curve_points must be a non-negative integer, got "
+            f"{raw_curve_points!r}") from exc
+    if not (math.isfinite(curve_points_num) and curve_points_num >= 0.0
+            and curve_points_num == int(curve_points_num)):
+        raise ValueError(
+            f"curve_points must be a non-negative integer, got "
+            f"{raw_curve_points!r}")
+    curve_points = int(curve_points_num)
     seed_everything(seed, deterministic=settings.deterministic)
     model = build(_model_cfg(settings, **model_overrides), compile=False)
     model_cfg = asdict(model.cfg)
     params = sum(p.numel() for p in model.parameters())
-    train_steps = int(settings.steps if steps is None else steps)
-    if train_steps < 1:
-        raise ValueError(f"steps must be a positive integer, got {steps!r}")
-    eval_every = (max(1, train_steps // settings.curve_points)
-                  if settings.curve_points > 0 else 0)
+    eval_every = (max(1, train_steps // curve_points)
+                  if curve_points > 0 else 0)
     early_stop_info = {}
     seeding = {}
     hist = train_model(model, steps=train_steps, batch=settings.batch,
