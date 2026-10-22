@@ -716,7 +716,10 @@ def _bca_bounds(d: torch.Tensor, means: torch.Tensor,
     else:
         z0 = nd.inv_cdf(n_less / b)
     loo = _jackknife_means(d)
-    dev = loo.mean() - loo
+    # Standard BCa acceleration: the third central moment of the
+    # leave-one-out estimates.  The sign matters - using the mean-minus-LOO
+    # direction flips ``a`` and therefore the corrected endpoints.
+    dev = loo - loo.mean()
     den = 6.0 * float(dev.pow(2).sum()) ** 1.5
     a = (float(dev.pow(3).sum()) / den) if den > 0.0 else 0.0
 
@@ -1252,12 +1255,13 @@ def _self_test() -> int:
     tiny = paired_bootstrap_ci([1.0, 0.9, 1.1], n_boot=500, seed=0)
     check("bca_needs_four_points", tiny["bca_agrees"] is None)
 
-    # Skewed sample: percentile CI includes 0 but BCa excludes it (one
-    # dominant seed pulls the mean).  The audit must detect the gap.
-    skewed = paired_bootstrap_ci([0.343, -0.674, 0.721, 0.929, 3.138],
+    # Skewed sample: the percentile CI excludes 0 but the BCa interval
+    # (standard jackknife acceleration) includes it.  The audit must detect
+    # the gap rather than silently trusting the first-order interval.
+    skewed = paired_bootstrap_ci([1.521, 2.38, -0.028, 1.926, -0.531],
                                  n_boot=2000, seed=0)
     check("bca_disagreement_detected",
-          skewed["lo"] < 0.0 < skewed["lo_bca"]
+          skewed["lo"] > 0.0 > skewed["lo_bca"]
           and skewed["bca_agrees"] is False)
 
     # One dominant seed with opposite-sign remainder: jackknife must flag it.
@@ -1285,8 +1289,8 @@ def _self_test() -> int:
     check("equiv_loo_within", eq["loo_within_bound"] is True)
     # Equivalence claim whose BCa interval pokes out of the bound: the
     # companion must flag the disagreement with the percentile verdict.
-    eq_dis = equivalence_test([-0.021, 0.0207, -0.0123, -0.0028, 0.0456],
-                              0.03, n_boot=2000, seed=0)
+    eq_dis = equivalence_test([0.0456, 0.0213, -0.0476, 0.0053, -0.0723],
+                              0.05, n_boot=2000, seed=0)
     check("equiv_bca_disagreement",
           eq_dis["equivalent"] is True and eq_dis["equivalent_bca"] is False)
     neq = equivalence_test([2.0, 2.1, 1.9, 2.0, 2.05], 1.0,
