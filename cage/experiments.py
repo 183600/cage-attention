@@ -4167,7 +4167,9 @@ def _run_context(settings: Settings) -> dict:
     # make_batch's draws are shape-dependent, so one seed at two batch
     # sizes is two realizations.  Training reads settings.batch; validation
     # monitoring reads settings.batch too (same fixed VAL stream), final
-    # val/test read eval_batch, and mechanism statistics read stats_batch.
+    # val/test read eval_batch, mechanism statistics read stats_batch, the
+    # linear probe trains at probe_batch and selects/scores at
+    # probe_eval_batch, and the overfit sanity check reads overfit_batch.
     fingerprints = {
         "val": stream_fingerprint(
             settings.n_pairs, settings.vocab, settings.device,
@@ -4181,11 +4183,26 @@ def _run_context(settings: Settings) -> dict:
         "stats": stream_fingerprint(
             settings.n_pairs, settings.vocab, settings.device,
             batch=settings.stats_batch, seed=STATS_SEED),
+        "probe_val": stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.probe_eval_batch, seed=VAL_SEED),
+        "probe_test": stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.probe_eval_batch, seed=TEST_SEED),
+        "overfit_sanity": stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.overfit_batch, seed=SANITY_SEED),
     }
     fingerprints["train"] = {
         str(seed): stream_fingerprint(
             settings.n_pairs, settings.vocab, settings.device,
             batch=settings.batch, seed=seed)
+        for seed in settings.seeds
+    }
+    fingerprints["probe_train"] = {
+        str(seed): stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.probe_batch, seed=seed)
         for seed in settings.seeds
     }
     git_sha = _git_sha()
@@ -5611,9 +5628,10 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
         # settings.steps * settings.batch samples at its own geometry,
         # which is a different realization from the eval-geometry prefix.
         # Replay the exact streams each consumer reads (training, val
-        # monitoring, final val/test, stats, probe test) and refuse any
-        # content overlap between different splits.  Realizations of the
-        # same split (val monitoring vs final val) must remain allowed.
+        # monitoring, final val/test, stats, probe train/val/test) and
+        # refuse any content overlap or cross-group seed reuse between
+        # different splits.  Realizations of the same split (val monitoring
+        # vs final val, probe val vs val) must remain allowed.
         actual = actual_stream_overlap_audit(
             settings.n_pairs, settings.vocab, settings.device,
             train_specs={
@@ -5644,6 +5662,15 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
                 "val": {
                     "seed": VAL_SEED, "batch": settings.eval_batch,
                     "batches": settings.eval_batches, "group": "val",
+                },
+                # The linear probe selects lr x steps on the probe-geometry
+                # validation stream (``tune_linear_probe``), which is a
+                # different realization from the eval-geometry ``val``
+                # stream.  Replaying only ``probe_test`` would leave the
+                # stream that actually drives a selection unaudited.
+                "probe_val": {
+                    "seed": VAL_SEED, "batch": settings.probe_eval_batch,
+                    "batches": settings.probe_eval_batches, "group": "val",
                 },
                 "test": {
                     "seed": TEST_SEED, "batch": settings.eval_batch,
