@@ -27,6 +27,12 @@ Gate variants
                  separated from the mere presence of an extra
                  data-dependent input.  Defaults reproduce the full gate
                  exactly; the flag is ablation-only.
+                 ``Cfg.calib_ent_norm`` (default True) is the E2
+                 normalisation ablation: with False the concentration term
+                 reads the *raw* row-mean entropy instead of
+                 ``Hbar = H / log T``, while the architecture, parameter
+                 count, computation and length term are unchanged.  The
+                 default reproduces the full gate exactly.
 - ``null``     : explicit null-attention / sparse selection baseline
                  (a learnable "null" key-value slot competes with real
                  tokens; choosing null suppresses the attention write).
@@ -120,6 +126,13 @@ class Cfg:
     # Requires the concentration term to be on; default False reproduces
     # the full calibrated gate exactly.
     calib_shuffle_ent: bool = False
+    # Ablation switch for the length normalisation of the concentration
+    # term.  True (default) is the registered gate
+    # sigmoid((W_g x - a*log T - c*scale*H/log T)/tau); False feeds the raw
+    # row-mean entropy instead, so E2 can test whether dividing by log T is
+    # what makes the concentration signal length-stable.  The length term,
+    # parameter count and computation are identical either way.
+    calib_ent_norm: bool = True
     use_gradient_checkpointing: bool = False
 
     def __post_init__(self):
@@ -161,6 +174,13 @@ class Cfg:
                 "calib_shuffle_ent is an active-control switch for the "
                 "concentration term of gate='calib'; it requires "
                 "gate='calib' and calib_use_ent=True"
+            )
+        if not self.calib_ent_norm and (self.gate != "calib"
+                                        or not self.calib_use_ent):
+            raise ValueError(
+                "calib_ent_norm=False is an ablation of the concentration "
+                "term's log-T normalisation; it requires gate='calib' and "
+                "calib_use_ent=True"
             )
 
 
@@ -1012,10 +1032,14 @@ class Attention(nn.Module):
             self._log_len_cache: dict[int, float] = {}
             self._ent_perm_cache: dict | None = (
                 {} if cfg.calib_shuffle_ent else None)
+            # True = registered gate (Hbar = H / log T); False = raw-entropy
+            # ablation arm (E2/H2g).  Only read when calc_ent is true.
+            self.calib_ent_norm = bool(cfg.calib_ent_norm)
         else:
             self.calib_a = self.calib_c = self.calib_tau = self.calib_scale = None
             self._log_len_cache = None
             self._ent_perm_cache = None
+            self.calib_ent_norm = True
         if cfg.gate == "null":
             self.null_k = nn.Parameter(torch.zeros(self.h, self.dk))
             self.null_v = nn.Parameter(torch.zeros(self.h, self.dk))
@@ -1293,13 +1317,23 @@ class Attention(nn.Module):
                             B * h * T).view(B, h, T)
                         torch.index_select(ent, 2, perm, out=ent_gate)
                 calib_cs = self.calib_c * self.calib_scale
+                # Length normalisation ablation (E2/H2g): the registered
+                # gate divides the concentration signal by log T; the raw
+                # arm uses the same row-mean entropy without that division.
+                # Everything else (parameters, length term, kernel) is
+                # identical, so the contrast is single-factor.
                 if grad_on:
-                    shift = ent_gate.mean(dim=1).div_(log_len).mul(calib_cs)
+                    shift = ent_gate.mean(dim=1)
+                    if self.calib_ent_norm:
+                        shift = shift.div_(log_len)
+                    shift.mul_(calib_cs)
                 else:
                     shift = _get_scratch(("calib_conc",), x.device,
                                          x.dtype, B * T)[:B * T].view(B, T)
                     torch.mean(ent_gate, dim=1, out=shift)
-                    shift.div_(log_len).mul_(calib_cs)
+                    if self.calib_ent_norm:
+                        shift.div_(log_len)
+                    shift.mul_(calib_cs)
                 if calc_len:
                     shift.add_(self.calib_a * log_len)
                 gate_val.sub_(shift.reshape(B * T, 1) if grad_on

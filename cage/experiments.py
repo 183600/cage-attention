@@ -13,7 +13,11 @@ Design principles
    the learned length and concentration coefficients are positive - so the
    claim that calib *explicitly* corrects ``log T`` entropy growth is
    checked on the learned gate rather than inferred from endpoint accuracy
-   alone.
+   alone.  H2g then ablates the normalisation itself: a raw-entropy arm
+   with the same architecture and parameters sits in the same length
+   sweep, so "H/log T is stable" (a property of the statistic) is not
+   confused with "the model needs the normalisation" (a property of the
+   trained mechanism).
 2. **Tuned baselines and sanity checks before complex models.**  The
    complexity ladder is explicit and every rung is tuned: the rule
    system (exact ceiling), the trivial floor, a wide-grid-tuned linear
@@ -104,9 +108,14 @@ Design principles
     count as a claim; rows below the floor are marked INELIGIBLE, and the
     seeds that actually entered each paired difference are recorded
     (``seeds_used``/``seeds_dropped``) so a sample that silently shrank is
-    visible.  Every factorial design (E1's four gate arms, E2's seven
+    visible.  Every factorial design (E1's four gate arms, E2's eight
     arms, E3's 2x4x2 grid) is additionally checked for cell coverage, so
     an incomplete ablation cannot silently leave an effect unmeasured.
+    The E2 design includes a one-factor normalisation ablation
+    (``calib_raw_ent``, H2g) next to the two-term 2x2: H2b shows that
+    ``H/log T`` is length-stable, and H2g asks whether the trained gate
+    actually needs that normalisation rather than merely whether the
+    statistic is stable.
 
 Outputs land in ``results/`` (git-ignored); nothing is written into the
 tracked tree.
@@ -217,7 +226,7 @@ from .train import (
 HYPO_IDS = ("HB0", "HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7",
             "H1a", "H1b",
             "H1c", "H1d", "H1e", "H1f", "H1g", "H2a", "H2b", "H2c", "H2d",
-            "H2e", "H2f", "H3a", "H3b", "H3c")
+            "H2e", "H2f", "H2g", "H3a", "H3b", "H3c")
 
 # Every hypothesis entry may carry ``"sesoi"``: the smallest effect size of
 # interest per metric (same metric keys as the pre-registered contrasts).
@@ -835,6 +844,43 @@ HYPOTHESES = {
         "sesoi": {"a_mean": 0.01, "c_effective_mean": 0.01},
         "direction": {"a_mean": "+", "c_effective_mean": "+"},
     },
+    "H2g": {
+        "experiment": "e2",
+        "question": "Is the log-T normalisation of the concentration term "
+                    "load-bearing, or would raw entropy do just as well "
+                    "across lengths?",
+        "hypothesis": "The calibrated gate claims a length-stable "
+                      "concentration signal: Hbar = H / log T.  H2b measures "
+                      "that H/log T is stable, but a stable *statistic* does "
+                      "not show that the model needs the normalisation.  An "
+                      "arm with the identical calib architecture, parameter "
+                      "count, computation and length term, but reading raw "
+                      "row-mean entropy (Cfg.calib_ent_norm=False), therefore "
+                      "isolates the normalisation.  At the training length "
+                      "the two parameterisations differ by a constant factor "
+                      "that the learned c can absorb, so the informative "
+                      "divergence is at the extrapolation lengths, where H "
+                      "keeps growing with log T and an unnormalised term "
+                      "over-corrects relative to the registered gate.",
+        "prediction": "accuracy_at_longest(calib) > "
+                      "accuracy_at_longest(calib_raw_ent) and "
+                      "accuracy_drop(calib) < accuracy_drop(calib_raw_ent); "
+                      "the full arm's concentration coefficient was already "
+                      "shown positive by H2f, so this is a comparison between "
+                      "two implemented corrections, not between a term and "
+                      "no term",
+        "decision": "paired bootstrap 95% CI of calib - calib_raw_ent "
+                    "excludes 0 in the pre-registered directions after "
+                    "Benjamini-Hochberg FDR control across the E2 contrasts "
+                    "(q=0.05); a CI including 0 while spanning the SESOI is "
+                    "'inconclusive', a confidently positive effect below the "
+                    "SESOI is 'practically negligible', and an FDR-significant "
+                    "effect in the opposite direction refutes the "
+                    "normalisation claim rather than being read as a null "
+                    "result",
+        "sesoi": {"accuracy_at_longest": 0.01, "accuracy_drop": 0.01},
+        "direction": {"accuracy_at_longest": "+", "accuracy_drop": "-"},
+    },
     "H3a": {
         "experiment": "e3",
         "question": "Does dynamic normalisation make deep layers write more "
@@ -1230,7 +1276,7 @@ _AUDIT_FACTOR_KEYS = ("gate", "norm", "layer_scale", "calib_variant")
 # what the labels say.
 _AUDIT_MODEL_FACTOR_KEYS = ("gate", "norm", "layer_scale",
                             "calib_use_len", "calib_use_ent",
-                            "calib_shuffle_ent")
+                            "calib_shuffle_ent", "calib_ent_norm")
 
 # Ground truth of the calib gate's additive terms, keyed by the resolved
 # ``(calib_use_len, calib_use_ent, calib_shuffle_ent)`` flags of the model
@@ -1278,6 +1324,15 @@ _FACTORIAL_MAIN_EFFECTS = {
 
 _CALIB_PLACEBO_CELL = "calib_shuf_ent"
 
+# E2 normalisation-ablation cell (H2g): the full calib architecture and both
+# additive terms, but the concentration term reads the raw row-mean entropy
+# instead of the registered H/log(T).  It is a one-factor ablation of the
+# normalisation itself (same parameters, same length term, same kernel), kept
+# outside the 2x2 term factorisation because at a fixed length the two forms
+# differ only by a constant absorbed into ``calib_c`` - it is identifiable
+# only across the length sweep.
+_CALIB_RAW_ENT_CELL = "calib_raw_ent"
+
 
 def _calib_cell(run):
     """The calibration-term cell a run actually trained (None when N/A).
@@ -1286,7 +1341,10 @@ def _calib_cell(run):
     to the declared label for records that predate the stamp.  A shuffle
     flag combined with anything but the full term set is not a declared
     cell: it returns a non-matching name so the label audit fails loudly
-    instead of crediting a mis-wired placebo.
+    instead of crediting a mis-wired placebo.  Likewise, the raw-entropy
+    normalisation ablation is a declared cell only when both additive terms
+    are on and the entropy is not shuffled (the flags that define H2g's
+    single-factor arm).
     """
     cfg = run.get("model_cfg")
     if cfg is not None:
@@ -1295,6 +1353,10 @@ def _calib_cell(run):
         flags = (bool(cfg.get("calib_use_len", True)),
                  bool(cfg.get("calib_use_ent", True)),
                  bool(cfg.get("calib_shuffle_ent", False)))
+        if not bool(cfg.get("calib_ent_norm", True)):
+            return (_CALIB_RAW_ENT_CELL
+                    if flags == (True, True, False)
+                    else "calib_raw_ent_undeclared")
         cell = _CALIB_FACTORIAL.get(flags)
         if cell is None and flags[2]:
             return "calib_shuf_ent_undeclared"
@@ -1394,7 +1456,7 @@ def _report_design_coverage(out_dir, tag, runs, design, extract, expected,
     """Verify a declared factorial design trained every declared cell.
 
     Generalises the ablation-coverage check to whole experiment grids
-    (E1's four gate arms, E2's seven arms, E3's 2x4x2 grid): an effect is
+    (E1's four gate arms, E2's eight arms, E3's 2x4x2 grid): an effect is
     only attributable if every cell it contrasts was actually trained, and
     a missing arm leaves that effect unmeasured - or worse, invites a
     claim from the cells that happen to have run.  The extractor reads the
@@ -10358,12 +10420,18 @@ def _calibration_coefficients(model) -> dict:
         a = float(a_p.detach()) if a_p is not None else float("nan")
         c = float(c_p.detach()) if c_p is not None else float("nan")
         effective_tau = float(torch.nn.functional.softplus(tau.detach())) + 0.1
+        ent_norm = bool(getattr(attn, "calib_ent_norm", True))
         rows.append({
             "layer": int(layer_idx),
             "a": a, "c": c, "scale": scale,
             "c_effective": (c * scale if math.isfinite(c)
                             and math.isfinite(scale) else float("nan")),
             "tau_effective": effective_tau,
+            # The concentration coefficient's units depend on the signal it
+            # multiplies: H/log T (registered gate) or raw H (H2g arm).
+            # Recorded so a c*scale comparison across arms is not silently
+            # read as if the two coefficients had the same scale.
+            "ent_norm": ent_norm,
         })
     if not rows:
         return {"applicable": False}
@@ -10389,6 +10457,11 @@ def _calibration_coefficients(model) -> dict:
         "c_effective_positive_layers": _positive("c_effective"),
         "a_layers": sum(1 for row in rows if _finite(row.get("a"))),
         "c_layers": sum(1 for row in rows if _finite(row.get("c"))),
+        "ent_norm_layers": sum(1 for row in rows if row.get("ent_norm")),
+        "concentration_signal": (
+            "H/logT" if all(row.get("ent_norm") for row in rows)
+            else "H" if not any(row.get("ent_norm") for row in rows)
+            else "mixed"),
     }
 
 
@@ -10397,9 +10470,12 @@ def _calibration_coefficients(model) -> dict:
 # ``calib`` arm itself), so the arm that isolates any H2a/H2b effect (the
 # length term, H2c) is measured on the same frozen recipe and the same
 # length sweep inside a full-factorial design - no term combination is left
-# unmeasured.  The calib arms carry ``calib_variant`` labels next to
-# ``gate="calib"``, so the controlled-variable audit attributes a contrast
-# to the term flag rather than to the gate.
+# unmeasured.  ``calib_raw_ent`` adds the one-factor normalisation ablation
+# (H2g): both terms on, identical architecture, but the concentration term
+# reads raw entropy instead of H/log(T).  The calib arms carry
+# ``calib_variant`` labels next to ``gate="calib"``, so the
+# controlled-variable audit attributes a contrast to the term/normalisation
+# flag rather than to the gate.
 _E2_VARIANTS = (
     ("none", "none", {}, {}),
     ("query", "query", {}, {}),
@@ -10410,6 +10486,9 @@ _E2_VARIANTS = (
      {"calib_use_len": False, "calib_use_ent": True}),
     ("calib_no_terms", "calib", {"calib_variant": "calib_no_terms"},
      {"calib_use_len": False, "calib_use_ent": False}),
+    ("calib_raw_ent", "calib", {"calib_variant": _CALIB_RAW_ENT_CELL},
+     {"calib_use_len": True, "calib_use_ent": True,
+      "calib_ent_norm": False}),
     ("null", "null", {}, {}),
 )
 
@@ -10445,6 +10524,7 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
     for rule, a_label, b_label in (
         ("calib - none", "calib", "none"),
         ("calib - query", "calib", "query"),
+        ("calib - calib_raw_ent", "calib", _CALIB_RAW_ENT_CELL),
     ):
         runs_a = by_variant[a_label]
         runs_b = by_variant[b_label]
@@ -10978,7 +11058,7 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
 
 
 def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("H2a", "H2b", "H2c", "H2d", "H2e", "H2f"))
+    _announce(("H2a", "H2b", "H2c", "H2d", "H2e", "H2f", "H2g"))
     # HB1/HB3/HB4/HB5 hard gate (see run_e1).
     verdict = _enforce_baseline_verdict(settings, out_dir, "e2")
     _write_manifest(settings, out_dir, "e2")
@@ -11023,7 +11103,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 settings, seed, lr, eval_seed=eval_seed, gate=gate,
                 **model_overrides)
             rec = {"experiment": "e2",
-                   "hypotheses": ["H2a", "H2b", "H2c", "H2d", "H2e", "H2f"],
+                   "hypotheses": ["H2a", "H2b", "H2c", "H2d", "H2e", "H2f",
+                                   "H2g"],
                    "gate": gate, "variant": label, "seed": seed, "lr": lr,
                    "eval_seed": eval_seed, "stats_seed": stats_seed,
                    "params": params, "model_cfg": model_cfg,
@@ -11094,6 +11175,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             # correction the hypothesis names.
             coefficients = _calibration_coefficients(model)
             rec["calib_coefficients"] = coefficients
+            rec["concentration_signal"] = coefficients.get(
+                "concentration_signal")
             # Top-level scalar coefficients: H2f is a one-sample contrast
             # across training seeds, so the per-run values have to be
             # readable by ``_one_sample_contrast`` (the nested per-layer
@@ -11153,7 +11236,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                   for label, *_ in _E2_VARIANTS}
     table = {label: _aggregate_runs(rs) for label, rs in by_variant.items()}
     ablation_coverage = _report_ablation_coverage(
-        out_dir, "e2", runs, planned_seeds=settings.seeds)
+        out_dir, "e2", runs,
+        cells=_CALIB_FACTORIAL_CELLS + (_CALIB_RAW_ENT_CELL,),
+        planned_seeds=settings.seeds,
+        design=("calib_use_len x calib_use_ent (2x2) + raw-entropy "
+                "normalisation ablation (H2g)"))
     design_coverage = _report_design_coverage(
         out_dir, "e2", runs, "variant",
         lambda r: r.get("variant"),
@@ -11162,6 +11249,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     print(f"\n[e2] accuracy by n_pairs (mean +- std over seeds; the "
           f"calib_len_only / calib_ent_only / calib_no_terms arms are the "
           f"H2c calibration-term ablations, completing the 2x2 with calib; "
+          f"calib_raw_ent is the H2g normalisation ablation - identical "
+          f"architecture/parameters, raw entropy instead of H/log T; "
           f"gap@long = mean gap to the per-length rule ceiling at the "
           f"longest length, the absolute reference for H2a's drop):")
     # ``drop`` / ``gap@long`` / ``entropy_drift`` are the pre-registered H2a
@@ -11246,8 +11335,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
           f"concentration correction.  'a+'/'c+' count layers with a positive "
           f"coefficient; an ablated arm that should not have a term must "
           f"report n/a there.  Mean over seeds and layers, ± seed std:")
-    print(f"{'arm':>16} {'a':>16} {'c_eff':>16} {'tau_eff':>16} "
-          f"{'a+':>8} {'c+':>8} {'layers':>8}")
+    print(f"{'arm':>16} {'signal':>10} {'a':>16} {'c_eff':>16} "
+          f"{'tau_eff':>16} {'a+':>8} {'c+':>8} {'layers':>8}")
     for label, *_ in _E2_VARIANTS:
         if not label.startswith("calib"):
             continue
@@ -11269,7 +11358,9 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 return "n/a"
             return f"{agg['mean']:+.4f}±{agg['std']:.4f}"
 
-        print(f"{label:>16} {ccell('a_mean'):>16} "
+        print(f"{label:>16} "
+              f"{(coeffs[0].get('concentration_signal') if coeffs else 'n/a'):>10} "
+              f"{ccell('a_mean'):>16} "
               f"{ccell('c_effective_mean'):>16} "
               f"{ccell('tau_effective_mean'):>16} "
               f"{ccell(None, 'a_positive_layers'):>8} "
@@ -11279,7 +11370,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
           "on should show a finite 'a'; only the arms with the concentration "
           "term on should show a finite 'c_eff'.  A full-calib run with "
           "a<=0 or c_eff<=0 is not implementing the correction H2a/H2b "
-          "name, whatever its endpoint accuracy.)")
+          "name, whatever its endpoint accuracy.  'signal' names what c_eff "
+          "multiplies: H/logT for the registered gate, H for the H2g "
+          "raw-entropy ablation - the two c_eff values are therefore not in "
+          "the same units and must not be compared directly.)")
 
     print(f"\n[e2] gate/attention-distribution association across the length "
           f"sweep (within-layer Pearson, Fisher-z mean over layers, mean±std "
@@ -11471,7 +11565,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         balance_ok = eval_balance.get("all_uniform")
     print("\n[e2] pre-registered contrasts:")
     clog = ContrastLog("e2", hypotheses=("H2a", "H2b", "H2c", "H2d", "H2e",
-                                       "H2f"),
+                                       "H2f", "H2g"),
                        min_seeds=settings.min_seeds_for_claim,
                        competence=competence,
                        coverage=(ablation_coverage, design_coverage),
@@ -11573,6 +11667,47 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         clog.print(f"{label} vs 0", "H2f", metric,
                    _one_sample_contrast(calib_runs, metric),
                    warn=calib_warn)
+    # H2g: ablate the log-T normalisation of the concentration term.  The
+    # raw-entropy arm keeps the same architecture, parameters, length term
+    # and kernel; only Hbar = H/log T becomes H.  At the training length a
+    # constant factor is absorbed by calib_c, so the endpoint/drop contrast
+    # is where the normalisation can show up.
+    raw_runs = by_variant[_CALIB_RAW_ENT_CELL]
+    raw_warn = _curve_warn(("calib", calib_runs),
+                           (_CALIB_RAW_ENT_CELL, raw_runs))
+    full_norm = {(r.get("model_cfg") or {}).get("calib_ent_norm")
+                 for r in calib_runs}
+    raw_norm = {(r.get("model_cfg") or {}).get("calib_ent_norm")
+                for r in raw_runs}
+    print(f"\n[e2] H2g log-T normalisation ablation (single factor: both "
+          f"additive terms on, identical architecture/parameter count/"
+          f"computation, but the concentration term reads raw entropy "
+          f"instead of Hbar=H/log T).  Resolved flags: full calib "
+          f"calib_ent_norm={sorted(full_norm, key=str)}, "
+          f"{_CALIB_RAW_ENT_CELL} calib_ent_norm={sorted(raw_norm, key=str)}. "
+          f"A gain for the normalised arm at the longest length / a smaller "
+          f"drop is evidence that the normalisation - not merely the "
+          f"presence of a concentration term - carries length robustness:")
+    if full_norm != {True} or raw_norm != {False}:
+        print(f"      WARNING: the resolved normalisation flags do not match "
+              f"the declared arms (full={full_norm}, raw={raw_norm}); the "
+              f"H2g contrasts are mis-wired and must not be read")
+    # Descriptive manipulation check: H2g compares two *implemented*
+    # corrections, so the raw arm must still use its concentration term
+    # (otherwise the contrast would silently become full-vs-no-term).  This
+    # is a readout, not a second decision rule; H2f owns the full arm's
+    # coefficient test.
+    raw_c = _mean_std([r.get("c_effective_mean") for r in raw_runs])
+    raw_c_s = (f"{raw_c['mean']:+.4f}±{raw_c['std']:.4f}"
+               if _finite(raw_c["mean"]) else "n/a")
+    print(f"      descriptive manipulation check: {_CALIB_RAW_ENT_CELL} "
+          f"c*scale={raw_c_s} (coefficient on raw H; a non-positive value "
+          f"would mean this arm did not use its concentration term, in which "
+          f"case the contrast is not a normalisation-only comparison)")
+    for metric in ("accuracy_at_longest", "accuracy_drop"):
+        clog.print("calib - calib_raw_ent", "H2g", metric,
+                   _paired_diff(calib_runs, raw_runs, metric),
+                   warn=raw_warn)
     print(f"\n[e2] H2c length-term ablation contrasts (each ablation arm "
           f"removes additive terms from the full gate at identical recipe; "
           f"only the calibration-term flags vary, so the full 2x2 is "
@@ -11680,9 +11815,15 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         } for row in h2f_rows],
         "by_arm": {
             label: {
-                key: _mean_std([r.get(key) for r in by_variant[label]])
-                for key in ("a_mean", "c_effective_mean",
-                            "tau_effective_mean")
+                "concentration_signal": next(
+                    (r.get("concentration_signal")
+                     for r in by_variant[label]
+                     if r.get("concentration_signal")), None),
+                **{
+                    key: _mean_std([r.get(key) for r in by_variant[label]])
+                    for key in ("a_mean", "c_effective_mean",
+                                "tau_effective_mean")
+                },
             }
             for label, *_ in _E2_VARIANTS if label.startswith("calib")
         },
