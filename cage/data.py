@@ -1027,7 +1027,13 @@ def stream_content_digest(batches) -> dict:
     h = hashlib.sha256()
     n_batches = 0
     n_rows = 0
-    for batch in batches:
+    try:
+        stream = iter(batches)
+    except TypeError as exc:
+        raise ValueError(
+            "batches must be an iterable of (idx, targets, meta) triples, "
+            f"got {type(batches).__name__}") from exc
+    for batch in stream:
         if not isinstance(batch, (tuple, list)) or len(batch) != 3:
             raise ValueError(
                 "each stream batch must be an (idx, targets, meta) triple")

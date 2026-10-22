@@ -91,6 +91,12 @@ class StreamContentDigestTest(unittest.TestCase):
         self.assertEqual(empty["n_rows"], 0)
         self.assertEqual(len(empty["sha256"]), 16)
 
+    def test_non_iterable_batches_raise_value_error(self):
+        for bad in (None, 42, object()):
+            with self.subTest(bad=type(bad).__name__):
+                with self.assertRaises(ValueError):
+                    stream_content_digest(bad)
+
     def test_malformed_batches_raise(self):
         idx, tgt, meta = self._batches()[0]
         bad_cases = [
