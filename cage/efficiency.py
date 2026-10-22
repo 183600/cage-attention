@@ -27,6 +27,7 @@ import time
 
 import torch
 
+from .metrics import _positive_integer
 from .model import Cfg, build, release_eval_scratch
 
 
@@ -45,16 +46,19 @@ def analytic_matmul_flops(cfg, seq_len: int, batch: int = 1,
     reads one supervised position per row.
     """
     cfg = _as_cfg(cfg)
-    seq_len = int(seq_len)
-    batch = int(batch)
-    head_tokens = int(head_tokens)
-    if seq_len < 1 or seq_len > cfg.max_len:
+    raw_seq_len, raw_batch, raw_head_tokens = (
+        seq_len, batch, head_tokens)
+    seq_len = _positive_integer(raw_seq_len)
+    batch = _positive_integer(raw_batch)
+    head_tokens = _positive_integer(raw_head_tokens)
+    if seq_len is None or seq_len > cfg.max_len:
         raise ValueError(
-            f"seq_len must be in [1, {cfg.max_len}], got {seq_len}")
-    if batch < 1 or head_tokens < 1:
+            f"seq_len must be a positive integer in [1, {cfg.max_len}], "
+            f"got {raw_seq_len!r}")
+    if batch is None or head_tokens is None:
         raise ValueError(
-            f"batch and head_tokens must be positive, got "
-            f"{batch} and {head_tokens}")
+            f"batch and head_tokens must be positive integers, got "
+            f"{raw_batch!r} and {raw_head_tokens!r}")
 
     d = int(cfg.d_model)
     t = seq_len
@@ -98,14 +102,21 @@ def measure_forward(model, cfg, seq_len: int, device, batch: int = 1,
     resident-set number that would mostly reflect unrelated allocations.
     """
     device = torch.device(device)
-    warmup = max(1, int(warmup))
-    repeats = max(1, int(repeats))
-    batch = max(1, int(batch))
+    raw_warmup, raw_repeats, raw_batch = warmup, repeats, batch
+    warmup = _positive_integer(raw_warmup)
+    repeats = _positive_integer(raw_repeats)
+    batch = _positive_integer(raw_batch)
     cfg = _as_cfg(cfg)
-    seq_len = int(seq_len)
-    if seq_len < 1 or seq_len > cfg.max_len:
+    raw_seq_len = seq_len
+    seq_len = _positive_integer(raw_seq_len)
+    if warmup is None or repeats is None or batch is None:
         raise ValueError(
-            f"seq_len must be in [1, {cfg.max_len}], got {seq_len}")
+            f"warmup, repeats and batch must be positive integers, got "
+            f"{raw_warmup!r}, {raw_repeats!r} and {raw_batch!r}")
+    if seq_len is None or seq_len > cfg.max_len:
+        raise ValueError(
+            f"seq_len must be a positive integer in [1, {cfg.max_len}], "
+            f"got {raw_seq_len!r}")
 
     idx = torch.zeros((batch, seq_len), dtype=torch.long, device=device)
     # Snapshot every module, not just the top-level flag: a caller may
