@@ -1772,14 +1772,30 @@ def _controlled_audit(runs_a, runs_b):
             audit["model_cfg"] = {"a": cfgs_a[0], "b": cfgs_b[0]}
             for side, side_runs in (("a", runs_a), ("b", runs_b)):
                 for r in side_runs:
+                    cfg = r.get("model_cfg") or {}
+                    # The top-level design labels are what a reader sees in
+                    # the table; they must name the model that actually
+                    # trained.  Checking only ``calib_variant`` would let a
+                    # run labelled gate="none" carry a query/calib config,
+                    # making an identical-config or mislabelled contrast
+                    # look controlled.
+                    for key in ("gate", "norm", "layer_scale"):
+                        if key not in r:
+                            continue
+                        label = r.get(key)
+                        trained = cfg.get(key)
+                        if label != trained:
+                            audit["mismatches"].append(
+                                f"side {side}: {key} label {label!r} does "
+                                f"not match the trained model_cfg "
+                                f"({trained!r})")
                     label = r.get("calib_variant")
                     if not label:
                         continue
-                    if (r.get("model_cfg") or {}).get("gate") != "calib":
+                    if cfg.get("gate") != "calib":
                         audit["mismatches"].append(
                             f"side {side}: calib_variant={label!r} on a "
-                            f"gate={(r.get('model_cfg') or {}).get('gate')!r} "
-                            f"run")
+                            f"gate={cfg.get('gate')!r} run")
                         continue
                     cell = _calib_cell(r)
                     if label != cell:
@@ -1856,7 +1872,23 @@ def _controlled_audit(runs_a, runs_b):
                                 "a": sorted(va), "b": sorted(vb)}
         audit["n_varying_factors"] = len(factor_keys)
         audit["single_factor"] = len(factor_keys) == 1
-        if len(factor_keys) > 1:
+        if not factor_keys:
+            if audit.get("model_cfg") is not None:
+                # A stale declared label difference does not make an
+                # identical-config pair a controlled contrast.  This check
+                # is separate from the label-only fallback because
+                # ``varying_factors`` still contains the declared labels
+                # even when the resolved configs are identical.
+                audit["mismatches"].append(
+                    "the resolved model config is identical on both sides "
+                    "(no model factor differs), so the declared label "
+                    "difference does not identify a controlled manipulation")
+            else:
+                audit["mismatches"].append(
+                    "no declared model factor (gate/norm/layer_scale/"
+                    "calib_variant) differs across the sides: degenerate or "
+                    "mislabeled contrast")
+        elif len(factor_keys) > 1:
             audit["mismatches"].append(
                 f"single-factor contract: the contrast varies "
                 f"{len(factor_keys)} model factor(s) "
@@ -1864,11 +1896,6 @@ def _controlled_audit(runs_a, runs_b):
                 f"exactly one factor, so a multi-factor manipulation has to "
                 f"be read through a registered factorial main effect or "
                 f"interaction instead")
-        if not audit["varying_factors"]:
-            audit["mismatches"].append(
-                "no declared model factor (gate/norm/layer_scale/"
-                "calib_variant) differs across the sides: degenerate or "
-                "mislabeled contrast")
     audit["controlled"] = not audit["mismatches"]
     return audit
 
