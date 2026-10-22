@@ -6850,6 +6850,13 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     ceiling_acc = float(ceiling["accuracy"]) if ceiling else float("nan")
     ceiling_known = math.isfinite(ceiling_acc)
     chance = 1.0 / (settings.vocab - 2)
+    # HB0 is a union claim over the ladder rungs ("at least one rung is
+    # competent"), so the per-rung lower quantile is Bonferroni-adjusted by
+    # the number of rungs exactly as ``_competence_check`` does for the
+    # E1/E2/E3 arm families.  Without the adjustment the ladder could call
+    # a rung competent on an uncorrected one-sided bound while the
+    # registered family-wise criterion would not.
+    competence_alpha = 0.05 / max(len(ladder), 1)
     # Pre-registered practical-significance bound for the depth readouts:
     # HB6/HB7 both register ``sesoi: {accuracy: 0.01}``, so the same bound
     # decides "saturated" (one-sided equivalence within the band) and
@@ -7006,7 +7013,8 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             # pseudo-replicate.
             cluster = clustered_proportion_ci(
                 [r["correct"] for r in valid_runs],
-                [r["n"] for r in valid_runs])
+                [r["n"] for r in valid_runs],
+                lower_alpha=competence_alpha)
             summary = _mean_std([r["accuracy"] for r in valid_runs])
         else:
             pooled = {"p": float("nan"), "lo": float("nan"),
@@ -7072,6 +7080,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             "pooled_wilson": pooled, "cluster_ci": cluster,
             "ceiling": ceiling_acc,
             "chance": chance, "above_chance": above_chance,
+            "competence_alpha": competence_alpha,
             "sesoi_accuracy": sesoi,
             "ceiling_gap": ceiling_gap,
             # Smallest plausible gap to the ceiling (upper-bound side): the
@@ -7206,9 +7215,11 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         "hb7_depth_required": hb7_depth_required,
         "chance": chance,
         "competence": {
-            "criterion": ("at least one rung's seed-clustered 95% lower "
-                          "bound above chance"),
+            "criterion": ("at least one rung's seed-clustered one-sided 95% "
+                          "family-wise lower bound above chance "
+                          "(Bonferroni over the ladder rungs)"),
             "chance": chance,
+            "alpha_per_rung": competence_alpha,
             "ladder_competent": ladder_competent,
             "above_chance_by_depth": {str(d): depths[d]["above_chance"]
                                       for d in ladder},
