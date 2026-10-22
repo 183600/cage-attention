@@ -7,6 +7,29 @@ import io
 import unittest
 
 from cage.experiments import Settings, _train_and_eval
+from cage.train import training_curve_verdict
+
+
+class CurveVerdictSingleCheckTest(unittest.TestCase):
+    def test_one_validation_check_still_reports_the_best_point(self):
+        hist = [
+            {"step": 0, "train_loss": 1.0, "lr": 1e-3,
+             "val_loss": 2.0, "val_loss_se": 0.1},
+            {"step": 1, "train_loss": 0.8, "lr": 1e-4},
+        ]
+        out = training_curve_verdict(hist)
+        self.assertEqual(out["best_val_loss"], 2.0)
+        self.assertEqual(out["best_val_step"], 0)
+        self.assertEqual(out["val_regression_after_best"], 0.0)
+        self.assertAlmostEqual(out["generalization_gap"], 1.0)
+
+    def test_single_point_history_reports_best_before_abstaining(self):
+        out = training_curve_verdict(
+            [{"step": 0, "train_loss": 1.0, "val_loss": 2.0, "lr": 1e-3}])
+        self.assertEqual(out["verdict"], "insufficient_points")
+        self.assertEqual(out["best_val_loss"], 2.0)
+        self.assertEqual(out["best_val_step"], 0)
+        self.assertEqual(out["val_regression_after_best"], 0.0)
 
 
 class CurvePointsTest(unittest.TestCase):

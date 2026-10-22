@@ -263,6 +263,28 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
         out["grad_norm_last"] = grad_norms[-1]
         out["grad_norm_explode_count"] = sum(
             1 for g in grad_norms if g > grad_norm_explode)
+    val = [h for h in finite if h.get("val_loss") is not None
+           and math.isfinite(float(h["val_loss"]))]
+    gap_first = float("nan")
+    gap_last = float("nan")
+    if val:
+        # A single validation check still identifies the best point and the
+        # final regression past it (which is exactly zero).  Those readouts
+        # must not depend on a second check existing: ``curve_points=1`` is
+        # a supported schedule, and returning NaN there would hide the
+        # early-stop point from every single-check run.
+        best = min(val, key=lambda h: h["val_loss"])
+        out["best_val_loss"] = float(best["val_loss"])
+        out["best_val_step"] = int(best["step"])
+        out["val_regression_after_best"] = float(
+            val[-1]["val_loss"] - best["val_loss"])
+        common = [h for h in finite if h.get("val_loss") is not None]
+        if common:
+            gap_first = float(
+                common[0]["val_loss"] - common[0]["train_loss"])
+            gap_last = float(
+                common[-1]["val_loss"] - common[-1]["train_loss"])
+            out["generalization_gap"] = gap_last
     if len(finite) < 2:
         return out
 
@@ -282,24 +304,8 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
         return slope * (xs[-1] - xs[0]) / abs(my)
 
     out["train_delta"] = rel_delta(finite, "train_loss")
-    val = [h for h in finite if h.get("val_loss") is not None
-           and math.isfinite(float(h["val_loss"]))]
-    gap_first = float("nan")
-    gap_last = float("nan")
     if len(val) >= 2:
         out["val_delta"] = rel_delta(val, "val_loss")
-        best = min(val, key=lambda h: h["val_loss"])
-        out["best_val_loss"] = float(best["val_loss"])
-        out["best_val_step"] = int(best["step"])
-        out["val_regression_after_best"] = float(
-            val[-1]["val_loss"] - best["val_loss"])
-        common = [h for h in finite if h.get("val_loss") is not None]
-        if common:
-            gap_first = float(
-                common[0]["val_loss"] - common[0]["train_loss"])
-            gap_last = float(
-                common[-1]["val_loss"] - common[-1]["train_loss"])
-            out["generalization_gap"] = gap_last
         if (len(val) >= 3 and math.isfinite(out["best_val_loss"])
                 and out["val_regression_after_best"]
                 > rel_tol * abs(out["best_val_loss"])):
