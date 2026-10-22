@@ -110,6 +110,20 @@ class BootstrapCompanionTest(unittest.TestCase):
         self.assertTrue(0.0 <= ni["sign_flip_p"] <= 1.0)
 
 
+class ContrastSeedFloorValidationTest(unittest.TestCase):
+    def test_invalid_min_seeds_is_rejected(self):
+        for value in (0, -1, True, 2.5, None):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    ContrastLog("e1", hypotheses=("H1a",),
+                                min_seeds=value)
+
+    def test_integral_float_seed_floor_is_canonicalised(self):
+        log = ContrastLog("e1", hypotheses=("H1a",), min_seeds=3.0)
+        self.assertEqual(log.min_seeds, 3)
+        self.assertIsInstance(log.min_seeds, int)
+
+
 class ContrastExactAuditTest(unittest.TestCase):
     @staticmethod
     def _ci(diffs):

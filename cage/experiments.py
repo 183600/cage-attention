@@ -4906,7 +4906,14 @@ class ContrastLog:
                  balance_ok: bool = True):
         self.tag = tag
         self.hypotheses = tuple(hypotheses)
-        self.min_seeds = int(min_seeds)
+        # The seed floor is a pre-registered decision rule.  Coercing a
+        # bool/fractional/zero value with ``int`` would silently lower it
+        # (``True`` -> 1, ``0`` -> 0) and make underpowered rows eligible.
+        floor = _positive_integer(min_seeds)
+        if floor is None:
+            raise ValueError(
+                f"min_seeds must be a positive integer, got {min_seeds!r}")
+        self.min_seeds = int(floor)
         self.rows: list[dict] = []
         # Held-out answer-balance premise for accuracy-based claims.  The
         # gross-imbalance audit is not merely descriptive: if the stream is
