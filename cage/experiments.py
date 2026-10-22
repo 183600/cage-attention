@@ -2744,7 +2744,7 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
         return out
     masks_a, masks_b, ns = [], [], []
     digests_a, digests_b = set(), set()
-    digest_fields_present = 0
+    digest_pairs_present = 0
     for seed in used:
         ra, rb = by_a.get(seed), by_b.get(seed)
         if ra is None or rb is None:
@@ -2778,7 +2778,9 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
                     f"string")
                 return out
         if da is not None and db is not None:
-            digest_fields_present += 1
+            # Both sides stamped the digest: only this pair can verify that
+            # the masks describe the same realized items.
+            digest_pairs_present += 1
             digests_a.add(da)
             digests_b.add(db)
             if da != db:
@@ -2790,8 +2792,8 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
         elif da is not None or db is not None:
             # Legacy/mixed records: one side did not stamp the digest, so
             # item-by-item pairing cannot be verified.  Keep the companion
-            # available but disclose the weaker evidence.
-            digest_fields_present += 1
+            # available but disclose the weaker evidence; the digest still
+            # identifies the one side that has it.
             if da is not None:
                 digests_a.add(da)
             if db is not None:
@@ -2825,7 +2827,7 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
     stream_digest = (next(iter(digests_a | digests_b))
                      if digests_a or digests_b else None)
     digest_verified = bool(
-        digest_fields_present == len(used) and stream_digest is not None)
+        digest_pairs_present == len(used) and stream_digest is not None)
     ca = torch.cat(masks_a)
     cb = torch.cat(masks_b)
     if ca.numel() != cb.numel() or ca.numel() == 0:

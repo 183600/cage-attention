@@ -172,6 +172,27 @@ class PairedStreamDigestTest(unittest.TestCase):
         self.assertFalse(out["applicable"])
         self.assertIn("digest", out["reason"])
 
+    def test_mixed_or_one_sided_digest_is_not_verified(self):
+        a = [[1] * 16]
+        b = [[0] * 16]
+        for side in ("a", "b"):
+            with self.subTest(side=side):
+                by_a, by_b = self._records(a, b)
+                {"a": by_a, "b": by_b}[side][0].pop("stream_digest")
+                out = _paired_stream_test(by_a, by_b, [0], "accuracy", 1.0)
+                self.assertTrue(out["applicable"])
+                self.assertFalse(out["digest_verified"])
+                self.assertEqual(out["stream_digest"], "abc123")
+
+    def test_partial_digest_across_seeds_is_not_verified(self):
+        a = [[1] * 16, [1] * 16]
+        b = [[0] * 16, [0] * 16]
+        by_a, by_b = self._records(a, b)
+        by_b[1].pop("stream_digest")
+        out = _paired_stream_test(by_a, by_b, [0, 1], "accuracy", 1.0)
+        self.assertTrue(out["applicable"])
+        self.assertFalse(out["digest_verified"])
+
     def test_legacy_records_without_digest_stay_available(self):
         a = [[1] * 16]
         b = [[0] * 16]
