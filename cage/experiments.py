@@ -5602,7 +5602,7 @@ def _steps_run_from_hist(hist):
     return max(0, max(int(h["step"]) for h in hist) + 1 - skipped)
 
 
-def _curve_record(hist, early_stop_info=None):
+def _curve_record(hist, early_stop_info=None, seeding=None):
     """Per-run learning-curve summary (monitor the curve, not just the end).
 
     Stores both the reduced verdict and the raw series (steps, train loss,
@@ -5625,6 +5625,12 @@ def _curve_record(hist, early_stop_info=None):
     stored with its step under ``diagnoses`` / ``val_diagnoses`` (the
     validation-side triage runs on the exact batch that produced the bad
     value), and the steps are listed under ``nonfinite_steps``.
+
+    ``seeding`` is the actual :func:`cage.repro.seed_everything` result
+    returned for this run (Python/NumPy/Torch/CUDA coverage, pinned
+    ``PYTHONHASHSEED``, deterministic-kernel/TF32 state).  It rides with
+    the curve so a record proves which RNGs this run actually pinned
+    instead of only citing the static policy.
     """
     verdict = training_curve_verdict(hist)
     train = [h for h in hist if _finite(h.get("train_loss"))]
@@ -5705,6 +5711,7 @@ def _curve_record(hist, early_stop_info=None):
             (early_stop_info or {}).get("stopped_early", False)),
         "restored_best": bool(
             (early_stop_info or {}).get("restored_best", False)),
+        "seeding": dict(seeding or {}),
     }
 
 
@@ -5749,18 +5756,20 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
     eval_every = (max(1, train_steps // settings.curve_points)
                   if settings.curve_points > 0 else 0)
     early_stop_info = {}
+    seeding = {}
     hist = train_model(model, steps=train_steps, batch=settings.batch,
                        n_pairs=settings.n_pairs, lr=lr, vocab=settings.vocab,
                        device=settings.device, log_every=0, seed=seed,
                        eval_every=eval_every, val_batches=settings.val_batches,
                        permute_labels=permute_labels,
                        early_stop_info=early_stop_info,
-                       deterministic=settings.deterministic)
+                       deterministic=settings.deterministic,
+                       seed_info=seeding)
     metrics = eval_metrics(model, settings.n_pairs, settings.vocab,
                            settings.device, batch=settings.eval_batch,
                            batches=settings.eval_batches, seed=eval_seed)
-    return model, params, metrics, _curve_record(hist, early_stop_info), \
-        model_cfg
+    return model, params, metrics, _curve_record(
+        hist, early_stop_info, seeding), model_cfg
 
 
 def tune_shared_recipe(settings: Settings):
@@ -7190,6 +7199,10 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
                 "acc_last": row["acc_last"],
                 "steps_to_target_loss": row["steps_to_target_loss"],
                 "steps_to_target_acc": row["steps_to_target_acc"],
+                "target_loss": row["target_loss"],
+                "target_acc": row["target_acc"],
+                "curve": row["curve"],
+                "seeding": dict(row.get("seeding") or {}),
                 "data_sha256": row["data_sha256"],
                 "params": row["params"],
                 "model_cfg": row["model_cfg"],

@@ -683,7 +683,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                 early_stop_info=None, fixed_batch=None,
                 disable_regularization=False, grad_flow_info=None,
                 regularization_info=None, batch_metrics=False,
-                deterministic=False):
+                deterministic=False, seed_info=None):
     """Train on the recall task with optional learning-curve monitoring.
 
     ``seed`` governs *all* run-to-run randomness: ``cage.repro.seed_everything``
@@ -778,6 +778,12 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     * ``batch_metrics`` adds the pre-update fixed-batch accuracy to each
       logged ``hist`` entry, which the overfit check samples as its
       learning curve.
+    * ``seed_info`` receives the exact :func:`cage.repro.seed_everything`
+      result applied by this run (Python/NumPy/Torch/CUDA coverage,
+      ``PYTHONHASHSEED``, and the determinism kernel switches actually
+      requested).  Run records stamp it beside the curve, so "the run was
+      seeded" is a measured, per-run fact rather than a static policy
+      claim; with ``seed=None`` it records that no re-seeding happened.
     """
     raw_steps, raw_batch = steps, batch
     steps = _positive_integer(raw_steps)
@@ -800,9 +806,18 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             raise ValueError(
                 "seed=None is only valid with fixed_batch: a stream-drawn "
                 "run must pin its data seed")
+        if seed_info is not None:
+            seed_info.update({
+                "seed": None,
+                "reseeded": False,
+                "reason": "fixed_batch caller owns the RNG state",
+            })
     else:
         check_train_seed(seed)
-        seed_everything(seed, deterministic=deterministic)
+        applied = seed_everything(seed, deterministic=deterministic)
+        if seed_info is not None:
+            seed_info.update(applied)
+            seed_info["reseeded"] = True
     if early_stop_patience is not None and eval_every <= 0:
         raise ValueError(
             "early_stop_patience requires eval_every > 0: there is no "
@@ -1122,13 +1137,15 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
     sample_every = max(1, steps // 10)
     regularization = {}
     grad_flow = {}
+    seeding = {}
     hist = train_model(
         model, steps=steps, batch=int(idx.size(0)), lr=lr, vocab=vocab,
         device=idx.device, log_every=sample_every,
         seed=seed, dense_lm=False,
         fixed_batch=(idx, tgt, meta), disable_regularization=True,
         grad_flow_info=grad_flow, regularization_info=regularization,
-        batch_metrics=True, deterministic=deterministic)
+        batch_metrics=True, deterministic=deterministic,
+        seed_info=seeding)
     curve = [{"step": int(row["step"]), "loss": float(row["train_loss"]),
               "acc": float(row.get("batch_acc", float("nan")))}
              for row in hist]
@@ -1160,6 +1177,7 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
         "steps_to_target_acc": _first_sampled_at(
             "acc", float(target_acc), lambda v, t: v >= t),
         "curve": curve,
+        "seeding": seeding,
         "regularization": regularization,
         "grad_flow": grad_flow,
         "learned": bool(curve[-1]["loss"] < curve[0]["loss"]),
