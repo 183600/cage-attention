@@ -329,17 +329,40 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
     high learning rates so that "the tuned probe stays near chance" cannot
     be attributed to an under-tuned strawman.
     """
+    def _sequence(value, name):
+        """Normalise a grid/seed iterable, rejecting scalars and bytes."""
+        if isinstance(value, (str, bytes)):
+            raise ValueError(
+                f"{name} must be an iterable, got {type(value).__name__}")
+        try:
+            return tuple(value)
+        except TypeError as exc:
+            raise ValueError(
+                f"{name} must be an iterable, got {type(value).__name__}"
+            ) from exc
+
     check_eval_seed(val_seed, selection=True)
+    seeds = _sequence(seeds, "seeds")
+    if not seeds:
+        raise ValueError("seeds must contain at least one training seed")
     if stream_seed_key(val_seed) in {stream_seed_key(s) for s in seeds}:
         raise ValueError(
             f"validation seed {val_seed} is also a probe training seed; "
             f"selection data must be disjoint from fitting data"
         )
-    raw_steps = tuple(steps_grid or (steps,))
+    lr_grid = _sequence(lr_grid, "lr_grid")
+    if not lr_grid:
+        raise ValueError("lr_grid must contain at least one learning rate")
+    lr_grid = tuple(_validated_lr(lr) for lr in lr_grid)
+    if steps_grid:
+        raw_steps = _sequence(steps_grid, "steps_grid")
+    else:
+        raw_steps = (steps,)
     step_values = tuple(_positive_integer(s) for s in raw_steps)
     if not step_values or any(s is None for s in step_values):
         raise ValueError(f"steps_grid must contain positive ints, got "
                          f"{raw_steps!r}")
+    step_values = tuple(int(s) for s in step_values)
     table = []
     for lr in lr_grid:
         for train_steps in step_values:

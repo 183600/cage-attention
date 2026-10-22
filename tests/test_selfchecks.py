@@ -388,6 +388,18 @@ class BaselineArgumentValidationTest(unittest.TestCase):
                 self.assertFalse(out["hb2_supported"])
 
 
+    def test_malformed_probe_grids_and_seeds_raise_value_error(self):
+        from cage.baselines import tune_linear_probe
+
+        for kwargs in ({"lr_grid": 5}, {"lr_grid": b"\x01"},
+                       {"lr_grid": []}, {"seeds": 5},
+                       {"seeds": b"\x00"}, {"seeds": []},
+                       {"steps_grid": 5}, {"steps_grid": b"\x01"}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    tune_linear_probe(3, 16, **kwargs)
+
+
 class ProjectSelfCheckTest(unittest.TestCase):
     def test_metrics_self_check(self):
         with contextlib.redirect_stdout(io.StringIO()):
