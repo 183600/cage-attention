@@ -243,6 +243,10 @@ def _group_codes(groups) -> torch.Tensor:
             f"{type(groups).__name__}") from exc
     mapping, codes = {}, []
     for value in iterator:
+        if isinstance(value, complex):
+            # The tensor branch rejects complex ids; the generic branch must
+            # not silently turn ``1+2j`` into the real id ``1`` either.
+            raise ValueError("group ids must be real, not complex")
         try:
             if value in mapping:
                 codes.append(mapping[value])
@@ -1654,6 +1658,10 @@ def _counts(values, n_categories):
         raise ValueError(
             f"n_categories must be non-negative, got {n_categories}")
     raw = values.reshape(-1)
+    # ``Tensor.to(long)`` silently discards the imaginary part (with only a
+    # warning), which would fabricate a count the caller never supplied.
+    if raw.is_complex():
+        raise ValueError("audit values must be real integers")
     if raw.is_floating_point() and not bool(raw.eq(raw.round()).all()):
         raise ValueError("audit values must be integers")
     flat = raw.to(torch.long).cpu()
@@ -1755,6 +1763,8 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
     ``python3 -m cage.data``: same-source draws are not flagged, a
     half-range split is).  Returns ``(nan, nan)`` for empty inputs.
     """
+    if observed.is_complex() or reference.is_complex():
+        raise ValueError("observed and reference counts must be real integers")
     obs = observed.detach().cpu().reshape(-1).to(torch.float64)
     ref = reference.detach().cpu().reshape(-1).to(torch.float64)
     if obs.numel() != ref.numel():
@@ -1999,7 +2009,10 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     the descriptive bound).  Degenerate input (no samples, fewer than
     two classes) returns NaN fields and ``uniform_supported=False``.
     """
-    c = torch.as_tensor(counts).detach().reshape(-1).to(torch.float64)
+    raw = torch.as_tensor(counts).detach().reshape(-1)
+    if raw.is_complex():
+        raise ValueError("answer counts must be real integers")
+    c = raw.to(torch.float64)
     if not bool(torch.isfinite(c).all()):
         raise ValueError("answer counts contain NaN/Inf")
     if bool((c < 0).any()):
