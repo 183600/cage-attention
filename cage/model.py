@@ -184,21 +184,58 @@ class Cfg:
                 raise ValueError(
                     f"layer_scale must be finite, got {self.layer_scale!r}")
             self.layer_scale = layer_scale
-        if not (math.isfinite(float(self.dropout))
-                and 0.0 <= float(self.dropout) <= 1.0):
+        if isinstance(self.dropout, bool):
+            raise ValueError(
+                f"dropout must be a finite number in [0, 1], got "
+                f"{self.dropout!r}")
+        try:
+            dropout = float(self.dropout)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"dropout must be a finite number in [0, 1], got "
+                f"{self.dropout!r}") from exc
+        if not (math.isfinite(dropout) and 0.0 <= dropout <= 1.0):
             raise ValueError(
                 f"dropout must be finite and in [0, 1], got "
                 f"{self.dropout!r}")
+        self.dropout = dropout
         for name in ("calib_a", "calib_c", "calib_scale"):
             value = getattr(self, name)
-            if not math.isfinite(float(value)):
+            if isinstance(value, bool):
                 raise ValueError(f"{name} must be finite, got {value!r}")
-        if (not math.isfinite(float(self.calib_tau_init))
-                or float(self.calib_tau_init) <= 0.0):
+            try:
+                value = float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    f"{name} must be finite, got {getattr(self, name)!r}"
+                ) from exc
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite, got {value!r}")
+            setattr(self, name, value)
+        raw_tau_init = self.calib_tau_init
+        if isinstance(raw_tau_init, bool):
+            raise ValueError(
+                f"calib_tau_init must be finite and > 0, got "
+                f"{raw_tau_init!r}")
+        try:
+            tau_init = float(raw_tau_init)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"calib_tau_init must be finite and > 0, got "
+                f"{raw_tau_init!r}") from exc
+        if not math.isfinite(tau_init) or tau_init <= 0.0:
             raise ValueError(
                 f"calib_tau_init must be finite and > 0 so that "
                 f"log(expm1(calib_tau_init)) is defined, got "
-                f"{self.calib_tau_init!r}")
+                f"{raw_tau_init!r}")
+        try:
+            math.log(math.expm1(tau_init))
+        except (OverflowError, ValueError) as exc:
+            raise ValueError(
+                f"calib_tau_init is too large for "
+                f"log(expm1(calib_tau_init)) to stay finite, got "
+                f"{raw_tau_init!r}") from exc
+        self.calib_tau_init = tau_init
         if self.calib_shuffle_ent and (self.gate != "calib"
                                        or not self.calib_use_ent):
             raise ValueError(
