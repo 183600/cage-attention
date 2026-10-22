@@ -283,3 +283,15 @@ class DifficultyVectorAlignmentTest(unittest.TestCase):
         self.assertEqual(contrast["accuracy_sign_agreement"], "undetermined")
         self.assertEqual(contrast["drop_sign_agreement"], "undetermined")
         self.assertFalse(contrast["raw_and_standardized_agree"])
+
+
+class DifficultyDeviceTest(unittest.TestCase):
+    def test_position_indices_follow_the_batch_device(self):
+        # A CUDA batch with CPU-side answer metadata must not compare a
+        # device-local tensor with a CPU ``arange``.  ``meta`` exercises the
+        # same placement rule without requiring a GPU.
+        idx = torch.zeros((1, 8), dtype=torch.long, device="meta")
+        answer = torch.zeros(1, dtype=torch.long)
+        features = difficulty_features(idx, answer, 3)
+        for value in features.values():
+            self.assertEqual(value.device, idx.device)

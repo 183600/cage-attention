@@ -1332,9 +1332,15 @@ def difficulty_features(idx, answer, n_pairs):
     match = keys.eq(query.unsqueeze(1))
     key_pos = match.to(torch.int64).argmax(dim=1)
     values = idx[:, 1:2 * n_pairs:2]
+    # ``answer`` is normally already on ``idx``'s device, but the helper is
+    # public: align it rather than failing a valid CPU-metadata/CUDA-batch
+    # call (or, worse, broadcasting the wrong side).
+    answer = answer.to(device=idx.device)
     value_repeats = (values.eq(answer.unsqueeze(1)).sum(dim=1)
                      > 1).to(torch.int64)
-    positions = torch.arange(idx.size(1)).view(1, -1)
+    # Position indices must live on the batch's device: the comparison
+    # below is boolean-ANDed with a tensor derived from ``idx``.
+    positions = torch.arange(idx.size(1), device=idx.device).view(1, -1)
     visible = positions < (idx.size(1) - 1)
     last_match = torch.where(idx.eq(query.unsqueeze(1)) & visible,
                              positions,
