@@ -1863,20 +1863,22 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
             f"batches must be a positive integer, got {raw_batches!r}")
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     training_states = {module: module.training for module in model.modules()}
-    model.eval()
-    correct = torch.zeros((), dtype=torch.int64, device=device)
-    total = 0
-    for i in range(batches):
-        idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        validate_batch(idx, tgt, meta, vocab, diagnostics=False)
-        logits, _, _ = model(idx)
-        pred = logits.squeeze(1).argmax(-1)
-        correct.add_((pred == meta["answer"]).sum())
-        total += idx.size(0)
-    for module, training in training_states.items():
-        module.train(training)
-    release_eval_scratch()
-    return correct.item() / total if total else float("nan")
+    try:
+        model.eval()
+        correct = torch.zeros((), dtype=torch.int64, device=device)
+        total = 0
+        for i in range(batches):
+            idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+            validate_batch(idx, tgt, meta, vocab, diagnostics=False)
+            logits, _, _ = model(idx)
+            pred = logits.squeeze(1).argmax(-1)
+            correct.add_((pred == meta["answer"]).sum())
+            total += idx.size(0)
+        return correct.item() / total if total else float("nan")
+    finally:
+        for module, training in training_states.items():
+            module.train(training)
+        release_eval_scratch()
 
 
 def encode_correct_mask(correct: torch.Tensor) -> str:
@@ -1965,50 +1967,52 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
             f"batches must be a positive integer, got {raw_batches!r}")
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     training_states = {module: module.training for module in model.modules()}
-    model.eval()
-    logits_all, tgt_all = [], []
-    for i in range(batches):
-        idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        validate_batch(idx, tgt, meta, vocab, diagnostics=False)
-        logits, _, _ = model(idx)
-        logits_all.append(logits.squeeze(1).float())
-        tgt_all.append(meta["answer"])
-    for module, training in training_states.items():
-        module.train(training)
-    if logits_all:
-        logits_cat = torch.cat(logits_all, dim=0).cpu()
-        tgt_cat = torch.cat(tgt_all, dim=0).cpu()
-    else:
-        logits_cat = torch.empty((0, vocab))
-        tgt_cat = torch.empty((0,), dtype=torch.long)
-    # Reported metrics must be as traceable as training: if any evaluation
-    # row carries non-finite logits, its accuracy/NLL/calibration values are
-    # meaningless.  Stamp the finite fraction on every metric record and say
-    # so loudly once, instead of silently averaging poisoned rows.
-    finite_rows = torch.isfinite(logits_cat).all(dim=-1)
-    out = multiclass_metrics(logits_cat, tgt_cat, topk=topk)
-    out["finite_logit_frac"] = float(finite_rows.float().mean())
-    if not bool(finite_rows.all()):
-        print(f"[eval] WARNING: {int((~finite_rows).sum())}/"
-              f"{finite_rows.numel()} evaluation rows have non-finite "
-              f"logits; accuracy/NLL/calibration over those rows are not "
-              f"interpretable (see cage.train.diagnose_nonfinite)")
-    acc_ci = wilson_ci(int((logits_cat.argmax(-1) == tgt_cat).sum()),
-                       int(tgt_cat.numel()))
-    out["accuracy_lo"] = acc_ci["lo"]
-    out["accuracy_hi"] = acc_ci["hi"]
-    out["nll"] = float(torch.nn.functional.cross_entropy(logits_cat, tgt_cat))
-    probs = logits_cat.softmax(dim=-1)
-    confidence, pred = probs.max(dim=-1)
-    out["ece_15bin"] = expected_calibration_error(confidence, pred == tgt_cat,
-                                                  n_bins=15)
-    out["brier"] = brier_score(confidence, pred == tgt_cat)
-    # Item-level correctness in a compact, JSON-safe form: the shared
-    # finite stream is a real source of uncertainty for paired contrasts
-    # (see ``cage.experiments._paired_diff``).
-    out["correct_bitmask"] = encode_correct_mask(pred == tgt_cat)
-    release_eval_scratch()
-    return out
+    try:
+        model.eval()
+        logits_all, tgt_all = [], []
+        for i in range(batches):
+            idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+            validate_batch(idx, tgt, meta, vocab, diagnostics=False)
+            logits, _, _ = model(idx)
+            logits_all.append(logits.squeeze(1).float())
+            tgt_all.append(meta["answer"])
+        if logits_all:
+            logits_cat = torch.cat(logits_all, dim=0).cpu()
+            tgt_cat = torch.cat(tgt_all, dim=0).cpu()
+        else:
+            logits_cat = torch.empty((0, vocab))
+            tgt_cat = torch.empty((0,), dtype=torch.long)
+        # Reported metrics must be as traceable as training: if any evaluation
+        # row carries non-finite logits, its accuracy/NLL/calibration values are
+        # meaningless.  Stamp the finite fraction on every metric record and say
+        # so loudly once, instead of silently averaging poisoned rows.
+        finite_rows = torch.isfinite(logits_cat).all(dim=-1)
+        out = multiclass_metrics(logits_cat, tgt_cat, topk=topk)
+        out["finite_logit_frac"] = float(finite_rows.float().mean())
+        if not bool(finite_rows.all()):
+            print(f"[eval] WARNING: {int((~finite_rows).sum())}/"
+                  f"{finite_rows.numel()} evaluation rows have non-finite "
+                  f"logits; accuracy/NLL/calibration over those rows are not "
+                  f"interpretable (see cage.train.diagnose_nonfinite)")
+        acc_ci = wilson_ci(int((logits_cat.argmax(-1) == tgt_cat).sum()),
+                           int(tgt_cat.numel()))
+        out["accuracy_lo"] = acc_ci["lo"]
+        out["accuracy_hi"] = acc_ci["hi"]
+        out["nll"] = float(torch.nn.functional.cross_entropy(logits_cat, tgt_cat))
+        probs = logits_cat.softmax(dim=-1)
+        confidence, pred = probs.max(dim=-1)
+        out["ece_15bin"] = expected_calibration_error(confidence, pred == tgt_cat,
+                                                      n_bins=15)
+        out["brier"] = brier_score(confidence, pred == tgt_cat)
+        # Item-level correctness in a compact, JSON-safe form: the shared
+        # finite stream is a real source of uncertainty for paired contrasts
+        # (see ``cage.experiments._paired_diff``).
+        out["correct_bitmask"] = encode_correct_mask(pred == tgt_cat)
+        return out
+    finally:
+        for module, training in training_states.items():
+            module.train(training)
+        release_eval_scratch()
 
 
 @torch.inference_mode()
