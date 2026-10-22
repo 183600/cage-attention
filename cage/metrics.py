@@ -996,13 +996,15 @@ def bootstrap_upper_p(diffs, bound, n_boot: int = 10000, seed: int = 0) -> float
     means sit clearly below the bound, so the bound is rejected as an upper
     limit on the effect.  The same ``+1`` smoothing as the two-sided
     :func:`paired_bootstrap_ci` p-value is used, so the two readouts are
-    on the same scale.  Returns NaN for an empty sample or a non-finite
-    bound; ``p >= 0.5`` is expected whenever the point estimate does not
-    even fall below the bound (no amount of resampling certifies it).
+    on the same scale.  Returns NaN for an empty sample, a non-finite
+    difference, or a non-finite bound; ``p >= 0.5`` is expected whenever
+    the point estimate does not even fall below the bound (no amount of
+    resampling certifies it).
     """
     d = _flatten_float(diffs)
     bound = _float_or_nan(bound)
-    if d.numel() == 0 or not math.isfinite(bound) \
+    if d.numel() == 0 or not bool(torch.isfinite(d).all()) \
+            or not math.isfinite(bound) \
             or not _bootstrap_args_ok(n_boot, 0.05):
         return float("nan")
     n_boot = int(float(n_boot))
@@ -1307,6 +1309,9 @@ def _self_test() -> int:
                               n_boot=0)["noninferior"] is False)
     check("upper_p_zero_boot_no_claim",
           math.isnan(bootstrap_upper_p([1.0, 2.0], 0.5, n_boot=0)))
+    check("upper_p_nonfinite_diff_no_claim",
+          math.isnan(bootstrap_upper_p([float("nan")], 0.5, n_boot=50))
+          and math.isnan(bootstrap_upper_p([float("inf")], 0.5, n_boot=50)))
     check("paired_bad_alpha_no_claim",
           math.isnan(paired_bootstrap_ci([1.0, 2.0, 3.0], alpha=2.0)["lo"]))
 
