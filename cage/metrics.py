@@ -758,7 +758,8 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
     ``diffs`` holds one value per independent unit (e.g. the same training
     seed under two configurations).  Differencing removes the between-unit
     variance that a two-sample test would fold in, which matters with the
-    small seed counts used here.  NaNs must be filtered by the caller.
+    small seed counts used here.  NaNs should be filtered by the caller;
+    if a non-finite difference remains, the readout abstains.
 
     Besides the CI the result carries the quantities needed to interpret
     *why* it looks the way it does:
@@ -799,6 +800,16 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 "hi_bca": float("nan"), "bca_agrees": None,
                 "cohens_d": float("nan"), "hedges_g": float("nan")}
     n = d.numel()
+    if not bool(torch.isfinite(d).all()):
+        return {"mean": float("nan"), "lo": float("nan"),
+                "hi": float("nan"), "n": int(n), "sd": float("nan"),
+                "half_width": float("nan"), "mde80": float("nan"),
+                "p_value": float("nan"), "sign_consistency": float("nan"),
+                "alpha": alpha,
+                "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
+                "loo_sign_flip": False, "lo_bca": float("nan"),
+                "hi_bca": float("nan"), "bca_agrees": None,
+                "cohens_d": float("nan"), "hedges_g": float("nan")}
     if not _bootstrap_args_ok(n_boot, alpha):
         return {"mean": float(d.mean()), "lo": float("nan"),
                 "hi": float("nan"), "n": int(n),
@@ -869,8 +880,8 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
     seed-level noise wider than the bound, "not significant" is
     inconclusive, and the returned dict carries the usual
     ``lo``/``hi``/``sd``/``mde80`` fields so the report can say which.
-    Returns NaN fields and ``equivalent=False`` for an empty input or a
-    non-positive/non-finite bound.
+    Returns NaN fields and ``equivalent=False`` for an empty input, a
+    non-finite difference, or a non-positive/non-finite bound.
 
     The same small-sample robustness companions as in
     :func:`paired_bootstrap_ci` are attached: ``loo_within_bound`` (every
@@ -894,7 +905,8 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         "hi_bca": float("nan"), "equivalent_bca": None,
         "bca_agrees": None,
     }
-    if d.numel() == 0 or not math.isfinite(bound) or bound <= 0.0 \
+    if d.numel() == 0 or not bool(torch.isfinite(d).all()) \
+            or not math.isfinite(bound) or bound <= 0.0 \
             or not _bootstrap_args_ok(n_boot, alpha):
         return out
     n_boot = int(float(n_boot))
@@ -945,8 +957,8 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
     ``diffs`` holds the paired per-seed values as in
     :func:`paired_bootstrap_ci`; the usual ``lo``/``hi``/``sd``/``mde80``
     and small-sample (jackknife/BCa) companions are attached.  Returns NaN
-    fields and ``noninferior=False`` for an empty input or a non-positive/
-    non-finite bound.
+    fields and ``noninferior=False`` for an empty input, a non-finite
+    difference, or a non-positive/non-finite bound.
     """
     bound = _float_or_nan(bound)
     alpha = _float_or_nan(alpha)
@@ -962,7 +974,8 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         "hi_bca": float("nan"), "noninferior_bca": None,
         "bca_agrees": None,
     }
-    if d.numel() == 0 or not math.isfinite(bound) or bound <= 0.0 \
+    if d.numel() == 0 or not bool(torch.isfinite(d).all()) \
+            or not math.isfinite(bound) or bound <= 0.0 \
             or not _bootstrap_args_ok(n_boot, alpha):
         return out
     n_boot = int(float(n_boot))
@@ -1314,6 +1327,20 @@ def _self_test() -> int:
           and math.isnan(bootstrap_upper_p([float("inf")], 0.5, n_boot=50)))
     check("paired_bad_alpha_no_claim",
           math.isnan(paired_bootstrap_ci([1.0, 2.0, 3.0], alpha=2.0)["lo"]))
+    check("paired_nonfinite_diff_no_claim",
+          math.isnan(paired_bootstrap_ci([float("nan")], n_boot=50)["lo"])
+          and math.isnan(paired_bootstrap_ci([float("inf")],
+                                             n_boot=50)["p_value"]))
+    check("equiv_nonfinite_diff_no_claim",
+          equivalence_test([float("nan")], 0.5,
+                           n_boot=50)["equivalent"] is False
+          and math.isnan(equivalence_test([float("nan")], 0.5,
+                                          n_boot=50)["p_value"]))
+    check("noninf_nonfinite_diff_no_claim",
+          noninferiority_test([float("nan")], 0.5,
+                              n_boot=50)["noninferior"] is False
+          and math.isnan(noninferiority_test([float("nan")], 0.5,
+                                             n_boot=50)["p_value"]))
 
     # Mismatched rows must abstain rather than broadcast one side or raise
     # an incidental indexing error.
