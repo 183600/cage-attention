@@ -1750,9 +1750,13 @@ def benjamini_hochberg(p_values, q: float = 0.05) -> list:
             continue
         # Malformed/complex/boolean p-values are not testable; skip them
         # rather than letting ``float()`` raise or read ``True`` as 1.0.
+        # A finite value outside [0, 1] is equally malformed: clamping a
+        # negative p-value to zero would turn it into the strongest
+        # possible rejection, and clamping a value above one would let a
+        # caller believe it was tested.  Both stay untestable (NaN).
         fp = _float_or_nan(p)
-        if math.isfinite(fp):
-            finite.append((i, min(max(fp, 0.0), 1.0)))
+        if math.isfinite(fp) and 0.0 <= fp <= 1.0:
+            finite.append((i, fp))
     m = len(finite)
     if not m:
         return out

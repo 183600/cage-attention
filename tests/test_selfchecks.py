@@ -97,6 +97,15 @@ class MetricInputValidationTest(unittest.TestCase):
         for row in mixed[1:]:
             self.assertFalse(row["reject"])
             self.assertTrue(math.isnan(row["p"]))
+        # A p-value outside [0, 1] is malformed, not an extreme test
+        # result.  Clamping a negative value to zero would fabricate the
+        # strongest possible rejection.
+        outside = metrics.benjamini_hochberg([-0.1, 1.5, 0.01], q=0.05)
+        self.assertFalse(outside[0]["reject"])
+        self.assertTrue(math.isnan(outside[0]["p"]))
+        self.assertFalse(outside[1]["reject"])
+        self.assertTrue(math.isnan(outside[1]["p"]))
+        self.assertTrue(outside[2]["reject"])
 
     def test_malformed_cluster_inputs_abstain(self):
         for successes, totals in ((["not-a-count"], [1]),
