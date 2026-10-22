@@ -8181,6 +8181,8 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
     }
     if _finite(rec.get("gate_vs_entropy")):
         rec["abs_gate_vs_entropy"] = abs(rec["gate_vs_entropy"])
+    if _finite(rec.get("gate_vs_maxprob")):
+        rec["abs_gate_vs_maxprob"] = abs(rec["gate_vs_maxprob"])
     if _finite(fc.get("gate_on_correct")) and \
             _finite(fc.get("gate_on_false_conc")):
         rec["gate_margin"] = fc["gate_on_correct"] - fc["gate_on_false_conc"]
@@ -8193,6 +8195,19 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
     rec["false_conc_sweep"] = fc_sweep
     if gate == "null":
         rec["null_mass_error_margin"] = _null_mass_margin(stats)
+        # Report the null slot's absolute occupancy too, not only the
+        # error-minus-correct margin: a slot that is uniformly open (or
+        # uniformly closed) has a near-zero margin but no suppression
+        # interpretation, so the level is needed next to the contrast.
+        nm = stats.get("null_mass")
+        if nm is not None:
+            mass = nm.mean(dim=1)
+            corr = stats["correct"].bool()
+            rec["null_mass_mean"] = float(mass.mean())
+            if bool((~corr).any()):
+                rec["null_mass_error"] = float(mass[~corr].mean())
+            if bool(corr.any()):
+                rec["null_mass_correct"] = float(mass[corr].mean())
     return rec, errors
 
 
@@ -8867,10 +8882,40 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         for pair, ci in (ladder.get("adjacent_contrasts") or {}).items():
             print(f"      adjacent-depth {pair} accuracy: {_fmt_ci(ci)}")
 
+    print("\n[e1] H1b false-concentration decomposition (pre-registered "
+          "threshold maxprob>0.5): 'false_conc_rate' is the error rate "
+          "*within* the confident set, and a calibrated gate must close on "
+          "those rows relative to its value on confident correct rows.  "
+          "The margin alone is not enough: the two conditional levels and "
+          "the size of the confident set are printed so a margin driven by "
+          "a near-empty false-concentration group is visible; mean±std over "
+          "seeds, 'n_high' is the confident-sample count per stats pass):")
+    print(f"{'gate':>6} {'false_conc_rate':>17} {'gate@false_conc':>17} "
+          f"{'gate@correct':>17} {'margin':>17} {'n_high':>10} "
+          f"{'null_mass':>17}")
+    for gate in GATES:
+        t = table[gate]
+
+        def fcell(key, fmt="{:.4f}"):
+            m = t.get(key)
+            if not m or not math.isfinite(m["mean"]):
+                return "n/a"
+            return fmt.format(m["mean"])
+
+        print(f"{gate:>6} {fcell('false_conc_rate'):>17} "
+              f"{fcell('gate_on_false_conc'):>17} "
+              f"{fcell('gate_on_correct'):>17} "
+              f"{fcell('gate_margin'):>17} "
+              f"{fcell('n_high_maxprob', '{:.1f}'):>10} "
+              f"{fcell('null_mass_mean'):>17}")
+
     print("\n[e1] H1a robustness: rank (Spearman) gate-entropy correlation "
           "alongside Pearson (a monotone effect must survive the change of "
           "association measure; mean±std over seeds - a difference smaller "
-          "than the seed spread is not a robustness conclusion):")
+          "than the seed spread is not a robustness conclusion).  Both r "
+          "columns are the Fisher-z mean of the *within-layer* Pearson "
+          "coefficients, so between-layer operating-point offsets cannot "
+          "create the association:")
     print(f"{'gate':>6} {'r_entropy':>17} {'rho_entropy':>19} "
           f"{'r_maxprob':>17} {'rho_maxprob':>19}")
     for gate in GATES:
@@ -8886,6 +8931,43 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{rcell('gate_vs_entropy_spearman'):>19} "
               f"{rcell('gate_vs_maxprob'):>17} "
               f"{rcell('gate_vs_maxprob_spearman'):>19}")
+
+    # The Fisher-z mean is a summary of *per-layer* associations; print the
+    # layer profile for the gated arms so a single-layer association or a
+    # depth sign flip is not hidden by the average.
+    print("\n[e1] per-layer Pearson r (mean over seeds) behind the Fisher-z "
+          "summary; 'L-i' are layer indices, 'per-layer std' is the "
+          "between-seed spread at the layer level, not the Fisher-z spread:")
+    layer_keys = []
+    for gate in ("query", "calib"):
+        for r in by_gate[gate]:
+            values = r.get("gate_vs_entropy_per_layer")
+            if isinstance(values, list) and values:
+                layer_keys = list(range(len(values)))
+                break
+        if layer_keys:
+            break
+    if layer_keys:
+        print(f"{'gate':>6} {'metric':>14}"
+              + "".join(f"{'L' + str(i):>9}" for i in layer_keys))
+        for gate in ("query", "calib"):
+            for metric, label in (
+                ("gate_vs_entropy_per_layer", "r_entropy"),
+                ("gate_vs_maxprob_per_layer", "r_maxprob"),
+            ):
+                rows = [r[metric] for r in by_gate[gate]
+                        if isinstance(r.get(metric), list) and r[metric]]
+                if not rows:
+                    continue
+                width = min(len(v) for v in rows)
+                cells = []
+                for i in range(width):
+                    vals = [float(v[i]) for v in rows
+                            if i < len(v) and _finite(v[i])]
+                    cells.append(
+                        f"{sum(vals) / len(vals):+.3f}" if vals else "n/a")
+                print(f"{gate:>6} {label:>14}"
+                      + "".join(f"{c:>9}" for c in cells))
 
     print("\n[e1] H1b robustness: gate margin (correct - false-conc) across "
           "the high-maxprob threshold sweep (pre-registered decision point "

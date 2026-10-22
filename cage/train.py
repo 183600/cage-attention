@@ -2187,6 +2187,18 @@ def gate_stat_correlations(stats):
     r["gate_vs_entropy_by_layer"] = _zmean_std(r_list)
     r["gate_vs_maxprob_by_layer"] = _zmean_std(r_list_m)
     r["gate_vs_entropy_spearman_by_layer"] = _zmean_std(s_list)
+    r["gate_vs_maxprob_spearman_by_layer"] = _zmean_std(s_list_m)
+    # Raw per-layer values alongside the Fisher-z summary.  The mean alone
+    # cannot reveal a correlation carried by one layer or a sign flip across
+    # depth, and the E1 claim is explicitly about *within-layer* association
+    # (between-layer operating-point offsets must not be pooled).  NaN
+    # (degenerate layer) is stored as null so the JSON stays valid.
+    def _per_layer(rs):
+        return [float(x) if x == x else None for x in rs]
+    r["gate_vs_entropy_per_layer"] = _per_layer(r_list)
+    r["gate_vs_maxprob_per_layer"] = _per_layer(r_list_m)
+    r["gate_vs_entropy_spearman_per_layer"] = _per_layer(s_list)
+    r["gate_vs_maxprob_spearman_per_layer"] = _per_layer(s_list_m)
     return r
 
 
