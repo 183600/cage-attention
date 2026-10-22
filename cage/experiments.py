@@ -1290,8 +1290,17 @@ def _difficulty_vectors(difficulty):
             ids.append(sid)
         if len(set(ids)) != len(ids):
             return [], []
-        totals = [0] * (max(ids) + 1)
-        correct = [0] * (max(ids) + 1)
+        # ``eval_metrics`` also records the declared encoding size.  Use it
+        # so a compact record that stores only observed strata still keeps
+        # its ids aligned with a full reference encoding (the missing ids
+        # are genuine zero-count strata, not a different encoding).
+        size = max(ids) + 1
+        declared = (difficulty or {}).get("n_strata")
+        if (isinstance(declared, int) and not isinstance(declared, bool)
+                and declared >= size):
+            size = declared
+        totals = [0] * size
+        correct = [0] * size
         for sid, row in zip(ids, rows):
             total = _difficulty_count(row.get("n", 0))
             hit = _difficulty_count(row.get("correct", 0))

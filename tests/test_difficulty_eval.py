@@ -239,6 +239,16 @@ class DifficultyVectorAlignmentTest(unittest.TestCase):
         self.assertEqual(totals, [0, 0, 5])
         self.assertEqual(correct, [0, 0, 1])
 
+    def test_declared_encoding_pads_compact_partial_records(self):
+        from cage.experiments import _difficulty_vectors
+
+        totals, correct = _difficulty_vectors({
+            "n_strata": 4,
+            "strata": [{"id": 2, "n": 5, "correct": 1}],
+        })
+        self.assertEqual(totals, [0, 0, 5, 0])
+        self.assertEqual(correct, [0, 0, 1, 0])
+
     def test_legacy_rows_without_ids_fall_back_to_order(self):
         from cage.experiments import _difficulty_vectors
 
