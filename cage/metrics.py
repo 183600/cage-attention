@@ -1591,23 +1591,29 @@ def evaluation_fold_audit(correct_a, correct_b, n_folds=8) -> dict:
     unit_fold_flips, unit_consistency = [], []
     for unit in range(n_units):
         unit_sign = _sign(float(unit_effects[unit]))
-        if unit_sign == 0:
-            unit_consistency.append(float("nan"))
-            continue
-        flips = False
-        matching = 0
-        nonzero = 0
+        fold_signs = []
         for fold in folds:
             effect = float(diff[unit, fold].mean())
-            if abs(effect) <= eps:
-                continue
-            nonzero += 1
-            if _sign(effect) == unit_sign:
-                matching += 1
-            else:
-                flips = True
-        unit_consistency.append(matching / nonzero if nonzero else float("nan"))
-        if flips:
+            if abs(effect) > eps:
+                fold_signs.append(_sign(effect))
+        if not fold_signs:
+            unit_consistency.append(float("nan"))
+            continue
+        has_positive = any(sign > 0 for sign in fold_signs)
+        has_negative = any(sign < 0 for sign in fold_signs)
+        if unit_sign == 0:
+            # The unit's mean effect cancels exactly, so there is no
+            # overall direction to measure consistency against.  The fold
+            # effects can still point in opposite directions, and the
+            # per-seed flip count is specifically about that disagreement;
+            # dropping it here silently hid the most inconsistent seeds.
+            unit_consistency.append(float("nan"))
+            if has_positive and has_negative:
+                unit_fold_flips.append(int(unit))
+            continue
+        matching = sum(1 for sign in fold_signs if sign == unit_sign)
+        unit_consistency.append(matching / len(fold_signs))
+        if has_positive and has_negative:
             unit_fold_flips.append(int(unit))
     fragile = bool(
         overall_sign != 0

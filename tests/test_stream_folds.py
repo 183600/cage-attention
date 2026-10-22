@@ -71,6 +71,19 @@ class EvaluationFoldAuditTest(unittest.TestCase):
         self.assertEqual(out["n_unit_fold_sign_flips"], 1)
         self.assertAlmostEqual(out["unit_fold_sign_consistency"][1], 0.5)
 
+    def test_zero_mean_unit_with_opposite_folds_is_flagged(self):
+        out = evaluation_fold_audit([1, 1, 0, 0], [0, 0, 1, 1], n_folds=2)
+        self.assertTrue(out["valid"])
+        self.assertEqual(out["fold_effects"], [1.0, -1.0])
+        self.assertEqual(out["unit_fold_sign_flips"], [0])
+        self.assertEqual(out["n_unit_fold_sign_flips"], 1)
+        self.assertTrue(math.isnan(out["unit_fold_sign_consistency"][0]))
+
+    def test_zero_mean_unit_with_one_fold_direction_is_not_flagged(self):
+        out = evaluation_fold_audit([1, 1, 0, 0], [0, 0, 0, 0], n_folds=2)
+        self.assertTrue(out["valid"])
+        self.assertEqual(out["unit_fold_sign_flips"], [])
+
     def test_fold_count_is_capped_to_keep_folds_nonempty(self):
         out = evaluation_fold_audit([1] * 10, [0] * 10, n_folds=8)
         self.assertTrue(out["valid"])
