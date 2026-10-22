@@ -1902,10 +1902,20 @@ def _calib_cell(run):
             return "model_cfg_malformed"
         if cfg.get("gate") != "calib":
             return None
-        flags = (bool(cfg.get("calib_use_len", True)),
-                 bool(cfg.get("calib_use_ent", True)),
-                 bool(cfg.get("calib_shuffle_ent", False)))
-        if not bool(cfg.get("calib_ent_norm", True)):
+        # The resolved model config is JSON provenance: these flags are
+        # booleans, and a string such as ``"False"`` is truthy.  Coercing
+        # it with ``bool`` would silently read a malformed record as the
+        # opposite arm and could certify the contrast.  Fail closed with a
+        # non-cell sentinel so the label cross-check below reports it.
+        raw_flags = (cfg.get("calib_use_len", True),
+                     cfg.get("calib_use_ent", True),
+                     cfg.get("calib_shuffle_ent", False))
+        raw_ent_norm = cfg.get("calib_ent_norm", True)
+        if any(not isinstance(value, bool) for value in raw_flags) \
+                or not isinstance(raw_ent_norm, bool):
+            return "model_cfg_malformed"
+        flags = raw_flags
+        if not raw_ent_norm:
             return (_CALIB_RAW_ENT_CELL
                     if flags == (True, True, False)
                     else "calib_raw_ent_undeclared")

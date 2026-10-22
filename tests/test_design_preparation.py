@@ -19,6 +19,8 @@ import unittest
 
 from cage.experiments import (
     Settings,
+    _calib_cell,
+    _controlled_audit,
     _blocked_run_order,
     _design_sensitivity_plan,
     _pilot_accuracy_level,
@@ -139,6 +141,45 @@ class BlockedRunOrderTest(unittest.TestCase):
         self.assertEqual(audit["always_first"], ["a"])
         self.assertGreaterEqual(audit["extreme_p_value"], 0.05)
         self.assertTrue(audit["balanced"])
+
+
+class ControlledAuditProvenanceTest(unittest.TestCase):
+    CFG = {
+        "vocab_size": 64, "d_model": 32, "n_heads": 4, "n_layers": 2,
+        "max_len": 64, "dropout": 0.0, "gate": "calib", "norm": "pre",
+        "layer_scale": None, "calib_use_len": True, "calib_use_ent": True,
+        "calib_shuffle_ent": False, "calib_ent_norm": True,
+    }
+
+    def _run(self, **cfg_overrides):
+        cfg = dict(self.CFG)
+        cfg.update(cfg_overrides)
+        return {
+            "seed": 0, "config": {"d_model": 32}, "lr": 1e-3,
+            "eval_seed": 2024, "stats_seed": 7, "steps_run": 10,
+            "stopped_early": False, "restored_best": False,
+            "data_fingerprints": None, "training_recipe": {},
+            "params": 100, "gate": "calib", "norm": "pre",
+            "layer_scale": None, "calib_variant": "full",
+            "model_cfg": cfg,
+        }
+
+    def test_malformed_calib_flag_does_not_certify_the_audit(self):
+        # ``"False"`` is truthy; coercing it would read the record as the
+        # full arm and let the contrast pass as controlled.  The malformed
+        # flag must surface as a control mismatch instead.
+        good = self._run()
+        bad = self._run(calib_use_len="False")
+        self.assertEqual(_calib_cell(bad), "model_cfg_malformed")
+        audit = _controlled_audit([good], [bad])
+        self.assertFalse(audit["controlled"])
+        self.assertTrue(audit["mismatches"])
+
+    def test_non_boolean_entropy_normalisation_flag_fails_closed(self):
+        for raw in ("False", 0, None):
+            with self.subTest(raw=raw):
+                run = self._run(calib_ent_norm=raw)
+                self.assertEqual(_calib_cell(run), "model_cfg_malformed")
 
 
 class PilotSdTest(unittest.TestCase):
