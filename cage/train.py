@@ -2217,6 +2217,24 @@ def _counterfactual_edits(idx, meta, n_pairs, vocab):
     answer changes); relocation updates ``meta['key_pos']`` because the
     queried pair moved.
     """
+    for name, value in (("n_pairs", n_pairs), ("vocab", vocab)):
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be an integer, not bool")
+        try:
+            value = operator.index(value)
+        except TypeError as exc:
+            raise ValueError(
+                f"{name} must be an integer, got {value!r}") from exc
+        if name == "n_pairs":
+            if value < 1:
+                raise ValueError(f"n_pairs must be >= 1, got {value!r}")
+            n_pairs = int(value)
+        else:
+            if value < 4:
+                raise ValueError(
+                    f"counterfactual edits need at least two selectable "
+                    f"values (vocab >= 4), got vocab={value!r}")
+            vocab = int(value)
     if not torch.is_tensor(idx) or idx.dim() != 2:
         raise ValueError(
             f"idx must be a 2-D integer tensor, got {type(idx)}")

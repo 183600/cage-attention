@@ -111,6 +111,16 @@ class CounterfactualEditTest(unittest.TestCase):
                                   self.vocab)
         with self.assertRaises(ValueError):
             _counterfactual_edits(self.idx, self.meta, self.n_pairs, 3)
+        for n_pairs in (0, -1, True, 4.0, "4"):
+            with self.subTest(n_pairs=n_pairs):
+                with self.assertRaises(ValueError):
+                    _counterfactual_edits(self.idx, self.meta, n_pairs,
+                                          self.vocab)
+        for vocab in (True, 3.0, 17.5, "17"):
+            with self.subTest(vocab=vocab):
+                with self.assertRaises(ValueError):
+                    _counterfactual_edits(self.idx, self.meta, self.n_pairs,
+                                          vocab)
 
     def test_edits_are_deterministic(self):
         again = _counterfactual_edits(
