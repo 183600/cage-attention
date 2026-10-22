@@ -8551,8 +8551,17 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "untestable": "untestable",
     }[verdict["hb2_state"]]
     if verdict["hb7_depth_required"] is None:
-        hb7_txt = ("not determinable (no competent rung)"
-                   if not verdict["ladder_competent"] else "n/a")
+        unmeasured = [
+            d for d, row in ((verdict.get("depth_ladder") or {})
+                             .get("by_depth") or {}).items()
+            if row.get("unmeasured")]
+        if not verdict["ladder_competent"]:
+            hb7_txt = "not determinable (no competent rung)"
+        elif unmeasured:
+            hb7_txt = ("not determinable (unmeasured rung(s) "
+                       f"{', '.join(str(d) for d in unmeasured)})")
+        else:
+            hb7_txt = "not determinable (rule ceiling unknown)"
     elif verdict["hb7_depth_required"]:
         hb7_txt = "required"
     else:
@@ -10039,13 +10048,20 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         sat = verdict.get("saturation_depth")
         req = verdict.get("hb7_depth_required")
         if req is None:
+            unmeasured = [d for d, row in by_depth.items()
+                          if row.get("unmeasured")]
             if verdict.get("ladder_competent") is False:
                 sat_txt = ("not determinable: no ladder rung is above "
                            "chance, so the ladder did not solve the task at "
                            "this step count - depth is unverified either way "
                            "(raise the step count and re-run `--only baselines`)")
+            elif unmeasured:
+                sat_txt = ("not determinable: rung(s) "
+                           f"{', '.join(str(d) for d in unmeasured)} were "
+                           "not measured, so the ladder cannot establish "
+                           "whether depth is required")
             else:
-                sat_txt = "unavailable (rule ceiling unknown)"
+                sat_txt = "not determinable (rule ceiling unknown)"
         elif req:
             sat_txt = ("no rung up to "
                        f"{max(int(d) for d in by_depth)} layers is within "
@@ -12613,8 +12629,20 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                   "depth-based framing of H3a/H3b is unverified (raise the "
                   "step count and re-run `--only baselines`)")
         else:
-            print("[e3] HB7 depth context unavailable (rule ceiling unknown): "
-                  "the depth-based framing of H3a/H3b is unverified")
+            unmeasured = [
+                d for d, row in ((verdict.get("depth_ladder") or {})
+                                 .get("by_depth") or {}).items()
+                if row.get("unmeasured")]
+            if unmeasured:
+                print("[e3] HB7 NOT DETERMINABLE: rung(s) "
+                      f"{', '.join(str(d) for d in unmeasured)} were not "
+                      "measured, so the ladder cannot establish whether "
+                      "depth is required; the depth-based framing of "
+                      "H3a/H3b is unverified")
+            else:
+                print("[e3] HB7 depth context unavailable (rule ceiling "
+                      "unknown): the depth-based framing of H3a/H3b is "
+                      "unverified")
     elif not required:
         sat_sesoi = (verdict.get("depth_ladder") or {}).get(
             "sesoi_accuracy", float("nan"))
