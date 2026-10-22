@@ -186,6 +186,7 @@ from .metrics import (
     noninferiority_test,
     paired_bootstrap_ci,
     seeds_for_power,
+    standardized_proportion,
     wilson_ci,
 )
 from .model import Cfg, GATES, NORMS, build
@@ -1245,6 +1246,101 @@ def _linear_slope(xs, ys):
     if denom <= 0.0:
         return float("nan")
     return sum((x - mx) * (y - my) for x, y in pairs) / denom
+
+
+def _difficulty_vectors(difficulty):
+    """Extract ``(totals, corrects)`` from an ``eval_metrics`` difficulty block.
+
+    Returns two equal-length integer lists indexed by stratum id.  A
+    missing/legacy block yields empty lists so a companion can abstain
+    instead of inventing a composition.
+    """
+    rows = (difficulty or {}).get("strata") or []
+    totals = [max(0, int(row.get("n", 0))) for row in rows]
+    correct = [max(0, int(row.get("correct", 0))) for row in rows]
+    if len(totals) != len(correct):
+        return [], []
+    return totals, correct
+
+
+def _stratum_mix_tv(reference, other):
+    """Total-variation distance between two difficulty-stratum mixes.
+
+    ``0`` means the two evaluation streams have exactly the same
+    retrieval-position x ambiguity composition; a positive value is the
+    share of probability mass that moved.  This is the direct measure of
+    the confound the standardized readout adjusts for, so it is reported
+    beside every standardized contrast.
+    """
+    ref_totals, _ = _difficulty_vectors(reference)
+    other_totals, _ = _difficulty_vectors(other)
+    if (not ref_totals or len(ref_totals) != len(other_totals)
+            or sum(ref_totals) <= 0 or sum(other_totals) <= 0):
+        return float("nan")
+    ref_sum, other_sum = sum(ref_totals), sum(other_totals)
+    return 0.5 * sum(abs(a / ref_sum - b / other_sum)
+                     for a, b in zip(ref_totals, other_totals))
+
+
+def _stamp_difficulty_standardization(rec, base_length, lengths):
+    """Add composition-standardized accuracy fields to one run record.
+
+    ``rec["metrics_by_length"][L]["difficulty"]`` carries the per-stratum
+    counts from ``eval_metrics``.  Reweighting each length to the
+    base-length stratum mix is a pure function of those counts, so it is a
+    separate helper (and is unit-tested) rather than an untested inline
+    block in the E2 loop.
+
+    The fields are exploratory companions: the pre-registered H2 decisions
+    keep reading the raw ``accuracy_*`` / ``accuracy_drop`` values.
+    """
+    base_difficulty = (rec["metrics_by_length"]
+                       .get(base_length, {}).get("difficulty"))
+    reference_totals, _ = _difficulty_vectors(base_difficulty)
+    base_std = float("nan")
+    for length in lengths:
+        block = (rec["metrics_by_length"].get(length, {})
+                 .get("difficulty"))
+        totals, correct = _difficulty_vectors(block)
+        standardized = standardized_proportion(correct, totals,
+                                               reference_totals)
+        rec.setdefault(
+            "difficulty_standardized_accuracy_by_length", {})[length] = (
+                standardized["rate"])
+        rec.setdefault(
+            "difficulty_standardized_coverage_by_length", {})[length] = (
+                standardized["coverage"])
+        rec.setdefault(
+            "difficulty_standardized_effective_n_by_length", {})[length] = (
+                standardized["effective_n"])
+        rec.setdefault(
+            "difficulty_standardized_min_stratum_n_by_length", {})[length] = (
+                standardized["min_stratum_n"])
+        rec.setdefault("difficulty_mix_tv_by_length", {})[length] = (
+            _stratum_mix_tv(base_difficulty, block))
+        if length == base_length:
+            base_std = standardized["rate"]
+    long_std = rec.get("difficulty_standardized_accuracy_by_length", {}).get(
+        lengths[-1], float("nan"))
+    rec["difficulty_standardized_accuracy_at_base"] = base_std
+    rec["difficulty_standardized_accuracy_at_longest"] = long_std
+    rec["difficulty_standardized_accuracy_drop"] = base_std - long_std
+    rec["difficulty_standardized_accuracy_slope_log_len"] = _linear_slope(
+        [math.log(max(2 * L + 2, 2)) for L in lengths],
+        [rec["difficulty_standardized_accuracy_by_length"].get(L)
+         for L in lengths])
+    rec["difficulty_standardized_coverage_at_longest"] = rec.get(
+        "difficulty_standardized_coverage_by_length", {}).get(
+            lengths[-1], float("nan"))
+    rec["difficulty_standardized_effective_n_at_longest"] = rec.get(
+        "difficulty_standardized_effective_n_by_length", {}).get(
+            lengths[-1], float("nan"))
+    rec["difficulty_standardized_min_stratum_n_at_longest"] = rec.get(
+        "difficulty_standardized_min_stratum_n_by_length", {}).get(
+            lengths[-1], 0)
+    rec["difficulty_mix_tv_at_longest"] = rec.get(
+        "difficulty_mix_tv_by_length", {}).get(lengths[-1], float("nan"))
+    return rec
 
 
 def _aggregate_runs(runs, skip=("seed", "lr", "params", "eval_seed",
@@ -11479,6 +11575,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                    "maxprob_by_length": {}, "gate_by_length": {},
                    "gate_vs_entropy_by_length": {},
                    "gate_vs_maxprob_by_length": {},
+                   "difficulty_standardized_accuracy_by_length": {},
+                   "difficulty_standardized_coverage_by_length": {},
+                   "difficulty_standardized_effective_n_by_length": {},
+                   "difficulty_standardized_min_stratum_n_by_length": {},
+                   "difficulty_mix_tv_by_length": {},
                    **_run_context(settings),
                    **record_extra,
                    **_training_record(settings, lr),
@@ -11530,6 +11631,17 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                         corr_by_len.get("gate_vs_entropy", float("nan")))
                     rec["gate_vs_maxprob_by_length"][length] = (
                         corr_by_len.get("gate_vs_maxprob", float("nan")))
+            # Difficulty-composition control.  A length sweep is not a pure
+            # length manipulation: more pairs per sequence also raise the
+            # chance that the answer value repeats and that the query token
+            # appears later as a value, so raw accuracy at a longer length
+            # mixes the length effect with a harder data mix.  Re-weight
+            # every length's per-stratum accuracy to the *base-length*
+            # stratum mix (post-stratification on a pre-treatment
+            # covariate).  This is an exploratory robustness companion;
+            # the pre-registered H2 decision rows remain the raw readouts.
+            _stamp_difficulty_standardization(
+                rec, settings.n_pairs, lengths)
             # Mechanism manipulation check for H2b (no new run/grid point):
             # the trained length and concentration coefficients say whether
             # the gate actually implements the explicit log-T / entropy
@@ -12213,6 +12325,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     length_contrasts = _e2_per_length_contrasts(
         settings, out_dir, by_variant, lengths)
     endpoint_companions = _e2_endpoint_class_companions(by_variant, lengths)
+    difficulty_companions = _e2_difficulty_companions(by_variant, lengths)
     per_variant_tuning = _e2_per_variant_tuning(
         settings, out_dir, lr, by_variant, lengths)
     length_efficiency = _length_efficiency_companion(
@@ -12263,8 +12376,169 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     e2_summary["_per_variant_tuning"] = per_variant_tuning
     e2_summary["_efficiency"] = length_efficiency
     e2_summary["_class_frequency_companions"] = endpoint_companions
+    e2_summary["_difficulty_companions"] = difficulty_companions
+    e2_summary["_difficulty_standardized"] = {
+        label: {
+            str(L): _mean_std([
+                (r.get("difficulty_standardized_accuracy_by_length") or {})
+                .get(L) for r in by_variant[label]])
+            for L in lengths}
+        for label, *_ in _E2_VARIANTS}
+    e2_summary["_difficulty_standardized_coverage"] = {
+        label: {
+            str(L): _mean_std([
+                (r.get("difficulty_standardized_coverage_by_length") or {})
+                .get(L) for r in by_variant[label]])
+            for L in lengths}
+        for label, *_ in _E2_VARIANTS}
+    e2_summary["_difficulty_mix_tv"] = {
+        label: {
+            str(L): _mean_std([
+                (r.get("difficulty_mix_tv_by_length") or {}).get(L)
+                for r in by_variant[label]])
+            for L in lengths}
+        for label, *_ in _E2_VARIANTS}
     e2_summary["_provenance"] = _stamp(settings)
     _write_json(out_dir / "e2_summary.json", e2_summary)
+
+
+def _e2_difficulty_companions(by_variant: dict, lengths: list) -> dict:
+    """Difficulty-composition robustness companion for the E2 endpoint.
+
+    The length sweep grows ``n_pairs`` with the sequence length, so the
+    *pre-treatment* difficulty mix changes: a longer sequence is more likely
+    to contain a repeated answer value or a query token that also appears
+    later as a value.  A raw accuracy drop therefore mixes the length effect
+    with a harder data mix.  This companion re-weights every arm's
+    per-stratum accuracy at the endpoint to the base-length stratum mix
+    (:func:`cage.metrics.standardized_proportion`) and re-pairs the same
+    seeds.  It is exploratory - the pre-registered H2 decision rows remain
+    the raw readouts - but a sign reversal here means the raw endpoint
+    should not be attributed to length calibration.
+    """
+    base_length = int(lengths[0])
+    endpoint = int(lengths[-1])
+
+    def tagged(runs):
+        rows = []
+        for run in runs:
+            rows.append({
+                **run,
+                "accuracy": run.get("accuracy_at_longest"),
+                "difficulty_standardized_accuracy": run.get(
+                    "difficulty_standardized_accuracy_at_longest"),
+                "difficulty_standardized_accuracy_drop": run.get(
+                    "difficulty_standardized_accuracy_drop"),
+            })
+        return rows
+
+    def _sign(ci):
+        mean = ci.get("mean")
+        if not _finite(mean) or float(mean) == 0.0:
+            return 0
+        return 1 if float(mean) > 0.0 else -1
+
+    def _sign_label(raw_ci, std_ci):
+        raw, std = _sign(raw_ci), _sign(std_ci)
+        if raw == 0 or std == 0:
+            return "undetermined"
+        return "consistent" if raw == std else "REVERSED"
+
+    print(f"\n[e2] difficulty-composition robustness companion (exploratory, "
+          f"outside the FDR family): reweighting each length's per-stratum "
+          f"accuracy to the L={base_length} retrieval-position x ambiguity "
+          f"mix.  More pairs at a longer length means more repeated values "
+          f"and naive-confusable queries, so raw accuracy at L={endpoint} "
+          f"mixes length with a harder data mix; 'std' removes that mix "
+          f"difference.  The pre-registered H2 rows stay the raw readouts.")
+    print(f"{'arm':>16} {'raw@long':>18} {'std@long':>18} "
+          f"{'raw_drop':>18} {'std_drop':>18} {'cov@long':>9} "
+          f"{'effN@long':>10} {'mixTV@long':>11}")
+    by_arm = {}
+    for label, *_ in _E2_VARIANTS:
+        runs = by_variant[label]
+        raw_acc = _mean_std([r.get("accuracy_at_longest") for r in runs])
+        std_acc = _mean_std([
+            r.get("difficulty_standardized_accuracy_at_longest")
+            for r in runs])
+        raw_drop = _mean_std([r.get("accuracy_drop") for r in runs])
+        std_drop = _mean_std([
+            r.get("difficulty_standardized_accuracy_drop") for r in runs])
+        coverage = _mean_std([
+            r.get("difficulty_standardized_coverage_at_longest")
+            for r in runs])
+        effective_n = _mean_std([
+            r.get("difficulty_standardized_effective_n_at_longest")
+            for r in runs])
+        mix_tv = _mean_std([
+            r.get("difficulty_mix_tv_at_longest") for r in runs])
+        by_arm[label] = {
+            "raw_accuracy_at_longest": raw_acc,
+            "difficulty_standardized_accuracy_at_longest": std_acc,
+            "raw_accuracy_drop": raw_drop,
+            "difficulty_standardized_accuracy_drop": std_drop,
+            "difficulty_standardized_coverage_at_longest": coverage,
+            "difficulty_standardized_effective_n_at_longest": effective_n,
+            "difficulty_mix_tv_at_longest": mix_tv,
+        }
+
+        def _cell(agg):
+            if not _finite(agg.get("mean")):
+                return "n/a"
+            return f"{agg['mean']:+.4f}±{agg['std']:.4f}"
+
+        print(f"{label:>16} {_cell(raw_acc):>18} {_cell(std_acc):>18} "
+              f"{_cell(raw_drop):>18} {_cell(std_drop):>18} "
+              f"{_cell(coverage):>9} {_cell(effective_n):>10} "
+              f"{_cell(mix_tv):>11}")
+    print(f"\n[e2] difficulty-standardized endpoint contrasts (paired over "
+          f"training seeds; same protocol as the accuracy companions):")
+    print(f"{'contrast':>18} {'raw acc':>28} {'std acc':>28} "
+          f"{'raw drop':>28} {'std drop':>28} {'signs':>15}")
+    contrasts = {}
+    for rule, a_label, b_label in (
+            ("calib - none", "calib", "none"),
+            ("calib - query", "calib", "query")):
+        tagged_a = tagged(by_variant[a_label])
+        tagged_b = tagged(by_variant[b_label])
+        raw_acc = _paired_diff(tagged_a, tagged_b, "accuracy")
+        std_acc = _paired_diff(tagged_a, tagged_b,
+                               "difficulty_standardized_accuracy")
+        raw_drop = _paired_diff(tagged_a, tagged_b, "accuracy_drop")
+        std_drop = _paired_diff(tagged_a, tagged_b,
+                                "difficulty_standardized_accuracy_drop")
+        acc_signs = _sign_label(raw_acc, std_acc)
+        drop_signs = _sign_label(raw_drop, std_drop)
+        contrasts[rule] = {
+            "raw_accuracy_at_longest": raw_acc,
+            "difficulty_standardized_accuracy_at_longest": std_acc,
+            "raw_accuracy_drop": raw_drop,
+            "difficulty_standardized_accuracy_drop": std_drop,
+            "accuracy_sign_agreement": acc_signs,
+            "drop_sign_agreement": drop_signs,
+            "raw_and_standardized_agree": bool(
+                acc_signs != "REVERSED" and drop_signs != "REVERSED"),
+        }
+        print(f"{rule:>18} {_fmt_ci(raw_acc):>28} {_fmt_ci(std_acc):>28} "
+              f"{_fmt_ci(raw_drop):>28} {_fmt_ci(std_drop):>28} "
+              f"{(acc_signs + '/' + drop_signs):>15}")
+        if acc_signs == "REVERSED" or drop_signs == "REVERSED":
+            print(f"      -> {rule}: WARNING the raw and "
+                  f"difficulty-standardized endpoint effects do not agree "
+                  f"in sign (accuracy: {acc_signs}, drop: {drop_signs}); "
+                  f"the raw H2 reading is confounded by the changing "
+                  f"difficulty mix and must not be attributed to length "
+                  f"calibration alone")
+    return {
+        "reference_length": base_length,
+        "endpoint_length": endpoint,
+        "by_arm": by_arm,
+        "contrasts": contrasts,
+        "note": ("exploratory post-stratification companion: per-stratum "
+                 "accuracy at the endpoint reweighted to the base-length "
+                 "retrieval-position x ambiguity mix; the pre-registered "
+                 "H2 rows and FDR family are unchanged"),
+    }
 
 
 def _e2_endpoint_class_companions(by_variant: dict,

@@ -12,10 +12,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .data import (
+    DEFAULT_DIFFICULTY_KEY_BINS,
     STATS_SEED,
     VAL_SEED,
     batch_fingerprint,
     check_train_seed,
+    difficulty_strata,
+    difficulty_stratum_labels,
     make_batch,
     stream_seed_key,
     validate_batch,
@@ -2115,19 +2118,23 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     training_states = {module: module.training for module in model.modules()}
     try:
         model.eval()
-        logits_all, tgt_all = [], []
+        logits_all, tgt_all, strata_all = [], [], []
         for i in range(batches):
             idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
             validate_batch(idx, tgt, meta, vocab, diagnostics=False)
             logits, _, _ = model(idx)
             logits_all.append(logits.squeeze(1).float())
             tgt_all.append(meta["answer"])
+            strata_all.append(difficulty_strata(
+                idx, meta["answer"], n_pairs)["stratum"].cpu())
         if logits_all:
             logits_cat = torch.cat(logits_all, dim=0).cpu()
             tgt_cat = torch.cat(tgt_all, dim=0).cpu()
+            strata_cat = torch.cat(strata_all, dim=0).cpu()
         else:
             logits_cat = torch.empty((0, vocab))
             tgt_cat = torch.empty((0,), dtype=torch.long)
+            strata_cat = torch.empty((0,), dtype=torch.long)
         # Reported metrics must be as traceable as training: if any evaluation
         # row carries non-finite logits, its accuracy/NLL/calibration values are
         # meaningless.  Stamp the finite fraction on every metric record and say
@@ -2154,6 +2161,46 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         # finite stream is a real source of uncertainty for paired contrasts
         # (see ``cage.experiments._paired_diff``).
         out["correct_bitmask"] = encode_correct_mask(pred == tgt_cat)
+        # Per-stratum recall by *pre-treatment* difficulty: retrieval
+        # position (relative tertile) x structural ambiguity.  A length
+        # sweep changes the ambiguity mix by construction (more pairs ->
+        # more repeated values / naive-confusable queries), so the raw
+        # accuracy drop conflates length with data difficulty.  Recording
+        # the joint counts lets the experiment layer post-stratify to a
+        # common reference mix (``cage.metrics.standardized_proportion``)
+        # without a second model pass.
+        n_key_bins = DEFAULT_DIFFICULTY_KEY_BINS
+        n_strata = 4 * n_key_bins
+        correct_rows = pred == tgt_cat
+        strata_counts = torch.bincount(strata_cat, minlength=n_strata)
+        strata_correct = torch.bincount(
+            strata_cat[correct_rows], minlength=n_strata)
+        strata_rows = []
+        for sid, label in enumerate(difficulty_stratum_labels(n_key_bins)):
+            n_s = int(strata_counts[sid].item())
+            k_s = int(strata_correct[sid].item())
+            strata_rows.append({
+                "id": int(sid),
+                "key_bin": int(label["key_bin"]),
+                "ambiguity": label["ambiguity"],
+                "n": n_s, "correct": k_s,
+                # ``None`` (not NaN) for an unobserved stratum: records are
+                # compared for exact reproducibility, and NaN != NaN would
+                # make an otherwise identical evaluation look different.
+                "accuracy": (k_s / n_s) if n_s else None,
+            })
+        observed = sum(1 for row in strata_rows if row["n"] > 0)
+        out["difficulty"] = {
+            "n_pairs": int(n_pairs),
+            "n_key_bins": int(n_key_bins),
+            "n_strata": int(n_strata),
+            "observed_strata": int(observed),
+            "coverage_of_possible": observed / n_strata,
+            "strata": strata_rows,
+            "note": ("pre-treatment retrieval-position x ambiguity strata; "
+                     "post-stratify across lengths with the base-length "
+                     "counts instead of comparing raw compositions"),
+        }
         return out
     finally:
         for module, training in training_states.items():

@@ -97,6 +97,7 @@ __all__ = [
     "clustered_proportion_ci",
     "selection_at_fraction",
     "seeds_for_power",
+    "standardized_proportion",
     "wilson_ci",
     "cohens_d_paired",
     "hedges_g_paired",
@@ -1145,6 +1146,149 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
     return {"p": p, "lo": lo, "hi": hi, "n": total}
 
 
+def standardized_proportion(successes, totals, reference_weights=None) -> dict:
+    """Post-stratified (directly standardized) rate over fixed strata.
+
+    ``successes[i] / totals[i]`` is the observed rate inside stratum ``i``
+    and ``reference_weights[i]`` is that stratum's mass in a *common*
+    reference population.  The returned ``rate`` is
+
+    ``sum_i w_i * p_i / sum_i w_i``  (over strata with ``totals[i] > 0``)
+
+    i.e. the accuracy the arm would have if every length/condition had the
+    reference composition instead of its own.  This is the standard
+    post-stratification estimator for a *pre-treatment* covariate: the
+    stratum is fixed by the generated sample (retrieval distance /
+    structural ambiguity), never by the model, so reweighting cannot
+    remove the mechanism effect being measured - it only removes the
+    composition difference that otherwise confounds a length sweep.
+
+    ``reference_weights=None`` uses ``totals`` itself, which reproduces the
+    pooled (unstratified) rate; passing the base-length stratum counts
+    makes a longer-length accuracy comparable to the base length.  Strata
+    with no target observations cannot be estimated; they are dropped and
+    ``coverage`` reports the fraction of reference mass that remains, so a
+    comparison across a sparse stratum is never silently extrapolated.
+
+    ``se``/``lo``/``hi`` use the design-based variance of a post-stratified
+    proportion, ``sum_i W_i^2 p_i (1-p_i) / n_i`` with ``W_i`` the
+    normalized reference weights, and a normal 95% interval.  It is a
+    *within-stream* approximation used for the exploratory companion; the
+    seed-level paired bootstrap remains the decision layer.
+
+    Counts must be non-negative integers; malformed input returns a
+    ``valid=False`` payload with NaN fields instead of raising, matching
+    ``wilson_ci``'s contract so a reporting companion can abstain.
+    """
+    def _as_vector(values):
+        try:
+            raw = torch.as_tensor(values)
+        except (TypeError, ValueError, RuntimeError):
+            return None, "values must be numeric"
+        if raw.dtype == torch.bool or raw.is_complex():
+            return None, "values must be real numeric counts"
+        if raw.numel() == 0:
+            return None, "empty counts"
+        try:
+            out = raw.detach().reshape(-1).to(device="cpu",
+                                              dtype=torch.float64)
+        except (TypeError, ValueError, RuntimeError):
+            return None, "values must be numeric counts"
+        if not bool(torch.isfinite(out).all()):
+            return None, "counts must be finite"
+        return out, ""
+
+    s, why = _as_vector(successes)
+    n, why_n = _as_vector(totals)
+    first_error = why or why_n
+    n_strata = 0 if s is None else int(s.numel())
+    out = {
+        "rate": float("nan"), "se": float("nan"),
+        "lo": float("nan"), "hi": float("nan"),
+        "coverage": 0.0, "n_strata": n_strata, "n_used": 0,
+        "total_success": 0, "total_n": 0, "pooled_rate": float("nan"),
+        "effective_n": float("nan"), "min_stratum_n": 0,
+        "strata": [], "valid": False, "reason": "",
+    }
+    if first_error:
+        out["reason"] = first_error
+        return out
+    if n is None or s.numel() != n.numel():
+        out["reason"] = "successes and totals must have the same length"
+        return out
+    for name, values in (("successes", s), ("totals", n)):
+        if bool((values < 0).any()):
+            out["reason"] = f"{name} must be non-negative"
+            return out
+        if not bool(values.eq(values.round()).all()):
+            out["reason"] = f"{name} must be integers"
+            return out
+        if name == "successes" and not bool((values <= n).all()):
+            out["reason"] = "successes must not exceed totals"
+            return out
+    if reference_weights is None:
+        w = n.clone()
+    else:
+        w, why_w = _as_vector(reference_weights)
+        if why_w:
+            out["reason"] = f"reference_weights: {why_w}"
+            return out
+        if w.numel() != s.numel():
+            out["reason"] = (
+                "reference_weights must have one entry per stratum")
+            return out
+        if bool((w < 0).any()):
+            out["reason"] = "reference_weights must be non-negative"
+            return out
+    if float(w.sum()) <= 0.0:
+        out["reason"] = "reference weights sum to zero"
+        return out
+    usable = (n > 0) & (w > 0)
+    out["coverage"] = float(w[usable].sum() / w.sum())
+    out["n_used"] = int(usable.sum())
+    if not bool(usable.any()):
+        out["reason"] = "no stratum is observed in both target and reference"
+        return out
+    p = torch.where(n > 0, s / torch.clamp(n, min=1.0),
+                    torch.zeros_like(s))
+    w_used = w[usable]
+    weight_sum = w_used.sum()
+    w_norm = w_used / weight_sum
+    counts_used = torch.clamp(n[usable], min=1.0)
+    rate = (w_used * p[usable]).sum() / weight_sum
+    variance = ((w_norm ** 2) * p[usable]
+                * (1.0 - p[usable]) / counts_used).sum()
+    # Kish-style effective sample size of the weighted stratum mean: a
+    # reference bin represented by one or two base samples can dominate a
+    # standardized comparison, so the companion must expose its precision
+    # instead of printing a four-decimal rate as if it were well measured.
+    effective_n = 1.0 / float(((w_norm ** 2) / counts_used).sum())
+    se = float(torch.sqrt(torch.clamp(variance, min=0.0)))
+    z = 1.959964
+    rate_f = float(rate)
+    lo = max(0.0, rate_f - z * se)
+    hi = min(1.0, rate_f + z * se)
+    out.update({
+        "rate": rate_f, "se": se, "lo": lo, "hi": hi,
+        "total_success": int(s[usable].sum().item()),
+        "total_n": int(n[usable].sum().item()),
+        "pooled_rate": (float(s[usable].sum() / n[usable].sum())
+                        if float(n[usable].sum()) > 0.0 else float("nan")),
+        "effective_n": float(effective_n),
+        "min_stratum_n": int(counts_used.min().item()),
+        "strata": [
+            {"id": i,
+             "successes": int(s[i].item()), "total": int(n[i].item()),
+             "rate": (float(p[i]) if n[i] > 0 else float("nan")),
+             "reference_weight": float(w[i]),
+             "used": bool(usable[i])}
+            for i in range(int(s.numel()))
+        ],
+        "valid": True, "reason": "",
+    })
+    return out
+
+
 def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
                             seed: int = 0, alpha: float = 0.05,
                             lower_alpha: float | None = None) -> dict:
@@ -1528,6 +1672,45 @@ def _self_test() -> int:
     bad_alpha_cluster = clustered_proportion_ci([50] * 5, [100] * 5,
                                                lower_alpha=2.0)
     check("cluster_bad_quantile_no_claim", not bad_alpha_cluster["valid"])
+
+    # Post-stratification: reweighting to a common reference mix must
+    # reproduce the pooled rate with self-weights, apply the reference
+    # weights exactly, and drop a stratum with no target observations
+    # while reporting how much reference mass was lost.
+    std_pooled = standardized_proportion([9, 1], [10, 10])
+    check("standardized_self_weights_pooled",
+          abs(std_pooled["rate"] - 0.5) < 1e-12
+          and abs(std_pooled["pooled_rate"] - 0.5) < 1e-12
+          and std_pooled["coverage"] == 1.0)
+    std_ref = standardized_proportion([9, 1], [10, 10], [90, 10])
+    check("standardized_reference_weights",
+          abs(std_ref["rate"] - 0.82) < 1e-12
+          and std_ref["lo"] <= std_ref["rate"] <= std_ref["hi"])
+    std_missing = standardized_proportion([9, 0], [10, 0], [100, 100])
+    check("standardized_missing_stratum_renormalized",
+          abs(std_missing["rate"] - 0.9) < 1e-12
+          and std_missing["coverage"] == 0.5
+          and std_missing["n_used"] == 1
+          and std_missing["effective_n"] == 10.0
+          and std_missing["min_stratum_n"] == 10)
+    check("standardized_effective_n_disclosed",
+          abs(std_pooled["effective_n"] - 20.0) < 1e-12)
+    check("standardized_empty_no_claim",
+          not standardized_proportion([], [])["valid"])
+    check("standardized_all_zero_target_no_claim",
+          not standardized_proportion([0, 0], [0, 0])["valid"])
+    check("standardized_mismatched_no_claim",
+          not standardized_proportion([1], [1, 1])["valid"])
+    check("standardized_fractional_no_claim",
+          not standardized_proportion([0.5, 1], [1, 1])["valid"])
+    check("standardized_success_overflow_no_claim",
+          not standardized_proportion([2, 0], [1, 1])["valid"])
+    check("standardized_negative_no_claim",
+          not standardized_proportion([-1, 1], [1, 1])["valid"])
+    check("standardized_bad_reference_no_claim",
+          not standardized_proportion([1, 1], [2, 2], [-1, 1])["valid"]
+          and not standardized_proportion([1, 1], [2, 2], [0, 0])["valid"]
+          and not standardized_proportion([1, 1], [2, 2], [1])["valid"])
 
     for label, kwargs in (
             ("alpha", {"sd": 1.0, "effect": 0.5, "alpha": 1.5}),

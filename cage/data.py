@@ -1256,8 +1256,32 @@ _AUDIT_SIM_SEED = 90210
 _AUDIT_SMOOTH = 0.5
 
 
-def _difficulty_features(split, n_pairs):
-    """Per-sample structural difficulty covariates of one drawn split.
+# Ambiguity strata used by :func:`difficulty_strata`.  The encoding is a
+# two-bit code: bit 0 = naive-confusable, bit 1 = repeated answer value, so
+# every id in [0, 4) names one combination and the id is stable across
+# audits/records.
+_AMBIGUITY_LABELS = ("none", "naive_confusable", "value_repeats", "both")
+
+# Relative retrieval-position bins used by the default difficulty stratum.
+# Three bins keep every cell populated at the audit/evaluation sizes while
+# still separating early / middle / late retrieval, and the same id means
+# the same *relative* position at every sequence length.
+DEFAULT_DIFFICULTY_KEY_BINS = 3
+
+
+def _difficulty_int(value, name):
+    """Reject bool/fractional metadata instead of silently truncating it."""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer, not bool")
+    try:
+        return int(operator.index(value))
+    except TypeError as exc:
+        raise ValueError(
+            f"{name} must be an integer, got {value!r}") from exc
+
+
+def difficulty_features(idx, answer, n_pairs):
+    """Per-sample structural difficulty covariates of one batch.
 
     Derived from the validated ``[k1 v1 ... kn vn SEP query]`` layout (the
     query is the last column of ``idx``; the answer is stored separately),
@@ -1270,11 +1294,39 @@ def _difficulty_features(split, n_pairs):
       as a value, so the naive "last visible match wins" rule differs from
       the exact pair lookup.
 
+    These are exactly the task-structural factors that make a length sweep
+    non-comparable: with more pairs per sequence the chance that a value
+    repeats or that the query token appears later as a value grows, so raw
+    accuracy at a longer length mixes a length effect with a data-
+    difficulty effect.  :func:`difficulty_strata` turns the covariates into
+    a small categorical stratum that can be used for post-stratification
+    (:func:`cage.metrics.standardized_proportion`).
+
     Mirrors ``cage.train._error_case_flags`` so the audit measures exactly
-    the difficulty factors used to explain errors downstream.
+    the difficulty factors used to explain errors downstream.  The batch
+    geometry is checked instead of inferred from slicing: a narrower
+    ``idx`` would otherwise silently pair the wrong columns and label a
+    malformed batch as easy/hard.
     """
-    idx = split["idx"]
-    answer = split["answer"]
+    n_pairs = _difficulty_int(n_pairs, "n_pairs")
+    if n_pairs < 1:
+        raise ValueError(f"n_pairs must be >= 1, got {n_pairs}")
+    if not _is_integer_tensor(idx) or idx.dim() != 2:
+        raise ValueError(
+            "idx must be a (batch, 2*n_pairs + 2) integer tensor, got "
+            f"{type(idx)}")
+    if not _is_integer_tensor(answer) or answer.dim() != 1:
+        raise ValueError("answer must be a 1-D integer tensor")
+    batch, width = idx.shape
+    expected = 2 * n_pairs + 2
+    if width != expected:
+        raise ValueError(
+            f"idx width {width} does not match the [k v]*{n_pairs} + SEP + "
+            f"query layout ({expected} positions)")
+    if int(answer.numel()) != int(batch):
+        raise ValueError(
+            f"answer has {int(answer.numel())} entries for {int(batch)} "
+            f"sequences")
     query = idx[:, -1]
     keys = idx[:, :2 * n_pairs:2]
     match = keys.eq(query.unsqueeze(1))
@@ -1290,6 +1342,79 @@ def _difficulty_features(split, n_pairs):
     naive_confusable = last_match.ne(key_pos.mul(2)).to(torch.int64)
     return {"key_pos": key_pos, "value_repeats": value_repeats,
             "naive_confusable": naive_confusable}
+
+
+def difficulty_stratum_labels(n_key_bins=DEFAULT_DIFFICULTY_KEY_BINS):
+    """JSON-safe labels for :func:`difficulty_strata` ids.
+
+    Ids are ``key_bin * 4 + ambiguity_code``; the accompanying bounds are
+    in *pair-index* space (``key_bin`` is a relative retrieval-position
+    tercile, so the same id is comparable across lengths even though the
+    absolute distance differs).
+    """
+    n_key_bins = _difficulty_int(n_key_bins, "n_key_bins")
+    if n_key_bins < 1:
+        raise ValueError(f"n_key_bins must be >= 1, got {n_key_bins}")
+    return [
+        {"id": bin_idx * 4 + ambiguity,
+         "key_bin": bin_idx,
+         "ambiguity": _AMBIGUITY_LABELS[ambiguity]}
+        for bin_idx in range(n_key_bins)
+        for ambiguity in range(4)
+    ]
+
+
+def difficulty_strata(idx, answer, n_pairs,
+                      n_key_bins=DEFAULT_DIFFICULTY_KEY_BINS):
+    """Map each sample to a joint retrieval-position x ambiguity stratum.
+
+    ``n_key_bins`` relative retrieval-position bins are crossed with the
+    four ambiguity states of :data:`_AMBIGUITY_LABELS`, giving
+    ``4 * n_key_bins`` strata.  A stratum is a *pre-treatment* covariate:
+    it is fixed by the generated sequence, not by a model, so conditioning
+    on it cannot remove the effect of the mechanism under test.  That is
+    what makes it valid for post-stratifying accuracy across lengths:
+    ``standardized_proportion(correct, n, reference_weights)`` reweights
+    each length's per-stratum accuracy to the same reference mix instead
+    of comparing compositions that differ by construction.
+
+    Returns ``{"stratum", "key_bin", "ambiguity", "labels",
+    "key_bin_bounds"}``.  ``stratum``/``key_bin``/``ambiguity`` are
+    per-sample tensors; ``labels`` and ``key_bin_bounds`` describe the
+    encoding for records (all JSON-safe).
+    """
+    n_key_bins = _difficulty_int(n_key_bins, "n_key_bins")
+    if n_key_bins < 1:
+        raise ValueError(f"n_key_bins must be >= 1, got {n_key_bins}")
+    n_pairs = _difficulty_int(n_pairs, "n_pairs")
+    if n_pairs < 1:
+        raise ValueError(f"n_pairs must be >= 1, got {n_pairs}")
+    features = difficulty_features(idx, answer, n_pairs)
+    key_bin = (features["key_pos"] * n_key_bins // n_pairs).clamp(
+        max=n_key_bins - 1).to(torch.long)
+    # bit 0 = naive-confusable, bit 1 = repeated value.  Ordering repeat
+    # above naive matches the historical ``difficulty_joint`` encoding at
+    # n_key_bins == n_pairs, so the two audit views cannot drift apart.
+    ambiguity = (features["value_repeats"] * 2
+                 + features["naive_confusable"]).to(torch.long)
+    stratum = key_bin * 4 + ambiguity
+    bounds = [[math.ceil(bin_idx * n_pairs / n_key_bins),
+               math.ceil((bin_idx + 1) * n_pairs / n_key_bins)]
+              for bin_idx in range(n_key_bins)]
+    return {
+        "stratum": stratum,
+        "key_bin": key_bin,
+        "ambiguity": ambiguity,
+        "labels": difficulty_stratum_labels(n_key_bins),
+        "key_bin_bounds": bounds,
+        "n_key_bins": n_key_bins,
+        "n_strata": 4 * n_key_bins,
+    }
+
+
+def _difficulty_features(split, n_pairs):
+    """Backward-compatible wrapper around :func:`difficulty_features`."""
+    return difficulty_features(split["idx"], split["answer"], n_pairs)
 
 
 def _joint_difficulty_values(features):
@@ -2107,6 +2232,29 @@ def _self_test() -> int:
           feat["naive_confusable"].tolist() == [1, 0])
     check("difficulty_joint_encoding",
           _joint_difficulty_values(feat).tolist() == [5, 6])
+    # Difficulty strata are the *pre-treatment* covariate used to
+    # post-stratify accuracy across lengths.  With one bin per pair the
+    # stratum must reproduce the historical joint encoding exactly; with
+    # three relative bins the same samples collapse into the middle bin.
+    strata_exact = difficulty_strata(
+        feat_split["idx"], feat_split["answer"], 3, n_key_bins=3)
+    check("difficulty_strata_matches_joint",
+          strata_exact["stratum"].tolist() == [5, 6])
+    check("difficulty_strata_labels_complete",
+          len(strata_exact["labels"]) == 12
+          and [row["id"] for row in strata_exact["labels"]]
+          == list(range(12)))
+    check("difficulty_strata_bounds_cover_pairs",
+          strata_exact["key_bin_bounds"][0][0] == 0
+          and strata_exact["key_bin_bounds"][-1][1] == 3)
+    # A malformed width must be refused rather than silently slicing the
+    # wrong columns into an "easy" label.
+    try:
+        difficulty_features(feat_split["idx"][:, :-1],
+                            feat_split["answer"], 3)
+        check("difficulty_strata_geometry_rejected", False)
+    except ValueError:
+        check("difficulty_strata_geometry_rejected", True)
 
     # Joint-difficulty shift: the 2x2 marginals are identical in both
     # samples, so the separate field tests are blind by construction; the
