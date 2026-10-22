@@ -70,8 +70,19 @@ def stream_seed_key(seed) -> int:
     ``torch.Generator.manual_seed`` keeps only these bits on CPU, so a seed
     such as ``TEST_SEED + 2**32`` draws the exact sealed stream despite
     comparing unequal to ``TEST_SEED`` as a Python integer.
+
+    ``seed`` must be integral: silently truncating a fractional value would
+    make it draw a *different* stream than the one the caller named (and
+    would let e.g. ``0.5`` alias the protected seed ``0``).
     """
-    return int(seed) & 0xFFFFFFFF
+    if isinstance(seed, bool):
+        raise ValueError(f"stream seed must be an integer, got {seed!r}")
+    try:
+        value = operator.index(seed)
+    except TypeError as exc:
+        raise ValueError(
+            f"stream seed must be an integer, got {seed!r}") from exc
+    return int(value) & 0xFFFFFFFF
 
 
 _RESERVED_EVAL_SEED_KEYS = frozenset(
