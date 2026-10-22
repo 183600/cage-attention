@@ -108,7 +108,11 @@ def measure_forward(model, cfg, seq_len: int, device, batch: int = 1,
             f"seq_len must be in [1, {cfg.max_len}], got {seq_len}")
 
     idx = torch.zeros((batch, seq_len), dtype=torch.long, device=device)
-    was_training = model.training
+    # Snapshot every module, not just the top-level flag: a caller may
+    # deliberately leave a submodule in its previous mode (e.g. dropout
+    # disabled for a diagnostic), and ``model.train(was_training)`` would
+    # silently overwrite that mixed state.
+    training_states = {module: module.training for module in model.modules()}
     model.eval()
     timings = []
     baseline_allocated = None
@@ -131,7 +135,8 @@ def measure_forward(model, cfg, seq_len: int, device, batch: int = 1,
                 peak_allocated = torch.cuda.max_memory_allocated(device)
                 peak_reserved = torch.cuda.max_memory_reserved(device)
     finally:
-        model.train(was_training)
+        for module, training in training_states.items():
+            module.train(training)
 
     ordered = sorted(timings)
     median_ms = statistics.median(ordered)
