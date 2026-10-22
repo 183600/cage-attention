@@ -5625,19 +5625,24 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
         }
         audit["shift_p_value_bh"] = shift_tests
         # Prefix overlap is necessary but not sufficient: training reads
-        # settings.steps * settings.batch samples at its own geometry,
-        # which is a different realization from the eval-geometry prefix.
+        # at least settings.steps * settings.batch samples at its own
+        # geometry, which is a different realization from the
+        # eval-geometry prefix.  The depth ladder and its capacity control
+        # reuse the same seed-owned training stream for up to the largest
+        # _depth_step_candidates budget, so replay that full prefix; a
+        # longer in-order prefix subsumes every shorter training budget.
         # Replay the exact streams each consumer reads (training, val
         # monitoring, final val/test, stats, probe train/val/test) and
         # refuse any content overlap or cross-group seed reuse between
         # different splits.  Realizations of the same split (val monitoring
         # vs final val, probe val vs val) must remain allowed.
+        training_steps = max(_depth_step_candidates(settings))
         actual = actual_stream_overlap_audit(
             settings.n_pairs, settings.vocab, settings.device,
             train_specs={
                 f"train:{seed}": {
                     "seed": int(seed), "batch": settings.batch,
-                    "steps": settings.steps, "group": "train",
+                    "steps": training_steps, "group": "train",
                 }
                 for seed in train_seeds
             } | {
