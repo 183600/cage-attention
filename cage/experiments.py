@@ -10320,6 +10320,64 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
           "a<=0 or c_eff<=0 is not implementing the correction H2a/H2b "
           "name, whatever its endpoint accuracy.)")
 
+    # Decompose the trained gate into the two additive calibration terms at
+    # the training and longest lengths.  This is derived from data already
+    # recorded (learned a / c_eff and the per-length normalised entropy), so
+    # it adds no runs or grid points: it asks *which* term moves with length,
+    # the explicit mechanism H2b/H2c is about.
+    print(f"\n[e2] implied calibration-term contributions at the base and "
+          f"longest sweep lengths (a*log T and c_eff*H/log T, using the "
+          f"trained coefficients; mean±std over seeds).  A length term that "
+          f"is on should show a non-zero drift a*(log T_long - log T_base); "
+          f"a stable concentration term drifts only with H/log T:")
+    print(f"{'arm':>16} {'length@base':>17} {'length@long':>17} "
+          f"{'length_drift':>17} {'conc@base':>17} {'conc@long':>17} "
+          f"{'conc_drift':>17}")
+    term_contributions = {}
+    for label, *_ in _E2_VARIANTS:
+        if not label.startswith("calib"):
+            continue
+        per_run = []
+        for r in by_variant[label]:
+            coeff = r.get("calib_coefficients") or {}
+            if not coeff.get("applicable"):
+                continue
+            a = coeff.get("a_mean", float("nan"))
+            c_eff = coeff.get("c_effective_mean", float("nan"))
+            base_L, long_L = settings.n_pairs, lengths[-1]
+            log_base = math.log(max(2 * base_L + 2, 2))
+            log_long = math.log(max(2 * long_L + 2, 2))
+            h_base = r["entropy_norm_by_length"][base_L]
+            h_long = r["entropy_norm_by_length"][long_L]
+            per_run.append({
+                "length_base": a * log_base if _finite(a) else float("nan"),
+                "length_long": a * log_long if _finite(a) else float("nan"),
+                "length_drift": (a * (log_long - log_base)
+                                 if _finite(a) else float("nan")),
+                "conc_base": (c_eff * h_base if _finite(c_eff)
+                              else float("nan")),
+                "conc_long": (c_eff * h_long if _finite(c_eff)
+                              else float("nan")),
+                "conc_drift": (c_eff * (h_long - h_base) if _finite(c_eff)
+                               else float("nan")),
+            })
+        keys = ("length_base", "length_long", "length_drift",
+                "conc_base", "conc_long", "conc_drift")
+        agg = {key: _mean_std([row[key] for row in per_run])
+               for key in keys}
+        term_contributions[label] = agg
+
+        def tcell(key):
+            m = agg[key]
+            if not math.isfinite(m["mean"]):
+                return "n/a"
+            return f"{m['mean']:+.4f}±{m['std']:.4f}"
+
+        print(f"{label:>16} {tcell('length_base'):>17} "
+              f"{tcell('length_long'):>17} {tcell('length_drift'):>17} "
+              f"{tcell('conc_base'):>17} {tcell('conc_long'):>17} "
+              f"{tcell('conc_drift'):>17}")
+
     print(f"\n[e2] training-curve health (curve_ok = curve-valid runs / "
           f"all runs; late = U-shaped val curves; tail_train = relative "
           f"change over the last third - falling under a plateau verdict "
@@ -10591,6 +10649,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         for label, *_ in _E2_VARIANTS
         if label.startswith("calib")
     }
+    e2_summary["_calibration_term_contributions"] = term_contributions
     e2_summary["_efficiency"] = length_efficiency
     e2_summary["_class_frequency_companions"] = endpoint_companions
     e2_summary["_provenance"] = _stamp(settings)
