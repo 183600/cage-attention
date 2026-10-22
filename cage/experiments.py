@@ -4396,6 +4396,12 @@ def _read_artifact_entries(index_path: pathlib.Path) -> tuple[dict, str | None]:
             name = entry.get("file")
             if not isinstance(name, str) or not name:
                 raise ValueError("every artifact entry needs a non-empty file")
+            if name in entries:
+                # A duplicated entry is not a partially trustworthy list:
+                # silently keeping the last copy would let the next index
+                # write launder a state that ``_verify_artifacts`` rejects.
+                raise ValueError(
+                    f"duplicate artifact entry for file {name!r}")
             entries[name] = entry
         return entries, None
     except (OSError, ValueError, TypeError, UnicodeError) as exc:
