@@ -8314,6 +8314,10 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
             "curve": curve,
             **_training_record(settings, lr),
             **_run_context(settings),
+            # ``_curve_record`` holds the actual seed_everything result for
+            # this run; promote it over the static policy copy stamped by
+            # the run context (the nested curve stays for the full record).
+            "seeding": curve["seeding"],
         }
         _write_result(out_dir / "e1_per_variant_tuning_runs.jsonl", rec)
         tuning_rows.append(rec)
@@ -8900,8 +8904,8 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
         **{k: v for k, v in ed.items() if k != "n"},
         **{f"err_{k}": v for k, v in errors["summary"].items()},
         **_training_record(settings, lr),
-        **curve, **record_extra,
         **_run_context(settings),
+        **curve, **record_extra,
     }
     if _finite(rec.get("gate_vs_entropy")):
         rec["abs_gate_vs_entropy"] = abs(rec["gate_vs_entropy"])
@@ -10639,9 +10643,9 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
             "eval_seed": VAL_SEED, "params": int(params),
             "val_accuracy": float(metrics["accuracy"]),
             "model_cfg": model_cfg,
-            **curve,
             **_training_record(settings, lr),
             **_run_context(settings),
+            **curve,
         }
         _write_result(out_dir / "e2_per_variant_tuning_runs.jsonl", rec)
         tuning_rows.append(rec)
@@ -10775,9 +10779,9 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                     "accuracy_drop": float(base_metrics["accuracy"]
                                            - long_metrics["accuracy"]),
                     "model_cfg": model_cfg,
-                    **curve,
                     **_training_record(settings, final_lr),
                     **_run_context(settings),
+                    **curve,
                 }
                 _write_result(
                     out_dir / "e2_per_variant_tuned_runs.jsonl", rec)
@@ -11029,10 +11033,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                    "maxprob_by_length": {}, "gate_by_length": {},
                    "gate_vs_entropy_by_length": {},
                    "gate_vs_maxprob_by_length": {},
+                   **_run_context(settings),
                    **record_extra,
                    **_training_record(settings, lr),
-                   **curve,
-                   **_run_context(settings)}
+                   **curve}
             errors = None
             for length in lengths:
                 metrics = (base_metrics if length == settings.n_pairs else
@@ -11863,8 +11867,8 @@ def _e3_capacity_matched_pre_reference(settings: Settings,
                 resid[-1] / resid[0].clamp_min(1e-12)),
             **{f"err_{k}": v for k, v in errors["summary"].items()},
             **_training_record(settings, lr),
-            **curve,
             **_run_context(settings),
+            **curve,
         }
         _write_result(out_dir / "e3_capacity_matched_runs.jsonl", rec)
         runs.append(rec)
@@ -12185,8 +12189,8 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                         **{f"err_{k}": v
                            for k, v in errors["summary"].items()},
                         **_training_record(settings, lr),
-                        **curve,
                         **_run_context(settings),
+                        **curve,
                     }
                     _write_result(out_dir / "e3_runs.jsonl", rec)
                     runs.append(rec)
