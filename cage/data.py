@@ -311,13 +311,46 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
             name = "test"
         assigned[name].append(gid)
         cumulative += mass
+    targets = {
+        "train": float(train_frac) * n,
+        "val": float(val_frac) * n,
+        "test": (1.0 - float(train_frac) - float(val_frac)) * n,
+    }
+
+    def _masses():
+        return {name: sum(float(counts[gid]) for gid in gids)
+                for name, gids in assigned.items()}
+
+    def _objective(masses=None):
+        masses = _masses() if masses is None else masses
+        return sum((masses[name] - targets[name]) ** 2 for name in targets)
+
+    # The midpoint pass can leave a split empty when one group dominates the
+    # cumulative mass.  Filling it with an arbitrary last group (the old
+    # behaviour) can move the *largest* group out of ``train`` and destroy
+    # the requested mass allocation.  Donate instead the group whose move
+    # yields the smallest squared deviation from the three target masses, so
+    # the non-empty guarantee does not come at the cost of the split shape.
     for name in ("train", "val", "test"):
-        if not assigned[name]:
-            donor = max(assigned, key=lambda k: len(assigned[k]))
+        if assigned[name]:
+            continue
+        best = None
+        for donor in assigned:
             if len(assigned[donor]) <= 1:
-                raise ValueError(
-                    f"cannot give every split a group at n_groups={n_groups}")
-            assigned[name].append(assigned[donor].pop())
+                continue
+            for gid in list(assigned[donor]):
+                masses = _masses()
+                masses[donor] -= float(counts[gid])
+                masses[name] += float(counts[gid])
+                candidate = (_objective(masses), donor, int(gid))
+                if best is None or candidate < best:
+                    best = candidate
+        if best is None:
+            raise ValueError(
+                f"cannot give every split a group at n_groups={n_groups}")
+        _, donor, gid = best
+        assigned[donor].remove(gid)
+        assigned[name].append(gid)
     out = {}
     for name, gids in assigned.items():
         mask = torch.isin(inverse, torch.tensor(gids, dtype=torch.long))
@@ -2109,6 +2142,16 @@ def _self_test() -> int:
     g_split_again = group_disjoint_split(groups, seed=3)
     check("group_split_deterministic",
           all(torch.equal(g_split[k], g_split_again[k]) for k in g_split))
+    # A dominant group can make the midpoint pass leave a split empty.  The
+    # fallback must donate a group that improves the mass allocation, not
+    # the arbitrary last group (which could be the dominant one and leave
+    # train with only a single small group).
+    imbalanced = torch.arange(3).repeat_interleave(
+        torch.tensor([10, 10, 80]))
+    imbalanced_split = group_disjoint_split(imbalanced, seed=1)
+    check("group_split_fallback_preserves_train_mass",
+          int(imbalanced_split["train"].numel()) == 80)
+    assert_group_disjoint(imbalanced, imbalanced_split)
     g_split_alias = group_disjoint_split(groups, seed=3 + 2 ** 32)
     check("group_split_seed_alias_canonical",
           all(torch.equal(g_split[k], g_split_alias[k]) for k in g_split))
