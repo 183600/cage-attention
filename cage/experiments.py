@@ -8491,7 +8491,11 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
             return "above tuned baseline by SESOI"
         if ci["below_reference"]:
             return "tuned baseline better"
-        return "indistinguishable"
+        if ci.get("indistinguishable"):
+            return "indistinguishable"
+        # A wide CI that contains 0 but reaches outside the SESOI is
+        # inconclusive, not evidence that the arms are indistinguishable.
+        return "inconclusive"
 
     for baseline in ("none", "query", "null"):
         if baseline == "calib" or baseline not in by_arm:
