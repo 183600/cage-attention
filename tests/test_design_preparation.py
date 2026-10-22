@@ -74,6 +74,21 @@ class BlockedRunOrderTest(unittest.TestCase):
         self.assertFalse(broken_audit["complete"])
         self.assertTrue(broken_audit["missing"])
 
+    def test_audit_flags_unplanned_cells_and_invalid_slots(self):
+        complete = _blocked_run_order(self.CELLS, self.SEEDS, 11)
+        extra = list(complete) + [("unplanned", 0, 0, len(self.CELLS))]
+        extra_audit = _run_order_audit(extra, self.CELLS, self.SEEDS)
+        self.assertFalse(extra_audit["complete"])
+        self.assertEqual(extra_audit["unexpected"][0]["cell"], "unplanned")
+        # Every declared cell present, but all at slot 0: the block design
+        # is broken even though the presence counts look complete.
+        bad_slots = [(cell, seed, block, 0)
+                     for cell, seed, block, _ in complete]
+        slot_audit = _run_order_audit(bad_slots, self.CELLS, self.SEEDS)
+        self.assertFalse(slot_audit["complete"])
+        self.assertTrue(slot_audit["invalid_positions"])
+        self.assertFalse(slot_audit["balanced"])
+
     def test_two_block_random_schedule_is_not_over_flagged(self):
         # With only two blocks, a random schedule can put one arm first in
         # both by chance; the family-wise check must not call that a design

@@ -1317,15 +1317,28 @@ def _run_order_audit(order, cells, seeds, randomized=True):
     """
     cells = list(cells)
     seeds = list(seeds)
+    expected = {_coverage_cell_key(c) for c in cells}
+    n_cells = len(cells)
+    n_blocks = len(seeds)
     per_block: dict[int, dict[str, int]] = {}
-    positions: dict[str, list[int]] = {_coverage_cell_key(c): []
-                                       for c in cells}
+    positions: dict[str, list[int]] = {key: [] for key in expected}
+    per_block_positions: dict[int, list[int]] = {}
+    unexpected = []
     for cell, _seed, block, position in order:
         key = _coverage_cell_key(cell)
-        per_block.setdefault(int(block), {}).setdefault(key, 0)
-        per_block[int(block)][key] += 1
-        positions.setdefault(key, []).append(int(position))
-    expected = {_coverage_cell_key(c) for c in cells}
+        block = int(block)
+        position = int(position)
+        per_block.setdefault(block, {}).setdefault(key, 0)
+        per_block[block][key] += 1
+        per_block_positions.setdefault(block, []).append(position)
+        if key not in expected:
+            # A cell that was never declared is an unplanned run: it makes
+            # the schedule incomplete even if every declared cell is also
+            # present exactly once.
+            unexpected.append({"block": block, "cell": key,
+                               "position": position})
+            continue
+        positions[key].append(position)
     missing = []
     duplicated = []
     for block, counts in sorted(per_block.items()):
@@ -1335,11 +1348,27 @@ def _run_order_audit(order, cells, seeds, randomized=True):
             elif counts.get(key, 0) > 1:
                 duplicated.append({"block": block, "cell": key,
                                    "count": counts[key]})
-    n_cells = len(cells)
-    n_blocks = len(seeds)
+    # A complete block design also needs each cell at a distinct slot
+    # 0..n_cells-1 inside its block.  Without this check a schedule that
+    # puts every cell at position 0 (or out of range) would be certified
+    # as complete and balanced.
+    invalid_positions = []
+    for block, slots in sorted(per_block_positions.items()):
+        seen_slots = set()
+        for slot in slots:
+            if not 0 <= slot < n_cells:
+                invalid_positions.append({
+                    "block": block, "position": slot,
+                    "reason": f"outside [0, {n_cells})"})
+            elif slot in seen_slots:
+                invalid_positions.append({
+                    "block": block, "position": slot,
+                    "reason": "duplicate position within the block"})
+            seen_slots.add(slot)
     complete = (bool(cells) and bool(seeds)
                 and set(per_block) == set(range(n_blocks))
-                and not missing and not duplicated)
+                and not missing and not duplicated and not unexpected
+                and not invalid_positions)
     always_first = sorted(
         key for key, vals in positions.items()
         if len(vals) == n_blocks and vals and all(v == 0 for v in vals))
@@ -1366,6 +1395,8 @@ def _run_order_audit(order, cells, seeds, randomized=True):
         "complete": bool(complete),
         "missing": missing,
         "duplicated": duplicated,
+        "unexpected": unexpected,
+        "invalid_positions": invalid_positions,
         "always_first": always_first,
         "always_last": always_last,
         "extreme_p_value": extreme_p,
