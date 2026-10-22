@@ -170,6 +170,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 from collections.abc import Mapping
+from importlib import metadata as importlib_metadata
 import hashlib
 import io
 import json
@@ -6451,6 +6452,7 @@ def _run_event(settings: Settings, experiment: str, event: str, **details) -> No
         }
         path = pathlib.Path(settings.out_dir) / "run_index.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
+        _assert_append_target_intact(path)
         # Append directly rather than through ``_write_result``: a fallback
         # context has no setup hash, and this lifecycle row must still be
         # written when the environment probe itself failed.
@@ -6514,11 +6516,19 @@ def _write_result(path: pathlib.Path, record: dict) -> None:
     record on disk carries "when" next to the ``git_sha`` / ``setup_sha256``
     provenance it already stores inline.  The write is refused (instead of
     appending an orphan row) when the provenance join keys are absent.
+
+    An append to a file that was already certified by an earlier
+    ``artifact_index.json`` is refused when its current bytes no longer
+    match that certificate.  Without this guard the next index write would
+    simply hash the tampered file and launder it into a fresh "verified"
+    entry, so a single edited row could silently re-enter the cumulative
+    chain of custody.
     """
     _validate_result_record(record)
     record.setdefault("created_utc",
                       time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     path.parent.mkdir(parents=True, exist_ok=True)
+    _assert_append_target_intact(path)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         fh.flush()
@@ -6689,6 +6699,70 @@ def _read_artifact_entries(index_path: pathlib.Path) -> tuple[dict, str | None]:
         return entries, None
     except (OSError, ValueError, TypeError, UnicodeError) as exc:
         return {}, f"{type(exc).__name__}: {exc}"
+
+
+def _find_artifact_root(path: pathlib.Path) -> pathlib.Path | None:
+    """Nearest ancestor directory that carries an ``artifact_index.json``."""
+    for candidate in (path.parent, *path.parents):
+        if (candidate / "artifact_index.json").is_file():
+            return candidate
+    return None
+
+
+def _assert_append_target_intact(path) -> None:
+    """Refuse to append to a previously certified but changed file.
+
+    ``_write_artifact_index`` hashes whatever is on disk when an invocation
+    ends.  Without this pre-append check, appending to a JSONL file that an
+    earlier invocation certified - after someone edited or truncated it -
+    would let the next index write re-certify the modified history.  The
+    check is intentionally limited to files that appear in an existing
+    index; a brand-new or legacy untracked file is allowed through and will
+    be covered by the index written at the end of the invocation.
+    """
+    path = pathlib.Path(path)
+    if path.resolve() in _RUN_ARTIFACTS:
+        # This process already wrote the file (and therefore knows its
+        # current state); re-hashing a growing JSONL before every row would
+        # make long grids quadratic.
+        return
+    root = _find_artifact_root(path)
+    if root is None:
+        return
+    entries, error = _read_artifact_entries(root / "artifact_index.json")
+    if error is not None:
+        raise TrackingError(
+            f"refusing to append to {path}: the previous artifact index in "
+            f"{root} is unreadable ({error}); the cumulative chain of "
+            f"custody cannot be checked")
+    try:
+        relative = path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return
+    entry = entries.get(relative)
+    if entry is None:
+        return
+    if not path.exists():
+        raise TrackingError(
+            f"refusing to recreate {path}: the artifact index certifies it "
+            f"({entry['bytes']} bytes, {entry['sha256'][:12]}) but the file "
+            f"is missing; restore it or rebuild the results directory "
+            f"deliberately instead of letting a new run overwrite the "
+            f"missing history")
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise TrackingError(
+            f"refusing to append to {path}: cannot read it to check the "
+            f"previous certificate ({exc})") from exc
+    digest = hashlib.sha256(data).hexdigest()
+    if len(data) != entry["bytes"] or digest != entry["sha256"]:
+        raise TrackingError(
+            f"refusing to append to {path}: its current size/hash "
+            f"({len(data)} bytes, {digest[:12]}) does not match the "
+            f"certified entry ({entry['bytes']} bytes, "
+            f"{entry['sha256'][:12]}); re-run ``--verify-artifacts`` and "
+            f"restore the file instead of extending a tampered history")
 
 
 def _write_artifact_index(out_dir: pathlib.Path, settings: Settings,
@@ -6904,6 +6978,235 @@ def _hypotheses_sha() -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+# Fields that describe *how this invocation was launched* rather than the
+# numerical environment a rerun has to match.  They are deliberately kept in
+# the record (they are useful provenance) but excluded from the environment
+# fingerprint and from drift comparison: a rerun from another directory or
+# with another argv is still the same environment.
+_ENV_IGNORED_FIELDS = frozenset({
+    "argv", "cwd", "repo_root", "git_dirty", "pythonhashseed",
+    "environment_sha256",
+})
+
+# Hardware/toolchain descriptors that are reported as advisories instead of
+# hard incompatibilities.  A different CPU model can change the last bits of
+# a float, but it does not by itself mean that a *protocol* was changed;
+# critical fields below identify the software/numerical recipe.
+_ENV_ADVISORY_FIELDS = frozenset({
+    "platform", "machine", "processor", "os_release", "cpu_model",
+    "cpu_count", "cuda_device_count", "cuda_devices", "python_executable",
+    "hash_randomization",
+})
+
+# Declared dependencies are content-addressed: the installed inventory alone
+# cannot tell whether the project's own requirement range changed.
+_DEPENDENCY_FILES = ("pyproject.toml", "requirements-ci.txt",
+                     "requirements.txt")
+
+
+def _package_inventory() -> dict:
+    """Installed distribution name -> version, deterministically sorted.
+
+    ``torch.__version__`` pins the framework but not the rest of the
+    process.  An optional dependency (NumPy, a BLAS wheel, a plugin) can
+    change numerics or import behaviour, so the environment record keeps the
+    full installed inventory.  Package metadata is untrusted input: a broken
+    distribution must not make the provenance probe fail a run.
+    """
+    packages: dict[str, str] = {}
+    try:
+        distributions = list(importlib_metadata.distributions())
+    except Exception:  # noqa: BLE001 - metadata is a best-effort probe
+        return {}
+    for dist in distributions:
+        try:
+            name = dist.metadata["Name"]
+            version = dist.version
+        except Exception:  # noqa: BLE001 - skip malformed distributions
+            continue
+        if not isinstance(name, str) or not isinstance(version, str):
+            continue
+        key = name.strip().lower().replace("_", "-").replace(".", "-")
+        if not key or not version:
+            continue
+        # Two spellings of the same distribution should not make the
+        # inventory order-dependent: keep the lexicographically largest
+        # version so the result is stable regardless of scan order.
+        previous = packages.get(key)
+        packages[key] = version if previous is None else max(previous, version)
+    return dict(sorted(packages.items()))
+
+
+def _dependency_manifest() -> dict:
+    """Content hashes of the project's declared dependency files.
+
+    The installed inventory answers "what ran"; these hashes answer "what
+    was requested".  A requirements/pyproject edit changes the latter even
+    when the current interpreter already has the new versions installed.
+    """
+    manifest = {}
+    for name in _DEPENDENCY_FILES:
+        path = _REPO_ROOT / name
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        manifest[name] = {
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    return manifest
+
+
+def _environment_fingerprint(record: Mapping) -> str:
+    """Stable content id for the reproducibility-relevant environment.
+
+    All non-volatile fields participate, so a field added to the record
+    automatically strengthens the fingerprint instead of being silently
+    ignored.  Volatile launch metadata (argv/cwd/git status) is excluded:
+    two runs from different directories still share an environment.
+    """
+    payload = {
+        key: value for key, value in record.items()
+        if key not in _ENV_IGNORED_FIELDS
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _mapping_delta(recorded: Mapping, current: Mapping) -> dict:
+    """Summarise a nested mapping difference without dumping both copies."""
+    recorded_keys = set(recorded)
+    current_keys = set(current)
+    return {
+        "missing_keys": sorted(recorded_keys - current_keys),
+        "extra_keys": sorted(current_keys - recorded_keys),
+        "changed_keys": sorted(
+            key for key in recorded_keys & current_keys
+            if recorded[key] != current[key]),
+    }
+
+
+def _environment_drift(recorded, current) -> dict:
+    """Compare a stored environment record with the current process.
+
+    Returns a structured diagnosis rather than a bare boolean:
+
+    * ``compatible`` - no *critical* field differs (the software/numerical
+      recipe is unchanged); advisory hardware fields may still differ;
+    * ``identical`` - no recorded field differs at all;
+    * ``critical_differences`` / ``advisory_differences`` - the evidence for
+      either verdict, with nested mappings summarised by missing/extra/
+      changed keys instead of two full copies.
+
+    Missing fields fail closed when they are critical: an old record that
+    predates the package inventory cannot certify the packages that ran.
+    A malformed record is itself an incompatibility, never an empty match.
+    """
+    result = {
+        "compatible": False,
+        "identical": False,
+        "recorded_environment_sha256": None,
+        "current_environment_sha256": None,
+        "differences": [],
+        "critical_differences": [],
+        "advisory_differences": [],
+    }
+    if not isinstance(recorded, Mapping) or not isinstance(current, Mapping) \
+            or not recorded:
+        result["reason"] = "recorded or current environment is missing/malformed"
+        return result
+    recorded_sha = recorded.get("environment_sha256")
+    current_sha = current.get("environment_sha256")
+    if not isinstance(current_sha, str) or not current_sha:
+        current_sha = _environment_fingerprint(current)
+    result["recorded_environment_sha256"] = recorded_sha
+    result["current_environment_sha256"] = current_sha
+    for field in sorted((set(recorded) | set(current)) - _ENV_IGNORED_FIELDS):
+        severity = "advisory" if field in _ENV_ADVISORY_FIELDS else "critical"
+        if field not in recorded:
+            difference = {
+                "field": field, "kind": "missing_recorded",
+                "severity": severity,
+                "current": (current.get(field)
+                            if not isinstance(current.get(field), Mapping)
+                            else _mapping_delta({}, current[field])),
+            }
+        elif field not in current:
+            difference = {
+                "field": field, "kind": "missing_current",
+                "severity": severity,
+                "recorded": (recorded.get(field)
+                             if not isinstance(recorded.get(field), Mapping)
+                             else _mapping_delta(recorded[field], {})),
+            }
+        elif recorded[field] != current[field]:
+            if isinstance(recorded[field], Mapping) \
+                    and isinstance(current[field], Mapping):
+                detail = _mapping_delta(recorded[field], current[field])
+            else:
+                detail = {"recorded": recorded[field],
+                          "current": current[field]}
+            difference = {
+                "field": field, "kind": "changed",
+                "severity": severity, **detail,
+            }
+        else:
+            continue
+        result["differences"].append(difference)
+        result[f"{severity}_differences"].append(difference)
+    # A hash mismatch with no field-level difference means the fingerprint
+    # algorithm or its field set changed.  Treat that as a critical schema
+    # mismatch instead of claiming the environments are identical.  A
+    # malformed hash is likewise not allowed to pass as "no hash".
+    valid_recorded_hash = (
+        isinstance(recorded_sha, str) and len(recorded_sha) == 16
+        and all(ch in "0123456789abcdef" for ch in recorded_sha))
+    if recorded_sha is not None and not valid_recorded_hash:
+        difference = {
+            "field": "environment_sha256", "kind": "malformed",
+            "severity": "critical",
+            "recorded": recorded_sha, "current": current_sha,
+        }
+        result["differences"].append(difference)
+        result["critical_differences"].append(difference)
+    elif (isinstance(recorded_sha, str) and recorded_sha
+          and recorded_sha != current_sha and not result["differences"]):
+        difference = {
+            "field": "environment_sha256", "kind": "fingerprint_schema",
+            "severity": "critical",
+            "recorded": recorded_sha, "current": current_sha,
+        }
+        result["differences"].append(difference)
+        result["critical_differences"].append(difference)
+    result["compatible"] = not result["critical_differences"]
+    result["identical"] = not result["differences"]
+    if result["identical"]:
+        result["reason"] = "environment matches the recorded one"
+    elif result["compatible"]:
+        result["reason"] = ("critical software/numerical fields match; "
+                            "advisory hardware fields differ")
+    else:
+        result["reason"] = ("critical software/numerical fields differ: "
+                            + ", ".join(
+                                d["field"] for d in
+                                result["critical_differences"]))
+    return result
+
+
+def _extract_environment_record(payload):
+    """Accept either a bare environment block or a run-context document."""
+    if not isinstance(payload, Mapping):
+        return None, None
+    nested = payload.get("environment")
+    if isinstance(nested, Mapping):
+        return nested, payload
+    if "torch" in payload and "python" in payload:
+        return payload, None
+    return None, payload
+
+
 def _environment_record(settings: Settings, git_dirty: bool | None = None) -> dict:
     """Software/hardware provenance for reproducibility.
 
@@ -6918,6 +7221,12 @@ def _environment_record(settings: Settings, git_dirty: bool | None = None) -> di
     train under even when the context is built before the first training
     call (a previous run in the same process may have left the global flag
     in the other position).
+
+    The record additionally carries the full installed package inventory,
+    content hashes of the declared dependency files, and a stable
+    ``environment_sha256`` over the non-volatile fields.  The hash makes
+    "same environment" a one-field comparison; :func:`_environment_drift`
+    explains a mismatch field by field.
     """
     determinism = configure_determinism(settings.deterministic)
     numeric_env = {}
@@ -7013,7 +7322,195 @@ def _environment_record(settings: Settings, git_dirty: bool | None = None) -> di
             env["cuda_devices"] = devices
         except Exception as exc:  # noqa: BLE001 - probe must not fail a record
             env["cuda_devices_error"] = f"{type(exc).__name__}: {exc}"
+    # Full interpreter string (the short ``python`` field omits the build),
+    # the complete package set, and content ids for the declared dependency
+    # files.  Computed last so the fingerprint below covers every probe that
+    # actually ran.
+    env["python_full_version"] = sys.version
+    env["package_inventory"] = _package_inventory()
+    env["dependency_manifest"] = _dependency_manifest()
+    env["environment_sha256"] = _environment_fingerprint(env)
     return env
+
+
+def _read_environment_file(path) -> tuple[dict | None, dict | None, str | None]:
+    """Read an ``environment.json`` or run manifest.
+
+    Returns ``(environment_block, whole_payload, error)``.  A malformed or
+    schema-less file is an error rather than an empty record: treating a
+    corrupt provenance file as "no previous environment" would let a rerun
+    silently bless an unverifiable results directory.
+    """
+    try:
+        payload = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        return None, None, f"{type(exc).__name__}: {exc}"
+    environment, context = _extract_environment_record(payload)
+    if environment is None:
+        return None, payload if isinstance(payload, dict) else None, (
+            "file has no environment block")
+    return environment, context, None
+
+
+def _record_environment_history(out_dir, context: Mapping) -> dict:
+    """Compare this invocation to the previous environment in ``out_dir``.
+
+    A results directory is routinely appended to across days, package
+    upgrades and machines.  Silently mixing records from different
+    environments makes the artifact index certify a directory whose numbers
+    were not produced by one recipe.  Every invocation therefore appends a
+    compatibility row to ``environment_history.jsonl`` before the new
+    ``environment.json`` replaces the old one; a critical drift is printed
+    and (with ``--strict-environment``) aborts the run, while an advisory
+    hardware drift is recorded but allowed.
+
+    The previous file is the *only* source of the old record: it is read
+    before the caller writes the new one.  If it is missing or malformed the
+    history still records that fact (``compatible=False`` for malformed,
+    ``None`` for a first run) so the provenance chain has no silent gap.
+    """
+    out_dir = pathlib.Path(out_dir)
+    previous_path = out_dir / "environment.json"
+    previous, previous_payload, previous_error = (None, None, None)
+    if previous_path.exists():
+        previous, previous_payload, previous_error = _read_environment_file(
+            previous_path)
+    current = context.get("environment") if isinstance(context, Mapping) else None
+    if not isinstance(current, Mapping):
+        drift = {
+            "compatible": False,
+            "identical": False,
+            "reason": "current environment record is missing",
+            "differences": [], "critical_differences": [],
+            "advisory_differences": [],
+        }
+    elif previous_error is not None:
+        drift = {
+            "compatible": False,
+            "identical": False,
+            "reason": f"previous environment record is unreadable: "
+                      f"{previous_error}",
+            "differences": [], "critical_differences": [],
+            "advisory_differences": [],
+        }
+    elif previous is None:
+        drift = {
+            "compatible": None,
+            "identical": None,
+            "reason": "no previous environment record (first run in this "
+                      "results directory)",
+            "differences": [], "critical_differences": [],
+            "advisory_differences": [],
+        }
+    else:
+        drift = _environment_drift(previous, current)
+    record = {
+        "run_id": context.get("run_id"),
+        "schema_version": context.get("schema_version"),
+        "setup_sha256": context.get("setup_sha256"),
+        "git_sha": context.get("git_sha"),
+        "source_tree_sha256": context.get("source_tree_sha256"),
+        "event": "environment_checked",
+        "previous_environment_sha256": (
+            previous.get("environment_sha256")
+            if isinstance(previous, Mapping) else None),
+        "current_environment_sha256": (
+            current.get("environment_sha256")
+            if isinstance(current, Mapping) else None),
+        "previous_setup_sha256": (
+            previous_payload.get("setup_sha256")
+            if isinstance(previous_payload, Mapping) else None),
+        "previous_git_sha": (
+            previous_payload.get("git_sha")
+            if isinstance(previous_payload, Mapping) else None),
+        "compatible": drift.get("compatible"),
+        "identical": drift.get("identical"),
+        "reason": drift.get("reason"),
+        "differences": drift.get("differences", []),
+    }
+    try:
+        _write_result(out_dir / "environment_history.jsonl", record)
+    except TrackingError:
+        # A certificate mismatch is not a transient I/O problem: continuing
+        # would let the end-of-run index writer re-bless edited evidence.
+        raise
+    except Exception as exc:  # noqa: BLE001 - history must not kill a run
+        print(f"[runner] WARNING: could not record environment history: {exc}")
+    return drift
+
+
+def _describe_environment_difference(difference: Mapping) -> str:
+    """One readable line for an environment drift entry."""
+    field = difference.get("field", "<unknown>")
+    kind = difference.get("kind")
+    severity = difference.get("severity", "critical")
+    if kind == "missing_recorded":
+        detail = "missing from the recorded environment"
+    elif kind == "missing_current":
+        detail = "missing from the current environment"
+    elif "changed_keys" in difference:
+        detail = ("missing={missing_keys} extra={extra_keys} "
+                  "changed={changed_keys}").format(**difference)
+    elif kind == "fingerprint_schema":
+        detail = (f"fingerprint {difference.get('recorded')} != "
+                  f"{difference.get('current')}")
+    else:
+        detail = (f"recorded={difference.get('recorded')!r} "
+                  f"current={difference.get('current')!r}")
+    return f"[{severity}] {field}: {detail}"
+
+
+def _check_environment(out_dir) -> int:
+    """Compare the environment stored in ``out_dir`` with this process.
+
+    Exit 0 when the critical software/numerical fields match, 1 when they
+    drift, 2 when no usable environment record exists.  The check is
+    read-only: it writes nothing into the results directory.
+    """
+    root = pathlib.Path(out_dir)
+    candidates = []
+    primary = root / "environment.json"
+    if primary.is_file():
+        candidates.append(primary)
+    if not candidates and root.is_dir():
+        candidates.extend(sorted(root.glob("*_manifest.json")))
+    if not candidates:
+        print(f"[env-check] no environment.json or run manifest under {root}; "
+              f"nothing to check")
+        return 2
+    path = candidates[0]
+    recorded, payload, error = _read_environment_file(path)
+    if error is not None:
+        print(f"[env-check] cannot read {path}: {error}")
+        return 2
+    device = recorded.get("device") if isinstance(
+        recorded.get("device"), str) else "cpu"
+    deterministic = recorded.get("deterministic_requested")
+    if not isinstance(deterministic, bool):
+        deterministic = True
+    try:
+        current = _environment_record(
+            Settings(device=device, deterministic=deterministic),
+            git_dirty=None)
+    except Exception as exc:  # noqa: BLE001 - a bad record is a check error
+        print(f"[env-check] cannot build the current environment record: "
+              f"{type(exc).__name__}: {exc}")
+        return 2
+    drift = _environment_drift(recorded, current)
+    run_label = (payload.get("run_id") if isinstance(payload, Mapping)
+                 else None)
+    print(f"[env-check] recorded={path} run={run_label} "
+          f"recorded_env={drift.get('recorded_environment_sha256')} "
+          f"current_env={drift.get('current_environment_sha256')}")
+    for difference in drift["differences"]:
+        print("    " + _describe_environment_difference(difference))
+    print(f"[env-check] {drift.get('reason')}")
+    if drift["compatible"]:
+        print("[env-check] PASS: critical software/numerical fields match")
+        return 0
+    print("[env-check] FAIL: the stored result was produced under a "
+          "different software/numerical environment")
+    return 1
 
 
 _SEEDING_POLICY = {
@@ -15836,9 +16333,20 @@ def main(argv=None) -> int:
     parser.add_argument("--verify-artifacts", action="store_true",
                         help="check files in --out against artifact_index.json "
                              "and exit")
+    parser.add_argument("--check-environment", action="store_true",
+                        help="compare --out's recorded environment with this "
+                             "process and exit (0-compatible, 1-drift, "
+                             "2-no usable record); writes nothing")
+    parser.add_argument("--strict-environment", action="store_true",
+                        help="abort a run when the recorded environment in "
+                             "--out differs from the current one in a "
+                             "critical (software/numerical) field; the "
+                             "default is to record and warn")
     args = parser.parse_args(argv)
     if args.verify_artifacts:
         return _verify_artifacts(args.out)
+    if args.check_environment:
+        return _check_environment(args.out)
 
     settings = Settings.quick(args.device) if args.quick else Settings(
         device=args.device)
@@ -15896,12 +16404,49 @@ def main(argv=None) -> int:
     started = time.monotonic()
     status = "failed"
     try:
+        # Read the previous environment before writing the new one, then
+        # record the compatibility verdict in the cumulative history.  The
+        # environment probe is also the one used for the manifest and every
+        # record, so all copies agree.
+        context = _run_context(settings)
+        drift = _record_environment_history(out_dir, context)
+        critical_fields = [d.get("field") for d in
+                           drift.get("critical_differences", [])]
+        advisory_fields = [d.get("field") for d in
+                           drift.get("advisory_differences", [])]
+        if drift.get("compatible") is False:
+            print(f"[runner] WARNING: environment drift vs {out_dir}: "
+                  f"{drift.get('reason')}")
+            if critical_fields:
+                print(f"[runner]   critical fields: "
+                      f"{', '.join(str(f) for f in critical_fields)}")
+            if args.strict_environment:
+                status = "aborted"
+                print("[runner] ABORTED: --strict-environment requested and "
+                      "the recorded environment is not compatible")
+                _run_event(settings, args.only, "aborted",
+                           error="EnvironmentMismatch",
+                           reason=drift.get("reason"),
+                           critical_fields=critical_fields,
+                           elapsed_seconds=round(
+                               time.monotonic() - started, 3))
+                return 3
+        elif drift.get("compatible") is True and advisory_fields:
+            print(f"[runner] note: advisory hardware drift vs {out_dir} "
+                  f"({', '.join(str(f) for f in advisory_fields)}); "
+                  f"critical numerical fields match")
+        elif drift.get("compatible") is None:
+            print(f"[runner] environment history: {drift.get('reason')}")
         _write_json(out_dir / "hypotheses.json", HYPOTHESES)
         _run_event(settings, args.only, "started", quick=bool(args.quick),
                    seeds=list(settings.seeds), steps=settings.steps,
                    lr=settings.lr, device=settings.device,
-                   fdr_q=settings.fdr_q)
-        _write_json(out_dir / "environment.json", _run_context(settings))
+                   fdr_q=settings.fdr_q,
+                   environment_compatible=drift.get("compatible"),
+                   environment_identical=drift.get("identical"),
+                   environment_critical_fields=critical_fields,
+                   environment_advisory_fields=advisory_fields)
+        _write_json(out_dir / "environment.json", context)
         print(f"[runner] only={args.only} quick={args.quick} "
               f"seeds={settings.seeds} steps={settings.steps} "
               f"lr={settings.lr if settings.lr is not None else 'tuned'} "
