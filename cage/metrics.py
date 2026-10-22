@@ -631,6 +631,11 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     if n_bins is None or not bool(torch.isfinite(p).all()) \
             or not bool(torch.isfinite(c).all()):
         return float("nan")
+    # Correctness is a binary outcome; a fractional/out-of-range value is
+    # not a count of correct rows and would silently distort the bin
+    # accuracy (and the implied calibration error).
+    if not bool(((c == 0.0) | (c == 1.0)).all()):
+        return float("nan")
     p = p.clamp(0.0, 1.0)
     bin_id = (p * n_bins).long().clamp(max=n_bins - 1)
     counts = torch.bincount(bin_id, minlength=n_bins).float()
@@ -648,6 +653,10 @@ def brier_score(probs, correct) -> float:
     if p.numel() == 0 or c.numel() != p.numel() \
             or not bool(torch.isfinite(p).all()) \
             or not bool(torch.isfinite(c).all()):
+        return float("nan")
+    # As with ECE, the target is a binary correctness outcome; accepting
+    # e.g. 0.5 or 2.0 would report a Brier score for a different question.
+    if not bool(((c == 0.0) | (c == 1.0)).all()):
         return float("nan")
     return float(((p - c) ** 2).mean())
 

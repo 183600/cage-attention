@@ -4,9 +4,20 @@ from __future__ import annotations
 
 import contextlib
 import io
+import math
 import unittest
 
 from cage import data, metrics
+
+
+class MetricInputValidationTest(unittest.TestCase):
+    def test_non_binary_correctness_abstains(self):
+        self.assertTrue(math.isnan(
+            metrics.expected_calibration_error([0.5], [0.5])))
+        self.assertTrue(math.isnan(
+            metrics.expected_calibration_error([0.5], [2.0])))
+        self.assertTrue(math.isnan(metrics.brier_score([0.5], [0.5])))
+        self.assertTrue(math.isnan(metrics.brier_score([0.5], [-1.0])))
 
 
 class ProjectSelfCheckTest(unittest.TestCase):
