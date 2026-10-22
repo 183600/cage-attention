@@ -757,6 +757,13 @@ def _permute_batch_labels(tgt: torch.Tensor, gen: torch.Generator) -> torch.Tens
     sample's labels, so no true answer is trained on.  ``batch < 2`` has
     no other row to take labels from, so it is refused instead of silently
     training the control on unpermuted labels.
+
+    When every row has exactly one supervised column (the sparse recall
+    target), only the label *values* are shifted while each row keeps its
+    own supervised column.  The receiving column is the one ``train_model``
+    reads, so the control still trains every row; shifting whole rows would
+    move the label to the donor's column and silently drop or crash rows
+    whose query columns differ.
     """
     n = int(tgt.size(0))
     if n < 2:
