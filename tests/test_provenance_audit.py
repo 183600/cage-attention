@@ -129,6 +129,23 @@ class ProvenanceAuditTest(unittest.TestCase):
         self.assertEqual(code, 1, text)
         self.assertIn("invalid JSON", text)
 
+    def test_malformed_full_context_types_are_rejected(self):
+        for key, value, expected in (
+                ("config", [], "config must be a JSON object"),
+                ("data_fingerprints", "not-an-object",
+                 "data_fingerprints must be a JSON object"),
+                ("hypotheses_sha256", "not-a-content-id",
+                 "hypotheses_sha256 must be")):
+            with self.subTest(key=key):
+                record = self._record(**{key: value})
+                self._write_jsonl("e1_runs.jsonl", [record])
+                code, text = self._audit()
+                self.assertEqual(code, 1, text)
+                self.assertIn(expected, text)
+                # Each subtest must start from a clean directory.
+                for path in self.root.iterdir():
+                    path.unlink()
+
     def test_tampered_environment_document_is_rejected(self):
         self._write_jsonl("e1_runs.jsonl", [self._record()])
         broken = copy.deepcopy(self.base)

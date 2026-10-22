@@ -7122,6 +7122,16 @@ def _provenance_record_errors(record) -> list[str]:
             f"incomplete full-context block: has {present} but needs "
             f"hypotheses_sha256, config and data_fingerprints")
     elif present:
+        # The full-context block is itself typed provenance: a string/list
+        # where a mapping belongs cannot be silently hashed as if it were a
+        # valid config or fingerprint table.  Fail closed before the setup
+        # hash comparison so the defect is named explicitly.
+        for key in ("config", "data_fingerprints"):
+            if not isinstance(record[key], Mapping):
+                problems.append(f"{key} must be a JSON object")
+        if not _is_short_sha(record["hypotheses_sha256"]):
+            problems.append(
+                "hypotheses_sha256 must be a 16-character lowercase hex id")
         expected = _setup_fingerprint(record)
         if expected is not None and expected != setup:
             problems.append(
