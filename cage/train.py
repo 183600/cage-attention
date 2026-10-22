@@ -44,7 +44,7 @@ from .metrics import (
     wilson_ci,
 )
 from .model import release_eval_scratch
-from .repro import seed_everything, stream_generator
+from .repro import configure_determinism, seed_everything, stream_generator
 
 
 # Fixed optimisation recipe (design pin D5): a single source of truth for
@@ -306,7 +306,7 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
     out["train_delta"] = rel_delta(finite, "train_loss")
     if len(val) >= 2:
         out["val_delta"] = rel_delta(val, "val_loss")
-        if (len(val) >= 3 and math.isfinite(out["best_val_loss"])
+        if (len(val) >= 2 and math.isfinite(out["best_val_loss"])
                 and out["val_regression_after_best"]
                 > rel_tol * abs(out["best_val_loss"])):
             out["late_overfit"] = True
@@ -962,7 +962,13 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             raise ValueError(
                 "seed=None is only valid with fixed_batch: a stream-drawn "
                 "run must pin its data seed")
+        # The caller owns the RNG stream (fixed batch), but the determinism
+        # option still belongs to this training run: skipping
+        # ``seed_everything`` must not silently leave the previous global
+        # kernel mode in place while the run record claims otherwise.
+        determinism = configure_determinism(deterministic)
         if seed_info is not None:
+            seed_info.update(determinism)
             seed_info.update({
                 "seed": None,
                 "reseeded": False,
@@ -1549,6 +1555,22 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     if batches is None:
         raise ValueError(
             f"batches must be a positive integer, got {raw_batches!r}")
+    if max_cases is not None:
+        raw_cases = max_cases
+        if isinstance(raw_cases, bool):
+            raise ValueError(
+                f"max_cases must be a non-negative integer or None, got "
+                f"{raw_cases!r}")
+        try:
+            max_cases = operator.index(raw_cases)
+        except TypeError as exc:
+            raise ValueError(
+                f"max_cases must be a non-negative integer or None, got "
+                f"{raw_cases!r}") from exc
+        if max_cases < 0:
+            raise ValueError(
+                f"max_cases must be a non-negative integer or None, got "
+                f"{raw_cases!r}")
     cfg = model.cfg
     C, H = cfg.d_model, cfg.n_heads
     dk = C // H
@@ -2159,6 +2181,10 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         raise ValueError(
             f"batches must be a positive integer, got {raw_batches!r}")
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
+    # With fewer pairs than the default tertile count, some key bins are
+    # unrealizable by construction; declaring all 12 strata would divide
+    # the coverage by cells that can never be observed.
+    n_key_bins = min(DEFAULT_DIFFICULTY_KEY_BINS, max(1, int(n_pairs)))
     training_states = {module: module.training for module in model.modules()}
     try:
         model.eval()
@@ -2175,7 +2201,8 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
             logits_all.append(logits.squeeze(1).float())
             tgt_all.append(meta["answer"])
             strata_all.append(difficulty_strata(
-                idx, meta["answer"], n_pairs)["stratum"].cpu())
+                idx, meta["answer"], n_pairs,
+                n_key_bins=n_key_bins)["stratum"].cpu())
         if logits_all:
             logits_cat = torch.cat(logits_all, dim=0).cpu()
             tgt_cat = torch.cat(tgt_all, dim=0).cpu()
@@ -2227,7 +2254,6 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         # the joint counts lets the experiment layer post-stratify to a
         # common reference mix (``cage.metrics.standardized_proportion``)
         # without a second model pass.
-        n_key_bins = DEFAULT_DIFFICULTY_KEY_BINS
         n_strata = 4 * n_key_bins
         correct_rows = pred == tgt_cat
         strata_counts = torch.bincount(strata_cat, minlength=n_strata)
@@ -2299,17 +2325,21 @@ def gate_depth_ratio(stats, n_early=2):
 
 
 def pearson(x, y):
-    x = x.flatten().float()
-    y = y.flatten().float()
+    # Keep the caller's precision: downcasting float64 to float32 can turn
+    # distinct values into ties (and a large common offset then looks like a
+    # constant vector), silently destroying the correlation.
+    x = x.flatten().to(torch.float64)
+    y = y.flatten().to(torch.float64)
     if x.numel() == 0 or y.numel() != x.numel():
         return torch.tensor(float("nan"))
     dx = x - x.mean()
     dy = y - y.mean()
-    # Constant-input guard relative to each vector's own magnitude.  The
-    # floor keeps an all-zero input degenerate without turning every
-    # small-valued vector (e.g. gates saturated near 0) into a false NaN.
-    if (dx.abs().max() <= 1e-12 + 1e-6 * x.abs().max()
-            or dy.abs().max() <= 1e-12 + 1e-6 * y.abs().max()):
+    # A constant input is exactly the case with zero centered spread.  The
+    # old guard compared that spread with the *raw* magnitude of x, so data
+    # with a large common offset (e.g. 1e6, 1e6+1, ...) was misclassified as
+    # constant.  Centered spread is the right scale; exact zero is the only
+    # genuinely undefined case.
+    if dx.abs().max() == 0.0 or dy.abs().max() == 0.0:
         return torch.tensor(float("nan"))
     return (dx * dy).sum() / (dx.norm() * dy.norm())
 
@@ -2323,8 +2353,9 @@ def spearman(x, y):
     outlier dominates it.  Agreement between the two coefficients means
     the effect is not an artifact of the correlation measure.
     """
-    x = x.flatten().float()
-    y = y.flatten().float()
+    # As in ``pearson``, ranking a float32 downcast would invent ties.
+    x = x.flatten().to(torch.float64)
+    y = y.flatten().to(torch.float64)
     if x.numel() == 0 or y.numel() != x.numel():
         return torch.tensor(float("nan"))
     rx = average_ranks(x)
@@ -2573,7 +2604,11 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
     b = _flat(b).to(a.device)
     n_a, n_b = a.numel(), b.numel()
     observed = float(a.mean() - b.mean()) if n_a and n_b else float("nan")
-    if n_a == 0 or n_b == 0 or not _bootstrap_args_ok(n_boot, alpha):
+    # One observation in a group carries no within-group variance: the
+    # percentile bootstrap would then collapse to a point and report a tiny
+    # p-value from a single row per condition.  Abstain (the wrappers turn
+    # this into ``applicable=False``) until both groups have >= 2 rows.
+    if n_a < 2 or n_b < 2 or not _bootstrap_args_ok(n_boot, alpha):
         return {"mean": observed, "lo": float("nan"), "hi": float("nan"),
                 "n": int(n_a + n_b), "n_a": int(n_a), "n_b": int(n_b),
                 "sd": float("nan"), "sd_a": float("nan"),
@@ -2660,7 +2695,10 @@ def false_concentration_gate_test(stats, maxprob_thresh=0.5,
     ci = _two_sample_bootstrap_ci(gm[cc], gm[fc], n_boot=n_boot, seed=seed)
     ci["n_fc"] = int(fc.sum())
     ci["n_cc"] = int(cc.sum())
-    ci["applicable"] = bool(ci["n_a"] and ci["n_b"])
+    ci["applicable"] = bool(
+        ci["n_a"] >= 2 and ci["n_b"] >= 2
+        and math.isfinite(ci.get("lo", float("nan")))
+        and math.isfinite(ci.get("hi", float("nan"))))
     return ci
 
 
@@ -2707,7 +2745,10 @@ def null_mass_gate_test(stats, maxprob_thresh=None, n_boot: int = 10000,
     ci = _two_sample_bootstrap_ci(err_group, correct_group, n_boot=n_boot,
                                   seed=seed)
     ci.update({
-        "applicable": True,
+        "applicable": bool(
+            ci["n_a"] >= 2 and ci["n_b"] >= 2
+            and math.isfinite(ci.get("lo", float("nan")))
+            and math.isfinite(ci.get("hi", float("nan")))),
         "contrast": "null_mass_error - null_mass_correct",
         "group": group,
         "n_error": int(err_group.numel()),
