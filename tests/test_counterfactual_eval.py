@@ -168,6 +168,16 @@ class CounterfactualCountsTest(unittest.TestCase):
         self.assertAlmostEqual(
             out["flat"]["cf_relocation_unchanged_rate"], 1.0)
 
+    def test_non_integral_predictions_are_rejected(self):
+        valid = torch.tensor([5, 5, 5, 7])
+        for bad in (torch.tensor([5.5, 5.0, 5.0, 7.0]),
+                    torch.tensor([True, False, True, False]),
+                    torch.tensor([5 + 1j, 5, 5, 7])):
+            with self.subTest(dtype=bad.dtype):
+                with self.assertRaises(ValueError):
+                    _counterfactual_counts(
+                        bad, valid, valid, valid, valid, valid)
+
     def test_empty_counts_abstain(self):
         out = _counterfactual_summary({})
         self.assertEqual(out["value_swap"]["n"], 0)

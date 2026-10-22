@@ -2323,11 +2323,37 @@ def _counterfactual_counts(original_pred, answer, value_swap_pred,
     (integer sums) and lets the summary abstain cleanly when a probe has no
     eligible rows (e.g. ``n_pairs == 1`` has no distractor).
     """
-    pred = original_pred.reshape(-1).to(torch.long)
-    ans = answer.to(device=pred.device).reshape(-1).to(torch.long)
-    swap_pred = value_swap_pred.reshape(-1).to(torch.long)
-    swap_ans = value_swap_answer.to(
-        device=pred.device).reshape(-1).to(torch.long)
+    def _ids(value, name):
+        # Token predictions/answers are class indices.  A float cast would
+        # silently truncate a fractional value and a complex cast would drop
+        # the imaginary part, fabricating a token the caller never supplied;
+        # integral JSON-style floats (2.0) remain accepted.
+        try:
+            t = torch.as_tensor(value).detach()
+        except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+            raise ValueError(
+                f"{name} must be an integer token tensor, got "
+                f"{type(value).__name__}") from exc
+        if t.is_complex() or t.dtype == torch.bool:
+            raise ValueError(
+                f"{name} must be an integer token tensor, got dtype {t.dtype}")
+        if t.is_floating_point():
+            if (not bool(torch.isfinite(t).all())
+                    or not bool(t.eq(t.round()).all())):
+                raise ValueError(
+                    f"{name} must contain integral token ids, got "
+                    f"fractional or non-finite values")
+        try:
+            return t.reshape(-1).to(torch.long)
+        except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+            raise ValueError(
+                f"{name} must be an integer token tensor") from exc
+
+    pred = _ids(original_pred, "original_pred")
+    ans = _ids(answer, "answer").to(device=pred.device)
+    swap_pred = _ids(value_swap_pred, "value_swap_pred")
+    swap_ans = _ids(value_swap_answer, "value_swap_answer").to(
+        device=pred.device)
     for name, value in (("answer", ans), ("value_swap_answer", swap_ans),
                         ("value_swap_pred", swap_pred)):
         if value.shape != pred.shape:
@@ -2360,7 +2386,7 @@ def _counterfactual_counts(original_pred, answer, value_swap_pred,
     out["n_value_flip"] = int(pred.ne(swap_pred).sum())
     out["n_value_correct"] = int(swap_pred.eq(swap_ans).sum())
     if distractor_pred is not None:
-        ctrl = distractor_pred.reshape(-1).to(torch.long)
+        ctrl = _ids(distractor_pred, "distractor_pred")
         if ctrl.shape != pred.shape:
             raise ValueError(
                 f"distractor_pred has {int(ctrl.numel())} entries for "
@@ -2369,7 +2395,7 @@ def _counterfactual_counts(original_pred, answer, value_swap_pred,
         out["n_distractor_unchanged"] = int(ctrl.eq(pred).sum())
         out["n_distractor_correct"] = int(ctrl.eq(ans).sum())
     if relocation_pred is not None:
-        moved = relocation_pred.reshape(-1).to(torch.long)
+        moved = _ids(relocation_pred, "relocation_pred")
         if moved.shape != pred.shape:
             raise ValueError(
                 f"relocation_pred has {int(moved.numel())} entries for "
