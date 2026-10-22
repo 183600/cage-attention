@@ -153,6 +153,7 @@ import hashlib
 import io
 import json
 import math
+import operator
 import os
 import pathlib
 import platform
@@ -1332,10 +1333,26 @@ def _run_order_audit(order, cells, seeds, randomized=True):
     unexpected = []
     seed_mismatches = []
     unexpected_seeds = []
+    invalid_indices = []
+
+    def _order_index(value):
+        if isinstance(value, bool):
+            return None
+        try:
+            return operator.index(value)
+        except TypeError:
+            return None
+
     for cell, order_seed, block, position in order:
         key = _coverage_cell_key(cell)
-        block = int(block)
-        position = int(position)
+        raw_block, raw_position = block, position
+        block, position = _order_index(block), _order_index(position)
+        if block is None or position is None:
+            invalid_indices.append({
+                "cell": key, "block": repr(raw_block),
+                "position": repr(raw_position),
+                "reason": "block and position must be integers"})
+            continue
         per_block.setdefault(block, {}).setdefault(key, 0)
         per_block[block][key] += 1
         per_block_positions.setdefault(block, []).append(position)
@@ -1401,9 +1418,9 @@ def _run_order_audit(order, cells, seeds, randomized=True):
     complete = (bool(cells) and bool(seeds)
                 and set(per_block) == set(range(n_blocks))
                 and not missing and not duplicated and not unexpected
-                and not invalid_positions and not seed_mismatches
-                and not unexpected_seeds and not missing_seeds
-                and not duplicate_seeds)
+                and not invalid_positions and not invalid_indices
+                and not seed_mismatches and not unexpected_seeds
+                and not missing_seeds and not duplicate_seeds)
     always_first = sorted(
         key for key, vals in positions.items()
         if len(vals) == n_blocks and vals and all(v == 0 for v in vals))
@@ -1432,6 +1449,7 @@ def _run_order_audit(order, cells, seeds, randomized=True):
         "duplicated": duplicated,
         "unexpected": unexpected,
         "invalid_positions": invalid_positions,
+        "invalid_indices": invalid_indices,
         "seed_mismatches": seed_mismatches,
         "unexpected_seeds": unexpected_seeds,
         "missing_seeds": missing_seeds,

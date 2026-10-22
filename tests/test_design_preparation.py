@@ -115,6 +115,15 @@ class BlockedRunOrderTest(unittest.TestCase):
             self.CELLS, (0, 0), 11)
         self.assertFalse(
             _run_order_audit(duplicate_seed, self.CELLS, (0, 0))["complete"])
+        # A fractional block/position would otherwise be silently truncated
+        # to an integer and could still look like a valid complete block.
+        fractional = [(cell, seed, float(block), pos)
+                      for cell, seed, block, pos in complete]
+        fractional[0] = (fractional[0][0], fractional[0][1], 0.5,
+                         fractional[0][3])
+        audit = _run_order_audit(fractional, self.CELLS, self.SEEDS)
+        self.assertFalse(audit["complete"])
+        self.assertTrue(audit["invalid_indices"])
 
     def test_two_block_random_schedule_is_not_over_flagged(self):
         # With only two blocks, a random schedule can put one arm first in
