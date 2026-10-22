@@ -153,10 +153,19 @@ def _flatten_float(x) -> torch.Tensor:
     # above, and a complex container raises on that cast).
     if torch.is_tensor(x):
         if x.is_complex():
-            raise ValueError(
-                "metric inputs must be real-valued, not complex "
-                "(casting would discard the imaginary part)")
+            # An empty sample makes every caller take its documented
+            # abstention/NaN branch instead of silently scoring the real
+            # projection.
+            return torch.empty(0, dtype=torch.float64)
         return x.detach().to(dtype=torch.float64).reshape(-1)
+    try:
+        probe = torch.as_tensor(x)
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+        raise ValueError(
+            f"metric inputs must be real numeric values, got "
+            f"{type(x).__name__}") from exc
+    if probe.is_complex():
+        return torch.empty(0, dtype=torch.float64)
     try:
         return torch.as_tensor(x, dtype=torch.float64).detach().reshape(-1)
     except (TypeError, ValueError) as exc:

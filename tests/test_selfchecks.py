@@ -41,10 +41,13 @@ class MetricInputValidationTest(unittest.TestCase):
         # ``Tensor.to(float64)`` silently discards the imaginary part with
         # only a warning; a complex paired difference must not be read as
         # its real projection.
-        with self.assertRaises(ValueError):
-            metrics.average_ranks(torch.tensor([1.0 + 2.0j, 3.0 + 4.0j]))
-        with self.assertRaises(ValueError):
-            metrics.paired_bootstrap_ci(torch.tensor([0.1 + 0.1j, 0.2 + 0j]))
+        self.assertEqual(
+            metrics.average_ranks(torch.tensor([1.0 + 2.0j,
+                                                3.0 + 4.0j])).numel(), 0)
+        ci = metrics.paired_bootstrap_ci(
+            torch.tensor([0.1 + 0.1j, 0.2 + 0j]))
+        self.assertEqual(ci["n"], 0)
+        self.assertTrue(math.isnan(ci["mean"]))
         # Companions that document an abstention instead of raising still
         # abstain rather than silently truncating.
         self.assertFalse(metrics.sign_flip_test(
