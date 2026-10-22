@@ -436,11 +436,12 @@ HYPOTHESES = {
                     "superiority claims",
         "sesoi": {"accuracy": 0.01, "abs_gate_vs_entropy": 0.05},
         # The one-sided accuracy companion covers the registered calib
-        # contrasts (calib - none, calib - query).  The query-vs-none
-        # completeness companion measures whether *any* gate moves accuracy
-        # and is not a signed claim, so it registers its own undirected key
-        # and cannot inherit the calib accuracy sign.
-        "direction": {"abs_gate_vs_entropy": "+", "accuracy": "+",
+        # contrasts (calib - none, calib - query) and is registered as
+        # non-inferiority under ``sesoi_test``, not as a direction.  The
+        # query-vs-none completeness companion measures whether *any* gate
+        # moves accuracy and is also not a signed claim, so it registers its
+        # own undirected key.
+        "direction": {"abs_gate_vs_entropy": "+",
                       "query_none_accuracy": None},
         "sesoi_test": {"accuracy": "noninferior"},
     },
@@ -760,10 +761,11 @@ HYPOTHESES = {
         # direction for seednorm; post/mix are two-sided companions that
         # measure whether a normalisation level moves the readout at all.
         # The companions register their own (undirected) keys so they cannot
-        # inherit seednorm's sign through the shared display metric.
+        # inherit seednorm's sign through the shared display metric.  The
+        # accuracy companion is non-inferiority under ``sesoi_test``, not a
+        # directional superiority claim, so it has no direction entry.
         "direction": {"gate_depth_ratio": "+",
                       "resid_norm_last_over_first": "+",
-                      "accuracy": "+",
                       "norm_gate_depth_ratio": "+",
                       "norm_resid_norm_last_over_first": "+",
                       "postmix_norm_gate_depth_ratio": None,
