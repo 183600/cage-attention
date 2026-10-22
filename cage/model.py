@@ -1600,7 +1600,17 @@ def build(cfg_dict: dict, compile: bool = False) -> CAGE:
     model = CAGE(Cfg(**cfg_dict))
     if compile:
         if hasattr(torch, "compile"):
-            model = torch.compile(model, mode="reduce-overhead", fullgraph=False)
+            try:
+                model = torch.compile(model, mode="reduce-overhead",
+                                      fullgraph=False)
+            except Exception as exc:  # noqa: BLE001 - optional acceleration
+                # ``torch.compile`` can exist but be unusable on this build
+                # (missing backend/triton, unsupported Python, ...).  D9 makes
+                # it an explicit opt-in optimisation, not a requirement: a
+                # failed compile must fall back to the eager model with a
+                # warning instead of breaking an otherwise runnable config.
+                print(f"Warning: torch.compile failed ({exc}); skipping "
+                      f"compilation")
         else:
             print("Warning: torch.compile not available, skipping compilation")
     return model
