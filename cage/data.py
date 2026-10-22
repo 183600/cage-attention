@@ -438,6 +438,16 @@ def assert_time_ordered(times, splits) -> None:
     if not bool(torch.isfinite(t).all()):
         raise ValueError("time values must be finite (no NaN/Inf): a "
                          "non-finite timestamp makes the ordering undefined")
+    unknown = [name for name in splits
+               if name not in ("train", "val", "test")]
+    if unknown:
+        # Silently skipping an unrecognised name would let a misspelled
+        # ``valid``/``holdout`` block escape the chronology check entirely
+        # while still looking like a valid split container.
+        raise ValueError(
+            f"unknown split name(s) {unknown!r}: time-ordered splits must "
+            f"use the canonical train/val/test names so every block is "
+            f"checked in past -> future order")
     assert_split_partition(int(t.numel()), splits, require_all=False)
     spans = []
     for name in ("train", "val", "test"):
@@ -1973,6 +1983,16 @@ def _self_test() -> int:
         check("time_leakage_rejected", False)
     except ValueError:
         check("time_leakage_rejected", True)
+    # A misspelled split name used to be skipped by the chronology loop, so
+    # an interleaved ``valid`` block could pass while only train/test were
+    # compared.  Unknown names must be refused instead.
+    try:
+        assert_time_ordered(
+            times, {"train": slice(0, 60), "valid": slice(50, 80),
+                    "test": slice(80, 100)})
+        check("time_unknown_split_name_rejected", False)
+    except ValueError:
+        check("time_unknown_split_name_rejected", True)
 
     # Group split contract: whole groups on one side, full coverage, and a
     # per-sample crossing assignment must be rejected.
