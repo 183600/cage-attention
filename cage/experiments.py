@@ -4677,11 +4677,17 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
     runs_by_label = {str(label): runs for label, runs in cells}
     ref_runs = (runs_by_label.get(str(reference))
                 if reference is not None else None)
+    valid_ref_runs = _curve_valid_runs(ref_runs or [])
     ref_accuracy = {}
-    for run in ref_runs or ():
+    for run in valid_ref_runs:
         seed = run.get("seed")
         if seed is not None and _finite(run.get("accuracy")):
             ref_accuracy[seed] = float(run["accuracy"])
+    all_ref_accuracy = {}
+    for run in ref_runs or ():
+        seed = run.get("seed")
+        if seed is not None and _finite(run.get("accuracy")):
+            all_ref_accuracy[seed] = float(run["accuracy"])
     for label, runs in cells:
         label = str(label)
         cfg = next((r.get("model_cfg") for r in runs
@@ -4690,7 +4696,9 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
             entries[label] = {"available": False,
                               "reason": "runs carry no model_cfg"}
             continue
+        valid_runs = _curve_valid_runs(runs)
         acc = _mean_std([r.get("accuracy") for r in runs])
+        valid_acc = _mean_std([r.get("accuracy") for r in valid_runs])
         recorded = sorted({int(r["params"]) for r in runs
                            if _finite(r.get("params"))})
         key = json.dumps(cfg, sort_keys=True)
@@ -4709,16 +4717,28 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
             continue
         deltas = [
             float(run["accuracy"]) - ref_accuracy[run["seed"]]
-            for run in runs
+            for run in valid_runs
             if run.get("seed") in ref_accuracy
+            and _finite(run.get("accuracy"))]
+        all_deltas = [
+            float(run["accuracy"]) - all_ref_accuracy[run["seed"]]
+            for run in runs
+            if run.get("seed") in all_ref_accuracy
             and _finite(run.get("accuracy"))]
         rec.update({
             "accuracy_mean": acc["mean"],
             "accuracy_std": acc["std"],
             "accuracy_n": acc["n"],
+            "accuracy_mean_curve_valid": valid_acc["mean"],
+            "accuracy_std_curve_valid": valid_acc["std"],
+            "accuracy_n_curve_valid": valid_acc["n"],
             "accuracy_delta_vs_reference": (
                 sum(deltas) / len(deltas) if deltas else float("nan")),
             "accuracy_delta_n": len(deltas),
+            "accuracy_delta_all": (
+                sum(all_deltas) / len(all_deltas)
+                if all_deltas else float("nan")),
+            "accuracy_delta_n_all": len(all_deltas),
             "recorded_params": recorded[0] if len(recorded) == 1 else None,
             "params_match_run": (len(recorded) == 1
                                  and recorded[0] == rec["params"]),
@@ -4728,7 +4748,8 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
     print(f"\n[{experiment}] inference cost (batch=1, seq_len={seq_len}; "
           f"FLOPs are analytic forward matmuls; latency is the eval-mode "
           f"median of {_EFFICIENCY_REPEATS} passes on {settings.device}; "
-          f"ratios and cost are companions, not decision rules):")
+          f"d_acc uses curve-valid paired seeds (acc is all runs); ratios "
+          f"and cost are companions, not decision rules):")
     print(f"{'cell':>23} {'params':>9} {'param_x':>8} {'GFLOP':>8} "
           f"{'gflop_x':>8} {'lat_ms':>8} {'lat_x':>7} {'d_acc':>8} "
           f"{'acc':>7}")
@@ -4806,11 +4827,17 @@ def _complexity_cost_companion(settings: Settings, out_dir: pathlib.Path,
     shallow = verdict.get("shallow_none") or {}
     matched = verdict.get("matched_shallow") or {}
     cells = {}
+    deep_runs = by_gate.get("none", [])
     if isinstance(deep_cost, dict) and deep_cost.get("available", True):
         deep = dict(deep_cost)
-        acc = _mean_std([r.get("accuracy") for r in by_gate.get("none", [])])
+        valid_deep = _curve_valid_runs(deep_runs)
+        acc = _mean_std([r.get("accuracy") for r in valid_deep])
+        all_acc = _mean_std([r.get("accuracy") for r in deep_runs])
         deep["accuracy_mean"] = acc["mean"]
         deep["accuracy_std"] = acc["std"]
+        deep["accuracy_n"] = acc["n"]
+        deep["accuracy_mean_all"] = all_acc["mean"]
+        deep["accuracy_n_all"] = all_acc["n"]
         deep["role"] = "deep none"
         cells["deep_none"] = deep
 
@@ -4870,7 +4897,7 @@ def _complexity_cost_companion(settings: Settings, out_dir: pathlib.Path,
 
     deep = cells.get("deep_none") or {}
     deep_by_seed = {}
-    for run in by_gate.get("none", []):
+    for run in _curve_valid_runs(deep_runs):
         seed = run.get("seed")
         if seed is not None and _finite(run.get("accuracy")):
             deep_by_seed[seed] = float(run["accuracy"])
@@ -4901,8 +4928,9 @@ def _complexity_cost_companion(settings: Settings, out_dir: pathlib.Path,
 
     print(f"\n[e1] complexity cost (batch=1, seq_len="
           f"{_efficiency_seq_len(settings)}; cost ratios are deep none / "
-          f"reference; d_acc is deep mean accuracy minus the reference on "
-          f"their paired seeds; companions only):")
+          f"reference; d_acc is deep minus reference, and both acc and "
+          f"d_acc use curve-valid seeds (all-run deep mean stored as "
+          f"accuracy_mean_all); companions only):")
     print(f"{'arm':>28} {'params':>9} {'GFLOP':>8} {'lat_ms':>8} "
           f"{'acc':>7} {'d_acc':>8} {'param_x':>8} {'gflop_x':>8} "
           f"{'lat_x':>8}")
@@ -4951,10 +4979,15 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
     ref_runs = (runs_by_label.get(str(reference))
                 if reference is not None else None)
     ref_accuracy = {}
-    for run in ref_runs or ():
+    for run in _curve_valid_runs(ref_runs or []):
         seed = run.get("seed")
         if seed is not None:
             ref_accuracy[seed] = run.get("accuracy_by_length") or {}
+    all_ref_accuracy = {}
+    for run in ref_runs or ():
+        seed = run.get("seed")
+        if seed is not None:
+            all_ref_accuracy[seed] = run.get("accuracy_by_length") or {}
     measured = {}
     entries = {}
     for label, runs in cells:
@@ -4965,6 +4998,7 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
             entries[label] = {"available": False,
                               "reason": "runs carry no model_cfg"}
             continue
+        valid_runs = _curve_valid_runs(runs)
         by_length = {}
         for length in lengths:
             seq_len = 2 * length + 2
@@ -4985,32 +5019,52 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
                              for r in runs
                              if _finite((r.get("accuracy_by_length")
                                          or {}).get(length))])
+            valid_acc = _mean_std([r["accuracy_by_length"][length]
+                                   for r in valid_runs
+                                   if _finite((r.get("accuracy_by_length")
+                                               or {}).get(length))])
             rec["accuracy_mean"] = acc["mean"]
             rec["accuracy_std"] = acc["std"]
             rec["accuracy_n"] = acc["n"]
+            rec["accuracy_mean_curve_valid"] = valid_acc["mean"]
+            rec["accuracy_std_curve_valid"] = valid_acc["std"]
+            rec["accuracy_n_curve_valid"] = valid_acc["n"]
             by_length[str(length)] = rec
-        if ref_accuracy:
+        if ref_accuracy or all_ref_accuracy:
             for length in lengths:
                 rec = by_length.get(str(length)) or {}
                 if not rec.get("available", True):
                     continue
                 deltas = []
-                for run in runs:
+                for run in valid_runs:
                     seed = run.get("seed")
                     refs = ref_accuracy.get(seed) or {}
                     truth = (run.get("accuracy_by_length") or {}).get(length)
                     other = refs.get(length)
                     if _finite(truth) and _finite(other):
                         deltas.append(float(truth) - float(other))
+                all_deltas = []
+                for run in runs:
+                    seed = run.get("seed")
+                    refs = all_ref_accuracy.get(seed) or {}
+                    truth = (run.get("accuracy_by_length") or {}).get(length)
+                    other = refs.get(length)
+                    if _finite(truth) and _finite(other):
+                        all_deltas.append(float(truth) - float(other))
                 rec["accuracy_delta_vs_reference"] = (
                     sum(deltas) / len(deltas) if deltas else float("nan"))
                 rec["accuracy_delta_n"] = len(deltas)
+                rec["accuracy_delta_all"] = (
+                    sum(all_deltas) / len(all_deltas)
+                    if all_deltas else float("nan"))
+                rec["accuracy_delta_n_all"] = len(all_deltas)
         entries[label] = {"by_length": by_length}
 
     base, longest = lengths[0], lengths[-1]
     print(f"\n[{experiment}] inference cost scaling (batch=1; FLOPs are "
           f"analytic forward matmuls; latency is the eval-mode median of "
-          f"{_EFFICIENCY_REPEATS} passes on {settings.device}; cost is a "
+          f"{_EFFICIENCY_REPEATS} passes on {settings.device}; d_acc uses "
+          f"curve-valid paired seeds (acc is all runs); cost is a "
           f"companion, not a decision rule):")
     print(f"{'arm':>16} {'GFLOP@' + str(base):>11} "
           f"{'GFLOP@' + str(longest):>11} {'gflop_x':>8} "
