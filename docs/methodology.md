@@ -133,6 +133,23 @@ sign_flip_disagrees        bootstrap 与精确检验结论是否相反
 
 - 每个网格在训练前写 `<tag>_design_plan.json`：用基线阶梯的 pilot 方差把
   SESOI 翻译成“计划种子数能容忍的最大 SD”，并对欠功效项提前报警。
+- **配对设计必须按配对差的正态尺度做功效规划**。只用一个臂的 seed 间 SD
+  隐含“两臂的 seed 效应完全相关”，会在两臂独立时高估功效。规划器因此使用
+  `max(相邻深度在同一 seed 上的配对差 SD, sqrt(2) × 最大单臂 SD)`：
+  前者是基线阶梯里唯一的经验配对方差，后者是两臂独立时的
+  `Var(A-B)=Var(A)+Var(B)` 界；单臂 SD 只作为兼容字段
+  `pilot_sd_single_arm` 与对照 `required_seeds_single_arm` 保留。
+  逐行字段为 `pilot_paired_sd` / `pilot_paired_source` /
+  `pilot_paired_components` / `pilot_paired_inflation`。
+- **有限评测流有独立于种子数的精度下限**。在“两臂逐 item 误差独立”的
+  最坏情形下，配对差的 item 方差为 `2p(1-p)`，`N` 个 item 的均值标准误为
+  `sqrt(2p(1-p)/N)`；因此设计计划同时报告
+  `planned_eval_items`、`stream_item_sd_floor`、
+  `stream_items_for_sesoi` 与 `stream_limited_worst_case`。这不是把
+  item 方差重复加进 seed 方差（seed 层差已包含该已实现流的噪声），
+  而是一个独立的下限诊断：`stream_limited_worst_case=True` 时，继续加
+  training seeds 不能消除该下限，应加宽 `eval_batch × eval_batches`，并用
+  3.6 节的种子 × item 交叉 bootstrap 检查实际 item 方差是否主导。
 - 运行顺序是**随机完整区组**（每个训练种子一个 block，每个 cell 恰好一次），
   记录在 `<tag>_run_order.json`，避免机器漂移与处理臂别名。
 - 运行记录带代码版本/源码哈希、完整配方、数据流指纹、线程与确定性开关；

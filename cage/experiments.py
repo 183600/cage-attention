@@ -125,7 +125,14 @@ Design principles
     ``<tag>_design_plan.json`` *before* its first run: the pre-registered
     SESOI per metric is translated into the largest seed-level SD the
     planned N can tolerate (and, for accuracy, into the required seed count
-    from the baseline-ladder pilot variance).  An underpowered plan is
+    from the baseline-ladder pilot variance).  Because accuracy contrasts
+    are paired over seeds, that pilot is the *paired-difference* variance -
+    the largest observed adjacent-depth paired SD or the independent-arm
+    ``sqrt(2)`` bound - not the single-arm SD, which would assume perfectly
+    correlated arms and certify an underpowered design.  The plan also
+    reports the finite-evaluation-stream binomial floor separately: more
+    training seeds cannot remove it, so a stream-limited warning asks for a
+    wider evaluation stream.  An underpowered plan is
     flagged at preparation time instead of being discovered as an
     "inconclusive" after the compute is spent.  The runs themselves are
     scheduled as randomised complete blocks (one block per training seed,
@@ -2117,6 +2124,115 @@ def _pilot_accuracy_sd(verdict) -> tuple[float, str | None]:
     return float(sd), source
 
 
+def _pilot_accuracy_level(verdict) -> tuple[float, str | None]:
+    """Pilot accuracy level used for the finite-stream precision floor.
+
+    The prospective design plan also has to say how much of the SESOI is
+    already consumed by scoring a *finite* evaluation stream.  That floor
+    depends on the accuracy level (the binomial variance ``p(1-p)``), so
+    this helper pools every per-seed pilot accuracy carried by the
+    baseline verdict.  Pooling rungs is deliberately crude: the quantity
+    only sets the worst-case binomial floor, and using all measured seeds
+    avoids tuning the planning input to one lucky rung.
+
+    Returns ``(nan, None)`` when the verdict carries no usable accuracy.
+    """
+    if not isinstance(verdict, dict):
+        return float("nan"), None
+    values: list[float] = []
+    ladder = verdict.get("depth_ladder") or {}
+    for row in (ladder.get("by_depth") or {}).values():
+        if not isinstance(row, dict) or row.get("unmeasured"):
+            continue
+        values.extend(float(v) for v in
+                      (row.get("accuracy_by_seed") or {}).values()
+                      if _finite(v))
+        if not (row.get("accuracy_by_seed") or {}) \
+                and _finite(row.get("accuracy_mean")):
+            values.append(float(row["accuracy_mean"]))
+    shallow = verdict.get("shallow_none") or {}
+    if isinstance(shallow, dict):
+        values.extend(float(v) for v in
+                      (shallow.get("accuracy_by_seed") or {}).values()
+                      if _finite(v))
+        if not (shallow.get("accuracy_by_seed") or {}) \
+                and _finite(shallow.get("accuracy_mean")):
+            values.append(float(shallow["accuracy_mean"]))
+    if not values:
+        return float("nan"), None
+    return (sum(values) / len(values),
+            f"pooled {len(values)} pilot seed accuracies")
+
+
+def _pilot_paired_accuracy_sd(verdict) -> tuple[float, str | None, list]:
+    """Paired-difference seed SD for the prospective power plan.
+
+    The registered accuracy contrasts are *paired* over training seeds, so
+    their power depends on ``Var(A - B)``, not on the between-seed SD of
+    one arm.  Using the single-arm SD (``_pilot_accuracy_sd``) silently
+    assumes the two arms' seed effects are perfectly correlated, which
+    makes the plan optimistic exactly when it matters.  This helper takes
+    the largest available paired-variance estimate:
+
+    * every adjacent-depth contrast in the baseline ladder is paired over
+      the same seeds, and its percentile bootstrap already reports the SD
+      of those paired differences (``adjacent_contrasts[*]["sd"]``); this
+      is the only *empirical paired* pilot in the artifact;
+    * ``sqrt(2) * max_rung_sd`` is the paired SD under independent arm
+      effects (``Var(A-B) = Var(A) + Var(B)`` with equal arm variances),
+      and is the fallback when no adjacent contrast is available.
+
+    Taking the maximum is the same conservative choice as
+    ``_pilot_accuracy_sd`` (largest rung): a pilot that happens to show
+    small paired variation must not certify an underpowered design.  The
+    returned components are recorded in the plan so the inflation is
+    auditable rather than buried in one number.
+
+    Returns ``(nan, None, [])`` when no usable pilot exists.
+    """
+    single, single_source = _pilot_accuracy_sd(verdict)
+    components: list[dict] = []
+    if _finite(single) and float(single) >= 0.0:
+        components.append({
+            "value": float(single),
+            "source": single_source,
+            "kind": "single_arm",
+            "note": ("between-seed SD of one arm; a lower bound on the "
+                     "paired SD only when the two arms are correlated"),
+        })
+        components.append({
+            "value": math.sqrt(2.0) * float(single),
+            "source": f"sqrt(2) * {single_source}",
+            "kind": "independent_arms",
+            "note": ("paired SD under independent arm effects, "
+                     "Var(A-B)=Var(A)+Var(B) with equal arm variances"),
+        })
+    ladder = (verdict.get("depth_ladder") or {}) if isinstance(verdict, dict) \
+        else {}
+    for name, row in (ladder.get("adjacent_contrasts") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        n = _positive_integer(row.get("n"))
+        if n is None or n < 2 or not _finite(row.get("sd")):
+            continue
+        sd = float(row["sd"])
+        if sd < 0.0:
+            continue
+        components.append({
+            "value": sd,
+            "source": f"depth_ladder.adjacent[{name}]",
+            "kind": "adjacent_paired",
+            "note": ("observed SD of the same-seed adjacent-depth "
+                     "difference; empirical paired-variance pilot"),
+        })
+    usable = [c for c in components if _finite(c["value"])
+              and float(c["value"]) >= 0.0]
+    if not usable:
+        return float("nan"), None, []
+    chosen = max(usable, key=lambda c: float(c["value"]))
+    return (float(chosen["value"]), chosen["source"], components)
+
+
 def _power_z(mode: str, alpha: float, power: float) -> float:
     """Multiplier ``z`` in ``n = (z * sd / bound)**2`` for a test mode.
 
@@ -2206,7 +2322,33 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
     n = len(settings.seeds)
     alpha = float(settings.design_alpha)
     target = float(settings.power_target)
+    # Two different pilot quantities answer two different questions:
+    #   * the single-arm SD is the legacy, optimistic scale (it assumes
+    #     the two arms' seed effects are perfectly correlated);
+    #   * the paired SD is the scale of the registered paired contrast
+    #     and is what the power calculation below must use.
     pilot_sd, pilot_source = _pilot_accuracy_sd(verdict)
+    paired_sd, paired_source, paired_components = \
+        _pilot_paired_accuracy_sd(verdict)
+    pilot_acc, pilot_acc_source = _pilot_accuracy_level(verdict)
+    planned_items = max(1, int(settings.eval_batch)
+                        * int(settings.eval_batches))
+    # Worst-case finite-stream floor: if the two arms' per-item errors were
+    # independent draws, the paired difference on one item would have
+    # variance p(1-p) + p(1-p).  This is deliberately a *worst case*: the
+    # realized paired item variance is smaller when the arms share item
+    # difficulty, and the post-hoc seed x item bootstrap measures it.  It
+    # is reported as a planning companion, not added to the seed-level
+    # variance (the seed-level differences already contain the realized
+    # finite-stream noise of this stream).
+    if _finite(pilot_acc):
+        p_level = min(max(float(pilot_acc), 0.0), 1.0)
+        stream_item_var = 2.0 * p_level * (1.0 - p_level)
+        stream_item_sd = math.sqrt(stream_item_var / planned_items)
+    else:
+        p_level = float("nan")
+        stream_item_var = float("nan")
+        stream_item_sd = float("nan")
     rows = []
     for item in _registered_sesoi_metrics(tag):
         metric = item["metric"]
@@ -2225,10 +2367,50 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
         }
         # The pilot is an accuracy-scale quantity; applying it to a metric
         # with different units would be a fabricated variance.
-        sd = pilot_sd if "accuracy" in metric else float("nan")
-        source = pilot_source if "accuracy" in metric else None
-        row["pilot_sd"] = float(sd)
-        row["pilot_source"] = source
+        accuracy_metric = "accuracy" in metric
+        sd_single = pilot_sd if accuracy_metric else float("nan")
+        sd = paired_sd if accuracy_metric else float("nan")
+        source = pilot_source if accuracy_metric else None
+        row.update({
+            # ``pilot_sd`` stays the single-arm field for compatibility with
+            # earlier design plans; the *decision-relevant* field is
+            # ``pilot_paired_sd`` and is what the power calculation uses.
+            "pilot_sd": float(sd_single),
+            "pilot_source": source,
+            "pilot_sd_single_arm": float(sd_single),
+            "pilot_paired_sd": float(sd),
+            "pilot_paired_source": paired_source if accuracy_metric else None,
+            "pilot_paired_components": (
+                list(paired_components) if accuracy_metric else []),
+            "pilot_paired_inflation": (
+                float(sd) / float(sd_single)
+                if _finite(sd) and _finite(sd_single)
+                and float(sd_single) > 0.0 else float("nan")),
+            "stream_items": int(planned_items) if accuracy_metric else None,
+            "stream_item_variance_floor": (
+                float(stream_item_var) if accuracy_metric
+                else float("nan")),
+            "stream_item_sd_floor": (
+                float(stream_item_sd) if accuracy_metric
+                else float("nan")),
+            "stream_items_for_sesoi": None,
+            "stream_limited_worst_case": None,
+        })
+        # A finite evaluation stream imposes a precision floor that more
+        # training seeds cannot remove.  Report the item count that would
+        # keep the worst-case independent-arm binomial SE at or below the
+        # SESOI's planning resolution.  This is a companion: the realized
+        # paired item variance is measured post hoc by the crossed
+        # bootstrap, and the pre-registered seed-level decision is
+        # unchanged.
+        if accuracy_metric and _finite(stream_item_var) \
+                and _finite(z) and z > 0.0:
+            target_var = (bound / z) ** 2
+            if target_var > 0.0:
+                items_needed = stream_item_var / target_var
+                row["stream_items_for_sesoi"] = int(math.ceil(items_needed))
+                row["stream_limited_worst_case"] = bool(
+                    items_needed > planned_items)
         if not _finite(sd):
             row.update({"required_seeds": None, "power_at_planned": None,
                         "powered": None, "status": "no_pilot"})
@@ -2242,6 +2424,12 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
                 required = int(math.ceil(required))
             else:
                 required = None
+            required_single = _required_seeds(
+                mode, sd_single, bound, alpha, target)
+            if _finite(required_single):
+                required_single = int(math.ceil(required_single))
+            else:
+                required_single = None
             # The conservative planning point for a directional test is the
             # SESOI itself; for a null/reverse check it is a true
             # difference of zero.
@@ -2249,10 +2437,14 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
                 else bound
             power_at = _power_at_effect(
                 mode, true_effect, sd, n, alpha, bound=bound)
+            power_single = _power_at_effect(
+                mode, true_effect, sd_single, n, alpha, bound=bound)
             powered = None if required is None else bool(required <= n)
             row.update({
                 "required_seeds": required,
+                "required_seeds_single_arm": required_single,
                 "power_at_planned": power_at,
+                "power_at_planned_single_arm": power_single,
                 "powered": powered,
                 "status": ("powered" if powered
                            else "underpowered" if powered is False
@@ -2263,6 +2455,8 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
                      and r["status"] in ("powered", "underpowered")]
     underpowered = sorted({r["metric"] for r in accuracy_rows
                            if r["status"] == "underpowered"})
+    stream_limited = sorted({r["metric"] for r in accuracy_rows
+                             if r.get("stream_limited_worst_case")})
     if not accuracy_rows:
         all_powered = None
     else:
@@ -2273,22 +2467,47 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
         "planned_seeds": [int(s) for s in settings.seeds],
         "alpha": alpha,
         "power_target": target,
+        # Legacy single-arm field (kept for readers of older plans) and the
+        # paired field actually used by the power calculation.
         "pilot_accuracy_sd": float(pilot_sd),
         "pilot_accuracy_source": pilot_source,
+        "pilot_paired_accuracy_sd": float(paired_sd),
+        "pilot_paired_source": paired_source,
+        "pilot_paired_components": paired_components,
+        "pilot_accuracy_level": float(p_level),
+        "pilot_accuracy_level_source": pilot_acc_source,
+        "planned_eval_items": int(planned_items),
+        "stream_item_variance_floor": float(stream_item_var),
+        "stream_item_sd_floor": float(stream_item_sd),
+        "paired_sd_formula": (
+            "max(observed SD of same-seed adjacent-depth differences, "
+            "sqrt(2) * largest single-arm rung SD); the single-arm SD alone "
+            "assumes perfectly correlated arm effects and is optimistic"),
         "max_sd_formula": (
             "SESOI * sqrt(planned_n) / z(mode, alpha, power); "
             "z is two-sided for superiority, one-sided for noninferiority, "
             "and TOST for equivalence"),
         "rows": rows,
         "accuracy_underpowered": underpowered,
+        "accuracy_stream_limited_worst_case": stream_limited,
         "all_accuracy_plans_powered": all_powered,
         "note": (
             "Prospective sensitivity budget from the pre-registered SESOIs "
-            "and the baseline-ladder pilot variance. A metric with no "
+            "and the baseline-ladder pilot variance.  Accuracy contrasts "
+            "are paired over seeds, so their power is planned on the paired "
+            "difference SD (largest empirical adjacent-depth paired SD or "
+            "the independent-arm sqrt(2) bound), not on the single-arm SD; "
+            "using the latter would certify an underpowered design whenever "
+            "the two arms are not perfectly correlated.  A metric with no "
             "pilot (non-accuracy mechanism readout) reports only the "
-            "largest SD the planned N can tolerate; it is not certified. "
-            "An underpowered row means a null result is uninformative at "
-            "this N, not that the effect is absent."),
+            "largest SD the planned N can tolerate; it is not certified.  "
+            "The finite-stream item floor is a separate worst-case "
+            "companion: it assumes independent arm errors, and more seeds "
+            "cannot remove it, so a stream-limited warning calls for a "
+            "wider evaluation stream (the post-hoc seed x item bootstrap "
+            "measures the realized paired item variance).  An underpowered "
+            "row means a null result is uninformative at this N, not that "
+            "the effect is absent."),
         "hypotheses_sha256": _hypotheses_sha(),
         **_stamp(settings),
     }
@@ -2296,35 +2515,54 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
     print(f"\n[{tag}] prospective sensitivity plan (written before the grid; "
           f"alpha={alpha:g} per registered test mode, power={target:g}, "
           f"n={n} seeds)")
-    if _finite(pilot_sd):
-        print(f"  accuracy pilot SD={pilot_sd:.4f} "
-              f"({pilot_source}); the largest rung SD is used so the plan "
-              f"cannot certify an underpowered design from a lucky rung")
+    if _finite(paired_sd):
+        single_s = f"{pilot_sd:.4f}" if _finite(pilot_sd) else "n/a"
+        print(f"  accuracy pilot: single-arm SD={single_s} "
+              f"({pilot_source or 'n/a'}); paired SD={paired_sd:.4f} "
+              f"({paired_source or 'n/a'})")
+        print("  the power plan uses the paired SD: the single-arm SD "
+              "assumes perfectly correlated arm effects and would certify "
+              "an underpowered design when the arms are independent")
     else:
         print("  accuracy pilot unavailable: the design plan reports the "
               "tolerable SD but cannot certify power; run `--only "
               "baselines` first")
+    if _finite(stream_item_sd):
+        print(f"  finite-stream floor (worst case, independent arm errors): "
+              f"items={planned_items}, p={p_level:.3f}, SE="
+              f"{stream_item_sd:.4f}")
     print(f"  {'metric':>34} {'mode':>12} {'SESOI':>8} {'maxSD':>8} "
-          f"{'pilotSD':>8} {'need_n':>7} {'power':>7} {'status':>16}")
+          f"{'armSD':>8} {'pairSD':>8} {'need_n':>7} {'power':>7} "
+          f"{'status':>16}")
     for row in rows:
         required = row["required_seeds"]
         need = "-" if required is None else str(required)
         power = row["power_at_planned"]
         power_s = f"{power:.2f}" if _finite(power) else "-"
-        pilot_s = (f"{row['pilot_sd']:.3f}"
-                   if _finite(row["pilot_sd"]) else "-")
+        arm_sd = (f"{row['pilot_sd']:.3f}"
+                  if _finite(row["pilot_sd"]) else "-")
+        pair_sd = (f"{row['pilot_paired_sd']:.3f}"
+                   if _finite(row["pilot_paired_sd"]) else "-")
         print(f"  {row['metric']:>34} {row['mode']:>12} "
               f"{row['sesoi']:>8.4g} "
-              f"{row['max_sd_for_power']:>8.4g} {pilot_s:>8} "
-              f"{need:>7} {power_s:>7} {row['status']:>16}")
+              f"{row['max_sd_for_power']:>8.4g} {arm_sd:>8} "
+              f"{pair_sd:>8} {need:>7} {power_s:>7} {row['status']:>16}")
     if underpowered:
-        print(f"  WARNING: planned n={n} is below the pilot-based "
+        print(f"  WARNING: planned n={n} is below the paired-variance "
               f"requirement for {', '.join(underpowered)}: add seeds or "
               f"pre-register a larger SESOI before claiming a null; the "
               f"grid still runs under the pre-registered rule")
     elif accuracy_rows:
         print("  accuracy contrasts: the planned seed count clears the "
-              "pilot-based requirement at the registered SESOI")
+              "paired-variance requirement at the registered SESOI")
+    if stream_limited:
+        print(f"  WARNING: the planned evaluation stream "
+              f"({planned_items} items) is below the worst-case "
+              f"independent-arm item requirement for "
+              f"{', '.join(stream_limited)}; more training seeds cannot "
+              f"remove this finite-stream floor, so widen the evaluation "
+              f"stream (eval_batch x eval_batches) if the realized "
+              f"seed x item bootstrap also shows item variance dominating")
     return payload
 
 

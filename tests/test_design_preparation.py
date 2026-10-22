@@ -21,7 +21,9 @@ from cage.experiments import (
     Settings,
     _blocked_run_order,
     _design_sensitivity_plan,
+    _pilot_accuracy_level,
     _pilot_accuracy_sd,
+    _pilot_paired_accuracy_sd,
     _power_at_effect,
     _run_order_audit,
     _verdict_seed_floor,
@@ -163,6 +165,54 @@ class PilotSdTest(unittest.TestCase):
         self.assertTrue(math.isnan(_pilot_accuracy_sd(verdict)[0]))
 
 
+class PairedPilotSdTest(unittest.TestCase):
+    """The power plan must use the paired-difference variance."""
+
+    @staticmethod
+    def _verdict(arm_sd=0.01, adjacent_sd=None):
+        # Two points give the requested sample SD: values are the mean
+        # plus/minus sd/sqrt(2).
+        delta = arm_sd / math.sqrt(2.0)
+        payload = {
+            "depth_ladder": {"by_depth": {
+                "2": {"accuracy_by_seed": {"0": 0.9 - delta,
+                                            "1": 0.9 + delta},
+                      "unmeasured": False},
+            }},
+        }
+        if adjacent_sd is not None:
+            payload["depth_ladder"]["adjacent_contrasts"] = {
+                "1->2": {"n": 2, "sd": adjacent_sd},
+            }
+        return payload
+
+    def test_independent_arm_bound_is_the_fallback(self):
+        sd, source, components = _pilot_paired_accuracy_sd(
+            self._verdict(arm_sd=0.02))
+        self.assertAlmostEqual(sd, math.sqrt(2.0) * 0.02, places=12)
+        self.assertIn("sqrt(2)", source)
+        kinds = {c["kind"] for c in components}
+        self.assertIn("single_arm", kinds)
+        self.assertIn("independent_arms", kinds)
+
+    def test_largest_empirical_adjacent_paired_sd_wins(self):
+        sd, source, _ = _pilot_paired_accuracy_sd(
+            self._verdict(arm_sd=0.01, adjacent_sd=0.08))
+        self.assertAlmostEqual(sd, 0.08, places=12)
+        self.assertIn("adjacent", source)
+
+    def test_abstains_without_a_pilot(self):
+        sd, source, components = _pilot_paired_accuracy_sd({})
+        self.assertTrue(math.isnan(sd))
+        self.assertIsNone(source)
+        self.assertEqual(components, [])
+
+    def test_accuracy_level_pools_pilot_seeds(self):
+        level, source = _pilot_accuracy_level(self._verdict(arm_sd=0.01))
+        self.assertAlmostEqual(level, 0.9, places=12)
+        self.assertIn("2 pilot", source)
+
+
 class DesignPlanTest(unittest.TestCase):
     @staticmethod
     def _verdict(sd=0.001):
@@ -224,6 +274,48 @@ class DesignPlanTest(unittest.TestCase):
         equiv = _power_at_effect(
             "equivalence", 0.0, 0.01, 50, 0.05, bound=0.01)
         self.assertGreater(equiv, 0.5)
+
+    def test_plan_uses_paired_sd_not_the_single_arm_sd(self):
+        # Single-arm pilot looks tight (SD~7e-5) but the observed paired
+        # adjacent-depth difference has SD=0.2: the plan must follow the
+        # paired variance and flag the design, not certify it from the
+        # optimistic single-arm scale.
+        settings = Settings.quick()
+        verdict = PairedPilotSdTest._verdict(
+            arm_sd=0.0001, adjacent_sd=0.2)
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _design_sensitivity_plan(
+                    settings, verdict, pathlib.Path(tmp), "e1")
+        self.assertAlmostEqual(payload["pilot_paired_accuracy_sd"], 0.2,
+                               places=12)
+        row = next(r for r in payload["rows"]
+                   if r["metric"] == "accuracy")
+        self.assertAlmostEqual(row["pilot_paired_sd"], 0.2, places=12)
+        self.assertLess(row["required_seeds_single_arm"],
+                        row["required_seeds"])
+        self.assertEqual(row["status"], "underpowered")
+        self.assertIn("accuracy", payload["accuracy_underpowered"])
+
+    def test_finite_eval_stream_floor_is_reported_as_a_companion(self):
+        # A 128-item stream at p~0.9 cannot resolve a 0.01 accuracy SESOI
+        # under independent arm errors; more seeds cannot remove that
+        # floor, so the plan must expose it instead of claiming power.
+        settings = Settings.quick()  # eval 64 x 2 = 128 items
+        verdict = PairedPilotSdTest._verdict(
+            arm_sd=0.0001, adjacent_sd=0.0001)
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _design_sensitivity_plan(
+                    settings, verdict, pathlib.Path(tmp), "e1")
+        row = next(r for r in payload["rows"]
+                   if r["metric"] == "accuracy")
+        self.assertEqual(row["stream_items"], 128)
+        self.assertGreater(row["stream_items_for_sesoi"], 128)
+        self.assertIs(row["stream_limited_worst_case"], True)
+        self.assertIn("accuracy",
+                      payload["accuracy_stream_limited_worst_case"])
+        self.assertGreater(payload["stream_item_sd_floor"], 0.0)
 
     def test_malformed_seed_floor_fails_closed(self):
         settings = Settings(seeds=(0, 1, 2))
