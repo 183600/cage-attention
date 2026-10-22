@@ -172,6 +172,22 @@ class DifficultyStrataTest(unittest.TestCase):
             difficulty_features(self.idx, self.answer + 1, 3)
 
 
+class EmptySweepCompanionTest(unittest.TestCase):
+    def test_empty_sweep_companions_abstain(self):
+        from cage.experiments import (
+            _e2_difficulty_companions,
+            _e2_endpoint_class_companions,
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            difficulty = _e2_difficulty_companions({}, [])
+            endpoint = _e2_endpoint_class_companions({}, [])
+        self.assertEqual(difficulty["by_arm"], {})
+        self.assertEqual(difficulty["contrasts"], {})
+        self.assertIsNone(difficulty["reference_length"])
+        self.assertEqual(endpoint["rows"], [])
+
+
 class StandardizedProportionTest(unittest.TestCase):
     def test_self_weights_reproduce_pooled_rate(self):
         out = standardized_proportion([9, 1], [10, 10])

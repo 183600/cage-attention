@@ -11637,6 +11637,17 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
     are exploratory: they do not enter the FDR family and cannot change
     the pre-registered endpoint decision.
     """
+    if not lengths:
+        payload = {
+            "lengths": [],
+            "contrasts": {},
+            "note": ("empty length sweep: no endpoint or interior length "
+                     "to read; companion abstained"),
+        }
+        _write_json(out_dir / "e2_length_contrasts.json", payload)
+        print("[e2] per-length paired contrasts: empty sweep; no endpoint "
+              "to read")
+        return payload
     print(f"\n[e2] per-length paired contrasts (exploratory, outside the "
           f"FDR family): the endpoint decision above uses L={lengths[-1]} "
           f"only; these rows ask whether an earlier sweep length reverses "
@@ -13098,6 +13109,18 @@ def _e2_difficulty_companions(by_variant: dict, lengths: list) -> dict:
     the raw readouts - but a sign reversal here means the raw endpoint
     should not be attributed to length calibration.
     """
+    if not lengths:
+        # Reporting an empty sweep has no endpoint to standardize; abstain
+        # instead of indexing an empty list (the same rule the per-record
+        # stamp follows).
+        return {
+            "reference_length": None,
+            "endpoint_length": None,
+            "by_arm": {},
+            "contrasts": {},
+            "note": ("empty length sweep: no endpoint to standardize; "
+                     "companion abstained"),
+        }
     base_length = int(lengths[0])
     endpoint = int(lengths[-1])
 
@@ -13238,6 +13261,9 @@ def _e2_endpoint_class_companions(by_variant: dict,
     accuracy gain that reverses on macro-F1 is visible without adding a new
     pre-registered decision.
     """
+    if not lengths:
+        return _class_frequency_companions(
+            [], "e2 (empty length sweep; no endpoint)")
     endpoint = int(lengths[-1])
 
     def tagged(runs):
