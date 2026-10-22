@@ -368,7 +368,14 @@ def auc_paired_bootstrap_ci(scores_a, scores_b, positives, n_boot: int = 10000,
             or sa.numel() == 0 or not bool(torch.isfinite(sa).all()) \
             or not bool(torch.isfinite(sb).all()):
         return {"mean_diff": float("nan"), "lo": float("nan"), "hi": float("nan")}
+    if not isinstance(metric, str):
+        raise ValueError(
+            f"metric must be 'roc' or 'pr', got {metric!r}")
     metric = metric.lower()
+    if metric not in ("roc", "pr"):
+        raise ValueError(
+            f"metric must be 'roc' or 'pr', got {metric!r}: an unknown "
+            f"name would silently select PR-AUC")
     def _auc(sv):
         return roc_auc(sv, y) if metric == "roc" else pr_auc(sv, y)
     a0 = _auc(sa)
