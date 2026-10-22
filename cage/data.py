@@ -351,6 +351,65 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
         _, donor, gid = best
         assigned[donor].remove(gid)
         assigned[name].append(gid)
+
+    # The midpoint pass (and even the non-empty repair above) can leave a
+    # whole-group assignment far from the requested mass split when one
+    # group dominates: e.g. 54/17/19 at 70/15/15 may put the 54 group in
+    # ``val``.  Improve the assignment by best-improvement single moves and
+    # pairwise swaps against the same squared-deviation objective.  Moves
+    # never empty a split; swaps preserve every split's non-emptiness.  The
+    # search is bounded, deterministic, and skipped for very large group
+    # counts where the quadratic swap scan would dominate (moves still run).
+    split_names = ("train", "val", "test")
+
+    def _improve_once() -> bool:
+        current = _objective()
+        best = None
+        for donor in split_names:
+            if len(assigned[donor]) <= 1:
+                continue
+            for gid in assigned[donor]:
+                for target in split_names:
+                    if target == donor:
+                        continue
+                    masses = _masses()
+                    mass = float(counts[gid])
+                    masses[donor] -= mass
+                    masses[target] += mass
+                    candidate = (_objective(masses), 0, donor, target,
+                                 int(gid), None)
+                    if best is None or candidate < best:
+                        best = candidate
+        if n_groups <= 128:
+            for i, left in enumerate(split_names):
+                for right in split_names[i + 1:]:
+                    for gid_left in assigned[left]:
+                        for gid_right in assigned[right]:
+                            masses = _masses()
+                            ml = float(counts[gid_left])
+                            mr = float(counts[gid_right])
+                            masses[left] += mr - ml
+                            masses[right] += ml - mr
+                            candidate = (_objective(masses), 1, left, right,
+                                         int(gid_left), int(gid_right))
+                            if best is None or candidate < best:
+                                best = candidate
+        if best is None or best[0] >= current - 1e-12:
+            return False
+        _, kind, left, right, gid_left, gid_right = best
+        if kind == 0:
+            assigned[left].remove(gid_left)
+            assigned[right].append(gid_left)
+        else:
+            assigned[left].remove(gid_left)
+            assigned[right].remove(gid_right)
+            assigned[left].append(gid_right)
+            assigned[right].append(gid_left)
+        return True
+
+    for _ in range(32):
+        if not _improve_once():
+            break
     out = {}
     for name, gids in assigned.items():
         mask = torch.isin(inverse, torch.tensor(gids, dtype=torch.long))
@@ -2152,6 +2211,14 @@ def _self_test() -> int:
     check("group_split_fallback_preserves_train_mass",
           int(imbalanced_split["train"].numel()) == 80)
     assert_group_disjoint(imbalanced, imbalanced_split)
+    # Non-empty is not enough: the mass rebalance must also avoid putting
+    # the dominant group in val/test when the midpoint pass picked a poor
+    # permutation (the old fallback produced 10/80/10 here).
+    mixed = torch.arange(3).repeat_interleave(torch.tensor([54, 17, 19]))
+    mixed_split = group_disjoint_split(mixed, seed=1)
+    check("group_split_mass_rebalanced",
+          int(mixed_split["train"].numel()) == 54)
+    assert_group_disjoint(mixed, mixed_split)
     g_split_alias = group_disjoint_split(groups, seed=3 + 2 ** 32)
     check("group_split_seed_alias_canonical",
           all(torch.equal(g_split[k], g_split_alias[k]) for k in g_split))
