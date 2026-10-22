@@ -1889,9 +1889,26 @@ def encode_correct_mask(correct: torch.Tensor) -> str:
     contrast run the exact item-level test (McNemar) instead of treating
     the shared stream as if it carried no measurement error.  One bit per
     row keeps the run record small (``batch * batches`` bits).
+
+    Only boolean/0-1 correctness values are encodable.  A fractional or
+    out-of-range array would otherwise be truncated by the integer cast,
+    silently turning e.g. ``0.8`` into a *correct* bit and fabricating a
+    mask the model never produced.
     """
-    bits = torch.as_tensor(correct).detach().reshape(-1).to(
-        device="cpu", dtype=torch.int64)
+    raw = torch.as_tensor(correct).detach().reshape(-1)
+    if raw.is_complex():
+        raise ValueError("correctness values must be real booleans/0-1")
+    if raw.is_floating_point() and (
+            not bool(torch.isfinite(raw).all())
+            or not bool(raw.eq(raw.round()).all())):
+        raise ValueError(
+            "correctness values must be integral booleans/0-1, got "
+            "fractional or non-finite values")
+    bits = raw.to(device="cpu", dtype=torch.int64)
+    if bits.numel() and not bool(((bits == 0) | (bits == 1)).all()):
+        raise ValueError(
+            "correctness values must be booleans/0-1; out-of-range values "
+            "cannot be encoded as one bit per item")
     pad = (-bits.numel()) % 8
     if pad:
         bits = torch.cat([bits, torch.zeros(pad, dtype=torch.int64)])
@@ -1919,13 +1936,17 @@ def decode_correct_mask(encoded: str, n: int) -> torch.Tensor:
             raise ValueError(
                 f"encoded mask is empty but n={n} bits were requested")
         return torch.zeros(0, dtype=torch.bool)
-    raw = base64.b64decode(encoded.encode("ascii"))
+    raw = base64.b64decode(encoded.encode("ascii"), validate=True)
+    expected_bytes = (n + 7) // 8
+    if len(raw) != expected_bytes:
+        raise ValueError(
+            f"encoded mask holds {len(raw)} byte(s) ({len(raw) * 8} bits) "
+            f"but n={n} requires exactly {expected_bytes} byte(s); a "
+            f"mismatched mask cannot be truncated to the recorded item "
+            f"count without fabricating or dropping items")
     values = torch.tensor(list(raw), dtype=torch.int64)
     shifts = torch.arange(7, -1, -1).to(torch.int64)
     bits = ((values.reshape(-1, 1) >> shifts) & 1).reshape(-1)
-    if bits.numel() < n:
-        raise ValueError(
-            f"encoded mask holds {bits.numel()} bits but n={n} was requested")
     return bits[:n].bool()
 
 
