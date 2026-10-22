@@ -5806,7 +5806,10 @@ def tune_shared_recipe(settings: Settings):
     table: if the selected rate's runs are all curve-invalid (plateau /
     diverging / instability) the selection was made between underfit or
     broken runs, and the frozen recipe cannot be trusted to expose the
-    mechanism under test - ``_resolve_lr`` prints that warning.
+    mechanism under test - ``_resolve_lr`` prints that warning.  Each row
+    also carries the per-seed validation accuracy and full curve record, so
+    the selection runs are traceable experiments themselves rather than
+    only an aggregate mean/verdict.
 
     Returns ``(best_lr, table, selection)`` where ``selection`` is the
     :func:`_selection_reliability` audit of the argmax: even at the claim
@@ -5818,13 +5821,17 @@ def tune_shared_recipe(settings: Settings):
                                              len(settings.seeds)))]
     table = []
     for lr in settings.lr_grid:
-        accs, verdicts = [], []
+        accs, verdicts, runs = [], [], []
         for seed in tune_seeds:
-            _, _, metrics, curve, _ = _train_and_eval(
+            _, params, metrics, curve, _ = _train_and_eval(
                 settings, seed, lr, eval_seed=VAL_SEED, selection=True,
                 gate="none")
             accs.append(metrics["accuracy"])
             verdicts.append(curve["curve_verdict"])
+            runs.append({"seed": int(seed), "params": int(params),
+                         "val_accuracy": metrics["accuracy"],
+                         "eval_seed": int(VAL_SEED),
+                         "curve": curve})
         mean = sum(accs) / len(accs)
         var = (sum((a - mean) ** 2 for a in accs) / (len(accs) - 1)
                if len(accs) > 1 else 0.0)
@@ -5832,7 +5839,8 @@ def tune_shared_recipe(settings: Settings):
                       "val_accuracy_std": var ** 0.5, "n_seeds": len(accs),
                       "curve_verdicts": verdicts,
                       "curve_invalid_runs": sum(
-                          v in CURVE_INVALID_VERDICTS for v in verdicts)})
+                          v in CURVE_INVALID_VERDICTS for v in verdicts),
+                      "runs": runs})
     # Same all-NaN guard as the depth ladder: ``max`` over an all-NaN key
     # returns an arbitrary row, which would freeze an unmeasured recipe for
     # every controlled contrast - refuse instead of fabricating a selection.
