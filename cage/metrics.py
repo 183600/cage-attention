@@ -535,6 +535,11 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
         out.update({key: float("nan") for key in keys})
         out[f"top{min(topk, k)}_accuracy"] = float("nan")
         return out
+    # Row alignment does not imply device alignment: callers may hand in
+    # CUDA logits with a CPU target/mask (or vice versa), and both top-k
+    # comparison and cross-entropy require one device.
+    if targets.device != logits.device:
+        targets = targets.to(logits.device)
 
     pred = logits.argmax(dim=-1)
     correct = pred == targets
