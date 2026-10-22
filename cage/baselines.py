@@ -197,7 +197,7 @@ class LinearBagProbe(torch.nn.Module):
 
 def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
                        lr=3e-4, seed=0, history: list | None = None,
-                       deterministic=False):
+                       deterministic=False, seed_info: dict | None = None):
     """Fit the probe with the same optimizer/schedule recipe pinned for the
     transformer (``_make_adamw``, cosine schedule, gradient clipping).
 
@@ -214,6 +214,11 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     NaN weights through the rest of the schedule: a diverged grid point
     has no measured accuracy and must be excluded from tuning, not read
     as "the probe cannot do better".
+
+    ``seed_info`` optionally receives the actual
+    :func:`cage.repro.seed_everything` result applied by this run, so a
+    probe record can prove which RNGs were pinned instead of citing only
+    the configured seed.
     """
     check_train_seed(seed)
     raw_steps = steps
@@ -226,7 +231,10 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     if batch is None:
         raise ValueError(
             f"batch must be a positive integer, got {raw_batch!r}")
-    seed_everything(seed, deterministic=deterministic)
+    applied = seed_everything(seed, deterministic=deterministic)
+    if seed_info is not None:
+        seed_info.update(applied)
+        seed_info["reseeded"] = True
     gen = stream_generator(seed, device)
     model = LinearBagProbe(vocab).to(device)
     params = list(model.parameters())
@@ -340,11 +348,13 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
             runs = []
             for seed in seeds:
                 history = []
+                seeding = {}
                 model = train_linear_probe(n_pairs, vocab, device,
                                            steps=train_steps,
                                            batch=batch, lr=lr, seed=seed,
                                            history=history,
-                                           deterministic=deterministic)
+                                           deterministic=deterministic,
+                                           seed_info=seeding)
                 run_diverged = any("nonfinite" in p or "nonfinite_grad" in p
                                    for p in history)
                 if run_diverged:
@@ -359,6 +369,7 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
                                             seed=val_seed)
                 runs.append({"seed": int(seed), "val_accuracy": acc,
                              "diverged": bool(run_diverged),
+                             "seeding": seeding,
                              "history": list(history)})
                 if run_diverged:
                     # The run stopped at an arbitrary step: this accuracy

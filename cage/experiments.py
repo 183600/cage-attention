@@ -7467,11 +7467,13 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     probe_diverged = []
     for seed in settings.seeds:
         probe_curve = []
+        probe_seeding = {}
         probe = train_linear_probe(settings.n_pairs, settings.vocab,
                                    settings.device, steps=best_steps,
                                    batch=settings.probe_batch, lr=best_lr,
                                    seed=seed, history=probe_curve,
-                                   deterministic=settings.deterministic)
+                                   deterministic=settings.deterministic,
+                                   seed_info=probe_seeding)
         acc = linear_probe_accuracy(
             probe, settings.n_pairs, settings.vocab, settings.device,
             batch=settings.probe_eval_batch,
@@ -7499,6 +7501,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                            probe_curve[-1]["loss"] if probe_curve
                            else float("nan")),
                        "probe_curve": probe_curve,
+                       "seeding": probe_seeding,
                        "n": settings.probe_eval_batch
                             * settings.probe_eval_batches})
     if probe_diverged:
