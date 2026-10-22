@@ -337,6 +337,7 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
             diverged_accs = []
             loss_means = []
             diverged = 0
+            runs = []
             for seed in seeds:
                 history = []
                 model = train_linear_probe(n_pairs, vocab, device,
@@ -356,6 +357,9 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
                                             batch=probe_batch,
                                             batches=val_batches,
                                             seed=val_seed)
+                runs.append({"seed": int(seed), "val_accuracy": acc,
+                             "diverged": bool(run_diverged),
+                             "history": list(history)})
                 if run_diverged:
                     # The run stopped at an arbitrary step: this accuracy
                     # is recorded for transparency but is not a
@@ -371,7 +375,7 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
             row = {"lr": lr, "steps": train_steps,
                    "val_accuracy_mean": mean,
                    "val_accuracy_std": var ** 0.5, "n_seeds": len(accs),
-                   "diverged_runs": diverged}
+                   "diverged_runs": diverged, "runs": runs}
             if diverged_accs:
                 row["diverged_accuracy_mean"] = (sum(diverged_accs)
                                                  / len(diverged_accs))
