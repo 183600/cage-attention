@@ -1460,8 +1460,15 @@ class Settings:
 
 
 def _finite(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) \
-        and math.isfinite(float(value))
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError, TypeError):
+        # A JSON integer can be arbitrarily large; converting it to float
+        # raises OverflowError.  That value is not a usable finite statistic,
+        # so report it as non-finite instead of aborting the audit.
+        return False
 
 
 def _depth_step_candidates(settings: Settings) -> tuple:

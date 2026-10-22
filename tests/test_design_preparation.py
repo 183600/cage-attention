@@ -265,6 +265,17 @@ class PairedPilotSdTest(unittest.TestCase):
         self.assertIn("2 pilot", source)
 
 
+class FiniteScalarTest(unittest.TestCase):
+    def test_overflowing_and_boolean_values_are_not_finite_statistics(self):
+        from cage.experiments import _finite
+
+        self.assertFalse(_finite(10 ** 400))
+        self.assertFalse(_finite(True))
+        self.assertFalse(_finite(None))
+        self.assertTrue(_finite(0))
+        self.assertTrue(_finite(-1.25))
+
+
 class DesignPlanTest(unittest.TestCase):
     @staticmethod
     def _verdict(sd=0.001):
