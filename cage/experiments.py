@@ -7464,13 +7464,19 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         # below (the TOST is symmetric, so only the reported sign moves).
         diffs = [by_seed_b[r["seed"]]["accuracy"] - r["accuracy"]
                  for r in valid_a if r["seed"] in by_seed_b]
-        if not diffs:
+        if len(diffs) < 2:
+            # One paired seed gives a zero-width percentile interval and a
+            # degenerate TOST (equivalence_test([0.0], bound) returns
+            # equivalent=True), which is not a seed-clustered claim.
             adjacent[f"{a}->{b}"] = {
-                "n": 0, "sesoi_accuracy": sesoi,
+                "n": len(diffs), "sesoi_accuracy": sesoi,
                 "equivalent": False, "unmeasured": True,
             }
+            reason = ("no paired runs (unmeasured rung)" if not diffs else
+                      "only one paired run; at least two independent pairs "
+                      "are needed for the bootstrap/TOST read")
             print(f"[baselines] HB7 adjacent-depth contrast {a}->{b} layers: "
-                  f"no paired runs (unmeasured rung); skipped")
+                  f"{reason}; skipped")
             continue
         ci = paired_bootstrap_ci(diffs)
         # The paired gain gets the same practical-significance reading as
