@@ -433,11 +433,14 @@ HYPOTHESES = {
         "question": "Does the calibrated gate use attention concentration / "
                     "length information beyond the query?",
         "hypothesis": "The query-only gate has no access to the attention "
-                      "distribution, so |gate_vs_entropy| is clearly larger "
-                      "for calib than for query.",
-        "prediction": "|gate_vs_entropy|(calib) - |gate_vs_entropy|(query) > 0; "
-                      "the same direction holds for the rank (Spearman) "
-                      "correlation as a robustness check.  The registered "
+                      "distribution, so |gate_vs_entropy| and "
+                      "|gate_vs_maxprob| are both clearly larger for calib "
+                      "than for query.",
+        "prediction": "|gate_vs_entropy|(calib) - |gate_vs_entropy|(query) > 0 "
+                      "and |gate_vs_maxprob|(calib) - "
+                      "|gate_vs_maxprob|(query) > 0; the same direction holds "
+                      "for the rank (Spearman) correlations as a robustness "
+                      "check.  The registered "
                       "accuracy companion (calib - none and calib - query) "
                       "is a one-sided non-inferiority check: the calibrated "
                       "gate must not lose accuracy beyond the registered "
@@ -449,7 +452,13 @@ HYPOTHESES = {
                     "one-sided non-inferiority tests against the registered "
                     "SESOI (lower bound above -SESOI), not directional "
                     "superiority claims",
-        "sesoi": {"accuracy": 0.01, "abs_gate_vs_entropy": 0.05},
+        # Both distribution readouts are in the pre-registered family: the
+        # claim is that calib reads the attention distribution while query
+        # does not, and max-prob is the other observable summary of that
+        # distribution.  Registering only entropy would leave half of the
+        # stated evidence exploratory.
+        "sesoi": {"accuracy": 0.01, "abs_gate_vs_entropy": 0.05,
+                  "abs_gate_vs_maxprob": 0.05},
         # The one-sided accuracy companion covers the registered calib
         # contrasts (calib - none, calib - query) and is registered as
         # non-inferiority under ``sesoi_test``, not as a direction.  The
@@ -457,6 +466,7 @@ HYPOTHESES = {
         # moves accuracy and is also not a signed claim, so it registers its
         # own undirected key.
         "direction": {"abs_gate_vs_entropy": "+",
+                      "abs_gate_vs_maxprob": "+",
                       "query_none_accuracy": None},
         "sesoi_test": {"accuracy": "noninferior"},
     },
@@ -8322,12 +8332,12 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                 **{key: _mean_std([r.get(key)
                                    for r in _curve_valid_runs(final_runs)])
                    for key in ("accuracy", "abs_gate_vs_entropy",
-                               "gate_margin", "false_conc_rate",
-                               "null_mass_mean")},
+                               "abs_gate_vs_maxprob", "gate_margin",
+                               "false_conc_rate", "null_mass_mean")},
                 "all": {key: _mean_std([r.get(key) for r in final_runs])
                         for key in ("accuracy", "abs_gate_vs_entropy",
-                                    "gate_margin", "false_conc_rate",
-                                    "null_mass_mean")},
+                                    "abs_gate_vs_maxprob", "gate_margin",
+                                    "false_conc_rate", "null_mass_mean")},
             },
             "curve_invalid_runs": sum(
                 r.get("curve_verdict") in CURVE_INVALID_VERDICTS
@@ -8337,6 +8347,8 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
 
     accuracy_sesoi = float(HYPOTHESES["H1a"]["sesoi"]["accuracy"])
     mechanism_sesoi = float(HYPOTHESES["H1a"]["sesoi"]["abs_gate_vs_entropy"])
+    maxprob_sesoi = float(
+        HYPOTHESES["H1a"]["sesoi"]["abs_gate_vs_maxprob"])
     margin_sesoi = float(HYPOTHESES["H1b"]["sesoi"]["gate_margin"])
     contrasts = {}
 
@@ -8364,6 +8376,7 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
         if baseline == "query":
             for metric, sesoi in (
                 ("abs_gate_vs_entropy", mechanism_sesoi),
+                ("abs_gate_vs_maxprob", maxprob_sesoi),
                 ("gate_margin", margin_sesoi),
             ):
                 ci = _paired_benchmark(
@@ -8423,6 +8436,9 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                     ("abs_gate_vs_entropy", _paired_diff(
                         reference_runs["calib"], reference_runs[baseline],
                         "abs_gate_vs_entropy")),
+                    ("abs_gate_vs_maxprob", _paired_diff(
+                        reference_runs["calib"], reference_runs[baseline],
+                        "abs_gate_vs_maxprob")),
                     ("gate_margin", _paired_diff(
                         reference_runs["calib"], reference_runs[baseline],
                         "gate_margin")),
@@ -8492,7 +8508,8 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
     print(f"{'contrast':>18} {'metric':>22} {'controlled':>28} "
           f"{'tuned':>28} {'tuned state':>34}")
     for name, row in contrasts.items():
-        for metric in ("accuracy", "abs_gate_vs_entropy", "gate_margin"):
+        for metric in ("accuracy", "abs_gate_vs_entropy",
+                       "abs_gate_vs_maxprob", "gate_margin"):
             if metric not in row:
                 continue
             tuned = row[metric]
@@ -8599,6 +8616,7 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
     comparisons = (
         ("calib - query", "calib", "query", "accuracy"),
         ("calib - query", "calib", "query", "abs_gate_vs_entropy"),
+        ("calib - query", "calib", "query", "abs_gate_vs_maxprob"),
         ("calib - query", "calib", "query", "gate_margin"),
         ("calib - none", "calib", "none", "accuracy"),
         # null is the third control baseline: re-measure the frozen-recipe
@@ -9771,6 +9789,16 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     clog.print("calib - query", "H1a", "abs_gate_vs_entropy",
                _paired_diff(by_gate["calib"], by_gate["query"],
                             "abs_gate_vs_entropy"),
+               warn=_curve_warn(("calib", by_gate["calib"]),
+                                ("query", by_gate["query"])))
+    # Same registered contrast on the other observable attention summary:
+    # calib's gate must use the distribution, query's cannot, and max-prob
+    # is the concentration readout the H1b false-concentration argument is
+    # built on.  Leaving it exploratory would make half of the stated
+    # evidence unaccounted for in the FDR family.
+    clog.print("calib - query", "H1a", "abs_gate_vs_maxprob",
+               _paired_diff(by_gate["calib"], by_gate["query"],
+                            "abs_gate_vs_maxprob"),
                warn=_curve_warn(("calib", by_gate["calib"]),
                                 ("query", by_gate["query"])))
     clog.print("calib - query", "H1b", "gate_margin",
