@@ -4799,6 +4799,137 @@ def _efficiency_pair(target, reference) -> dict:
     }
 
 
+def _complexity_cost_companion(settings: Settings, out_dir: pathlib.Path,
+                               verdict: dict, by_gate: dict,
+                               deep_cost=None) -> dict:
+    """Report the cost of the deep model against its tuned shallow rungs."""
+    shallow = verdict.get("shallow_none") or {}
+    matched = verdict.get("matched_shallow") or {}
+    cells = {}
+    if isinstance(deep_cost, dict) and deep_cost.get("available", True):
+        deep = dict(deep_cost)
+        acc = _mean_std([r.get("accuracy") for r in by_gate.get("none", [])])
+        deep["accuracy_mean"] = acc["mean"]
+        deep["accuracy_std"] = acc["std"]
+        deep["role"] = "deep none"
+        cells["deep_none"] = deep
+
+    shallow_depth = int(shallow.get("n_layers") or 0)
+    if shallow_depth > 0 and shallow.get("accuracy_by_seed"):
+        try:
+            rec = measure_config(
+                _model_cfg(settings, gate="none", n_layers=shallow_depth),
+                settings.device, _efficiency_seq_len(settings), batch=1,
+                warmup=_EFFICIENCY_WARMUP, repeats=_EFFICIENCY_REPEATS)
+            rec["accuracy_mean"] = shallow.get("accuracy_mean")
+            rec["accuracy_std"] = shallow.get("accuracy_std")
+            rec["role"] = f"tuned shallow ({shallow_depth} layer)"
+            cells["tuned_shallow"] = rec
+        except Exception as exc:  # noqa: BLE001 - cost is a companion
+            cells["tuned_shallow"] = {
+                "available": False,
+                "reason": f"{type(exc).__name__}: {exc}"}
+
+    wide_d = matched.get("d_model")
+    if wide_d and matched.get("accuracy_by_seed"):
+        try:
+            rec = measure_config(
+                _model_cfg(settings, gate="none", n_layers=1,
+                           d_model=int(wide_d)),
+                settings.device, _efficiency_seq_len(settings), batch=1,
+                warmup=_EFFICIENCY_WARMUP, repeats=_EFFICIENCY_REPEATS)
+            matched_acc = []
+            for value in matched["accuracy_by_seed"].values():
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if _finite(value):
+                    matched_acc.append(value)
+            acc = _mean_std(matched_acc)
+            rec["accuracy_mean"] = acc["mean"]
+            rec["accuracy_std"] = acc["std"]
+            rec["role"] = "capacity-matched shallow"
+            cells["matched_shallow"] = rec
+        except Exception as exc:  # noqa: BLE001 - cost is a companion
+            cells["matched_shallow"] = {
+                "available": False,
+                "reason": f"{type(exc).__name__}: {exc}"}
+
+    deep = cells.get("deep_none") or {}
+    deep_by_seed = {}
+    for run in by_gate.get("none", []):
+        seed = run.get("seed")
+        if seed is not None and _finite(run.get("accuracy")):
+            deep_by_seed[seed] = float(run["accuracy"])
+    references = {
+        "tuned_shallow": shallow.get("accuracy_by_seed"),
+        "matched_shallow": matched.get("accuracy_by_seed"),
+    }
+    for key, rec in cells.items():
+        if key == "deep_none" or not rec.get("available", True):
+            continue
+        rec["cost_ratio_deep_over_reference"] = _efficiency_pair(
+            deep, rec)
+        ref_by_seed = {}
+        for seed, value in (references.get(key) or {}).items():
+            try:
+                seed = int(seed)
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if _finite(value):
+                ref_by_seed[seed] = value
+        deltas = [deep_by_seed[seed] - value
+                  for seed, value in ref_by_seed.items()
+                  if seed in deep_by_seed]
+        rec["accuracy_delta_vs_deep"] = (
+            sum(deltas) / len(deltas) if deltas else float("nan"))
+        rec["accuracy_delta_n"] = len(deltas)
+
+    print(f"\n[e1] complexity cost (batch=1, seq_len="
+          f"{_efficiency_seq_len(settings)}; cost ratios are deep none / "
+          f"reference; d_acc is deep mean accuracy minus the reference on "
+          f"their paired seeds; companions only):")
+    print(f"{'arm':>28} {'params':>9} {'GFLOP':>8} {'lat_ms':>8} "
+          f"{'acc':>7} {'d_acc':>8} {'param_x':>8} {'gflop_x':>8} "
+          f"{'lat_x':>8}")
+    for key in ("deep_none", "tuned_shallow", "matched_shallow"):
+        rec = cells.get(key)
+        if not rec or not rec.get("available", True):
+            if rec:
+                print(f"{str(rec.get('role', key)):>28}  unavailable: "
+                      f"{rec.get('reason')}")
+            continue
+        ratio = rec.get("cost_ratio_deep_over_reference") or {}
+        ratios = ratio.get("ratios") or {}
+        def _x(name):
+            value = ratios.get(f"{name}_ratio_target_over_reference")
+            return f"{value:.3f}" if _finite(value) else "-"
+        delta = rec.get("accuracy_delta_vs_deep")
+        delta_s = f"{delta:+.4f}" if _finite(delta) else "-"
+        print(f"{str(rec.get('role', key)):>28} {rec['params']:>9} "
+              f"{rec['analytic_matmul_gflops']:>8.4f} "
+              f"{rec['latency_ms_median']:>8.3f} "
+              f"{rec.get('accuracy_mean', float('nan')):>7.4f} "
+              f"{delta_s:>8} "
+              f"{_x('params'):>8} {_x('analytic_matmul_flops'):>8} "
+              f"{_x('latency_ms_median'):>8}")
+
+    payload = {
+        "experiment": "e1",
+        "seq_len": _efficiency_seq_len(settings),
+        "comparison": "complexity_cost_companion",
+        "note": ("cost of the deep ungated model against its tuned and "
+                 "capacity-matched one-layer references; ratios are deep / "
+                 "reference; never a decision rule"),
+        "cells": cells,
+        "_provenance": _stamp(settings),
+    }
+    _write_json(out_dir / "e1_complexity_cost.json", payload)
+    return payload
+
+
 def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
                                  experiment: str, cells, lengths,
                                  reference=None) -> dict:
@@ -8943,6 +9074,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     table["_efficiency"] = _efficiency_companion(
         settings, out_dir, "e1", [(gate, by_gate[gate]) for gate in GATES],
         reference="none")
+    table["_complexity_cost"] = _complexity_cost_companion(
+        settings, out_dir, verdict, by_gate,
+        deep_cost=table["_efficiency"]["cells"].get("none"))
     table["_provenance"] = _stamp(settings)
     if complexity_benchmark is not None:
         table["_complexity_benchmark"] = complexity_benchmark
