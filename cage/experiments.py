@@ -25,13 +25,16 @@ Design principles
     baseline (validation seed), then frozen for all gate variants so the
     E1/E3 comparisons stay controlled (each side of every pre-registered
     contrast carries a machine-checked controlled-variable audit).  Because
-    that frozen point was selected on ``none`` alone, E1 additionally runs a
-    **separate per-variant fairness accounting**: every arm gets its own
-    validation-selected lr (and calib its own ``calib_tau_init``), and the
-    resulting calib-vs-baseline paired benchmark is reported *next to* the
-    controlled columns, never pooled with them.  The primary pre-registered
-    conclusion is still the same-recipe family; the tuned account answers
-    whether it survives when the baselines also get their best shot.  Every
+    that frozen point was selected on ``none`` alone, E1 and the primary E2
+    arms additionally run a **separate per-variant fairness accounting**:
+    every arm gets its own validation-selected lr (and calib its own
+    ``calib_tau_init``), and the resulting calib-vs-baseline paired
+    benchmark is reported *next to* the controlled columns, never pooled
+    with them.  E2 selects at the training length and reads the endpoint
+    metrics at the longest sweep length, so selection never sees the
+    extrapolation length.  The primary pre-registered conclusion is still
+    the same-recipe family; the tuned account answers whether it survives
+    when the baselines also get their best shot.  Every
     run record stamps the full optimisation recipe it trained under
     (optimizer family, weight decay, betas, schedule, eta_min, gradient
     clipping, augmentation - from the single source of truth in
@@ -10444,6 +10447,396 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
     return payload
 
 
+def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
+                           reference_lr: float, reference_runs: dict,
+                           lengths: list) -> dict:
+    """Give every primary E2 arm its own validation-selected recipe.
+
+    The pre-registered E2 family freezes one recipe (tuned on ``none`` at the
+    training length) for every arm.  That is the correct controlled contrast,
+    but it leaves the same fairness question as E1: if ``query`` or ``null``
+    prefers a different learning rate (or ``calib`` a different temperature),
+    the frozen recipe can make a control look weaker than it is.  This
+    companion selects, per primary arm and on ``VAL_SEED`` only:
+
+    * an lr from the shared ``lr_grid`` plus the frozen reference point;
+    * for calib, a ``calib_tau_init`` at the selected lr.
+
+    Selection is read at the *training* length (the same length the shared
+    recipe was tuned on); the selected recipe is then trained on the full
+    seed set and scored on the sealed test stream at the training and longest
+    sweep lengths.  It is deliberately not routed through ``ContrastLog``:
+    the arms differ in lr/temperature, so the controlled-variable audit must
+    fail and the row is an exploratory benchmark.  The pre-registered
+    same-recipe H2a/H2d family remains the primary conclusion; this payload
+    answers "does calib still degrade less when the baselines also get their
+    own best shot?".
+
+    Only the four primary arms are tuned (the calibration-term ablations are
+    mechanism decompositions, not baselines).  Reference runs are reused when
+    the selected recipe is the frozen one, so a baseline already optimal under
+    the controlled point costs no extra final runs.
+    """
+    if not settings.per_variant_tuning:
+        return {"available": False,
+                "reason": "disabled by Settings.per_variant_tuning"}
+    reference_lr = float(reference_lr)
+    if not math.isfinite(reference_lr) or reference_lr <= 0.0:
+        return {"available": False, "reason": "non-positive reference lr"}
+    primary = ("none", "query", "calib", "null")
+    tune_seeds = list(settings.seeds[:max(
+        1, min(int(settings.per_variant_tune_seeds), len(settings.seeds)))])
+    claim_floor = min(int(settings.min_seeds_for_claim), len(settings.seeds))
+    if len(tune_seeds) < claim_floor:
+        print(f"[e2] WARNING: per-variant tuning selects on "
+              f"{len(tune_seeds)} seed(s), below the pre-registered claim "
+              f"floor {claim_floor}; the tuned recipes are noisier than the "
+              f"controlled ones and the two accounts must still be read "
+              f"separately")
+    candidate_lrs = sorted({reference_lr,
+                            *(float(v) for v in settings.lr_grid)})
+    default_tau = float(Cfg().calib_tau_init)
+    candidate_taus = sorted({default_tau,
+                             *(float(v) for v in settings.calib_tau_grid)})
+    by_arm = {}
+    tuning_rows = []
+
+    def _tune_run(gate, seed, lr, tau, phase):
+        overrides = ({"calib_tau_init": tau} if gate == "calib" else {})
+        _, params, metrics, curve, model_cfg = _train_and_eval(
+            settings, seed, lr, eval_seed=VAL_SEED, selection=True,
+            gate=gate, **overrides)
+        rec = {
+            "experiment": "e2_per_variant_tuning",
+            "hypotheses": ["H2a", "H2d"],
+            "phase": phase, "variant": gate, "gate": gate,
+            "seed": int(seed), "lr": float(lr),
+            "calib_tau_init": (float(tau) if gate == "calib" else None),
+            "eval_seed": VAL_SEED, "params": int(params),
+            "val_accuracy": float(metrics["accuracy"]),
+            "model_cfg": model_cfg,
+            **curve,
+            **_training_record(settings, lr),
+            **_run_context(settings),
+        }
+        _write_result(out_dir / "e2_per_variant_tuning_runs.jsonl", rec)
+        tuning_rows.append(rec)
+        return rec
+
+    def _pick(rows, key, label):
+        pick = _curve_valid_selection_rows(rows)
+        eligible = pick["rows"]
+        if not eligible:
+            return None, {
+                "label": label, "pool": pick["pool"],
+                "n_finite": pick["n_finite"], "n_invalid": pick["n_invalid"],
+                "reason": "no finite validation row",
+            }
+        best = max(eligible, key=lambda row: row["val_accuracy_mean"])
+        selection = _selection_reliability(
+            eligible, grid=[row[key] for row in eligible])
+        selection["pool"] = pick["pool"]
+        selection["n_finite"] = pick["n_finite"]
+        selection["n_invalid"] = pick["n_invalid"]
+        selection["excluded_curve_invalid_rows"] = pick["n_excluded"]
+        return best, selection
+
+    for gate in primary:
+        lr_rows = []
+        for lr in candidate_lrs:
+            runs = [_tune_run(gate, seed, lr, default_tau, "lr")
+                    for seed in tune_seeds]
+            accs = [r["val_accuracy"] for r in runs]
+            mean = sum(accs) / len(accs) if accs else float("nan")
+            var = (sum((a - mean) ** 2 for a in accs) / (len(accs) - 1)
+                   if len(accs) > 1 else 0.0)
+            verdicts = [r["curve_verdict"] for r in runs]
+            lr_rows.append({
+                "lr": float(lr), "calib_tau_init": default_tau,
+                "val_accuracy_mean": mean,
+                "val_accuracy_std": math.sqrt(var) if math.isfinite(var)
+                else float("nan"),
+                "n_seeds": len(accs), "curve_verdicts": verdicts,
+                "curve_invalid_runs": sum(
+                    v in CURVE_INVALID_VERDICTS for v in verdicts),
+                "runs": runs,
+            })
+        best_lr_row, lr_selection = _pick(lr_rows, "lr", f"{gate}:lr")
+        fallback = None
+        if best_lr_row is None:
+            final_lr = reference_lr
+            fallback = "no finite lr row; reused frozen reference lr"
+        else:
+            final_lr = float(best_lr_row["lr"])
+        if gate != "calib":
+            final_tau = None
+            tau_selection = {"applicable": False}
+            validation = best_lr_row
+        else:
+            tau_rows = []
+            for tau in candidate_taus:
+                if (tau == default_tau and best_lr_row is not None
+                        and float(best_lr_row["lr"]) == final_lr):
+                    runs = list(best_lr_row["runs"])
+                else:
+                    runs = [_tune_run(gate, seed, final_lr, tau, "tau")
+                            for seed in tune_seeds]
+                accs = [r["val_accuracy"] for r in runs]
+                mean = sum(accs) / len(accs) if accs else float("nan")
+                var = (sum((a - mean) ** 2 for a in accs) / (len(accs) - 1)
+                       if len(accs) > 1 else 0.0)
+                verdicts = [r["curve_verdict"] for r in runs]
+                tau_rows.append({
+                    "lr": final_lr, "calib_tau_init": float(tau),
+                    "val_accuracy_mean": mean,
+                    "val_accuracy_std": math.sqrt(var) if math.isfinite(var)
+                    else float("nan"),
+                    "n_seeds": len(accs), "curve_verdicts": verdicts,
+                    "curve_invalid_runs": sum(
+                        v in CURVE_INVALID_VERDICTS for v in verdicts),
+                    "runs": runs,
+                })
+            best_tau_row, tau_selection = _pick(
+                tau_rows, "calib_tau_init", "calib:tau")
+            if best_tau_row is None:
+                final_tau = default_tau
+                fallback = ((fallback + "; ") if fallback else "") + \
+                    "no finite tau row; reused default calib_tau_init"
+                validation = best_lr_row
+            else:
+                final_tau = float(best_tau_row["calib_tau_init"])
+                validation = best_tau_row
+            tau_selection["rows"] = [
+                {k: v for k, v in row.items() if k != "runs"}
+                for row in tau_rows]
+        reuse = (final_lr == reference_lr
+                 and (gate != "calib" or final_tau == default_tau))
+        reused_reference = bool(reuse and reference_runs
+                                and reference_runs.get(gate))
+        if reused_reference:
+            final_runs = list(reference_runs[gate])
+        else:
+            final_runs = []
+            for seed in settings.seeds:
+                overrides = ({"calib_tau_init": final_tau}
+                             if gate == "calib" else {})
+                model, params, base_metrics, curve, model_cfg = \
+                    _train_and_eval(
+                        settings, seed, final_lr, eval_seed=TEST_SEED,
+                        gate=gate, **overrides)
+                long_metrics = eval_metrics(
+                    model, lengths[-1], settings.vocab, settings.device,
+                    batch=settings.eval_batch,
+                    batches=settings.eval_batches, seed=TEST_SEED)
+                rec = {
+                    "experiment": "e2_per_variant_tuning",
+                    "hypotheses": ["H2a", "H2d"],
+                    "phase": "final", "variant": gate, "gate": gate,
+                    "seed": int(seed), "lr": float(final_lr),
+                    "calib_tau_init": (float(final_tau)
+                                       if gate == "calib" else None),
+                    "eval_seed": TEST_SEED, "params": int(params),
+                    "eval_n": int(base_metrics["n"]),
+                    "eval_n_longest": int(long_metrics["n"]),
+                    "accuracy_at_base": float(base_metrics["accuracy"]),
+                    "accuracy_at_longest": float(long_metrics["accuracy"]),
+                    "accuracy_drop": float(base_metrics["accuracy"]
+                                           - long_metrics["accuracy"]),
+                    "model_cfg": model_cfg,
+                    **curve,
+                    **_training_record(settings, final_lr),
+                    **_run_context(settings),
+                }
+                _write_result(
+                    out_dir / "e2_per_variant_tuned_runs.jsonl", rec)
+                final_runs.append(rec)
+        by_arm[gate] = {
+            "recipe": {"lr": final_lr, "calib_tau_init": final_tau},
+            "reused_reference_runs": reused_reference,
+            "fallback": fallback,
+            "validation": (None if validation is None else {
+                "accuracy_mean": validation["val_accuracy_mean"],
+                "accuracy_std": validation["val_accuracy_std"],
+                "n_seeds": validation["n_seeds"],
+                "curve_invalid_runs": validation["curve_invalid_runs"],
+            }),
+            "lr_selection": lr_selection,
+            "tau_selection": tau_selection,
+            "lr_grid": [{k: v for k, v in row.items() if k != "runs"}
+                        for row in lr_rows],
+            "curve_invalid_runs": sum(
+                r.get("curve_verdict") in CURVE_INVALID_VERDICTS
+                for r in final_runs),
+            "runs": final_runs,
+        }
+
+    longest_sesoi = float(HYPOTHESES["H2a"]["sesoi"]["accuracy_at_longest"])
+    drop_sesoi = float(HYPOTHESES["H2a"]["sesoi"]["accuracy_drop"])
+
+    def _tuned_state(ci, sesoi, direction):
+        if ci.get("unmeasured"):
+            return "unmeasured"
+        lo, hi = ci.get("lo"), ci.get("hi")
+        if direction == "+":
+            if ci.get("complexity_justified"):
+                return "calib above tuned baseline by SESOI"
+            if ci.get("below_reference"):
+                return "tuned baseline better"
+        else:
+            if _finite(hi) and float(hi) < -float(sesoi):
+                return "calib drops less by SESOI"
+            if _finite(lo) and float(lo) > float(sesoi):
+                return "tuned baseline drops less"
+        if ci.get("indistinguishable"):
+            return "indistinguishable"
+        return "inconclusive"
+
+    contrasts = {}
+    for baseline in ("none", "query", "null"):
+        ref = (f"tuned {baseline} (lr={by_arm[baseline]['recipe']['lr']:g}"
+               + ("" if by_arm[baseline]['recipe']['calib_tau_init'] is None
+                  else f", tau={by_arm[baseline]['recipe']['calib_tau_init']:g}")
+               + ")")
+        row = {}
+        for metric, sesoi, direction in (
+            ("accuracy_at_longest", longest_sesoi, "+"),
+            ("accuracy_drop", drop_sesoi, "-"),
+        ):
+            ci = _paired_benchmark(
+                by_arm["calib"]["runs"], by_arm[baseline]["runs"], metric,
+                sesoi, ref,
+                comparison="e2_per_variant_tuned_benchmark",
+                treatment=("each arm's own val-selected lr and calib_tau_init "
+                           "for calib; selection at the training length"))
+            ci["state"] = _tuned_state(ci, sesoi, direction)
+            row[metric] = ci
+        contrasts[f"calib - {baseline}"] = row
+
+    def _is_good(row, metric):
+        state = (row.get(metric) or {}).get("state")
+        return state in ("calib above tuned baseline by SESOI",
+                         "calib drops less by SESOI")
+
+    def _is_ref_better(row, metric):
+        state = (row.get(metric) or {}).get("state")
+        return state in ("tuned baseline better",
+                         "tuned baseline drops less")
+
+    unmeasured = [name for name, row in contrasts.items()
+                  if any(ci.get("unmeasured") for ci in row.values())]
+    baseline_better = [name for name, row in contrasts.items()
+                       if any(_is_ref_better(row, metric)
+                              for metric in ("accuracy_at_longest",
+                                             "accuracy_drop"))]
+    robust = [name for name, row in contrasts.items()
+              if all(_is_good(row, metric)
+                     for metric in ("accuracy_at_longest", "accuracy_drop"))]
+    if unmeasured:
+        readout = ("not determinable for " + ", ".join(unmeasured)
+                   + ": at least one side has no curve-valid paired seed")
+    elif baseline_better:
+        readout = ("NOT robust to per-variant tuning: "
+                   + ", ".join(baseline_better)
+                   + " is confidently better on at least one endpoint metric")
+    elif len(robust) == len(contrasts) and contrasts:
+        readout = ("robust: calib beats every tuned baseline on both the "
+                   "longest-length level and the base-to-long drop by the "
+                   "pre-registered SESOI")
+    else:
+        readout = ("not established: calib is not better than every tuned "
+                   "baseline by the pre-registered SESOI on both endpoint "
+                   "metrics")
+
+    print(f"\n[e2] per-variant tuning (separate fairness accounting, "
+          f"exploratory and outside the FDR family): each primary arm's own "
+          f"recipe is selected on validation seed {VAL_SEED} at the training "
+          f"length over lr={candidate_lrs} (calib also over "
+          f"calib_tau_init={candidate_taus}); selection seeds={tune_seeds}.  "
+          f"The controlled rows above freeze one recipe for all arms - this "
+          f"table asks whether calib still degrades less when none/query/null "
+          f"also get their own best shot:")
+    print(f"{'arm':>6} {'lr':>10} {'tau':>7} {'val_acc':>17} {'val_n':>6} "
+          f"{'curve_invalid':>13} {'test_at_long':>17} {'test_drop':>17} "
+          f"{'reused':>7}")
+    for gate in primary:
+        row = by_arm[gate]
+        recipe = row["recipe"]
+        val = row["validation"] or {}
+        tau = ("n/a" if recipe["calib_tau_init"] is None
+               else f"{recipe['calib_tau_init']:g}")
+
+        def _mcell(key):
+            agg = _mean_std([r.get(key) for r in
+                             _curve_valid_runs(row["runs"])])
+            return (f"{agg['mean']:.4f}±{agg['std']:.4f}"
+                    if _finite(agg["mean"]) else "n/a")
+
+        val_s = (f"{val.get('accuracy_mean', float('nan')):.4f}±"
+                 f"{val.get('accuracy_std', float('nan')):.4f}"
+                 if _finite(val.get("accuracy_mean")) else "n/a")
+        print(f"{gate:>6} {recipe['lr']:>10g} {tau:>7} {val_s:>17} "
+              f"{int(val.get('n_seeds', 0)):>6} "
+              f"{row['curve_invalid_runs']:>13} "
+              f"{_mcell('accuracy_at_longest'):>17} "
+              f"{_mcell('accuracy_drop'):>17} "
+              f"{'yes' if row['reused_reference_runs'] else 'no':>7}")
+        if row.get("fallback"):
+            print(f"       fallback: {row['fallback']}")
+    print(f"\n[e2] two accounting conventions side by side (endpoint "
+          f"accuracy metrics; controlled = same frozen recipe, tuned = each "
+          f"arm's own validation-selected recipe).  The pre-registered FDR "
+          f"family is the controlled column; the tuned column is the "
+          f"fairness robustness check and must not be averaged with it:")
+    print(f"{'contrast':>18} {'metric':>22} {'controlled':>28} "
+          f"{'tuned':>28} {'tuned state':>38}")
+    controlled_columns = {}
+    for name, row in contrasts.items():
+        baseline = name.split(" - ", 1)[1]
+        for metric in ("accuracy_at_longest", "accuracy_drop"):
+            tuned = row.get(metric) or {}
+            controlled = _paired_diff(
+                (reference_runs or {}).get("calib") or [],
+                (reference_runs or {}).get(baseline) or [], metric)
+            controlled_columns.setdefault(name, {})[metric] = {
+                "mean": controlled.get("mean"), "lo": controlled.get("lo"),
+                "hi": controlled.get("hi"), "n": controlled.get("n"),
+            }
+            ctl_s = (f"{controlled.get('mean', float('nan')):+.4f} "
+                     f"[{controlled.get('lo', float('nan')):+.4f},"
+                     f"{controlled.get('hi', float('nan')):+.4f}]"
+                     if _finite(controlled.get("mean")) else "n/a")
+            print(f"{name:>18} {metric:>22} {ctl_s:>28} "
+                  f"{_fmt_ci(tuned):>28} {tuned.get('state', ''):>38}")
+    print(f"[e2] per-variant tuned endpoint conclusion: {readout}")
+    payload = {
+        "available": True,
+        "selection_seed": VAL_SEED,
+        "selection_length": int(settings.n_pairs),
+        "selection_rule": "max mean validation accuracy among curve-valid rows",
+        "tune_seeds": tune_seeds,
+        "candidate_lrs": candidate_lrs,
+        "calib_tau_grid": candidate_taus,
+        "by_arm": {gate: {k: v for k, v in row.items() if k != "runs"}
+                   for gate, row in by_arm.items()},
+        "contrasts": contrasts,
+        "controlled_contrasts": controlled_columns,
+        "robust_baselines": robust,
+        "baselines_better": baseline_better,
+        "unmeasured": unmeasured,
+        "readout": readout,
+        "comparison": "e2_per_variant_tuned_benchmark",
+        "note": ("exploratory fairness companion, not a controlled mechanism "
+                 "contrast and not part of the pre-registered FDR family: "
+                 "each arm's lr (and calib's calib_tau_init) is selected on "
+                 "the validation seed at the training length, then the "
+                 "selected recipe is evaluated at the longest sweep length; "
+                 "read it next to the same-recipe controlled family, never "
+                 "instead of it"),
+    }
+    _write_json(out_dir / "e2_per_variant_tuning.json", payload)
+    return payload
+
+
 def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H2a", "H2b", "H2c", "H2d", "H2e", "H2f"))
     # HB1/HB3/HB4/HB5 hard gate (see run_e1).
@@ -11118,6 +11511,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     length_contrasts = _e2_per_length_contrasts(
         settings, out_dir, by_variant, lengths)
     endpoint_companions = _e2_endpoint_class_companions(by_variant, lengths)
+    per_variant_tuning = _e2_per_variant_tuning(
+        settings, out_dir, lr, by_variant, lengths)
     length_efficiency = _length_efficiency_companion(
         settings, out_dir, "e2",
         [(label, by_variant[label]) for label, *_ in _E2_VARIANTS],
@@ -11159,6 +11554,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     e2_summary["_calibration_term_contributions"] = term_contributions
     e2_summary["_learned_correction_check"] = learned_correction_check
     e2_summary["_gate_stat_correlations_by_length"] = gate_corr_by_length
+    e2_summary["_per_variant_tuning"] = per_variant_tuning
     e2_summary["_efficiency"] = length_efficiency
     e2_summary["_class_frequency_companions"] = endpoint_companions
     e2_summary["_provenance"] = _stamp(settings)
@@ -11942,10 +12338,11 @@ def main(argv=None) -> int:
                              "is recorded in the run provenance)")
     parser.add_argument("--per-variant-tuning",
                         action=argparse.BooleanOptionalAction, default=None,
-                        help="tune each E1 arm's own lr (and calib's "
-                             "calib_tau_init) on validation data as a "
-                             "separate fairness benchmark (default: on; the "
-                             "same-recipe controlled family is unchanged)")
+                        help="tune each E1/E2 primary arm's own lr (and "
+                             "calib's calib_tau_init) on validation data as "
+                             "a separate fairness benchmark (default: on; "
+                             "the same-recipe controlled families are "
+                             "unchanged)")
     parser.add_argument("--out", default="results")
     parser.add_argument("--verify-artifacts", action="store_true",
                         help="check files in --out against artifact_index.json "
