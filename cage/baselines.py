@@ -495,7 +495,17 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
         raise ValueError(
             f"chance must be a finite probability in [0, 0.5), got "
             f"{chance!r}; the 2x-chance certificate is vacuous otherwise")
-    accs = [float(a) for a in accuracies if math.isfinite(float(a))]
+    # A malformed accuracy sample (non-numeric container, complex value)
+    # must abstain, not escape as a TypeError from a report companion.
+    # ``torch.as_tensor`` also flattens a nested/tensor input consistently.
+    try:
+        raw_acc = torch.as_tensor(accuracies).detach().reshape(-1)
+        if raw_acc.is_complex():
+            raise ValueError("accuracies must be real-valued")
+        raw_acc = raw_acc.to(torch.float64)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        raw_acc = torch.empty(0, dtype=torch.float64)
+    accs = [float(a) for a in raw_acc if math.isfinite(float(a))]
     margins = [a - chance for a in accs]
     # ``paired_bootstrap_ci``/``bootstrap_upper_p`` degrade to NaN readouts
     # for an invalid replicate count.  Normalise once here (a float or a

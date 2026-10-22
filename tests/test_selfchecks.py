@@ -222,6 +222,17 @@ class BaselineArgumentValidationTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     probe_vs_chance_test([0.01, 0.02], chance)
 
+    def test_malformed_probe_accuracies_abstain(self):
+        from cage.baselines import probe_vs_chance_test
+
+        for accuracies in (None, "not-a-sample", object(),
+                           [0.1 + 0.1j, 0.2 + 0j]):
+            with self.subTest(accuracies=accuracies):
+                out = probe_vs_chance_test(accuracies, 0.01)
+                self.assertEqual(out["n"], 0)
+                self.assertEqual(out["hb2_state"], "untestable")
+                self.assertFalse(out["hb2_supported"])
+
 
 class ProjectSelfCheckTest(unittest.TestCase):
     def test_metrics_self_check(self):
