@@ -4502,9 +4502,13 @@ def _load_baseline_verdict(out_dir: pathlib.Path):
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        verdict = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    # A syntactically valid JSON array/scalar is not a verdict record; treat
+    # it like a corrupt/missing file so the caller raises the documented
+    # BaselineVerdictError instead of failing on ``.get``.
+    return verdict if isinstance(verdict, dict) else None
 
 
 class BaselineVerdictError(RuntimeError):
