@@ -425,6 +425,17 @@ class DesignPlanTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             Settings(run_order_seed=True)
 
+    def test_settings_reject_byte_encoded_tuple_fields(self):
+        # Bytes are iterable, so a byte string would otherwise be read as
+        # its integer byte values (e.g. b"\x01\x02" -> depth ladder 1/2).
+        for field in ("depth_ladder", "probe_steps_grid", "lr_grid",
+                      "probe_lr_grid", "calib_tau_grid",
+                      "depth_step_multipliers"):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    Settings(**{field: b"\x01\x02"})
+        self.assertEqual(Settings(lr_grid=[1e-3]).lr_grid, (1e-3,))
+
     def test_settings_reject_non_sequence_or_byte_seeds(self):
         # ``bytes`` is iterable and would otherwise silently turn into its
         # integer byte values; a bare int/None is not a seed sequence.

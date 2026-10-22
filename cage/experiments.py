@@ -1266,6 +1266,12 @@ class Settings:
 
         def _positive_int_tuple(name, allow_empty=False):
             raw = getattr(self, name)
+            # ``bytes`` is iterable and would silently become its byte
+            # values; a string/mapping is also not a tuple of settings.
+            if isinstance(raw, (str, bytes)) or isinstance(raw, Mapping):
+                raise ValueError(
+                    f"{name} must be an iterable of positive integers, "
+                    f"got {type(raw).__name__}")
             try:
                 values = tuple(raw)
             except TypeError as exc:
@@ -1294,6 +1300,11 @@ class Settings:
         _positive_int_tuple("depth_ladder")
         _positive_int_tuple("probe_steps_grid", allow_empty=True)
         raw_multipliers = self.depth_step_multipliers
+        if isinstance(raw_multipliers, (str, bytes)) \
+                or isinstance(raw_multipliers, Mapping):
+            raise ValueError(
+                "depth_step_multipliers must be an iterable of finite "
+                f"positive numbers, got {type(raw_multipliers).__name__}")
         try:
             multipliers = tuple(raw_multipliers)
         except TypeError as exc:
@@ -1412,7 +1423,17 @@ class Settings:
                 f"per_variant_tune_seeds must be a positive integer, got "
                 f"{self.per_variant_tune_seeds!r}")
         for name in ("lr_grid", "probe_lr_grid", "calib_tau_grid"):
-            values = tuple(getattr(self, name))
+            raw = getattr(self, name)
+            if isinstance(raw, (str, bytes)) or isinstance(raw, Mapping):
+                raise ValueError(
+                    f"{name} must be a non-empty tuple of finite positive "
+                    f"numbers, got {type(raw).__name__}")
+            try:
+                values = tuple(raw)
+            except TypeError as exc:
+                raise ValueError(
+                    f"{name} must be a non-empty tuple of finite positive "
+                    f"numbers, got {raw!r}") from exc
             if not values or any(
                     not isinstance(v, (int, float)) or isinstance(v, bool)
                     or not math.isfinite(float(v)) or float(v) <= 0.0
@@ -1420,6 +1441,9 @@ class Settings:
                 raise ValueError(
                     f"{name} must be a non-empty tuple of finite positive "
                     f"numbers, got {values!r}")
+            # Canonicalise so a caller's list cannot be mutated after
+            # validation and silently change the grid used downstream.
+            setattr(self, name, tuple(values))
 
     @classmethod
     def quick(cls, device: str = "cpu") -> "Settings":
