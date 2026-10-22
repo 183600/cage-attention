@@ -1275,8 +1275,13 @@ def _difficulty_vectors(difficulty):
     abstain instead of inventing a composition.  Legacy blocks without
     ``id`` entries fall back to row order (their only available encoding).
     """
-    rows = (difficulty or {}).get("strata") or []
-    if not rows:
+    if not isinstance(difficulty, dict):
+        return [], []
+    rows = difficulty.get("strata") or []
+    if not isinstance(rows, (list, tuple)) or not rows:
+        return [], []
+    rows = list(rows)
+    if not all(isinstance(row, dict) for row in rows):
         return [], []
     has_id = ["id" in row for row in rows]
     if any(has_id) and not all(has_id):
