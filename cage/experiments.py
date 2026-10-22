@@ -6707,6 +6707,9 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
         if value is not None and not isinstance(value, bool):
             failed.append(
                 f"HB4 ({key} malformed: expected a boolean, got {value!r})")
+    if hb4_state is None and verdict.get("hb4_violated") is True:
+        failed.append(
+            "HB4 (legacy verdict has no state but hb4_violated is true)")
     if hb4_state in ("supported", "inconclusive") and \
             verdict.get("hb4_violated") is True:
         failed.append(
