@@ -2203,17 +2203,35 @@ def gate_stat_correlations(stats):
 
 
 def _false_concentration_at(mp, corr, gm, maxprob_thresh):
-    """Threshold-specific readout over precomputed per-sample vectors."""
+    """Threshold-specific readout over precomputed per-sample vectors.
+
+    ``false_conc_rate`` is a binomial error share over the confident rows,
+    so it carries a Wilson interval: at the stats-stream sizes used here a
+    rate of 0.30 [0.22, 0.39] is not distinguishable from 0.36, and a
+    variant difference read without that interval would overstate the
+    measurement.  The interval is on the *within-stream* sample; training-
+    seed variance is a separate uncertainty carried by the paired
+    contrast layer.
+    """
     high = mp > maxprob_thresh
     r = {
         "n_high_maxprob": int(high.sum()),
         "false_conc_rate": 1.0 - corr[high].float().mean().item() if high.any() else float("nan"),
         "overall_acc": corr.float().mean().item(),
     }
+    if high.any():
+        n_false = int((high & ~corr).sum())
+        ci = wilson_ci(n_false, int(high.sum()))
+        r["n_false_conc"] = n_false
+        r["false_conc_rate_lo"] = ci["lo"]
+        r["false_conc_rate_hi"] = ci["hi"]
     if gm is not None:
         fc = high & ~corr
+        cc = high & corr
+        r["n_false_conc_gate"] = int(fc.sum())
+        r["n_correct_high_gate"] = int(cc.sum())
         r["gate_on_false_conc"] = gm[fc].mean().item() if fc.any() else float("nan")
-        r["gate_on_correct"] = gm[corr & high].mean().item() if (corr & high).any() else float("nan")
+        r["gate_on_correct"] = gm[cc].mean().item() if cc.any() else float("nan")
     return r
 
 

@@ -173,6 +173,7 @@ from .train import (
     eval_accuracy,
     eval_metrics,
     false_concentration_analysis,
+    false_concentration_gate_test,
     false_concentration_sweep,
     gate_depth_ratio,
     gate_stat_correlations,
@@ -8576,6 +8577,13 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
     fc = (fc_sweep[0.5] if 0.5 in fc_sweep
           else false_concentration_analysis(stats))
     ed = error_detection_aucs(stats)
+    # Finite-stats-stream uncertainty on gate_on_correct - gate_on_false_conc
+    # (the independent two-sample bootstrap over the disjoint row groups).
+    # The seed-level gate_margin above is a different uncertainty: it asks
+    # whether the effect survives training-seed variance, not whether the
+    # finite diagnostic stream resolves the levels within one run.
+    fc_gate_boot = (false_concentration_gate_test(stats)
+                    if gate in ("query", "calib") else None)
     rec = {
         "experiment": "e1",
         "hypotheses": ["H1a", "H1b", "H1c", "H1d", "H1e", "H1f"],
@@ -8606,6 +8614,8 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
             rec[f"gate_margin_thr{thr:g}"] = (
                 row["gate_on_correct"] - row["gate_on_false_conc"])
     rec["false_conc_sweep"] = fc_sweep
+    if fc_gate_boot is not None:
+        rec["false_conc_gate_boot"] = fc_gate_boot
     if gate == "null":
         rec["null_mass_error_margin"] = _null_mass_margin(stats)
         # Report the null slot's absolute occupancy too, not only the
@@ -9303,9 +9313,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
           "the size of the confident set are printed so a margin driven by "
           "a near-empty false-concentration group is visible; mean±std over "
           "seeds, 'n_high' is the confident-sample count per stats pass):")
-    print(f"{'gate':>6} {'false_conc_rate':>17} {'gate@false_conc':>17} "
-          f"{'gate@correct':>17} {'margin':>17} {'n_high':>10} "
-          f"{'null_mass':>17}")
+    print(f"{'gate':>6} {'false_conc_rate[95%CI]':>27} "
+          f"{'gate@false_conc':>17} {'gate@correct':>17} {'margin':>17} "
+          f"{'n_high':>10} {'null_mass':>17} {'boot>0':>7}")
     for gate in GATES:
         t = table[gate]
 
@@ -9315,12 +9325,29 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 return "n/a"
             return fmt.format(m["mean"])
 
-        print(f"{gate:>6} {fcell('false_conc_rate'):>17} "
+        rate = fcell('false_conc_rate')
+        if rate != "n/a":
+            lo = t.get("false_conc_rate_lo", {}).get("mean", float("nan"))
+            hi = t.get("false_conc_rate_hi", {}).get("mean", float("nan"))
+            if _finite(lo) and _finite(hi):
+                rate += f"[{lo:.3f},{hi:.3f}]"
+        boots = [r.get("false_conc_gate_boot") for r in by_gate[gate]]
+        boots = [b for b in boots if b and b.get("applicable")]
+        boot_ok = sum(1 for b in boots
+                      if _finite(b.get("lo")) and float(b["lo"]) > 0.0)
+        boot_s = f"{boot_ok}/{len(boots)}" if boots else "n/a"
+        print(f"{gate:>6} {rate:>27} "
               f"{fcell('gate_on_false_conc'):>17} "
               f"{fcell('gate_on_correct'):>17} "
               f"{fcell('gate_margin'):>17} "
               f"{fcell('n_high_maxprob', '{:.1f}'):>10} "
-              f"{fcell('null_mass_mean'):>17}")
+              f"{fcell('null_mass_mean'):>17} {boot_s:>7}")
+    print("  (false_conc_rate[95%CI] = Wilson interval on the confident rows "
+          "of one stats stream; boot>0 = seeds whose within-stream "
+          "independent two-sample bootstrap CI for gate_on_correct - "
+          "gate_on_false_conc lies entirely above 0 - a different "
+          "uncertainty from the seed-level margin)")
+
 
     print("\n[e1] H1a robustness: rank (Spearman) gate-entropy correlation "
           "alongside Pearson (a monotone effect must survive the change of "
