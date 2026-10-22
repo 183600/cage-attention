@@ -280,6 +280,8 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
     out["train_delta"] = rel_delta(finite, "train_loss")
     val = [h for h in finite if h.get("val_loss") is not None
            and math.isfinite(float(h["val_loss"]))]
+    gap_first = float("nan")
+    gap_last = float("nan")
     if len(val) >= 2:
         out["val_delta"] = rel_delta(val, "val_loss")
         best = min(val, key=lambda h: h["val_loss"])
@@ -289,8 +291,11 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
             val[-1]["val_loss"] - best["val_loss"])
         common = [h for h in finite if h.get("val_loss") is not None]
         if common:
-            out["generalization_gap"] = float(
+            gap_first = float(
+                common[0]["val_loss"] - common[0]["train_loss"])
+            gap_last = float(
                 common[-1]["val_loss"] - common[-1]["train_loss"])
+            out["generalization_gap"] = gap_last
         if (len(val) >= 3 and math.isfinite(out["best_val_loss"])
                 and out["val_regression_after_best"]
                 > rel_tol * abs(out["best_val_loss"])):
@@ -407,8 +412,19 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
             f"gradient norm above {grad_norm_explode:g}: lower the learning "
             f"rate or check for rare spiking batches")
         out["recommendation"] = f"{out['recommendation']}; {out['grad_note']}"
-    out["overfitting_significant"] = bool(
-        out["verdict"] == "overfitting" and out["val_movement_significant"])
+    # The global overfit verdict is about the train/val *gap* widening, not
+    # merely about the validation curve's first-to-last movement: a run
+    # whose train loss collapses while validation stays flat is diverging
+    # even if the val movement itself is small.  Require the gap change to
+    # clear the validation-batch noise, as documented; without a noise
+    # estimate the claim abstains.
+    overfitting_significant = False
+    if (out["verdict"] == "overfitting"
+            and math.isfinite(gap_first) and math.isfinite(gap_last)
+            and math.isfinite(last_val_se) and last_val_se > 0.0):
+        overfitting_significant = bool(
+            (gap_last - gap_first) > 2.0 * last_val_se)
+    out["overfitting_significant"] = overfitting_significant
     return out
 
 
