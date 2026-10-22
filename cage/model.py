@@ -51,6 +51,7 @@ Normalization schemes
 from __future__ import annotations
 
 import math
+import operator
 from collections import OrderedDict
 from dataclasses import dataclass
 
@@ -140,6 +141,22 @@ class Cfg:
             raise ValueError(f"unknown gate {self.gate!r}; valid: {list(GATES)}")
         if self.norm not in NORMS:
             raise ValueError(f"unknown norm {self.norm!r}; valid: {list(NORMS)}")
+        # Geometry fields index embeddings/loops, so a float (or bool)
+        # cannot be coerced later: torch would raise a TypeError halfway
+        # through construction, after some parameters had already been
+        # allocated.  Validate and canonicalise them at the configuration
+        # boundary instead.
+        for name in ("vocab_size", "d_model", "n_heads", "n_layers",
+                     "max_len"):
+            raw = getattr(self, name)
+            if isinstance(raw, bool):
+                raise ValueError(f"{name} must be an integer, not bool")
+            try:
+                value = operator.index(raw)
+            except TypeError as exc:
+                raise ValueError(
+                    f"{name} must be an integer, got {raw!r}") from exc
+            setattr(self, name, value)
         if self.d_model <= 0 or self.n_heads <= 0 \
                 or self.d_model % self.n_heads:
             raise ValueError(
@@ -153,6 +170,20 @@ class Cfg:
         if self.vocab_size < 1:
             raise ValueError(
                 f"vocab_size must be >= 1, got {self.vocab_size!r}")
+        if self.layer_scale is not None:
+            if isinstance(self.layer_scale, bool):
+                raise ValueError(
+                    "layer_scale must be a finite number or None, not bool")
+            try:
+                layer_scale = float(self.layer_scale)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    f"layer_scale must be a finite number or None, got "
+                    f"{self.layer_scale!r}") from exc
+            if not math.isfinite(layer_scale):
+                raise ValueError(
+                    f"layer_scale must be finite, got {self.layer_scale!r}")
+            self.layer_scale = layer_scale
         if not (math.isfinite(float(self.dropout))
                 and 0.0 <= float(self.dropout) <= 1.0):
             raise ValueError(
