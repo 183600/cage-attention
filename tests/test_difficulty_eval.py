@@ -314,6 +314,16 @@ class DifficultyVectorAlignmentTest(unittest.TestCase):
         self.assertEqual(totals, [90, 10])
         self.assertEqual(correct, [9, 9])
 
+    def test_integral_float_ids_are_a_json_round_trip(self):
+        from cage.experiments import _difficulty_vectors
+
+        totals, correct = _difficulty_vectors({
+            "n_strata": 4.0,
+            "strata": [{"id": 2.0, "n": 5, "correct": 1}],
+        })
+        self.assertEqual(totals, [0, 0, 5, 0])
+        self.assertEqual(correct, [0, 0, 1, 0])
+
     def test_partial_strata_keep_their_id_slot(self):
         from cage.experiments import _difficulty_vectors
 

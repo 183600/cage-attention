@@ -1614,8 +1614,11 @@ def _difficulty_vectors(difficulty):
     if all(has_id):
         ids = []
         for row in rows:
-            sid = row["id"]
-            if isinstance(sid, bool) or not isinstance(sid, int) or sid < 0:
+            # Use the same JSON-round-trip rule as the counts: an integral
+            # float such as ``2.0`` is a valid serialisation of stratum id
+            # 2, while bool/fractional/negative values are not.
+            sid = _difficulty_count(row["id"])
+            if sid is None:
                 return [], []
             ids.append(sid)
         if len(set(ids)) != len(ids):
