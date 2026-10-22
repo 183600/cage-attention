@@ -6692,6 +6692,24 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
     elif hb4_state == "supported" and verdict.get("hb4_supported") is not True:
         failed.append(
             "HB4 (state says supported but the supported boolean is not true)")
+    # The state and its two booleans must agree.  A hand-edited verdict
+    # could otherwise pair an inconclusive state with ``hb4_violated=True``
+    # (or a supported state with a truthy but non-boolean mark) and pass the
+    # gate while its own fields say the control failed.
+    for key in ("hb4_supported", "hb4_violated"):
+        value = verdict.get(key)
+        if value is not None and not isinstance(value, bool):
+            failed.append(
+                f"HB4 ({key} malformed: expected a boolean, got {value!r})")
+    if hb4_state in ("supported", "inconclusive") and \
+            verdict.get("hb4_violated") is True:
+        failed.append(
+            f"HB4 (state {hb4_state!r} but hb4_violated is true)")
+    if hb4_state == "inconclusive" and \
+            verdict.get("hb4_supported") is True:
+        failed.append("HB4 (state inconclusive but hb4_supported is true)")
+    if hb4_state == "violated" and verdict.get("hb4_supported") is True:
+        failed.append("HB4 (state violated but hb4_supported is true)")
     # The held-out balance block is nested and its marks gate accuracy
     # claims.  A malformed block must fail closed here rather than crash the
     # runners later (``.get`` on a string/list) or be read as "not audited".
