@@ -6417,8 +6417,20 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
     model = build(_model_cfg(settings, **model_overrides), compile=False)
     model_cfg = asdict(model.cfg)
     params = sum(p.numel() for p in model.parameters())
-    eval_every = (max(1, train_steps // curve_points)
-                  if curve_points > 0 else 0)
+    if curve_points <= 0:
+        eval_every = 0
+    elif curve_points == 1:
+        # The training loop always evaluates step 0 and the final step, so
+        # one configured point is represented by the final check.
+        eval_every = max(1, train_steps - 1)
+    else:
+        # ``curve_points`` is the number of checks per run (Settings).  The
+        # final step is always checked in addition to the periodic ones, so
+        # the spacing must divide the interval between the first and final
+        # step into curve_points - 1 gaps; ``steps // curve_points`` adds an
+        # extra check in the common case.
+        eval_every = max(
+            1, math.ceil((train_steps - 1) / (curve_points - 1)))
     early_stop_info = {}
     seeding = {}
     hist = train_model(model, steps=train_steps, batch=settings.batch,
