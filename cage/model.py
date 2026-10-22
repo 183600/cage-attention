@@ -1537,6 +1537,11 @@ class CAGE(nn.Module):
                 sup = (flat_t != -1).nonzero(as_tuple=True)[0]
                 if sup.numel() == flat_t.numel():
                     sup = None
+        if sup is not None and sup.numel() == 0:
+            raise ValueError(
+                "targets contain no supervised position (all entries are "
+                "-1, or sup_pos selects only ignored positions): the loss "
+                "is undefined, so the batch must not be trained on")
         if torch.is_grad_enabled():
             x = self.tok(idx)
         else:
