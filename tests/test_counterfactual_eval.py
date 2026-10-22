@@ -122,6 +122,23 @@ class CounterfactualEditTest(unittest.TestCase):
                     _counterfactual_edits(self.idx, self.meta, self.n_pairs,
                                           vocab)
 
+    def test_non_integral_tokens_and_metadata_are_rejected(self):
+        bad_idx = self.idx.float()
+        with self.assertRaises(ValueError):
+            _counterfactual_edits(bad_idx, self.meta, self.n_pairs,
+                                  self.vocab)
+        for field, value in (("key_pos", 0.5), ("answer", 2.5)):
+            with self.subTest(field=field):
+                bad = dict(self.meta)
+                bad[field] = self.meta[field].float() + value
+                with self.assertRaises(ValueError):
+                    _counterfactual_edits(self.idx, bad, self.n_pairs,
+                                          self.vocab)
+        bad_bool = dict(self.meta, key_pos=self.meta["key_pos"].bool())
+        with self.assertRaises(ValueError):
+            _counterfactual_edits(self.idx, bad_bool, self.n_pairs,
+                                  self.vocab)
+
     def test_edits_are_deterministic(self):
         again = _counterfactual_edits(
             self.idx.clone(), self.meta, self.n_pairs, self.vocab)

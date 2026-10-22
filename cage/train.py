@@ -2257,6 +2257,11 @@ def _counterfactual_edits(idx, meta, n_pairs, vocab):
     if not torch.is_tensor(idx) or idx.dim() != 2:
         raise ValueError(
             f"idx must be a 2-D integer tensor, got {type(idx)}")
+    if idx.dtype == torch.bool or idx.is_floating_point() or idx.is_complex():
+        # Token ids are class indices; a float/complex/bool cast with
+        # ``torch.long`` would silently truncate or reinterpret them.
+        raise ValueError(
+            f"idx must be an integer token tensor, got dtype {idx.dtype}")
     if int(idx.size(1)) != 2 * int(n_pairs) + 2:
         raise ValueError(
             f"idx width {int(idx.size(1))} does not match the "
@@ -2272,6 +2277,19 @@ def _counterfactual_edits(idx, meta, n_pairs, vocab):
     answer = meta["answer"]
     if not torch.is_tensor(key_pos) or not torch.is_tensor(answer):
         raise ValueError("meta['key_pos'] and meta['answer'] must be tensors")
+    for name, value in (("key_pos", key_pos), ("answer", answer)):
+        # The pair/answer geometry is integer metadata.  ``.to(long)``
+        # would silently turn 0.5 into 0 or a boolean into a class index;
+        # integral JSON-style floats (2.0) remain accepted.
+        if value.dtype == torch.bool or value.is_complex():
+            raise ValueError(
+                f"meta['{name}'] must be an integer tensor, got dtype "
+                f"{value.dtype}")
+        if value.is_floating_point() and (
+                not bool(torch.isfinite(value).all())
+                or not bool(value.eq(value.round()).all())):
+            raise ValueError(
+                f"meta['{name}'] must contain integral values")
     key_pos = key_pos.to(device=idx.device, dtype=torch.long).reshape(-1)
     answer = answer.to(device=idx.device, dtype=torch.long).reshape(-1)
     if key_pos.shape != (batch,) or answer.shape != (batch,):
