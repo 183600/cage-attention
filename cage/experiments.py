@@ -1328,14 +1328,35 @@ def _run_order_audit(order, cells, seeds, randomized=True):
     per_block: dict[int, dict[str, int]] = {}
     positions: dict[str, list[int]] = {key: [] for key in expected}
     per_block_positions: dict[int, list[int]] = {}
+    block_seeds: dict[int, list] = {}
     unexpected = []
-    for cell, _seed, block, position in order:
+    seed_mismatches = []
+    unexpected_seeds = []
+    for cell, order_seed, block, position in order:
         key = _coverage_cell_key(cell)
         block = int(block)
         position = int(position)
         per_block.setdefault(block, {}).setdefault(key, 0)
         per_block[block][key] += 1
         per_block_positions.setdefault(block, []).append(position)
+        block_seeds.setdefault(block, []).append(order_seed)
+        # The seed is part of the realised design, not metadata: a block
+        # labelled with an undeclared seed (or with another block's seed)
+        # means the recorded complete-block schedule is not the one that
+        # ran, so treatment and time are no longer balanced by block.
+        if 0 <= block < n_blocks:
+            expected_seed = seeds[block]
+            if order_seed != expected_seed:
+                seed_mismatches.append({
+                    "block": block, "cell": key, "seed": order_seed,
+                    "expected": expected_seed})
+        else:
+            seed_mismatches.append({
+                "block": block, "cell": key, "seed": order_seed,
+                "expected": None})
+        if order_seed not in seeds:
+            unexpected_seeds.append({
+                "block": block, "cell": key, "seed": order_seed})
         if key not in expected:
             # A cell that was never declared is an unplanned run: it makes
             # the schedule incomplete even if every declared cell is also
@@ -1370,10 +1391,16 @@ def _run_order_audit(order, cells, seeds, randomized=True):
                     "block": block, "position": slot,
                     "reason": "duplicate position within the block"})
             seen_slots.add(slot)
+    missing_seeds = [
+        {"block": block, "seed": seed}
+        for block, seed in enumerate(seeds)
+        if block not in per_block or seed not in block_seeds.get(block, [])
+    ]
     complete = (bool(cells) and bool(seeds)
                 and set(per_block) == set(range(n_blocks))
                 and not missing and not duplicated and not unexpected
-                and not invalid_positions)
+                and not invalid_positions and not seed_mismatches
+                and not unexpected_seeds and not missing_seeds)
     always_first = sorted(
         key for key, vals in positions.items()
         if len(vals) == n_blocks and vals and all(v == 0 for v in vals))
@@ -1402,6 +1429,9 @@ def _run_order_audit(order, cells, seeds, randomized=True):
         "duplicated": duplicated,
         "unexpected": unexpected,
         "invalid_positions": invalid_positions,
+        "seed_mismatches": seed_mismatches,
+        "unexpected_seeds": unexpected_seeds,
+        "missing_seeds": missing_seeds,
         "always_first": always_first,
         "always_last": always_last,
         "extreme_p_value": extreme_p,

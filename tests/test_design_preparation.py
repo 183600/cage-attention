@@ -89,6 +89,26 @@ class BlockedRunOrderTest(unittest.TestCase):
         self.assertTrue(slot_audit["invalid_positions"])
         self.assertFalse(slot_audit["balanced"])
 
+    def test_audit_rejects_undeclared_or_misblocked_seeds(self):
+        complete = _blocked_run_order(self.CELLS, self.SEEDS, 11)
+        # The cell/block/position structure is still complete, but every row
+        # claims a seed that was never declared: the schedule is not the one
+        # the audit was asked to certify.
+        bad_seed = [(cell, 99, block, pos)
+                    for cell, _seed, block, pos in complete]
+        audit = _run_order_audit(bad_seed, self.CELLS, self.SEEDS)
+        self.assertFalse(audit["complete"])
+        self.assertFalse(audit["balanced"])
+        self.assertTrue(audit["seed_mismatches"])
+        self.assertTrue(audit["unexpected_seeds"])
+        # Using the wrong declared seed for a block is also a mismatch even
+        # though that seed appears in the declared set.
+        swapped = [(cell, self.SEEDS[(block + 1) % len(self.SEEDS)],
+                    block, pos)
+                   for cell, _seed, block, pos in complete]
+        self.assertFalse(
+            _run_order_audit(swapped, self.CELLS, self.SEEDS)["complete"])
+
     def test_two_block_random_schedule_is_not_over_flagged(self):
         # With only two blocks, a random schedule can put one arm first in
         # both by chance; the family-wise check must not call that a design
