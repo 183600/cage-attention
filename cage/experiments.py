@@ -9880,7 +9880,12 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
           f"{'bal_acc':>16} "
           f"{'gate_depth_ratio':>18} {'resid_growth':>14} "
           f"{'params':>9} "
-          f"{'curve_ok':>9} {'tail':>7} {'curve':>10}")
+          f"{'curve_ok':>9} {'late':>8} {'ofit':>5} {'tail':>7} "
+          f"{'vse':>7} {'curve':>10}")
+    print("  (late = U-shaped val curves (sig = also beyond validation "
+          "noise); ofit = significant overfitting verdicts; tail = last-third "
+          "relative train-loss change; vse = last val point's batch-sampling "
+          "SE; curve_ok = curve-valid runs / all runs)")
     index = {}
     for gate in ("query", "calib"):
         for norm in NORMS:
@@ -9895,18 +9900,27 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                 growth = _mean_std([r["resid_norm_last_over_first"] for r in rs])
                 params = _mean_std([r["params"] for r in rs])
                 tail = _mean_std([r.get("late_train_delta") for r in rs])
+                vse = _mean_std([r.get("val_loss_se_last") for r in rs])
+                late = sum(1 for r in rs if r.get("late_overfit"))
+                late_sig = sum(1 for r in rs
+                               if r.get("late_overfit_significant"))
+                overfit_sig = sum(1 for r in rs
+                                  if r.get("overfitting_significant"))
                 verdicts = sorted({r["curve_verdict"] for r in rs})
                 _, invalid = _curve_health(rs)
                 ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
                 tail_s = (f"{tail['mean']:+.3f}" if _finite(tail["mean"])
                           else "n/a")
+                vse_s = f"{vse['mean']:.4f}" if _finite(vse["mean"]) else "n/a"
                 print(f"{gate:>5} {norm:>9} {ls_label:>5} "
                       f"{acc['mean']:>8.4f}±{acc['std']:<7.4f} "
                       f"{bal['mean']:>8.4f}±{bal['std']:<7.4f} "
                       f"{ratio['mean']:>9.4f}±{ratio['std']:<8.4f} "
                       f"{growth['mean']:>7.3f}±{growth['std']:<6.3f} "
                       f"{params['mean']:>9.0f} "
-                      f"{invalid}/{len(rs)} {tail_s:>7} "
+                      f"{invalid}/{len(rs)} "
+                      f"{late:>3}({late_sig}) {overfit_sig:>5} "
+                      f"{tail_s:>7} {vse_s:>7} "
                       f"{'/'.join(verdicts):>10}")
 
     efficiency_cells = []
