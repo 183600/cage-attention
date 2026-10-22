@@ -820,6 +820,23 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     if batch is None:
         raise ValueError(
             f"batch must be a positive integer, got {raw_batch!r}")
+    raw_log_every = log_every
+    if isinstance(raw_log_every, bool):
+        raise ValueError(
+            f"log_every must be a non-negative integer, got "
+            f"{raw_log_every!r}")
+    try:
+        log_every_num = float(raw_log_every)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"log_every must be a non-negative integer, got "
+            f"{raw_log_every!r}") from exc
+    if not (math.isfinite(log_every_num) and log_every_num >= 0.0
+            and log_every_num == int(log_every_num)):
+        raise ValueError(
+            f"log_every must be a non-negative integer, got "
+            f"{raw_log_every!r}")
+    log_every = int(log_every_num)
     if nonfinite not in ("raise", "skip"):
         raise ValueError(
             f"nonfinite must be 'raise' or 'skip', got {nonfinite!r}: an "
