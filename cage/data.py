@@ -721,6 +721,19 @@ def _validate_batch_strict(idx, targets, meta, vocab) -> dict:
     if not bool((idx >= 0).all()) or not bool((idx < vocab).all()):
         raise ValueError(f"idx contains token ids outside [0, {vocab})")
     batch_size, width = idx.shape
+    # ``validate_batch`` promises ValueError for every invariant violation.
+    # A missing / non-mapping metadata object used to escape as KeyError or
+    # TypeError from the raw subscript below, which is neither documented nor
+    # catchable by callers that handle the cleaning gate's ValueError.
+    if not isinstance(meta, Mapping):
+        raise ValueError(
+            f"meta must be a mapping with 'query_pos' and 'answer', got "
+            f"{type(meta).__name__}")
+    missing = [key for key in ("query_pos", "answer") if key not in meta]
+    if missing:
+        raise ValueError(
+            f"meta is missing required key(s) {missing}; got keys "
+            f"{sorted(map(str, meta))}")
     if not _is_integer_tensor(meta["query_pos"]):
         raise ValueError("meta['query_pos'] must have an integer dtype")
     qp = meta["query_pos"].to(device=idx.device, dtype=torch.long)
@@ -2475,6 +2488,20 @@ def _self_test() -> int:
         8, 4, 64, "cpu", dense_lm=True, gen=torch.Generator().manual_seed(23))
     check("validate_accepts_dense_targets",
           validate_batch(dense_idx, dense_tgt, dense_meta, 64)["n"] == 8)
+
+    # The cleaning gate's contract is ValueError for *every* malformed batch.
+    # A missing or non-mapping meta object used to escape as KeyError /
+    # TypeError from the strict checker's raw subscript, so callers that
+    # handle the documented ValueError did not catch it.
+    for label, bad_meta in (
+            ("missing_query_pos", {"answer": sparse_meta["answer"]}),
+            ("missing_answer", {"query_pos": sparse_meta["query_pos"]}),
+            ("not_a_mapping", None)):
+        try:
+            validate_batch(sparse_idx, sparse_tgt, bad_meta, 64)
+            check(f"validate_rejects_{label}", False)
+        except ValueError:
+            check(f"validate_rejects_{label}", True)
 
     misaligned = sparse_tgt.clone()
     misaligned[:, 0] = (sparse_idx[:, 1] + 1) % 64
