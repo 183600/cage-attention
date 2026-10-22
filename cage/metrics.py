@@ -749,10 +749,12 @@ def _bca_bounds(d: torch.Tensor, means: torch.Tensor,
     else:
         z0 = nd.inv_cdf(n_less / b)
     loo = _jackknife_means(d)
-    # Standard BCa acceleration: the third central moment of the
-    # leave-one-out estimates.  The sign matters - using the mean-minus-LOO
-    # direction flips ``a`` and therefore the corrected endpoints.
-    dev = loo - loo.mean()
+    # Standard BCa acceleration: the third central moment of
+    # ``theta_bar - theta_(i)`` over the leave-one-out estimates, where
+    # ``theta_bar`` is their mean (equal to the observed mean for the
+    # jackknife).  The sign matters - using the LOO-minus-mean direction
+    # flips ``a`` and therefore the corrected endpoints.
+    dev = loo.mean() - loo
     den = 6.0 * float(dev.pow(2).sum()) ** 1.5
     a = (float(dev.pow(3).sum()) / den) if den > 0.0 else 0.0
 
@@ -1711,6 +1713,16 @@ def _self_test() -> int:
     check("bca_disagreement_detected",
           skewed["lo"] > 0.0 > skewed["lo_bca"]
           and skewed["bca_agrees"] is False)
+
+    # The acceleration must be built from ``theta_bar - theta_(i)``.  This
+    # sample was chosen so the percentile interval includes 0 while the
+    # correctly signed BCa interval excludes it; reversing the acceleration
+    # sign produces the opposite (wrong) bound.
+    standard_sign = paired_bootstrap_ci(
+        [0.343, -0.674, 0.721, 0.929, 3.138], n_boot=2000, seed=0)
+    check("bca_standard_acceleration_sign",
+          standard_sign["lo"] < 0.0 < standard_sign["lo_bca"]
+          and standard_sign["bca_agrees"] is False)
 
     # One dominant seed with opposite-sign remainder: jackknife must flag it.
     ci2 = paired_bootstrap_ci([5.0, -1.0, -1.0, -1.0, -1.0],
