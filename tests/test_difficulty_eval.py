@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import math
 import unittest
 
 import torch
@@ -209,6 +210,21 @@ class StandardizedProportionTest(unittest.TestCase):
                 out = standardized_proportion(successes, totals, reference)
                 self.assertFalse(out["valid"])
                 self.assertTrue(out["reason"])
+
+
+class MissingDifficultyRecordTest(unittest.TestCase):
+    def test_stamp_abstains_without_metrics_by_length(self):
+        from cage.experiments import _stamp_difficulty_standardization
+
+        for rec in ({}, {"metrics_by_length": None},
+                    {"metrics_by_length": {3: {}}}):
+            with self.subTest(rec=rec):
+                _stamp_difficulty_standardization(rec, 3, [3, 6])
+                self.assertTrue(math.isnan(
+                    rec["difficulty_standardized_accuracy_at_base"]))
+                self.assertTrue(math.isnan(
+                    rec["difficulty_standardized_accuracy_at_longest"]))
+                self.assertEqual(rec["difficulty_standardized_coverage_by_length"][3], 0.0)
 
 
 class EvalDifficultyRecordTest(unittest.TestCase):

@@ -1356,29 +1356,41 @@ def _stamp_difficulty_standardization(rec, base_length, lengths):
     The fields are exploratory companions: the pre-registered H2 decisions
     keep reading the raw ``accuracy_*`` / ``accuracy_drop`` values.
     """
-    base_difficulty = (rec["metrics_by_length"]
-                       .get(base_length, {}).get("difficulty"))
+    # A legacy/malformed record may lack the per-length table (or carry a
+    # non-dict placeholder).  The companion then abstains with NaN fields
+    # instead of raising in the middle of the E2 loop.
+    metrics_by_length = rec.get("metrics_by_length")
+    if not isinstance(metrics_by_length, dict):
+        metrics_by_length = {}
+
+    def _block(length):
+        entry = metrics_by_length.get(length)
+        return entry.get("difficulty") if isinstance(entry, dict) else None
+
+    def _bucket(name):
+        bucket = rec.get(name)
+        if not isinstance(bucket, dict):
+            bucket = {}
+            rec[name] = bucket
+        return bucket
+
+    base_difficulty = _block(base_length)
     reference_totals, _ = _difficulty_vectors(base_difficulty)
     base_std = float("nan")
     for length in lengths:
-        block = (rec["metrics_by_length"].get(length, {})
-                 .get("difficulty"))
+        block = _block(length)
         totals, correct = _difficulty_vectors(block)
         standardized = standardized_proportion(correct, totals,
                                                reference_totals)
-        rec.setdefault(
-            "difficulty_standardized_accuracy_by_length", {})[length] = (
-                standardized["rate"])
-        rec.setdefault(
-            "difficulty_standardized_coverage_by_length", {})[length] = (
-                standardized["coverage"])
-        rec.setdefault(
-            "difficulty_standardized_effective_n_by_length", {})[length] = (
-                standardized["effective_n"])
-        rec.setdefault(
-            "difficulty_standardized_min_stratum_n_by_length", {})[length] = (
-                standardized["min_stratum_n"])
-        rec.setdefault("difficulty_mix_tv_by_length", {})[length] = (
+        _bucket("difficulty_standardized_accuracy_by_length")[length] = (
+            standardized["rate"])
+        _bucket("difficulty_standardized_coverage_by_length")[length] = (
+            standardized["coverage"])
+        _bucket("difficulty_standardized_effective_n_by_length")[length] = (
+            standardized["effective_n"])
+        _bucket("difficulty_standardized_min_stratum_n_by_length")[length] = (
+            standardized["min_stratum_n"])
+        _bucket("difficulty_mix_tv_by_length")[length] = (
             _stratum_mix_tv(base_difficulty, block))
         if length == base_length:
             base_std = standardized["rate"]
