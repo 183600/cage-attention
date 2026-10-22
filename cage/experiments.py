@@ -2115,7 +2115,7 @@ def _paired_equivalence(runs_a, runs_b, metric, bound, mode="equivalence"):
     for key in ("arms", "arms_all", "arms_note", "baseline_mean",
                 "diffs", "curve_invalid_seeds", "seeds_used",
                 "seeds_dropped", "seeds_unpaired", "seeds_undefined",
-                "controlled"):
+                "stream_test", "controlled"):
         if key in paired:
             ci[key] = paired[key]
     return ci
