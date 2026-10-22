@@ -265,6 +265,25 @@ class PairedPilotSdTest(unittest.TestCase):
         self.assertIn("2 pilot", source)
 
 
+class ReferenceLrValidationTest(unittest.TestCase):
+    def test_boolean_reference_lr_is_not_accepted_as_one(self):
+        from cage.experiments import (
+            _e1_lr_sensitivity,
+            _e1_per_variant_tuning,
+            _e2_per_variant_tuning,
+        )
+        settings = Settings.quick()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            with contextlib.redirect_stdout(io.StringIO()):
+                e1 = _e1_per_variant_tuning(settings, out, True)
+                e2 = _e2_per_variant_tuning(settings, out, True, {}, [3])
+                lr = _e1_lr_sensitivity(settings, out, True)
+        for payload in (e1, e2, lr):
+            self.assertFalse(payload["available"])
+            self.assertIn("bool", payload["reason"])
+
+
 class FiniteScalarTest(unittest.TestCase):
     def test_overflowing_and_boolean_values_are_not_finite_statistics(self):
         from cage.experiments import _finite

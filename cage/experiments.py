@@ -12142,6 +12142,9 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
     if not settings.per_variant_tuning:
         return {"available": False,
                 "reason": "disabled by Settings.per_variant_tuning"}
+    if isinstance(reference_lr, bool):
+        return {"available": False,
+                "reason": "reference lr must be a number, not a bool"}
     reference_lr = float(reference_lr)
     if not math.isfinite(reference_lr) or reference_lr <= 0.0:
         return {"available": False, "reason": "non-positive reference lr"}
@@ -12570,6 +12573,9 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
     otherwise be stable at every alternative while reversing at the point
     that actually decides the claim.
     """
+    if isinstance(reference_lr, bool):
+        return {"available": False,
+                "reason": "reference lr must be a number, not a bool"}
     reference_lr = float(reference_lr)
     if not math.isfinite(reference_lr) or reference_lr <= 0.0:
         return {"available": False, "reason": "non-positive reference lr"}
@@ -14557,6 +14563,9 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
         return {"available": False,
                 "reason": ("empty length sweep: no endpoint at which to "
                            "score the tuned recipe")}
+    if isinstance(reference_lr, bool):
+        return {"available": False,
+                "reason": "reference lr must be a number, not a bool"}
     reference_lr = float(reference_lr)
     if not math.isfinite(reference_lr) or reference_lr <= 0.0:
         return {"available": False, "reason": "non-positive reference lr"}
