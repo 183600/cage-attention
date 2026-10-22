@@ -8291,11 +8291,20 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                 k: v for k, v in row.items() if k != "runs"
             } for row in lr_rows],
             "test": {
-                "n_runs": len(final_runs),
-                **{key: _mean_std([r.get(key) for r in final_runs])
+                # The paired contrasts below drop curve-invalid runs, so the
+                # per-arm levels printed next to them must use the same seed
+                # set; the all-run mean remains as a separate companion.
+                "n_runs": len(_curve_valid_runs(final_runs)),
+                "n_runs_all": len(final_runs),
+                **{key: _mean_std([r.get(key)
+                                   for r in _curve_valid_runs(final_runs)])
                    for key in ("accuracy", "abs_gate_vs_entropy",
                                "gate_margin", "false_conc_rate",
                                "null_mass_mean")},
+                "all": {key: _mean_std([r.get(key) for r in final_runs])
+                        for key in ("accuracy", "abs_gate_vs_entropy",
+                                    "gate_margin", "false_conc_rate",
+                                    "null_mass_mean")},
             },
             "curve_invalid_runs": sum(
                 r.get("curve_verdict") in CURVE_INVALID_VERDICTS
