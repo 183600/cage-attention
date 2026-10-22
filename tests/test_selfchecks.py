@@ -19,6 +19,22 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertTrue(math.isnan(metrics.brier_score([0.5], [0.5])))
         self.assertTrue(math.isnan(metrics.brier_score([0.5], [-1.0])))
 
+    def test_fractional_multiclass_targets_abstain(self):
+        import torch
+
+        logits = torch.tensor([[2.0, 0.0], [0.0, 2.0]])
+        for targets in ([0.5, 1.0], [1.9, 0.0], [-0.5, 0.0],
+                        [float("nan"), 0.0]):
+            with self.subTest(targets=targets):
+                out = metrics.multiclass_metrics(logits, targets)
+                self.assertEqual(out["n"], 0)
+                self.assertTrue(math.isnan(out["accuracy"]))
+        # Integral floating-point labels are a valid JSON round-trip of the
+        # token ids and must still be scored.
+        out = metrics.multiclass_metrics(logits, [1.0, 0.0])
+        self.assertEqual(out["n"], 2)
+        self.assertTrue(math.isfinite(out["accuracy"]))
+
     def test_malformed_cluster_inputs_abstain(self):
         for successes, totals in ((["not-a-count"], [1]),
                                   ([1], ["not-a-count"]),

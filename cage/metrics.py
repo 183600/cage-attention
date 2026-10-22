@@ -548,7 +548,7 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
         raise ValueError(
             f"topk must be a positive integer, got {raw_topk!r}")
     logits = torch.as_tensor(logits).detach()
-    targets = torch.as_tensor(targets).detach().reshape(-1).long()
+    raw_targets = torch.as_tensor(targets).detach().reshape(-1)
     if logits.dim() == 1:
         logits = logits.unsqueeze(0)
     n, k = logits.shape
@@ -556,6 +556,22 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
             "precision_macro", "recall_macro",
             "f1_macro_all_labels", "precision_macro_all_labels",
             "recall_macro_all_labels"]
+    # A target is a class *index*, so it must already be an integer.  A
+    # float/ complex value cast with ``.long()`` would silently truncate
+    # (1.9 -> 1, -0.5 -> 0), fabricating a label the caller never named;
+    # integral JSON-style floats (1.0) are accepted, everything else
+    # abstains.
+    bad_targets = bool(raw_targets.is_complex())
+    if not bad_targets and raw_targets.is_floating_point():
+        bad_targets = bool(
+            not torch.isfinite(raw_targets).all()
+            or not raw_targets.eq(raw_targets.round()).all())
+    if bad_targets:
+        out = {"n": 0, "n_classes_present": 0, "nll": float("nan")}
+        out.update({key: float("nan") for key in keys})
+        out[f"top{min(topk, k)}_accuracy"] = float("nan")
+        return out
+    targets = raw_targets.to(torch.long)
     if (n == 0 or targets.numel() != n
             or bool((targets < 0).any()) or bool((targets >= k).any())):
         out = {"n": 0, "n_classes_present": 0, "nll": float("nan")}
