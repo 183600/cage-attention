@@ -11059,6 +11059,13 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                     state = "indistinguishable (reference not competent)"
                 else:
                     state = "indistinguishable"
+                # The floor applies to every directional/equivalence state,
+                # not only to a win: a 1-2 seed "below" or "indistinguishable"
+                # reading is a provisional observation, not a settled result.
+                if (not floor_ok and not state.startswith("unmeasured")
+                        and "provisional" not in state):
+                    state += (f" (provisional: n={int(bench.get('n') or 0)} < "
+                              f"claim floor {settings.min_seeds_for_claim})")
                 cell["by_metric"][metric] = {
                     "seednorm_mean": (bench.get("arms") or {}).get(
                         "a", {}).get("mean"),
