@@ -287,6 +287,17 @@ class HypothesisSynthesisTest(unittest.TestCase):
         self.assertEqual(synth["n_rows"], 0)
         self.assertEqual(payload["n_hypotheses_no_contrast"], 1)
 
+    def test_print_equivalence_keeps_the_paired_sample(self):
+        diffs = [0.01, -0.01, 0.02, -0.02, 0.0]
+        log = ContrastLog("e2", hypotheses=("H2b",), min_seeds=3)
+        with contextlib.redirect_stdout(io.StringIO()):
+            log.print_equivalence("drift", "H2b", "entropy_norm_drift",
+                                  diffs)
+        row = log.rows[0]
+        self.assertEqual(row["diffs"], diffs)
+        self.assertTrue(row["replication"]["valid"])
+        self.assertEqual(row["replication"]["n"], len(diffs))
+
     def test_replication_uncertainty_is_aggregated_per_hypothesis(self):
         _, payload, _ = _finalize(
             "e2", ("H2a",),

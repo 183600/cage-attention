@@ -4967,6 +4967,11 @@ class ContrastLog:
                 f"'sesoi_test' first")
         ci = (noninferiority_test(diffs, bound) if mode == "noninferior"
               else equivalence_test(diffs, bound))
+        # Keep the paired sample on the row: the replication companion is
+        # computed inside ``print`` from ``ci["diffs"]``, and a null
+        # prediction registered through this helper would otherwise always
+        # report "no paired differences supplied".
+        ci["diffs"] = list(diffs)
         self.print_equivalence_ci(rule, hyp, metric, ci, warn=warn)
 
     def print_equivalence_ci(self, rule, hyp, metric, ci, warn="") -> None:
