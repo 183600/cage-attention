@@ -1092,6 +1092,12 @@ class Attention(nn.Module):
         never applied to them): a dropped row is scaled by the keep-prob and
         therefore is not a distribution any more, which would bias the
         entropy by ``keep*(log keep - 1)`` if it were read as one.
+
+        For the null variant, ``null_mass`` is the leading slot and the
+        entropy / max-prob describe the real-key distribution *conditional on
+        not choosing null* (the null column is removed and the remainder
+        renormalized), keeping those readouts comparable with the non-null
+        gates.  The caller's ``rows`` tensor is left unchanged.
         """
         with torch.no_grad():
             if is_null:
@@ -1102,7 +1108,9 @@ class Attention(nn.Module):
                                     n0 * n1)[:n0 * n1].view(n0, n1, 1)
                 torch.sum(pr, dim=-1, keepdim=True, out=ssum)
                 ssum.clamp_min_(_EPS)
-                pr.div_(ssum)
+                # Out-of-place: diagnostics must not mutate the attention
+                # probabilities they are reading (nor a caller's tensor).
+                pr = pr / ssum
             else:
                 null_mass = None
                 pr = rows
