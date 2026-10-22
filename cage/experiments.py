@@ -1230,6 +1230,26 @@ class Settings:
                 f"curve_points must be a non-negative integer, got "
                 f"{raw_curve_points!r}")
         self.curve_points = int(curve_points)
+        # The per-run error-case cap is zero-or-positive and is passed
+        # straight to ``collect_stats_and_errors``, which requires an
+        # integer.  Validate it here as well so a malformed cap cannot
+        # abort a grid after its training runs have already been written.
+        raw_max_cases = self.max_error_cases
+        if isinstance(raw_max_cases, bool):
+            raise ValueError(
+                f"max_error_cases must be a non-negative integer, got "
+                f"{raw_max_cases!r}")
+        try:
+            max_cases = operator.index(raw_max_cases)
+        except TypeError as exc:
+            raise ValueError(
+                f"max_error_cases must be a non-negative integer, got "
+                f"{raw_max_cases!r}") from exc
+        if max_cases < 0:
+            raise ValueError(
+                f"max_error_cases must be a non-negative integer, got "
+                f"{raw_max_cases!r}")
+        self.max_error_cases = int(max_cases)
 
         def _positive_int_tuple(name, allow_empty=False):
             raw = getattr(self, name)
@@ -1378,7 +1398,7 @@ class Settings:
             raise ValueError(
                 f"per_variant_tune_seeds must be a positive integer, got "
                 f"{self.per_variant_tune_seeds!r}")
-        for name in ("lr_grid", "calib_tau_grid"):
+        for name in ("lr_grid", "probe_lr_grid", "calib_tau_grid"):
             values = tuple(getattr(self, name))
             if not values or any(
                     not isinstance(v, (int, float)) or isinstance(v, bool)

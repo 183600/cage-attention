@@ -440,6 +440,7 @@ class DesignPlanTest(unittest.TestCase):
             "probe_eval_batches": (0, 1.5, True),
             "overfit_steps": (0, 1.5, True),
             "overfit_batch": (0, 1.5, True),
+            "max_error_cases": (-1, 1.5, True, "8"),
             "curve_points": (-1, 1.5, True),
             "d_model": (0, 1.5, True),
             "n_heads": (0, 1.5, True),
@@ -463,6 +464,17 @@ class DesignPlanTest(unittest.TestCase):
             with self.subTest(depth_step_multipliers=values):
                 with self.assertRaises(ValueError):
                     Settings(depth_step_multipliers=values)
+        # The probe's lr grid is used verbatim by ``tune_linear_probe``;
+        # an empty/invalid grid fails only after the baseline runs have
+        # been written, so it must be rejected at construction like the
+        # transformer grids.
+        for values in ((), (0.0,), (-1.0,), (float("nan"),), (True,),
+                       ("1e-3",)):
+            with self.subTest(probe_lr_grid=values):
+                with self.assertRaises(ValueError):
+                    Settings(probe_lr_grid=values)
+        # Zero error cases is the documented "collect no cases" value.
+        self.assertEqual(Settings(max_error_cases=0).max_error_cases, 0)
         # Empty optional grids keep the documented fallback behaviour.
         self.assertEqual(Settings(probe_steps_grid=()).probe_steps_grid, ())
         self.assertEqual(
