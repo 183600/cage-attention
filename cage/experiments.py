@@ -955,7 +955,13 @@ class Settings:
     # benchmark, never a replacement for the pre-registered controlled
     # family: a calib gain that survives both readings is the robust claim.
     per_variant_tuning: bool = True
-    per_variant_tune_seeds: int = 2
+    # Selection seeds for the per-variant tuned account.  Default to the
+    # pre-registered claim floor: the shared/controlled recipe already
+    # refuses to freeze a point on fewer seeds than a claim would need, and
+    # the tuned baseline comparison should not be decided by a smaller
+    # (noisier) argmax than that.  ``min(per_variant_tune_seeds,
+    # len(seeds))`` is used, so quick configs still work.
+    per_variant_tune_seeds: int = 3
     calib_tau_grid: tuple = (0.5, 0.9, 1.5)
     curve_points: int = 10      # validation checks per run (0 disables)
     val_batches: int = 2        # validation batches per check (fixed stream)
@@ -8148,6 +8154,13 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
         return {"available": False, "reason": "non-positive reference lr"}
     tune_seeds = list(settings.seeds[:max(
         1, min(int(settings.per_variant_tune_seeds), len(settings.seeds)))])
+    claim_floor = min(int(settings.min_seeds_for_claim), len(settings.seeds))
+    if len(tune_seeds) < claim_floor:
+        print(f"[e1] WARNING: per-variant tuning selects on "
+              f"{len(tune_seeds)} seed(s), below the pre-registered claim "
+              f"floor {claim_floor}; the tuned recipes are noisier than the "
+              f"controlled ones and the two accounts must still be read "
+              f"separately")
     candidate_lrs = sorted({reference_lr,
                             *(float(v) for v in settings.lr_grid)})
     default_tau = float(Cfg().calib_tau_init)
@@ -8522,8 +8535,12 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
     """Re-run the primary gate arms at alternative shared learning rates.
 
     For each factor in ``_E1_LR_SENSITIVITY_FACTORS`` the same seeds and
-    streams train ``none`` / ``query`` / ``calib`` under one shared lr, and
-    every A-vs-B contrast is re-paired within that point.  The comparison is
+    streams train the control baselines ``none`` / ``query`` / ``null`` and
+    the ``calib`` arm under one shared lr, and every A-vs-B contrast is
+    re-paired within that point.  ``null`` is a full control arm, not a
+    companion: its frozen-lr point must be re-measured like the other two,
+    otherwise "calib - null" could be recipe-specific without the
+    sensitivity table saying so.  The comparison is
     therefore still controlled at each lr (only the gate factor differs),
     while the *between-point* shift shows whether the calib-over-control
     effect is robust to the frozen-recipe choice or exists only at the
@@ -8548,12 +8565,12 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
     lrs = sorted({reference_lr, *alternative_lrs})
     by_cell = {}
     if reference_runs:
-        for gate in ("none", "query", "calib"):
+        for gate in ("none", "query", "calib", "null"):
             reused = reference_runs.get(gate)
             if reused:
                 by_cell[(reference_lr, gate)] = list(reused)
     for alt_lr in lrs:
-        for gate in ("none", "query", "calib"):
+        for gate in ("none", "query", "calib", "null"):
             if (alt_lr, gate) in by_cell:
                 continue
             for seed in settings.seeds:
@@ -8570,7 +8587,8 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
 
     print(f"\n[e1] learning-rate sensitivity (exploratory, outside the FDR "
           f"family): the frozen reference lr={reference_lr:g} point reuses "
-          f"the pre-registered runs, and the gate arms are re-trained at "
+          f"the pre-registered runs, and all four arms (including the null "
+          f"control baseline) are re-trained at "
           f"{', '.join(f'{v:g}' for v in alternative_lrs)}; at each lr both "
           f"sides of a contrast still share the identical recipe, steps and "
           f"streams.  A sign that flips or a CI that only excludes 0 at the "
@@ -8583,6 +8601,11 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
         ("calib - query", "calib", "query", "abs_gate_vs_entropy"),
         ("calib - query", "calib", "query", "gate_margin"),
         ("calib - none", "calib", "none", "accuracy"),
+        # null is the third control baseline: re-measure the frozen-recipe
+        # contrast at every shared lr instead of only in the per-variant
+        # tuned companion.
+        ("calib - null", "calib", "null", "accuracy"),
+        ("null - none", "null", "none", "accuracy"),
     )
     rows = []
     for rule, a_gate, b_gate, metric in comparisons:
