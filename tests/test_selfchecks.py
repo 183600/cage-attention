@@ -144,6 +144,22 @@ class NegativeControlPermutationTest(unittest.TestCase):
                                   torch.Generator().manual_seed(0))
 
 
+class TwoSampleBootstrapValidationTest(unittest.TestCase):
+    def test_malformed_groups_abstain_instead_of_raising(self):
+        from cage.train import _two_sample_bootstrap_ci
+
+        for left, right in (
+                ([1.0 + 1.0j, 2.0], [0.0, 1.0]),
+                (None, [0.0, 1.0]),
+                ("not-a-sample", [0.0, 1.0]),
+                ([0.0, 1.0], object())):
+            with self.subTest(left=left, right=right):
+                out = _two_sample_bootstrap_ci(left, right, n_boot=50)
+                self.assertTrue(math.isnan(out["mean"]))
+                self.assertTrue(math.isnan(out["lo"]))
+                self.assertTrue(math.isnan(out["p_value"]))
+
+
 class CorrelationInputValidationTest(unittest.TestCase):
     def test_complex_correlations_abstain(self):
         import torch

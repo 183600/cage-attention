@@ -2956,9 +2956,15 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
     def _flat(x):
         # A complex sample has no real mean difference; drop it rather than
         # letting the float64 cast silently discard its imaginary part.
+        # Non-numeric/malformed containers must likewise abstain instead of
+        # escaping as a TypeError from ``as_tensor``: this is a reporting
+        # companion, and one bad group must not abort the whole report.
         if torch.is_tensor(x) and x.is_complex():
             return torch.empty(0, dtype=torch.float64)
-        t = torch.as_tensor(x, dtype=torch.float64).detach().reshape(-1)
+        try:
+            t = torch.as_tensor(x, dtype=torch.float64).detach().reshape(-1)
+        except (TypeError, ValueError, RuntimeError, OverflowError):
+            return torch.empty(0, dtype=torch.float64)
         return t[torch.isfinite(t)]
 
     alpha = _float_or_nan(alpha)
