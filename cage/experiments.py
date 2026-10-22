@@ -1927,14 +1927,19 @@ def _paired_benchmark(runs_a, runs_b, metric, sesoi, reference,
         and float(mean) >= float(sesoi) and float(lo) > 0.0)
     ci["below_reference"] = bool(_finite(hi) and float(hi) < 0.0)
     # "Indistinguishable" is an equivalence-style read: it requires a
-    # measured paired effect.  When every seed was excluded as curve-invalid
-    # (or no seed could be paired) there is no evidence at all, and calling
-    # that "indistinguishable" would turn an unmeasured comparison into an
-    # absence-of-difference claim.
+    # measured paired effect whose CI lies inside the pre-registered
+    # practical bound.  A wide interval that merely includes 0 is
+    # inconclusive, not evidence of no difference; and when every seed was
+    # excluded as curve-invalid (or no seed could be paired) there is no
+    # evidence at all.
     ci["unmeasured"] = not (ci.get("seeds_used") and _finite(mean))
     ci["indistinguishable"] = bool(
+        not ci["unmeasured"] and _finite(lo) and _finite(hi)
+        and math.isfinite(float(sesoi))
+        and float(lo) > -float(sesoi) and float(hi) < float(sesoi))
+    ci["inconclusive"] = bool(
         not ci["unmeasured"] and not ci["complexity_justified"]
-        and not ci["below_reference"])
+        and not ci["below_reference"] and not ci["indistinguishable"])
     return ci
 
 
@@ -9175,8 +9180,10 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 state = "below"
             elif bench.get("unmeasured"):
                 state = "unmeasured (no curve-valid paired seeds)"
-            else:
+            elif bench.get("indistinguishable"):
                 state = "indistinguishable"
+            else:
+                state = "inconclusive (CI wider than SESOI)"
             print(f"{gate:>6} "
                   f"{arm_mean:>17.4f} {ref_mean:>17.4f} "
                   f"{_fmt_ci(bench):>28} {state:>18}{prov}")
@@ -9198,6 +9205,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 "complexity_justified": bench["complexity_justified"],
                 "below_reference": bench["below_reference"],
                 "indistinguishable": bench["indistinguishable"],
+                "inconclusive": bench["inconclusive"],
                 "controlled": False,
                 "observed_recipe_mismatches": (
                     (bench.get("controlled_audit") or {}).get(
@@ -9276,9 +9284,12 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 state = "unmeasured (no curve-valid paired seeds)"
             elif not capacity_ok:
                 state = ("indistinguishable from capacity-unmatched shallow "
-                         "control")
-            else:
+                         "control" if bench.get("indistinguishable") else
+                         "inconclusive vs capacity-unmatched shallow control")
+            elif bench.get("indistinguishable"):
                 state = "indistinguishable from matched capacity"
+            else:
+                state = "inconclusive vs matched capacity (CI wider than SESOI)"
             print(f"\n[e1] capacity-matched shallow control (target = depth "
                   f"{matched.get('control_for_depth')} rung's "
                   f"{matched.get('target_params')} params; 1 layer, "
@@ -9311,6 +9322,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                 "complexity_justified": bench["complexity_justified"],
                 "below_reference": bench["below_reference"],
                 "indistinguishable": bench["indistinguishable"],
+                "inconclusive": bench["inconclusive"],
                 "unmeasured": bench["unmeasured"],
                 "controlled": False,
                 "observed_recipe_mismatches": (
@@ -11057,13 +11069,17 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                 elif bench.get("unmeasured"):
                     state = "unmeasured (no curve-valid paired seeds)"
                 elif not capacity_ok:
-                    state = "indistinguishable (capacity not matched)"
+                    state = ("indistinguishable (capacity not matched)"
+                             if bench.get("indistinguishable") else
+                             "inconclusive (capacity not matched)")
                 elif not target_competent:
-                    state = "indistinguishable (target not competent)"
+                    state = "inconclusive (target not competent)"
                 elif not reference_competent:
-                    state = "indistinguishable (reference not competent)"
-                else:
+                    state = "inconclusive (reference not competent)"
+                elif bench.get("indistinguishable"):
                     state = "indistinguishable"
+                else:
+                    state = "inconclusive (CI wider than SESOI)"
                 # The floor applies to every directional/equivalence state,
                 # not only to a win: a 1-2 seed "below" or "indistinguishable"
                 # reading is a provisional observation, not a settled result.
@@ -11092,6 +11108,7 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                     "complexity_justified": bench["complexity_justified"],
                     "below_reference": bench["below_reference"],
                     "indistinguishable": bench["indistinguishable"],
+                    "inconclusive": bench["inconclusive"],
                     "unmeasured": bench["unmeasured"],
                 }
                 a = cell["by_metric"][metric]["seednorm_mean"]
