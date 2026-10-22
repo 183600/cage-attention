@@ -540,7 +540,10 @@ def _balanced_step(n: int, cap: int) -> int:
 def _qkv_step(B: int, T: int, C: int) -> int:
     """Batch chunk size for the staged QKV projection."""
     rows = max(1, _QKV_CHUNK_ELEMS // max(1, T * 3 * C))
-    return _balanced_step(B, rows)
+    # A zero-row batch still has to yield a legal range() step; the loops
+    # below then correctly execute zero chunks.  Returning 0 would abort an
+    # otherwise valid empty forward pass.
+    return max(1, _balanced_step(B, rows))
 
 
 def _linear_into(x: torch.Tensor, weight: torch.Tensor,
@@ -860,7 +863,8 @@ def _null_probs(q_blk: torch.Tensor, kt: torch.Tensor, i0: int, i1: int,
                       beta=1.0, alpha=scale, out=s)
     s0 = _get_scratch(("null_s0",), q_blk.device, q_blk.dtype, n * r)
     s0 = s0[:n * r]
-    torch.matmul(q_blk.view(B, h, r, -1), null_k.view(h, -1, 1),
+    dk = q_blk.size(-1)
+    torch.matmul(q_blk.view(B, h, r, dk), null_k.view(h, dk, 1),
                  out=s0.view(B, h, r, 1))
     s0mul = s0.view(n, r, 1)
     s0mul.mul_(scale)
@@ -1005,7 +1009,8 @@ class _NullAttn(torch.autograd.Function):
             n = bh * r * i1
             e = torch.bmm(g, vt[:, :, :i1], out=eb[:n].view(bh, r, i1))
             gu0 = gub[:bh * r].view(bh, r, 1)
-            torch.matmul(g.view(B, h, r, -1), nv4t, out=gu0.view(B, h, r, 1))
+            torch.matmul(g.view(B, h, r, dk), nv4t,
+                         out=gu0.view(B, h, r, 1))
             dot = dotb[:bh * r].view(bh, r, 1)
             # Row dot product via a batched GEMM.
             torch.bmm(p.view(bh * r, 1, i1), e.view(bh * r, i1, 1),
@@ -1331,7 +1336,7 @@ class Attention(nn.Module):
                     stats = None
                 else:
                     stats = self._row_stats(
-                        _pick_rows(p.view(B, h, T, -1), stat_pos), T, True)
+                        _pick_rows(p.view(B, h, T, dk), stat_pos), T, True)
                 if dropping:
                     p = self.attn_dropout(p)
                 pb = p.view(bh, T, T + 1)
@@ -1352,7 +1357,7 @@ class Attention(nn.Module):
                     stats = (_pick_rows(ent, stat_pos), rows.max(-1).values, None)
                 else:
                     stats = self._row_stats(
-                        _pick_rows(p.view(B, h, T, -1), stat_pos), T, False)
+                        _pick_rows(p.view(B, h, T, dk), stat_pos), T, False)
                 if dropping:
                     p = self.attn_dropout(p)
                 y4 = torch.bmm(p, packed[2]).view(B, h, T, dk)
