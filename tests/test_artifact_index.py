@@ -119,7 +119,16 @@ class ArtifactIndexTest(unittest.TestCase):
         self.assertEqual([e["file"] for e in payload["artifacts"]],
                          ["fresh.json"])
 
-    def test_duplicate_index_entry_fails_verification(self):
+    def test_malformed_previous_entry_is_not_trusted(self):
+        (self.root / "artifact_index.json").write_text(
+            json.dumps({"artifacts": [{"file": "old.json", "bytes": 1}]}),
+            encoding="utf-8")
+        self._write("fresh.json", '{"ok": true}\n')
+        payload = experiments._write_artifact_index(
+            self.root, None, "fresh", completed=True, elapsed_seconds=0.0)
+        self.assertIn("previous_index_error", payload)
+        self.assertEqual([e["file"] for e in payload["artifacts"]],
+                         ["fresh.json"])
         self._write("a.json", '{"a": 1}\n')
         experiments._write_artifact_index(
             self.root, None, "first", completed=True, elapsed_seconds=0.0)

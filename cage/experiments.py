@@ -6481,6 +6481,26 @@ def _read_artifact_entries(index_path: pathlib.Path) -> tuple[dict, str | None]:
                 # write launder a state that ``_verify_artifacts`` rejects.
                 raise ValueError(
                     f"duplicate artifact entry for file {name!r}")
+            # A structurally valid entry with an unusable byte count or
+            # digest is still a malformed integrity record.  Keeping it
+            # would write a new index that ``_verify_artifacts`` rejects,
+            # while the merge loop below would pretend the earlier history
+            # was preserved; drop the whole previous list and report it.
+            size = entry.get("bytes")
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                raise ValueError(
+                    f"artifact entry {name!r} has an invalid byte count")
+            digest = entry.get("sha256")
+            if not isinstance(digest, str) or len(digest) != 64 \
+                    or any(ch not in "0123456789abcdef" for ch in digest):
+                raise ValueError(
+                    f"artifact entry {name!r} has an invalid sha256")
+            if name.endswith(".jsonl"):
+                records = entry.get("records")
+                if isinstance(records, bool) or not isinstance(records, int) \
+                        or records < 0:
+                    raise ValueError(
+                        f"artifact entry {name!r} has an invalid line count")
             entries[name] = entry
         return entries, None
     except (OSError, ValueError, TypeError, UnicodeError) as exc:
