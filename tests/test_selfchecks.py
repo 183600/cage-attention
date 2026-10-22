@@ -52,6 +52,49 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertFalse(metrics.replication_interval(
             torch.tensor([0.1 + 0.1j, 0.2 + 0j, 0.3 + 0j]))["valid"])
 
+    def test_complex_calibration_and_count_inputs_abstain(self):
+        import torch
+
+        # ``.float()`` would silently drop the imaginary part, inventing a
+        # calibration sample; both helpers must abstain instead.
+        self.assertTrue(math.isnan(
+            metrics.expected_calibration_error([0.5 + 0.1j], [1.0])))
+        self.assertTrue(math.isnan(
+            metrics.expected_calibration_error([0.5], [1.0 + 0.0j])))
+        self.assertTrue(math.isnan(
+            metrics.brier_score([0.5 + 0.1j], [1.0])))
+        self.assertTrue(math.isnan(
+            metrics.brier_score([0.5], [1.0 + 0.0j])))
+        # Counts are real integers, never complex/bool flags.
+        for successes, totals in (([1 + 0j], [2 + 0j]),
+                                  (True, 2), ([True], [2])):
+            with self.subTest(successes=successes, totals=totals):
+                out = metrics.clustered_proportion_ci(successes, totals)
+                self.assertFalse(out["valid"])
+                self.assertTrue(out["reason"])
+
+    def test_wilson_and_bh_arguments_are_validated(self):
+        # A boolean is a flag, not a success count or a z quantile; a NaN
+        # z would silently collapse the interval to its point estimate.
+        for kwargs in ({"successes": True, "total": 2},
+                       {"successes": 1, "total": True}):
+            out = metrics.wilson_ci(**kwargs)
+            self.assertTrue(math.isnan(out["lo"]))
+            self.assertTrue(math.isnan(out["hi"]))
+        for z in (float("nan"), 0.0, -1.0, True, 1 + 0j):
+            out = metrics.wilson_ci(1, 2, z=z)
+            self.assertTrue(math.isnan(out["p"]))
+            self.assertTrue(math.isnan(out["lo"]))
+        # An invalid FDR level must not turn ``True`` into a 1.0 threshold
+        # that rejects the whole family; malformed p-values are untestable.
+        bad_level = metrics.benjamini_hochberg([0.01, 0.2], q=True)
+        self.assertFalse(any(row["reject"] for row in bad_level))
+        mixed = metrics.benjamini_hochberg([0.01, 0.2 + 1j, "x", None], q=0.05)
+        self.assertTrue(mixed[0]["reject"])
+        for row in mixed[1:]:
+            self.assertFalse(row["reject"])
+            self.assertTrue(math.isnan(row["p"]))
+
     def test_malformed_cluster_inputs_abstain(self):
         for successes, totals in ((["not-a-count"], [1]),
                                   ([1], ["not-a-count"]),

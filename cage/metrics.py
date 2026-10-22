@@ -739,8 +739,15 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     matching boolean correctness labels; ``n_bins`` equal-width confidence
     bins over [0, 1].
     """
-    p = torch.as_tensor(probs).detach().reshape(-1).float()
-    c = torch.as_tensor(correct).detach().reshape(-1).to(p.device).float()
+    raw_p = torch.as_tensor(probs).detach().reshape(-1)
+    raw_c = torch.as_tensor(correct).detach().reshape(-1)
+    # ``.float()`` silently discards the imaginary part of a complex input;
+    # a complex confidence or correctness value is not a real calibration
+    # sample, so abstain instead of scoring its real projection.
+    if raw_p.is_complex() or raw_c.is_complex():
+        return float("nan")
+    p = raw_p.float()
+    c = raw_c.to(p.device).float()
     n = p.numel()
     if n == 0 or c.numel() != n:
         return float("nan")
@@ -769,8 +776,14 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
 
 def brier_score(probs, correct) -> float:
     """Brier score of the top-1 answer correctness prediction."""
-    p = torch.as_tensor(probs).detach().reshape(-1).float()
-    c = torch.as_tensor(correct).detach().reshape(-1).to(p.device).float()
+    raw_p = torch.as_tensor(probs).detach().reshape(-1)
+    raw_c = torch.as_tensor(correct).detach().reshape(-1)
+    # As in ECE: a complex probability/correctness is not a real outcome
+    # and must not be silently reduced to its real part by ``.float()``.
+    if raw_p.is_complex() or raw_c.is_complex():
+        return float("nan")
+    p = raw_p.float()
+    c = raw_c.to(p.device).float()
     if p.numel() == 0 or c.numel() != p.numel() \
             or not bool(torch.isfinite(p).all()) \
             or not bool(torch.isfinite(c).all()):
@@ -1665,11 +1678,19 @@ def benjamini_hochberg(p_values, q: float = 0.05) -> list:
     p_values = list(p_values)
     out = [{"p": float("nan"), "p_adj": float("nan"), "reject": False}
            for _ in p_values]
+    # The FDR level is a probability: a boolean (``True == 1.0``) or a
+    # non-numeric level would silently turn the whole family into "reject
+    # everything".  Treat an invalid level like an untestable family (no
+    # rejection) while still reporting the adjusted p-values.
+    q = _float_or_nan(q)
+    q_ok = math.isfinite(q) and 0.0 < q < 1.0
     finite = []
     for i, p in enumerate(p_values):
         if p is None:
             continue
-        fp = float(p)
+        # Malformed/complex/boolean p-values are not testable; skip them
+        # rather than letting ``float()`` raise or read ``True`` as 1.0.
+        fp = _float_or_nan(p)
         if math.isfinite(fp):
             finite.append((i, min(max(fp, 0.0), 1.0)))
     m = len(finite)
@@ -1684,7 +1705,8 @@ def benjamini_hochberg(p_values, q: float = 0.05) -> list:
         adjusted[i] = value
         prev = value
     for i, p in finite:
-        out[i] = {"p": p, "p_adj": adjusted[i], "reject": adjusted[i] <= q}
+        out[i] = {"p": p, "p_adj": adjusted[i],
+                  "reject": bool(q_ok and adjusted[i] <= q)}
     return out
 
 
@@ -1696,15 +1718,27 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
     interval would hide that a rule can only be checked to +-binomial
     noise at the evaluated sample size.
     """
+    # Counts are integer samples, not booleans; ``float(True)`` would
+    # silently read a flag as one success.
+    if isinstance(successes, bool) or isinstance(total, bool):
+        return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
+                "n": 0}
     try:
         successes = float(successes)
         total = float(total)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
                 "n": 0}
     if not (math.isfinite(successes) and math.isfinite(total)) or total <= 0:
         return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
                 "n": 0}
+    # The multiplier must be a finite positive real; NaN would make the
+    # interval silently collapse to the point estimate, and a boolean is
+    # a flag rather than a z quantile.
+    z = _float_or_nan(z)
+    if not (math.isfinite(z) and z > 0.0):
+        return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
+                "n": int(total)}
     # Counts must be whole samples; accepting e.g. 0.5/2 would report a
     # binomial interval for a quantity that is not a proportion of trials.
     if successes != round(successes) or total != round(total) \
@@ -1900,9 +1934,26 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
         "lower_quantile": lo_q, "upper_quantile": hi_q,
         "valid": False, "reason": "",
     }
+    def _count_vector(values):
+        # Probe first: casting a complex tensor straight to float64 drops
+        # its imaginary part (warning only), and a boolean is a flag rather
+        # than a count of successes/examples - both would fabricate data.
+        try:
+            probe = torch.as_tensor(values)
+        except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+            raise ValueError("counts must be numeric") from exc
+        if probe.is_complex():
+            raise ValueError("counts must be real, not complex")
+        if probe.dtype == torch.bool:
+            raise ValueError("counts must be integers, not booleans")
+        try:
+            return torch.as_tensor(values, dtype=torch.float64).reshape(-1)
+        except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+            raise ValueError("counts must be numeric") from exc
+
     try:
-        s = torch.as_tensor(successes, dtype=torch.float64).reshape(-1)
-        n = torch.as_tensor(n_per_unit, dtype=torch.float64).reshape(-1)
+        s = _count_vector(successes)
+        n = _count_vector(n_per_unit)
     except (TypeError, ValueError, RuntimeError, OverflowError):
         empty["reason"] = "successes and unit lengths must be numeric counts"
         return empty
