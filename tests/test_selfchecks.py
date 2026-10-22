@@ -118,6 +118,16 @@ class CorrelationInputValidationTest(unittest.TestCase):
             self.assertTrue(math.isnan(float(fn(y, x))))
 
 
+class BaselineArgumentValidationTest(unittest.TestCase):
+    def test_probe_chance_must_be_a_real_probability(self):
+        from cage.baselines import probe_vs_chance_test
+
+        for chance in (False, True, float("nan"), -0.1, 0.5, 1 + 0j):
+            with self.subTest(chance=chance):
+                with self.assertRaises(ValueError):
+                    probe_vs_chance_test([0.01, 0.02], chance)
+
+
 class ProjectSelfCheckTest(unittest.TestCase):
     def test_metrics_self_check(self):
         with contextlib.redirect_stdout(io.StringIO()):

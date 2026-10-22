@@ -54,6 +54,7 @@ from .data import (
     validate_batch,
 )
 from .metrics import (
+    _float_or_nan,
     _positive_integer,
     bootstrap_upper_p,
     paired_bootstrap_ci,
@@ -481,7 +482,11 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     ``chance`` level, ``hb2_supported`` (certified), ``hb2_violated``,
     ``hb2_state``, ``p_above_chance`` and ``seeds_for_certification``.
     """
-    chance = float(chance)
+    if isinstance(chance, bool):
+        raise ValueError(
+            f"chance must be a finite probability in [0, 0.5), got "
+            f"{chance!r}; a boolean is a flag, not a chance level")
+    chance = _float_or_nan(chance)
     # The pre-registered HB2 bound is "below 2x chance".  For chance >= 0.5
     # that bound is at or above 1.0, so even a perfect probe would be
     # "certified"; a negative/non-finite chance is not a probability.  Fail
