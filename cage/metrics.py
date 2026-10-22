@@ -1360,12 +1360,6 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     upper bound stays at ``1 - alpha / 2``.  Degenerate inputs return a
     ``valid=False`` payload instead of raising, so callers can abstain.
     """
-    s = torch.as_tensor(successes, dtype=torch.float64).reshape(-1)
-    n = torch.as_tensor(n_per_unit, dtype=torch.float64).reshape(-1)
-    if n.numel() == 1 and s.numel() > 1:
-        n = n.expand_as(s).clone()
-    if s.numel() == 1 and n.numel() > 1:
-        s = s.expand_as(n).clone()
     alpha = _float_or_nan(alpha)
     lo_q = alpha / 2.0 if lower_alpha is None else _float_or_nan(lower_alpha)
     hi_q = 1.0 - alpha / 2.0
@@ -1379,6 +1373,16 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
         "lower_quantile": lo_q, "upper_quantile": hi_q,
         "valid": False, "reason": "",
     }
+    try:
+        s = torch.as_tensor(successes, dtype=torch.float64).reshape(-1)
+        n = torch.as_tensor(n_per_unit, dtype=torch.float64).reshape(-1)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        empty["reason"] = "successes and unit lengths must be numeric counts"
+        return empty
+    if n.numel() == 1 and s.numel() > 1:
+        n = n.expand_as(s).clone()
+    if s.numel() == 1 and n.numel() > 1:
+        s = s.expand_as(n).clone()
     if s.numel() != n.numel() or s.numel() == 0:
         empty["reason"] = "empty or mismatched inputs"
         return empty

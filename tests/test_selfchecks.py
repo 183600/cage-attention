@@ -19,6 +19,15 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertTrue(math.isnan(metrics.brier_score([0.5], [0.5])))
         self.assertTrue(math.isnan(metrics.brier_score([0.5], [-1.0])))
 
+    def test_malformed_cluster_inputs_abstain(self):
+        for successes, totals in ((["not-a-count"], [1]),
+                                  ([1], ["not-a-count"]),
+                                  ({"not": "a-count"}, [1])):
+            with self.subTest(successes=successes, totals=totals):
+                out = metrics.clustered_proportion_ci(successes, totals)
+                self.assertFalse(out["valid"])
+                self.assertTrue(out["reason"])
+
 
 class ProjectSelfCheckTest(unittest.TestCase):
     def test_metrics_self_check(self):
