@@ -845,8 +845,19 @@ def _bca_bounds(d: torch.Tensor, means: torch.Tensor,
     # jackknife).  The sign matters - using the LOO-minus-mean direction
     # flips ``a`` and therefore the corrected endpoints.
     dev = loo.mean() - loo
-    den = 6.0 * float(dev.pow(2).sum()) ** 1.5
-    a = (float(dev.pow(3).sum()) / den) if den > 0.0 else 0.0
+    try:
+        den = 6.0 * float(dev.pow(2).sum()) ** 1.5
+        num = float(dev.pow(3).sum())
+    except OverflowError:
+        # The jackknife acceleration is not representable for an
+        # extreme-scale sample; BCa is a companion, so abstain instead of
+        # aborting the whole contrast report.
+        return None
+    if not (math.isfinite(den) and math.isfinite(num)):
+        # Either sum overflowed to infinity; the ratio would be NaN and the
+        # adjusted quantiles are then undefined.
+        return None
+    a = (num / den) if den > 0.0 else 0.0
 
     def _adjusted(z: float):
         denom = 1.0 - a * (z0 + z)
