@@ -587,7 +587,10 @@ def _query_blocks(bh: int, T: int):
     if blocks is not None:
         _query_blocks_cache.move_to_end(key)
         return blocks
-    if T <= 32:
+    if T <= 32 or bh <= 0:
+        # A zero-row batch has no query rows to block; returning the single
+        # whole-sequence block keeps the empty forward legal (the kernel's
+        # zero-sized GEMMs still run) instead of dividing by ``bh`` = 0.
         blocks = ((0, T),)
     else:
         max_rows = (1 << 20) // (bh * T)

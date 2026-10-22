@@ -61,3 +61,23 @@ class EmptyBatchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmptyBatchLongSequenceTest(unittest.TestCase):
+    def test_empty_batch_with_blocked_sequence(self):
+        # A zero-row batch at T > 32 still enters _query_blocks; the block
+        # size formula divides by B*H, so it must not divide by zero.
+        idx, _, meta = make_batch(
+            0, 16, 64, "cpu", gen=torch.Generator().manual_seed(3))
+        self.assertGreater(idx.size(1), 32)
+        for gate in GATES:
+            with self.subTest(gate=gate):
+                model = build({
+                    "vocab_size": 64, "d_model": 32, "n_heads": 4,
+                    "n_layers": 1, "max_len": 64, "gate": gate,
+                })
+                logits, loss, _ = model(idx)
+                self.assertIsNone(loss)
+                self.assertEqual(tuple(logits.shape), (0, 1, 64))
+                _, _, layer_stats = model(idx, stat_pos=meta["query_pos"])
+                self.assertEqual(len(layer_stats), 1)
