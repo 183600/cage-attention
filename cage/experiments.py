@@ -2930,7 +2930,7 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
                            std_key="val_accuracy_std",
                            n_key="n_seeds", curve_key="curve_verdicts",
                            diverged_key="diverged_runs", grid=None,
-                           grid_keys=None) -> dict:
+                           grid_keys=None, full_rows=None) -> dict:
     """Audit an argmax hyperparameter selection for winner's curse.
 
     Every tuned baseline here selects a value by taking the argmax of a
@@ -2966,7 +2966,10 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
     - ``best_at_grid_boundary``: the winning index is the first or last
       grid point, so the optimum may lie outside the searched range and
       the true baseline could be stronger.  Only present when ``grid``
-      is given;
+      is given.  ``full_rows`` optionally supplies the complete
+      pre-filter table: axis boundaries are then read from the searched
+      grid, not from the curve-valid subset, so excluding an endpoint row
+      cannot make an interior winner look resolved;
     - ``reliable``: ``True`` only when the selection resolves the value
       (no boundary, no within-noise margin, and no curve-invalid runs in
       the winning row); ``None`` when the audit cannot be computed at
@@ -3020,7 +3023,9 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
     if _finite(r_best.get(diverged_key)):
         diverged_best = int(r_best[diverged_key])
     boundary = None
-    if grid is not None and len(grid) == len(rows):
+    boundary_rows = rows if full_rows is None else full_rows
+    if (full_rows is None and grid is not None
+            and len(grid) == len(rows)):
         boundary = bool(i_best in (0, len(rows) - 1))
     # A multi-dimensional grid (e.g. lr x steps) has a boundary on *each*
     # axis: an optimum at the smallest or largest learning rate is just as
@@ -3029,7 +3034,7 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
     axis_boundaries = {}
     if grid_keys:
         for key in grid_keys:
-            vals = sorted({float(r[key]) for r in rows
+            vals = sorted({float(r[key]) for r in boundary_rows
                            if _finite(r.get(key))})
             if len(vals) >= 2 and _finite(r_best.get(key)):
                 axis_boundaries[str(key)] = bool(
@@ -6505,7 +6510,7 @@ def tune_shared_recipe(settings: Settings):
     eligible = pick["rows"]
     best = max(eligible, key=lambda row: row["val_accuracy_mean"])
     selection = _selection_reliability(
-        eligible, grid=[row["lr"] for row in eligible])
+        eligible, grid_keys=("lr",), full_rows=table)
     selection["pool"] = pick["pool"]
     selection["excluded_curve_invalid_rows"] = pick["n_excluded"]
     selection["curve_invalid_rows"] = pick["n_invalid"]
@@ -7198,8 +7203,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         # (curve-valid) pool is audited again below.  Both axes matter: a
         # winner at the 2x step edge is as unresolved as one at the lr edge.
         selection = _selection_reliability(
-            table, grid=[(row["lr"], row["steps"]) for row in table],
-            grid_keys=("lr", "steps"))
+            table, grid_keys=("lr", "steps"), full_rows=table)
         if not finite_rows:
             print(f"[baselines] WARNING: depth={depth} tuning table has no "
                   f"finite validation accuracy (all {len(table)} "
@@ -7242,8 +7246,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                   f"not validated by a healthy curve")
         eligible = pick["rows"]
         selection = _selection_reliability(
-            eligible, grid=[(row["lr"], row["steps"]) for row in eligible],
-            grid_keys=("lr", "steps"))
+            eligible, grid_keys=("lr", "steps"), full_rows=table)
         selection["pool"] = pick["pool"]
         selection["excluded_curve_invalid_rows"] = pick["n_excluded"]
         selection["curve_invalid_rows"] = pick["n_invalid"]
@@ -7702,8 +7705,7 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
     pick = _curve_valid_selection_rows(table)
     eligible = pick["rows"]
     selection = _selection_reliability(
-        eligible, grid=[(row["lr"], row["steps"]) for row in eligible],
-        grid_keys=("lr", "steps"))
+        eligible, grid_keys=("lr", "steps"), full_rows=table)
     selection["pool"] = pick["pool"]
     best = max(eligible, key=lambda row: row["val_accuracy_mean"])
     warn = _selection_warn(
@@ -8117,8 +8119,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         probe_batch=settings.probe_eval_batch,
         deterministic=settings.deterministic)
     probe_selection = _selection_reliability(
-        table, grid=[(row.get("lr"), row.get("steps")) for row in table],
-        grid_keys=("lr", "steps"))
+        table, grid_keys=("lr", "steps"), full_rows=table)
     _write_json(out_dir / "baselines_probe_tuning.json",
                 {"val_seed": VAL_SEED, "table": table, "chosen_lr": best_lr,
                  "chosen_steps": best_steps,
@@ -8730,7 +8731,7 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
             row["val_accuracy_mean"],
             preferred is not None and row[key] == preferred))
         selection = _selection_reliability(
-            eligible, grid=[row[key] for row in eligible])
+            eligible, grid_keys=(key,), full_rows=rows)
         selection["pool"] = pick["pool"]
         selection["n_finite"] = pick["n_finite"]
         selection["n_invalid"] = pick["n_invalid"]
@@ -11100,7 +11101,7 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
             row["val_accuracy_mean"],
             preferred is not None and row[key] == preferred))
         selection = _selection_reliability(
-            eligible, grid=[row[key] for row in eligible])
+            eligible, grid_keys=(key,), full_rows=rows)
         selection["pool"] = pick["pool"]
         selection["n_finite"] = pick["n_finite"]
         selection["n_invalid"] = pick["n_invalid"]
