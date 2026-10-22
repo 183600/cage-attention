@@ -150,6 +150,7 @@ from .data import (
     stream_seed_key,
     validate_batch,
 )
+from .efficiency import measure_config
 from .metrics import (
     _positive_integer,
     benjamini_hochberg,
@@ -4624,6 +4625,132 @@ def _model_cfg(settings: Settings, **overrides) -> dict:
     return cfg
 
 
+_EFFICIENCY_WARMUP = 5
+_EFFICIENCY_REPEATS = 30
+
+
+def _efficiency_seq_len(settings: Settings) -> int:
+    return 2 * int(settings.n_pairs) + 2
+
+
+def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
+                          experiment: str, cells, reference=None) -> dict:
+    """Measure the inference-cost companion for one experiment's cells.
+
+    ``cells`` is ``[(label, runs), ...]``.  The architecture is rebuilt from
+    each cell's recorded ``model_cfg`` rather than from the runner's current
+    settings, so the cost row describes the model that actually trained.  A
+    measurement failure is recorded as an unavailable row instead of
+    aborting an experiment whose real results are already on disk.
+    """
+    seq_len = _efficiency_seq_len(settings)
+    measured = {}
+    entries = {}
+    for label, runs in cells:
+        label = str(label)
+        cfg = next((r.get("model_cfg") for r in runs
+                    if isinstance(r.get("model_cfg"), dict)), None)
+        if cfg is None:
+            entries[label] = {"available": False,
+                              "reason": "runs carry no model_cfg"}
+            continue
+        acc = _mean_std([r.get("accuracy") for r in runs])
+        recorded = sorted({int(r["params"]) for r in runs
+                           if _finite(r.get("params"))})
+        key = json.dumps(cfg, sort_keys=True)
+        try:
+            if key not in measured:
+                measured[key] = measure_config(
+                    cfg, settings.device, seq_len, batch=1,
+                    warmup=_EFFICIENCY_WARMUP,
+                    repeats=_EFFICIENCY_REPEATS)
+            rec = dict(measured[key])
+        except Exception as exc:  # noqa: BLE001 - report, do not kill run
+            entries[label] = {
+                "available": False,
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+            continue
+        rec.update({
+            "accuracy_mean": acc["mean"],
+            "accuracy_std": acc["std"],
+            "accuracy_n": acc["n"],
+            "recorded_params": recorded[0] if len(recorded) == 1 else None,
+            "params_match_run": (len(recorded) == 1
+                                 and recorded[0] == rec["params"]),
+        })
+        entries[label] = rec
+
+    print(f"\n[{experiment}] inference cost (batch=1, seq_len={seq_len}; "
+          f"FLOPs are analytic forward matmuls; latency is the eval-mode "
+          f"median of {_EFFICIENCY_REPEATS} passes on {settings.device}; "
+          f"ratios and cost are companions, not decision rules):")
+    print(f"{'cell':>23} {'params':>9} {'param_x':>8} {'GFLOP':>8} "
+          f"{'gflop_x':>8} {'lat_ms':>8} {'lat_x':>7} {'acc':>7}")
+    ref = entries.get(str(reference)) if reference is not None else None
+    for label, _ in cells:
+        label = str(label)
+        rec = entries[label]
+        if not rec.get("available", True):
+            print(f"{label:>23}  unavailable: {rec.get('reason')}")
+            continue
+        param_x = (rec["params"] / ref["params"]
+                   if ref and ref.get("available", True) and ref["params"]
+                   else float("nan"))
+        flop_x = (rec["analytic_matmul_flops"] / ref["analytic_matmul_flops"]
+                  if ref and ref.get("available", True)
+                  and ref["analytic_matmul_flops"] else float("nan"))
+        lat_x = (rec["latency_ms_median"] / ref["latency_ms_median"]
+                 if ref and ref.get("available", True)
+                 and ref["latency_ms_median"] else float("nan"))
+
+        def ratio(value):
+            return f"{value:.3f}" if _finite(value) else "-"
+
+        print(f"{label:>23} {rec['params']:>9} {ratio(param_x):>8} "
+              f"{rec['analytic_matmul_gflops']:>8.4f} {ratio(flop_x):>8} "
+              f"{rec['latency_ms_median']:>8.3f} {ratio(lat_x):>7} "
+              f"{rec['accuracy_mean']:>7.4f}")
+
+    payload = {
+        "experiment": experiment,
+        "seq_len": seq_len,
+        "reference": None if reference is None else str(reference),
+        "comparison": "efficiency_companion",
+        "note": ("cost/accuracy companion: analytic matmul FLOPs plus "
+                 "on-device latency and peak memory; it never changes a "
+                 "pre-registered decision rule"),
+        "cells": entries,
+        "_provenance": _stamp(settings),
+    }
+    _write_json(out_dir / f"{experiment}_efficiency.json", payload)
+    return payload
+
+
+def _efficiency_pair(target, reference) -> dict:
+    """Compare two measured cost records without re-measuring either side."""
+    if not isinstance(target, dict) or not isinstance(reference, dict):
+        return {"available": False, "reason": "missing cost record"}
+    if not target.get("available", True) \
+            or not reference.get("available", True):
+        return {"available": False, "reason": "cost measurement unavailable"}
+    fields = ("params", "analytic_matmul_flops", "latency_ms_median",
+              "peak_increment_bytes")
+    target_view = {key: target.get(key) for key in fields}
+    reference_view = {key: reference.get(key) for key in fields}
+    ratios = {}
+    for key in fields:
+        a, b = target_view[key], reference_view[key]
+        if _finite(a) and _finite(b) and float(b) != 0.0:
+            ratios[f"{key}_ratio_target_over_reference"] = float(a) / float(b)
+    return {
+        "available": True,
+        "target": target_view,
+        "reference": reference_view,
+        "ratios": ratios,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Seed-determinism self-check: the "one seed pins one run" contract
 # ---------------------------------------------------------------------------
@@ -8644,6 +8771,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     for gate in GATES:
         for case in examples.get(gate, (0, []))[1]:
             print(f"  [{gate}] {_format_case(case)}")
+    table["_efficiency"] = _efficiency_companion(
+        settings, out_dir, "e1", [(gate, by_gate[gate]) for gate in GATES],
+        reference="none")
     table["_provenance"] = _stamp(settings)
     if complexity_benchmark is not None:
         table["_complexity_benchmark"] = complexity_benchmark
@@ -9435,6 +9565,17 @@ def _e3_capacity_matched_pre_reference(settings: Settings,
         }
         _write_result(out_dir / "e3_capacity_matched_runs.jsonl", rec)
         runs.append(rec)
+    try:
+        efficiency = measure_config(
+            runs[-1]["model_cfg"], settings.device,
+            _efficiency_seq_len(settings), batch=1,
+            warmup=_EFFICIENCY_WARMUP, repeats=_EFFICIENCY_REPEATS)
+        efficiency["recorded_params"] = int(wide_params)
+        efficiency["params_match_run"] = (
+            int(efficiency["params"]) == int(wide_params))
+    except Exception as exc:  # noqa: BLE001 - cost is a companion
+        efficiency = {"available": False,
+                      "reason": f"{type(exc).__name__}: {exc}"}
     payload = {
         "name": f"capacity_matched_pre_{gate}_{ls_label}",
         "gate": gate, "norm": "pre", "layer_scale": layer_scale,
@@ -9447,6 +9588,7 @@ def _e3_capacity_matched_pre_reference(settings: Settings,
         "params_delta_frac": ((wide_params - target_params)
                               / max(target_params, 1)),
         "capacity_matched": matched,
+        "efficiency": efficiency,
         "chosen_lr": float(lr),
         "comparison": "capacity_benchmark",
         "note": ("same depth/gate/LayerScale/recipe/seeds, width chosen to "
@@ -9461,7 +9603,8 @@ def _e3_capacity_matched_pre_reference(settings: Settings,
 
 
 def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
-                           index: dict, lr: float) -> dict:
+                           index: dict, lr: float,
+                           efficiency: dict | None = None) -> dict:
     """Compare each seednorm cell with its capacity-matched Pre-LN control.
 
     The registered ``seednorm - pre`` contrasts hold the model width fixed,
@@ -9513,6 +9656,9 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                 continue
             ref = _e3_capacity_matched_pre_reference(
                 settings, out_dir, gate, layer_scale, target_params, lr)
+            target_eff = ((efficiency or {}).get("cells") or {}).get(
+                f"{gate}|seednorm|{ls_label}")
+            cost = _efficiency_pair(target_eff, ref.get("efficiency"))
             reference_competence = _competence_check(
                 [(ref["name"], _curve_valid_runs(ref["runs"]))],
                 lambda r: (int(round(r["accuracy"] * r["eval_n"])),
@@ -9534,6 +9680,7 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                 "params": ref["params"],
                 "target_params": ref["target_params"],
                 "capacity_matched": ref["capacity_matched"],
+                "efficiency": cost,
                 "target_competent": target_competent,
                 "target_competence": target_competence,
                 "reference_competent": reference_competent,
@@ -9612,6 +9759,20 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                       f"{a if _finite(a) else float('nan'):>10.4f} "
                       f"{b if _finite(b) else float('nan'):>12.4f} "
                       f"{_fmt_ci(bench):>28} {state:>26}")
+            if cost.get("available"):
+                ratios = cost.get("ratios") or {}
+
+                def _ratio_text(key):
+                    value = ratios.get(
+                        f"{key}_ratio_target_over_reference")
+                    return f"{value:.3f}" if _finite(value) else "-"
+
+                peak = _ratio_text("peak_increment_bytes")
+                print(f"      cost target/reference: params "
+                      f"{_ratio_text('params')}x, FLOPs "
+                      f"{_ratio_text('analytic_matmul_flops')}x, latency "
+                      f"{_ratio_text('latency_ms_median')}x"
+                      + (f", peak-memory {peak}x" if peak != "-" else ""))
             out[f"{gate}|{ls_label}"] = cell
     return out
 
@@ -9748,7 +9909,14 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                       f"{invalid}/{len(rs)} {tail_s:>7} "
                       f"{'/'.join(verdicts):>10}")
 
-    capacity_benchmark = _e3_capacity_benchmark(settings, out_dir, index, lr)
+    efficiency_cells = []
+    for (gate, norm, layer_scale), rs in index.items():
+        ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
+        efficiency_cells.append((f"{gate}|{norm}|{ls_label}", rs))
+    efficiency = _efficiency_companion(
+        settings, out_dir, "e3", efficiency_cells)
+    capacity_benchmark = _e3_capacity_benchmark(
+        settings, out_dir, index, lr, efficiency=efficiency)
 
     # Same bad-case attribution as E1/E2 (raw records in
     # e3_error_cases.jsonl): the residual/gate readouts of H3a/H3b say
@@ -9964,6 +10132,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     e3_summary = {f"{g}|{n}|{ls}": _aggregate_runs(rs)
                   for (g, n, ls), rs in index.items()}
     e3_summary["_capacity_matched_pre"] = capacity_benchmark
+    e3_summary["_efficiency"] = efficiency
     e3_summary["_class_frequency_companions"] = metric_robustness
     e3_summary["_provenance"] = _stamp(settings)
     _write_json(out_dir / "e3_summary.json", e3_summary)
