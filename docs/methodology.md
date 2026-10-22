@@ -24,7 +24,9 @@
 ## 2. 决策层级（从强到弱）
 
 1. **预注册的最低效应量 SESOI**：统计显著但小于 SESOI 读作
-   *practically negligible*，不算支持机制。
+   *practically negligible*，不算支持机制。点估计过 SESOI 但 95% CI
+   未整体过界时，只算“实际大小暂定”，不能写成已确立（区间级读法见
+   3.7 节的 minimum-effect test）。
 2. **预注册方向**：方向相反且 FDR 显著读作 *refutation*，永远不算支持。
 3. **Benjamini-Hochberg FDR**：每个实验的整个对照族一起校正
    （`--fdr-q`，默认 0.05）；不能逐条挑显著。
@@ -129,6 +131,37 @@ sign_flip_disagrees        bootstrap 与精确检验结论是否相反
 依赖”显式化。字段随每个对照写入 `<tag>_contrasts.json` 的
 `stream_test.crossed_bootstrap` 及行级 `stream_crossed_*`。
 
+## 3.7 SESOI 的区间级读法：minimum-effect test
+
+第 2 节把 SESOI 放在统计显著之后，但**用点估计是否达到 SESOI 来判断
+“实际重要”仍不充分**：一个点估计略高于 SESOI、而 95% CI 同时覆盖零和
+SESOI 以下效应的对照，数据与“实际可忽略”仍然相容。把它写成已确立的
+实际效应，是把点估计当成总体参数。
+
+因此每个方向性（`direction` 为 `+`/`-`）的差值对照还携带
+`cage.metrics.minimum_effect_test` 的**区间级伴随读数**：
+
+- 对预注册方向 `+`，H0 为 `mean <= +SESOI`；对 `-`，H0 为
+  `mean >= -SESOI`。bootstrap p 值取重采样均值落在错误一侧的比例（同样
+  带 `+1` 平滑），因此可与其它 p 值一起进入独立的 BH 伴随族；
+- `minimum_effect_established=True` 仅当整个 95% CI 在预注册方向上越过
+  边界（`+` 时 `lo > SESOI`，`-` 时 `hi < -SESOI`），而不是点估计
+  `|mean| >= SESOI`；
+- `sesoi_point_estimate_only=True` 表示该行按预注册规则仍读作
+  `SURVIVES`（点估计过 SESOI 且 FDR 显著），但区间级实际效应**未确立**。
+  报告应写成“实际大小暂定/未确立”，不能写成“已证明有实际意义”；
+- `minimum_effect_loo` / `minimum_effect_bca_agrees` 分别检查去掉任一
+  种子后是否仍越过边界、以及 BCa 区间是否与百分位区间一致；
+- 方向未注册的对照（如 H3b 的 `resid_norm_last_over_first`）没有单侧
+  最小效应，伴随读数直接留空，不能从观测符号反推方向。
+
+这一层是**伴随读数**：不改变 `supports_hypothesis` 的预注册判定，也不
+改变 FDR 结论，只把“统计上非零”“点估计过 SESOI”“区间级实际效应已确立”
+三种强度分开。实现位于 `cage/metrics.py::minimum_effect_test` 与
+`cage/experiments.py::ContrastLog.finalize`；字段随每个对照写入
+`<tag>_contrasts.json` 的行与汇总计数
+（`n_minimum_effect_established` / `n_sesoi_point_estimate_only`）。
+
 ## 4. 预设功效与批次顺序
 
 - 每个网格在训练前写 `<tag>_design_plan.json`：用基线阶梯的 pilot 方差把
@@ -162,7 +195,9 @@ sign_flip_disagrees        bootstrap 与精确检验结论是否相反
 每个进入结论的对照至少报告：
 
 1. 配对种子数 `n`、`seeds_used` / `seeds_dropped`（含原因）；
-2. 效应量、配对 SD、MDE80、SESOI；
+2. 效应量、配对 SD、MDE80、SESOI，以及 SESOI 的区间级读数
+   （`minimum_effect_established` / `sesoi_point_estimate_only`：
+   点估计过界但 CI 未过界时，只能写“实际大小暂定”，不能写“已确立”）；
 3. bootstrap 95% CI 与 BH 校正 p；
 4. 精确 sign-flip p 与最小可达 p；
 5. jackknife 区间、BCa 是否与主决策一致；

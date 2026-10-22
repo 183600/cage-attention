@@ -212,6 +212,7 @@ from .metrics import (
     crossed_cluster_bootstrap_ci,
     equivalence_test,
     evaluation_fold_audit,
+    minimum_effect_test,
     noninferiority_test,
     paired_bootstrap_ci,
     standardized_proportion,
@@ -4928,6 +4929,56 @@ class ContrastLog:
                 row["n_seeds_for_sesoi"] = (
                     float(required) if _finite(required)
                     else float("inf"))
+        # Minimum-effect (SESOI) companion.  The pre-registered practicality
+        # gate above compares the *point estimate* with the SESOI, so a row
+        # whose 95% CI still spans a negligible effect can be labelled
+        # practically relevant on the point estimate alone.  This parallel
+        # family asks the interval-level question - does the whole CI clear
+        # the SESOI in the registered direction? - with the bootstrap
+        # minimum-effect test.  It does not change ``supports_hypothesis``
+        # (that rule is pre-registered); a supported row that fails it is
+        # instead reported as "SESOI point-estimate only", so a claim is not
+        # read as practically established when the data are also compatible
+        # with an effect below the practical floor.
+        for row in self.rows:
+            direction = row.get("direction")
+            sesoi = row.get("sesoi")
+            row["minimum_effect_p"] = float("nan")
+            row["minimum_effect_established"] = False
+            row["minimum_effect_loo"] = None
+            row["minimum_effect_bca_agrees"] = None
+            if (row.get("test") == "difference"
+                    and direction in ("+", "-")
+                    and sesoi is not None and _finite(sesoi)
+                    and float(sesoi) > 0.0
+                    and len(row.get("diffs") or []) >= 2):
+                met = minimum_effect_test(
+                    row.get("diffs"), float(sesoi), direction=direction)
+                row["minimum_effect_p"] = met.get("p_value")
+                row["minimum_effect_lo"] = met.get("lo")
+                row["minimum_effect_hi"] = met.get("hi")
+                row["minimum_effect_loo"] = met.get("loo_beyond_sesoi")
+                row["minimum_effect_bca_agrees"] = met.get("bca_agrees")
+                row["minimum_effect_established"] = bool(
+                    met.get("beyond_sesoi"))
+        met_adj = benjamini_hochberg(
+            [r.get("minimum_effect_p") for r in self.rows], q=q)
+        for row, met_a in zip(self.rows, met_adj):
+            row["minimum_effect_p_adj"] = met_a["p_adj"]
+            row["minimum_effect_fdr_reject"] = bool(
+                met_a["reject"]
+                and row.get("controlled") is not False
+                and row.get("claim_eligible", True))
+            row["minimum_effect_established"] = bool(
+                row["minimum_effect_fdr_reject"]
+                and row.get("minimum_effect_established"))
+            row["sesoi_point_estimate_only"] = bool(
+                row.get("test") == "difference"
+                and row.get("direction") in ("+", "-")
+                and row.get("sesoi") is not None
+                and row.get("supports_hypothesis")
+                and row.get("claim_eligible", True)
+                and not row["minimum_effect_established"])
         # Parallel exact-test family: the same BH correction applied to the
         # paired sign-flip p-values.  This is a companion, not a replacement
         # for the pre-registered bootstrap decision; it answers "could this
@@ -4968,6 +5019,12 @@ class ContrastLog:
                 and float(exact_row["sign_flip_min_p"]) > q)
         surviving = [r for r in testable if r["fdr_reject"]]
         supporting = [r for r in testable if r["supports_hypothesis"]]
+        met_established = [
+            r for r in supporting
+            if r.get("claim_eligible", True)
+            and r.get("minimum_effect_established")]
+        sesoi_point_only = [
+            r for r in supporting if r.get("sesoi_point_estimate_only")]
         loo_flips = [r for r in testable if r.get("loo_flips_decision")]
         bca_differs = [r for r in testable if r.get("bca_disagrees")]
         sign_flip_supporting = [
@@ -5108,9 +5165,12 @@ class ContrastLog:
                        f" (min {float(r['sign_flip_min_p']):.4f})"
                        if _finite(exact_p) and _finite(r.get("sign_flip_min_p"))
                        else "")
+            sesoi_note = ("  [SESOI point-estimate only: 95% CI does not "
+                          "clear the practical bound]"
+                          if r.get("sesoi_point_estimate_only") else "")
             print(f"  [{r['hypothesis']}] {r['rule']} ({r['metric']}): "
                   f"p={r['p_value']:.4f} -> p_adj={r['p_adj']:.4f} "
-                  f"{exact_s} {verdict} "
+                  f"{exact_s} {verdict}{sesoi_note} "
                   f"(effect={r['mean']:+.4f}{rel_s}{dz_s}, "
                   f"MDE80={r['mde80']:.4f}{', ' if sesoi_s else ''}"
                   f"{sesoi_s}, seeds={r['n']}, "
@@ -5166,6 +5226,24 @@ class ContrastLog:
                   f"{len(underpowered)} of them would need more seeds "
                   f"(listed per row above) to resolve the SESOI - do not "
                   f"read them as supporting the mechanism")
+        if sesoi_point_only:
+            names = ", ".join(
+                f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                for r in sesoi_point_only)
+            print(f"[{self.tag}] WARNING: {len(sesoi_point_only)}/"
+                  f"{len(supporting)} supported contrast(s) clear their SESOI "
+                  f"on the point estimate but NOT at the interval level (the "
+                  f"95% CI still includes effects below the practical "
+                  f"floor): {names}; report them as practically provisional "
+                  f"(minimum-effect test), not as established practical "
+                  f"effects, even though the pre-registered decision rule "
+                  f"still reads them as SURVIVES")
+        if met_established:
+            print(f"[{self.tag}] minimum-effect (SESOI) companion: "
+                  f"{len(met_established)}/{len(supporting)} supported "
+                  f"contrast(s) also have their whole 95% CI above the "
+                  f"registered practical bound (their practical size is "
+                  f"established, not just their non-zero sign)")
         if equiv_rows:
             print(f"[{self.tag}] equivalence (null-prediction) tests: "
                   f"{len(equivalent)}/{len(equiv_rows)} have their 95% CI "
@@ -5404,6 +5482,11 @@ class ContrastLog:
                    "n_surviving": len(surviving),
                    "n_supporting": len(supporting),
                    "n_below_sesoi": len(below_sesoi),
+                   "n_minimum_effect_established": len(met_established),
+                   "n_sesoi_point_estimate_only": len(sesoi_point_only),
+                   "sesoi_point_estimate_only_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in sesoi_point_only],
                    "n_direction_reversed": len(reversed_effects),
                    "n_equivalence": len(equiv_rows),
                    "n_equivalent": len(equivalent),

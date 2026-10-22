@@ -63,7 +63,11 @@ Metric choices (and why)
   per metric, and ``seeds_for_power`` is the *planning* counterpart of the
   post-hoc ``mde80`` - it says how many seeds a contrast of practical
   interest would need at 80% power, so the design can be sized before it
-  is run instead of discovered to be underpowered afterwards.
+  is run instead of discovered to be underpowered afterwards.  The SESOI
+  itself is read through ``minimum_effect_test``: a row counts as
+  practically established only when the whole 95% CI clears the bound in
+  the pre-registered direction, not when the point estimate happens to
+  exceed it while the interval still spans a negligible effect.
 * For rare positive classes (error detection after convergence), the
   ranking summaries are paired with ``selection_at_fraction``: the
   operational question "if the most doubtful fraction of answers is
@@ -110,6 +114,7 @@ __all__ = [
     "sign_flip_test",
     "equivalence_test",
     "noninferiority_test",
+    "minimum_effect_test",
     "bootstrap_upper_p",
     "clustered_proportion_ci",
     "crossed_cluster_bootstrap_ci",
@@ -1179,6 +1184,109 @@ def bootstrap_upper_p(diffs, bound, n_boot: int = 10000, seed: int = 0) -> float
     means = _bootstrap_means(d, n_boot, seed)
     p = float((means >= bound).to(torch.float64).mean())
     return min(1.0, (p * n_boot + 1.0) / (n_boot + 1.0))
+
+
+def minimum_effect_test(diffs, bound, direction: str = "+",
+                        n_boot: int = 10000, seed: int = 0,
+                        alpha: float = 0.05) -> dict:
+    """Bootstrap minimum-effect (SESOI) test for a directional claim.
+
+    A statistically significant effect is not automatically a
+    *practically* relevant one.  The experiment registry therefore
+    pre-registers a smallest effect size of interest (SESOI) per metric,
+    but a gate that compares the **point estimate** with the SESOI still
+    calls an effect practically relevant when its 95% CI spans both the
+    SESOI and zero.  The minimum-effect test closes that gap: for a
+    prediction "the effect is positive and at least ``bound``", H0 is
+    ``mean(diffs) <= +bound`` (``direction='+'``) or
+    ``mean(diffs) >= -bound`` (``direction='-'``), and support requires
+    the whole 95% percentile CI to clear the bound in the registered
+    direction (``beyond_sesoi``).  ``p_value`` is the bootstrap mass on
+    the wrong side of the bound with the same ``+1`` smoothing as the
+    other bootstrap p-values, so it can join a Benjamini-Hochberg family.
+
+    This is the one-sided counterpart of :func:`equivalence_test`: TOST
+    asks whether the effect is small enough to be negligible, this asks
+    whether it is large enough to matter.  It is deliberately *not* a
+    two-sided "|effect| >= bound" test, because the registry only makes
+    directional SESOI claims; an undirected prediction has no minimum
+    effect to establish (pass ``direction`` from the registry, never
+    infer it from the observed sign).
+
+    ``diffs`` holds the paired per-seed values as in
+    :func:`paired_bootstrap_ci`.  The usual ``lo``/``hi``/``sd``/``mde80``
+    and small-sample companions are attached: ``loo_beyond_sesoi`` (every
+    leave-one-seed-out mean still clears the bound) and the BCa interval
+    (``beyond_sesoi_bca``/``bca_agrees``).  Returns NaN fields and
+    ``beyond_sesoi=False`` for an empty sample, fewer than two paired
+    units, a non-finite difference, a non-positive/non-finite bound, an
+    unknown direction, or invalid bootstrap arguments - a design that
+    cannot estimate uncertainty must not certify a practical effect.
+    """
+    bound = _float_or_nan(bound)
+    alpha = _float_or_nan(alpha)
+    d = _flatten_float(diffs)
+    out = {
+        "mean": float("nan"), "lo": float("nan"), "hi": float("nan"),
+        "n": 0, "sd": float("nan"), "half_width": float("nan"),
+        "mde80": float("nan"), "p_value": float("nan"),
+        "sign_consistency": float("nan"), "alpha": alpha,
+        "test": "minimum_effect", "bound": bound,
+        "direction": direction, "beyond_sesoi": False,
+        "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
+        "loo_beyond_sesoi": False, "lo_bca": float("nan"),
+        "hi_bca": float("nan"), "beyond_sesoi_bca": None,
+        "bca_agrees": None,
+    }
+    if direction not in ("+", "-") or d.numel() < 2 \
+            or not bool(torch.isfinite(d).all()) \
+            or not math.isfinite(bound) or bound <= 0.0 \
+            or not _bootstrap_args_ok(n_boot, alpha):
+        if direction in ("+", "-") and d.numel() == 1 \
+                and bool(torch.isfinite(d).all()) and math.isfinite(bound):
+            # Report the observed point but not a decision: one paired
+            # unit cannot estimate the interval the claim rests on.
+            out["mean"] = float(d.mean())
+            out["n"] = 1
+        return out
+    n_boot = int(float(n_boot))
+    means = _bootstrap_means(d, n_boot, seed)
+    out.update(_bootstrap_summary(d, means, alpha))
+    if direction == "+":
+        p_wrong_side = float((means <= bound).to(torch.float64).mean())
+        out["beyond_sesoi"] = bool(out["lo"] > bound)
+    else:
+        p_wrong_side = float((means >= -bound).to(torch.float64).mean())
+        out["beyond_sesoi"] = bool(out["hi"] < -bound)
+    out["p_value"] = min(
+        1.0, (p_wrong_side * n_boot + 1.0) / (n_boot + 1.0))
+    nonzero = d != 0.0
+    if int(nonzero.sum()) == 0 or out["mean"] == 0.0:
+        out["sign_consistency"] = float("nan")
+    else:
+        sign = 1.0 if out["mean"] > 0.0 else -1.0
+        out["sign_consistency"] = float(
+            (d[nonzero] * sign > 0.0).to(torch.float64).mean())
+    loo = _jackknife_means(d)
+    out["loo_mean_min"] = float(loo.min()) if loo.numel() else float("nan")
+    out["loo_mean_max"] = float(loo.max()) if loo.numel() else float("nan")
+    if loo.numel():
+        out["loo_beyond_sesoi"] = bool(
+            bool((loo > bound).all()) if direction == "+"
+            else bool((loo < -bound).all()))
+    bca = _bca_bounds(d, means, alpha)
+    if bca is None:
+        out["lo_bca"] = out["hi_bca"] = float("nan")
+        out["beyond_sesoi_bca"] = None
+        out["bca_agrees"] = None
+    else:
+        out["lo_bca"], out["hi_bca"] = bca
+        out["beyond_sesoi_bca"] = bool(
+            out["lo_bca"] > bound if direction == "+"
+            else out["hi_bca"] < -bound)
+        out["bca_agrees"] = bool(
+            out["beyond_sesoi"] == out["beyond_sesoi_bca"])
+    return out
 
 
 def seeds_for_power(sd, effect, alpha: float = 0.05,
@@ -2266,6 +2374,49 @@ def _self_test() -> int:
     check("sign_flip_tost_bounded",
           0.0 <= eq["sign_flip_p"] <= 1.0
           and 0.0 <= ni["sign_flip_p"] <= 1.0)
+
+    # Minimum-effect (SESOI) test: a point estimate above the bound is not
+    # enough; the interval must clear it.  A tight sample far above the
+    # bound establishes the practical effect, while a sample whose mean
+    # exceeds the bound but whose interval straddles it does not (the
+    # point-estimate-only failure mode this companion exists to expose).
+    met_clear = minimum_effect_test([0.60, 0.65, 0.62, 0.58, 0.61], 0.5,
+                                    direction="+", n_boot=2000, seed=0)
+    check("met_clear_established",
+          met_clear["beyond_sesoi"] is True
+          and met_clear["loo_beyond_sesoi"] is True
+          and met_clear["mean"] > met_clear["bound"])
+    met_spans = minimum_effect_test([1.0, 0.1, 0.2, 0.0, 0.1], 0.2,
+                                    direction="+", n_boot=2000, seed=0)
+    check("met_point_estimate_only_not_established",
+          abs(met_spans["mean"] - 0.28) < 1e-12
+          and met_spans["mean"] > met_spans["bound"]
+          and met_spans["lo"] <= met_spans["bound"]
+          and met_spans["beyond_sesoi"] is False)
+    met_neg = minimum_effect_test([-0.60, -0.65, -0.62, -0.58, -0.61], 0.5,
+                                  direction="-", n_boot=2000, seed=0)
+    check("met_negative_direction_established",
+          met_neg["beyond_sesoi"] is True
+          and met_neg["hi"] < -met_neg["bound"])
+    met_neg_wrong = minimum_effect_test([0.60, 0.65, 0.62, 0.58, 0.61], 0.5,
+                                        direction="-", n_boot=2000, seed=0)
+    check("met_wrong_direction_not_established",
+          met_neg_wrong["beyond_sesoi"] is False)
+    check("met_invalid_bound_no_claim",
+          minimum_effect_test([1.0, 2.0], 0.0)["beyond_sesoi"] is False
+          and math.isnan(minimum_effect_test([1.0, 2.0], 0.0)["p_value"]))
+    check("met_invalid_direction_no_claim",
+          minimum_effect_test([1.0, 2.0], 0.5,
+                              direction="up")["beyond_sesoi"] is False)
+    check("met_single_unit_no_claim",
+          minimum_effect_test([1.0], 0.5)["n"] == 1
+          and minimum_effect_test([1.0], 0.5)["beyond_sesoi"] is False)
+    check("met_nonfinite_no_claim",
+          minimum_effect_test([1.0, float("nan")], 0.5)["beyond_sesoi"]
+          is False)
+    check("met_zero_boot_no_claim",
+          minimum_effect_test([1.0, 2.0, 3.0], 0.5,
+                              n_boot=0)["beyond_sesoi"] is False)
 
     # Degenerate inputs must not raise and must not claim anything.
     empty = paired_bootstrap_ci([])
