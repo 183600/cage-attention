@@ -4799,6 +4799,125 @@ def _efficiency_pair(target, reference) -> dict:
     }
 
 
+def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
+                                 experiment: str, cells, lengths,
+                                 reference=None) -> dict:
+    """Measure how cost grows with the E2 sweep length for every arm."""
+    lengths = [int(length) for length in lengths]
+    runs_by_label = {str(label): runs for label, runs in cells}
+    ref_runs = (runs_by_label.get(str(reference))
+                if reference is not None else None)
+    ref_accuracy = {}
+    for run in ref_runs or ():
+        seed = run.get("seed")
+        if seed is not None:
+            ref_accuracy[seed] = run.get("accuracy_by_length") or {}
+    measured = {}
+    entries = {}
+    for label, runs in cells:
+        label = str(label)
+        cfg = next((r.get("model_cfg") for r in runs
+                    if isinstance(r.get("model_cfg"), dict)), None)
+        if cfg is None:
+            entries[label] = {"available": False,
+                              "reason": "runs carry no model_cfg"}
+            continue
+        by_length = {}
+        for length in lengths:
+            seq_len = 2 * length + 2
+            key = (json.dumps(cfg, sort_keys=True), seq_len)
+            try:
+                if key not in measured:
+                    measured[key] = measure_config(
+                        cfg, settings.device, seq_len, batch=1,
+                        warmup=_EFFICIENCY_WARMUP,
+                        repeats=_EFFICIENCY_REPEATS)
+                rec = dict(measured[key])
+            except Exception as exc:  # noqa: BLE001 - report, do not kill run
+                by_length[str(length)] = {
+                    "available": False,
+                    "reason": f"{type(exc).__name__}: {exc}"}
+                continue
+            acc = _mean_std([r["accuracy_by_length"][length]
+                             for r in runs
+                             if _finite((r.get("accuracy_by_length")
+                                         or {}).get(length))])
+            rec["accuracy_mean"] = acc["mean"]
+            rec["accuracy_std"] = acc["std"]
+            rec["accuracy_n"] = acc["n"]
+            by_length[str(length)] = rec
+        if ref_accuracy:
+            for length in lengths:
+                rec = by_length.get(str(length)) or {}
+                if not rec.get("available", True):
+                    continue
+                deltas = []
+                for run in runs:
+                    seed = run.get("seed")
+                    refs = ref_accuracy.get(seed) or {}
+                    truth = (run.get("accuracy_by_length") or {}).get(length)
+                    other = refs.get(length)
+                    if _finite(truth) and _finite(other):
+                        deltas.append(float(truth) - float(other))
+                rec["accuracy_delta_vs_reference"] = (
+                    sum(deltas) / len(deltas) if deltas else float("nan"))
+                rec["accuracy_delta_n"] = len(deltas)
+        entries[label] = {"by_length": by_length}
+
+    base, longest = lengths[0], lengths[-1]
+    print(f"\n[{experiment}] inference cost scaling (batch=1; FLOPs are "
+          f"analytic forward matmuls; latency is the eval-mode median of "
+          f"{_EFFICIENCY_REPEATS} passes on {settings.device}; cost is a "
+          f"companion, not a decision rule):")
+    print(f"{'arm':>16} {'GFLOP@' + str(base):>11} "
+          f"{'GFLOP@' + str(longest):>11} {'gflop_x':>8} "
+          f"{'lat@' + str(base):>10} {'lat@' + str(longest):>10} "
+          f"{'lat_x':>7} {'acc_long':>9} {'d_acc':>8}")
+    for label, _ in cells:
+        label = str(label)
+        entry = entries[label]
+        if not entry.get("available", True):
+            print(f"{label:>16}  unavailable: {entry.get('reason')}")
+            continue
+        base_rec = entry["by_length"].get(str(base)) or {}
+        long_rec = entry["by_length"].get(str(longest)) or {}
+        if not base_rec.get("available", True) \
+                or not long_rec.get("available", True):
+            print(f"{label:>16}  unavailable at a sweep length")
+            continue
+        flop_x = (long_rec["analytic_matmul_flops"]
+                  / base_rec["analytic_matmul_flops"]
+                  if base_rec["analytic_matmul_flops"] else float("nan"))
+        lat_x = (long_rec["latency_ms_median"]
+                 / base_rec["latency_ms_median"]
+                 if base_rec["latency_ms_median"] else float("nan"))
+        delta = long_rec.get("accuracy_delta_vs_reference")
+        delta_s = f"{delta:+.4f}" if _finite(delta) else "-"
+        print(f"{label:>16} "
+              f"{base_rec['analytic_matmul_gflops']:>11.4f} "
+              f"{long_rec['analytic_matmul_gflops']:>11.4f} "
+              f"{flop_x:>8.2f} "
+              f"{base_rec['latency_ms_median']:>10.3f} "
+              f"{long_rec['latency_ms_median']:>10.3f} "
+              f"{lat_x:>7.2f} {long_rec['accuracy_mean']:>9.4f} "
+              f"{delta_s:>8}")
+    payload = {
+        "experiment": experiment,
+        "lengths": lengths,
+        "seq_lengths": [2 * length + 2 for length in lengths],
+        "reference": None if reference is None else str(reference),
+        "comparison": "length_efficiency_companion",
+        "note": ("cost scaling across the E2 sweep: analytic matmul FLOPs "
+                 "and on-device latency at each length; d_acc is the paired "
+                 "accuracy difference vs the reference at the longest "
+                 "length; never a decision rule"),
+        "cells": entries,
+        "_provenance": _stamp(settings),
+    }
+    _write_json(out_dir / f"{experiment}_efficiency.json", payload)
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # Seed-determinism self-check: the "one seed pins one run" contract
 # ---------------------------------------------------------------------------
@@ -9465,6 +9584,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     length_contrasts = _e2_per_length_contrasts(
         settings, out_dir, by_variant, lengths)
     endpoint_companions = _e2_endpoint_class_companions(by_variant, lengths)
+    length_efficiency = _length_efficiency_companion(
+        settings, out_dir, "e2",
+        [(label, by_variant[label]) for label, *_ in _E2_VARIANTS],
+        lengths, reference="none")
     e2_summary = {
         label: {str(L): _mean_std([r["accuracy_by_length"][L]
                                    for r in by_variant[label]])
@@ -9486,6 +9609,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             for L in lengths}
         for label, *_ in _E2_VARIANTS}
     e2_summary["_per_length_contrasts"] = length_contrasts
+    e2_summary["_efficiency"] = length_efficiency
     e2_summary["_class_frequency_companions"] = endpoint_companions
     e2_summary["_provenance"] = _stamp(settings)
     _write_json(out_dir / "e2_summary.json", e2_summary)
