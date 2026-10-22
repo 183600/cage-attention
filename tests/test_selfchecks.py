@@ -46,6 +46,17 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertEqual(out["n"], 0)
         self.assertTrue(math.isnan(out["accuracy"]))
 
+    def test_complex_multiclass_logits_abstain(self):
+        import torch
+
+        # ``argmax`` has no complex ordering; the reporting metric must
+        # abstain instead of raising (or scoring the real projection).
+        logits = torch.tensor([[1 + 2j, 0j], [0j, 1 + 1j]])
+        out = metrics.multiclass_metrics(logits, [0, 1])
+        self.assertEqual(out["n"], 0)
+        self.assertTrue(math.isnan(out["accuracy"]))
+        self.assertTrue(math.isnan(out["nll"]))
+
     def test_malformed_multiclass_containers_abstain(self):
         import torch
 

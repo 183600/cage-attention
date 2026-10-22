@@ -655,6 +655,12 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
         raw_targets = torch.as_tensor(targets).detach().reshape(-1)
     except (TypeError, ValueError, RuntimeError, OverflowError):
         return _abstain()
+    if logits.is_complex():
+        # ``argmax`` has no complex ordering and the float cast used for
+        # NLL would silently drop the imaginary part; a complex logit
+        # panel is not a multiclass score matrix, so abstain rather than
+        # scoring an arbitrary projection of it.
+        return _abstain()
     if logits.dim() == 1:
         logits = logits.unsqueeze(0)
     if logits.dim() != 2:
@@ -3063,6 +3069,11 @@ def _self_test() -> int:
                                  torch.tensor([True, False]))
     check("multiclass_boolean_target_no_claim",
           mm_bool["n"] == 0 and math.isnan(mm_bool["accuracy"]))
+    mm_complex = multiclass_metrics(
+        torch.tensor([[1 + 2j, 0j], [0j, 1 + 1j]]),
+        torch.tensor([0, 1]))
+    check("multiclass_complex_logits_no_claim",
+          mm_complex["n"] == 0 and math.isnan(mm_complex["accuracy"]))
     check("brier_nonfinite_no_claim",
           math.isnan(brier_score([float("nan")], [True]))
           and math.isnan(brier_score([float("inf")], [True])))
