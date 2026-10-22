@@ -6,6 +6,7 @@ import base64
 import math
 import operator
 import warnings
+from collections.abc import Mapping
 
 import torch
 import torch.nn as nn
@@ -2144,6 +2145,285 @@ def decode_correct_mask(encoded: str, n: int) -> torch.Tensor:
     return bits[:n].bool()
 
 
+# ---------------------------------------------------------------------------
+# Counterfactual (minimal-pair) evaluation probes
+# ---------------------------------------------------------------------------
+# Accuracy alone does not say *which* rule a model used.  A model can be
+# right because it retrieved the value paired with the query key, because it
+# copied the token at a fixed position, because it learned a key -> value
+# prior, or because it is insensitive to most edits and always emits a
+# frequent token.  The task's generator makes every in-context pair
+# identifiable, so the *data-level* manipulation that separates these
+# explanations is a minimal edit of the already-realized evaluation batch:
+#
+# * value swap      - change the value paired with the queried key.  A
+#                     retrieval model must follow the new value; a model that
+#                     memorised key -> value (or copies a fixed position)
+#                     keeps the old answer.
+# * distractor swap - change a non-queried value.  The correct answer is
+#                     unchanged, so a retrieval model should stay stable; a
+#                     model that is globally sensitive to token edits fails
+#                     the placebo control.
+# * pair relocation - move the queried (key, value) pair to another pair
+#                     slot.  The correct answer is unchanged, so a
+#                     content-based retrieval model stays stable while a
+#                     position-only copy rule moves with the position.
+#
+# Every edit is deterministic, preserves the task's structural contract
+# (distinct keys, one SEP, the same query position) and uses only ids that
+# the generator could have produced, so no new data distribution is invented.
+# The probes are descriptive manipulation checks, not new FDR decision rows.
+
+
+def _counterfactual_alternative(value, vocab):
+    """A deterministic selectable token different from ``value``.
+
+    The task reserves ids 0 (PAD) and 1 (SEP); values live in
+    ``[2, vocab)``.  Cycling by one inside that range guarantees a different
+    id whenever ``vocab >= 4`` (the generator's geometry contract).
+    """
+    span = int(vocab) - 2
+    if span < 2:
+        raise ValueError(
+            f"counterfactual edits need at least two selectable values "
+            f"(vocab >= 4), got vocab={vocab}")
+    return (value.to(torch.long) - 2 + 1) % span + 2
+
+
+def _counterfactual_edits(idx, meta, n_pairs, vocab):
+    """Build the three minimal-pair edits of one validated evaluation batch.
+
+    Returns a dict of edited contexts and their matching metadata, or
+    ``None`` for an empty batch.  ``distractor_swap`` / ``pair_relocation``
+    are ``None`` when ``n_pairs == 1``: there is no second pair to edit, so
+    the probe abstains instead of silently editing the queried pair.
+
+    The edits are made on a copy; the caller's batch is never mutated.
+    ``meta['answer']`` is updated only for the value swap (the expected
+    answer changes); relocation updates ``meta['key_pos']`` because the
+    queried pair moved.
+    """
+    if not torch.is_tensor(idx) or idx.dim() != 2:
+        raise ValueError(
+            f"idx must be a 2-D integer tensor, got {type(idx)}")
+    if int(idx.size(1)) != 2 * int(n_pairs) + 2:
+        raise ValueError(
+            f"idx width {int(idx.size(1))} does not match the "
+            f"[k v]*{int(n_pairs)} + SEP + query layout")
+    if not isinstance(meta, Mapping) or "key_pos" not in meta \
+            or "answer" not in meta:
+        raise ValueError(
+            "counterfactual edits need meta with 'key_pos' and 'answer'")
+    batch = int(idx.size(0))
+    if batch == 0:
+        return None
+    key_pos = meta["key_pos"]
+    answer = meta["answer"]
+    if not torch.is_tensor(key_pos) or not torch.is_tensor(answer):
+        raise ValueError("meta['key_pos'] and meta['answer'] must be tensors")
+    key_pos = key_pos.to(device=idx.device, dtype=torch.long).reshape(-1)
+    answer = answer.to(device=idx.device, dtype=torch.long).reshape(-1)
+    if key_pos.shape != (batch,) or answer.shape != (batch,):
+        raise ValueError(
+            "meta['key_pos'] and meta['answer'] must carry one entry per row")
+    if bool((key_pos < 0).any()) or bool((key_pos >= 2 * int(n_pairs)).any()):
+        raise ValueError("meta['key_pos'] is outside the pair positions")
+    if bool((key_pos % 2).ne(0).any()):
+        raise ValueError("meta['key_pos'] must be an even key position")
+    if bool((answer < 2).any()) or bool((answer >= int(vocab)).any()):
+        raise ValueError(
+            f"meta['answer'] must be a selectable id in [2, {vocab})")
+    rows = torch.arange(batch, device=idx.device)
+    query = idx[:, -1]
+    paired_key = idx.gather(1, key_pos.unsqueeze(1)).squeeze(1)
+    paired_value = idx.gather(1, (key_pos + 1).unsqueeze(1)).squeeze(1)
+    if not bool(query.eq(paired_key).all()):
+        raise ValueError(
+            "the final query token does not match meta['key_pos']; "
+            "counterfactual edits would target the wrong pair")
+    if not bool(paired_value.eq(answer).all()):
+        raise ValueError(
+            "meta['answer'] does not match the value at meta['key_pos']+1")
+    value_swap_answer = _counterfactual_alternative(answer, vocab)
+    value_swap = idx.clone()
+    value_swap[rows, key_pos + 1] = value_swap_answer
+    value_swap_meta = dict(meta)
+    value_swap_meta["answer"] = value_swap_answer
+    distractor_swap = distractor_meta = None
+    relocation = relocation_meta = None
+    if int(n_pairs) >= 2:
+        pair_index = key_pos // 2
+        other = (pair_index + 1) % int(n_pairs)
+        distractor_pos = 2 * other + 1
+        current = idx.gather(1, distractor_pos.unsqueeze(1)).squeeze(1)
+        distractor_swap = idx.clone()
+        distractor_swap[rows, distractor_pos] = _counterfactual_alternative(
+            current, vocab)
+        distractor_meta = dict(meta)
+        relocation = idx.clone()
+        # Swap the whole (key, value) blocks; row-wise gather keeps the
+        # operation deterministic and independent of advanced-index layout.
+        for offset in (0, 1):
+            k_col, j_col = 2 * pair_index + offset, 2 * other + offset
+            moved = idx.gather(1, k_col.unsqueeze(1)).squeeze(1).clone()
+            relocation[rows, k_col] = idx.gather(
+                1, j_col.unsqueeze(1)).squeeze(1)
+            relocation[rows, j_col] = moved
+        relocation_meta = dict(meta)
+        relocation_meta["key_pos"] = 2 * other
+    return {
+        "value_swap": value_swap,
+        "value_swap_meta": value_swap_meta,
+        "value_swap_answer": value_swap_answer,
+        "distractor_swap": distractor_swap,
+        "distractor_swap_meta": distractor_meta,
+        "relocation": relocation,
+        "relocation_meta": relocation_meta,
+    }
+
+
+def _counterfactual_counts(original_pred, answer, value_swap_pred,
+                           value_swap_answer, distractor_pred=None,
+                           relocation_pred=None) -> dict:
+    """Item counts for the three counterfactual probes (no rates yet).
+
+    Splitting counts from rates keeps the aggregation per batch exact
+    (integer sums) and lets the summary abstain cleanly when a probe has no
+    eligible rows (e.g. ``n_pairs == 1`` has no distractor).
+    """
+    pred = original_pred.reshape(-1).to(torch.long)
+    ans = answer.to(device=pred.device).reshape(-1).to(torch.long)
+    swap_pred = value_swap_pred.reshape(-1).to(torch.long)
+    swap_ans = value_swap_answer.to(
+        device=pred.device).reshape(-1).to(torch.long)
+    for name, value in (("answer", ans), ("value_swap_answer", swap_ans),
+                        ("value_swap_pred", swap_pred)):
+        if value.shape != pred.shape:
+            raise ValueError(
+                f"{name} has {int(value.numel())} entries for "
+                f"{int(pred.numel())} predictions")
+    n = int(pred.numel())
+    out = {
+        "n": n,
+        "n_original_correct": 0,
+        "n_value_follow": 0,
+        "n_value_stubborn": 0,
+        "n_value_flip": 0,
+        "n_value_correct": 0,
+        "n_distractor": 0,
+        "n_distractor_unchanged": 0,
+        "n_distractor_correct": 0,
+        "n_relocation": 0,
+        "n_relocation_unchanged": 0,
+        "n_relocation_correct": 0,
+    }
+    if n == 0:
+        return out
+    original_correct = pred.eq(ans)
+    out["n_original_correct"] = int(original_correct.sum())
+    out["n_value_follow"] = int(
+        (original_correct & swap_pred.eq(swap_ans)).sum())
+    out["n_value_stubborn"] = int(
+        (original_correct & swap_pred.eq(ans)).sum())
+    out["n_value_flip"] = int(pred.ne(swap_pred).sum())
+    out["n_value_correct"] = int(swap_pred.eq(swap_ans).sum())
+    if distractor_pred is not None:
+        ctrl = distractor_pred.reshape(-1).to(torch.long)
+        if ctrl.shape != pred.shape:
+            raise ValueError(
+                f"distractor_pred has {int(ctrl.numel())} entries for "
+                f"{int(pred.numel())} predictions")
+        out["n_distractor"] = n
+        out["n_distractor_unchanged"] = int(ctrl.eq(pred).sum())
+        out["n_distractor_correct"] = int(ctrl.eq(ans).sum())
+    if relocation_pred is not None:
+        moved = relocation_pred.reshape(-1).to(torch.long)
+        if moved.shape != pred.shape:
+            raise ValueError(
+                f"relocation_pred has {int(moved.numel())} entries for "
+                f"{int(pred.numel())} predictions")
+        out["n_relocation"] = n
+        out["n_relocation_unchanged"] = int(moved.eq(pred).sum())
+        out["n_relocation_correct"] = int(moved.eq(ans).sum())
+    return out
+
+
+def _counterfactual_summary(counts) -> dict:
+    """Turn summed probe counts into rates plus flat aggregate fields.
+
+    ``follow_rate`` is conditioned on rows the clean model already answered
+    correctly: those are the rows where "did the answer track the edited
+    value?" is a meaningful question.  If the clean model was never correct,
+    the rate is NaN rather than 0 (an undefined diagnostic is not evidence of
+    a memorising model).
+    """
+
+    def rate(num, den):
+        return float(num) / float(den) if den else float("nan")
+
+    n = int(counts.get("n", 0))
+    n_correct = int(counts.get("n_original_correct", 0))
+    value_swap = {
+        "n": n,
+        "n_original_correct": n_correct,
+        "n_follow": int(counts.get("n_value_follow", 0)),
+        "follow_rate": rate(counts.get("n_value_follow", 0), n_correct),
+        "n_stubborn": int(counts.get("n_value_stubborn", 0)),
+        "stubborn_rate": rate(counts.get("n_value_stubborn", 0), n_correct),
+        "n_correct_after_edit": int(counts.get("n_value_correct", 0)),
+        "accuracy_after_edit": rate(counts.get("n_value_correct", 0), n),
+        "flip_rate": rate(counts.get("n_value_flip", 0), n),
+    }
+    distractor_swap = {
+        "n": int(counts.get("n_distractor", 0)),
+        "n_unchanged": int(counts.get("n_distractor_unchanged", 0)),
+        "unchanged_rate": rate(counts.get("n_distractor_unchanged", 0),
+                               counts.get("n_distractor", 0)),
+        "n_correct_after_edit": int(counts.get("n_distractor_correct", 0)),
+        "accuracy_after_edit": rate(counts.get("n_distractor_correct", 0),
+                                    counts.get("n_distractor", 0)),
+    }
+    pair_relocation = {
+        "n": int(counts.get("n_relocation", 0)),
+        "n_unchanged": int(counts.get("n_relocation_unchanged", 0)),
+        "unchanged_rate": rate(counts.get("n_relocation_unchanged", 0),
+                               counts.get("n_relocation", 0)),
+        "n_correct_after_edit": int(counts.get("n_relocation_correct", 0)),
+        "accuracy_after_edit": rate(counts.get("n_relocation_correct", 0),
+                                    counts.get("n_relocation", 0)),
+    }
+    flat = {
+        "cf_value_follow_rate": value_swap["follow_rate"],
+        "cf_value_stubborn_rate": value_swap["stubborn_rate"],
+        "cf_value_accuracy": value_swap["accuracy_after_edit"],
+        "cf_value_flip_rate": value_swap["flip_rate"],
+        "cf_distractor_unchanged_rate": distractor_swap["unchanged_rate"],
+        "cf_distractor_accuracy": distractor_swap["accuracy_after_edit"],
+        "cf_relocation_unchanged_rate": pair_relocation["unchanged_rate"],
+        "cf_relocation_accuracy": pair_relocation["accuracy_after_edit"],
+        # Denominators travel with the rates: a follow_rate conditioned on
+        # three clean-correct rows is not the same evidence as one
+        # conditioned on three hundred, and an undefined rate must not hide
+        # that its denominator was zero.
+        "cf_n": n,
+        "cf_n_original_correct": n_correct,
+        "cf_n_distractor": distractor_swap["n"],
+        "cf_n_relocation": pair_relocation["n"],
+    }
+    return {
+        "value_swap": value_swap,
+        "distractor_swap": distractor_swap,
+        "pair_relocation": pair_relocation,
+        "flat": flat,
+        "note": (
+            "deterministic minimal-pair data edits; descriptive retrieval "
+            "manipulation checks, not pre-registered FDR decision rows. "
+            "follow_rate is conditioned on rows the clean pass answered "
+            "correctly; distractor/relocation unchanged_rate is the placebo "
+            "specificity check."),
+    }
+
+
 @torch.inference_mode()
 def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
                  seed=VAL_SEED, topk=5):
@@ -2170,6 +2450,13 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     headline number).  Every batch passes the ``validate_batch`` cleaning
     gate, so the metric panel is only computed on data that satisfies the
     same integrity/label invariants as training.
+
+    The same pass also runs the deterministic minimal-pair probes
+    (:func:`_counterfactual_edits`): swap the queried value, swap a
+    distractor value, and relocate the queried pair.  The probe rates
+    separate in-context retrieval from memorisation, fixed-position copying
+    and global edit sensitivity without drawing a second evaluation stream;
+    see ``out['counterfactual']`` and the flat ``cf_*`` scalars.
     """
     raw_batch, raw_batches = batch, batches
     batch = _positive_integer(raw_batch)
@@ -2194,6 +2481,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         model.eval()
         logits_all, tgt_all, strata_all = [], [], []
         digest_batches = []
+        cf_totals = None
         for i in range(batches):
             idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
             validate_batch(idx, tgt, meta, vocab, diagnostics=False)
@@ -2207,6 +2495,38 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
             strata_all.append(difficulty_strata(
                 idx, meta["answer"], n_pairs,
                 n_key_bins=n_key_bins)["stratum"].cpu())
+            # Minimal-pair data edits on the *validated* realization.  The
+            # edited contexts go through the same cleaning gate, so a probe
+            # can never compare predictions on malformed data.
+            edits = _counterfactual_edits(idx, meta, n_pairs, vocab)
+            if edits is not None:
+                validate_batch(edits["value_swap"], None,
+                               edits["value_swap_meta"], vocab,
+                               diagnostics=False)
+                swap_logits, _, _ = model(edits["value_swap"])
+                swap_pred = swap_logits.squeeze(1).argmax(-1)
+                distractor_pred = relocation_pred = None
+                if edits["distractor_swap"] is not None:
+                    validate_batch(edits["distractor_swap"], None,
+                                   edits["distractor_swap_meta"], vocab,
+                                   diagnostics=False)
+                    distractor_logits, _, _ = model(edits["distractor_swap"])
+                    distractor_pred = distractor_logits.squeeze(1).argmax(-1)
+                if edits["relocation"] is not None:
+                    validate_batch(edits["relocation"], None,
+                                   edits["relocation_meta"], vocab,
+                                   diagnostics=False)
+                    relocation_logits, _, _ = model(edits["relocation"])
+                    relocation_pred = relocation_logits.squeeze(1).argmax(-1)
+                counts = _counterfactual_counts(
+                    logits.squeeze(1).argmax(-1), meta["answer"], swap_pred,
+                    edits["value_swap_answer"], distractor_pred,
+                    relocation_pred)
+                if cf_totals is None:
+                    cf_totals = counts
+                else:
+                    for key in cf_totals:
+                        cf_totals[key] += counts[key]
         if logits_all:
             logits_cat = torch.cat(logits_all, dim=0).cpu()
             tgt_cat = torch.cat(tgt_all, dim=0).cpu()
@@ -2294,6 +2614,9 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
                      "post-stratify across lengths with the base-length "
                      "counts instead of comparing raw compositions"),
         }
+        cf_summary = _counterfactual_summary(cf_totals or {})
+        out["counterfactual"] = cf_summary
+        out.update(cf_summary["flat"])
         return out
     finally:
         for module, training in training_states.items():

@@ -201,3 +201,22 @@ python3 ci_gate.py
 
 所有随机过程仍使用显式 canonical seed；新增读数本身是确定性的，不消耗
 任何 RNG 流。
+
+## 5. 数据层反事实操控检验（补充阅读顺序）
+
+种子层推断回答“换训练种子是否复现”，评测流层回答“换 item 是否复现”，
+但都没有回答“模型究竟是按上下文配对检索，还是靠记忆/位置/词频作答”。
+`cage.train.eval_metrics` 因此对每个已实现的评测 batch 做三个确定性最小
+编辑：交换 query key 配对的 value、交换一个无关 value、移动整个 query
+pair。读法：
+
+1. `cf_value_accuracy`：交换 value 后整批 item 的准确率，是跨臂可比的
+   主读数；
+2. `cf_distractor_accuracy` / `cf_relocation_accuracy`：安慰剂编辑后的
+   整批准确率，应与干净 accuracy 接近；
+3. `cf_value_follow_rate` / `cf_value_stubborn_rate`：只在干净答对子集上
+   定义，是臂内描述（该子集是输出后选择，不能直接跨臂比较）。
+
+若 accuracy 提升但 `cf_value_accuracy` 没有提升，不能把结果写成“更好地
+利用了上下文配对”；只能写成“在该数据分布上准确率更高，但检索操控检验
+未同步改善”。详细定义、字段与边界见 `docs/data_methodology.md`。

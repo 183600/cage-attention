@@ -3752,6 +3752,190 @@ def _paired_equivalence(runs_a, runs_b, metric, bound, mode="equivalence"):
     return ci
 
 
+_COUNTERFACTUAL_METRICS = (
+    "cf_value_follow_rate",
+    "cf_value_stubborn_rate",
+    "cf_value_accuracy",
+    "cf_value_flip_rate",
+    "cf_distractor_unchanged_rate",
+    "cf_distractor_accuracy",
+    "cf_relocation_unchanged_rate",
+    "cf_relocation_accuracy",
+    "cf_n",
+    "cf_n_original_correct",
+    "cf_n_distractor",
+    "cf_n_relocation",
+)
+
+
+def _counterfactual_companion(out_dir, tag, by_arm, lengths=None,
+                              reference="none"):
+    """Report the data-level minimal-pair retrieval probes per arm.
+
+    ``eval_metrics`` edits each already-realized evaluation batch three ways
+    (queried value swapped, a distractor value swapped, the queried pair
+    relocated) and records how the model's answer responds.  This companion
+    aggregates those rates across training seeds and, when a reference arm is
+    present, reports the paired contrast in ``cf_value_follow_rate`` (the
+    share of clean-correct rows whose answer follows the edited value).
+
+    ``reference`` may be a fixed label (``"none"`` for E1/E2) or a callable
+    mapping each arm label to its matched control (E3 uses the same
+    ``norm`` / ``layer_scale`` cell with ``gate="query"``); a callable keeps
+    the contrast within-cell instead of comparing against one global arm.
+
+    The probes are *data-processing* manipulation checks: they reuse the
+    finite stream, invent no new distribution, and are deterministic.  They
+    stay outside the FDR family and cannot change a pre-registered verdict;
+    their job is to prevent "accuracy improved" from being read as "the model
+    retrieves the in-context value" when the model is actually memorising or
+    position-copying.
+    """
+    def arm_label(label):
+        if isinstance(label, str):
+            return label
+        parts = []
+        for part in label:
+            if part is None:
+                parts.append("off")
+            elif isinstance(part, float):
+                parts.append(f"{part:g}")
+            else:
+                parts.append(str(part))
+        return "|".join(parts)
+
+    def value(run, metric, length):
+        if length is None:
+            return run.get(metric)
+        block = (run.get("metrics_by_length") or {}).get(length) or {}
+        return block.get(metric)
+
+    arm_map = {arm_label(label): (label, runs)
+               for label, runs in by_arm.items()}
+    arms = {}
+    for label, (_, runs) in arm_map.items():
+        if lengths is None:
+            entry = {"n_runs": len(runs)}
+            for metric in _COUNTERFACTUAL_METRICS:
+                entry[metric] = _mean_std(
+                    [value(r, metric, None) for r in runs
+                     if _finite(value(r, metric, None))])
+            entry["clean_accuracy"] = _mean_std(
+                [r.get("accuracy") for r in runs
+                 if _finite(r.get("accuracy"))])
+        else:
+            entry = {"n_runs": len(runs), "by_length": {}}
+            for length in lengths:
+                entry["by_length"][str(length)] = {
+                    metric: _mean_std(
+                        [value(r, metric, length) for r in runs
+                         if _finite(value(r, metric, length))])
+                    for metric in _COUNTERFACTUAL_METRICS}
+                entry["by_length"][str(length)]["clean_accuracy"] = _mean_std(
+                    [value(r, "accuracy", length) for r in runs
+                     if _finite(value(r, "accuracy", length))])
+        arms[label] = entry
+
+    contrasts = {}
+    if callable(reference):
+        ref_for = {}
+        for label, (raw, _) in arm_map.items():
+            target = arm_label(reference(raw))
+            if target in arm_map and target != label:
+                ref_for[label] = target
+    elif reference is not None:
+        ref_label = arm_label(reference)
+        ref_for = ({label: ref_label for label in arm_map
+                    if label != ref_label} if ref_label in arm_map else {})
+    else:
+        ref_for = {}
+    for label, ref_label in ref_for.items():
+        _, runs = arm_map[label]
+        _, ref_runs = arm_map[ref_label]
+        rule = f"{label} - {ref_label}"
+        if lengths is None:
+            row = {}
+            for metric in ("cf_value_accuracy",
+                           "cf_distractor_accuracy",
+                           "cf_relocation_accuracy",
+                           "cf_value_follow_rate",
+                           "cf_distractor_unchanged_rate",
+                           "cf_relocation_unchanged_rate"):
+                ci = _paired_diff(runs, ref_runs, metric)
+                row[metric] = {
+                    "mean": ci.get("mean"), "lo": ci.get("lo"),
+                    "hi": ci.get("hi"), "p_value": ci.get("p_value"),
+                    "n": ci.get("n"),
+                    "seeds_used": ci.get("seeds_used"),
+                }
+            contrasts[rule] = row
+        else:
+            by_length = {}
+            for length in lengths:
+                tagged_a = [
+                    dict(r, **{
+                        metric: value(r, metric, length)
+                        for metric in _COUNTERFACTUAL_METRICS})
+                    for r in runs]
+                tagged_b = [
+                    dict(r, **{
+                        metric: value(r, metric, length)
+                        for metric in _COUNTERFACTUAL_METRICS})
+                    for r in ref_runs]
+                ci = _paired_diff(
+                    tagged_a, tagged_b, "cf_value_accuracy")
+                by_length[str(length)] = {
+                    "mean": ci.get("mean"), "lo": ci.get("lo"),
+                    "hi": ci.get("hi"), "p_value": ci.get("p_value"),
+                    "n": ci.get("n"),
+                    "seeds_used": ci.get("seeds_used"),
+                }
+            contrasts[rule] = by_length
+
+    payload = {
+        "experiment": tag,
+        "reference": ("per-arm control mapping" if callable(reference)
+                      else reference),
+        "lengths": None if lengths is None else [int(L) for L in lengths],
+        "arms": arms,
+        "contrasts": contrasts,
+        "note": (
+            "data-level minimal-pair probes. Cross-arm contrasts use the "
+            "all-item cf_value_accuracy / cf_*_accuracy, which keep a fixed "
+            "denominator; value_swap follow_rate and the *_unchanged_rate "
+            "fields condition on model behaviour and are descriptive only. "
+            "Outside the FDR family."),
+    }
+    _write_json(out_dir / f"{tag}_counterfactual.json", payload)
+    print(f"\n[{tag}] counterfactual retrieval probes (data-level minimal "
+          f"edits; means over training seeds, outside the FDR family):")
+    print(f"{'arm':>22} {'clean_acc':>11} {'value_cf_acc':>13} "
+          f"{'value_follow':>13} {'distractor_acc':>15} "
+          f"{'relocation_acc':>15}")
+    for label in arm_map:
+        entry = arms[label]
+        if lengths is None:
+            cells = entry
+        elif not lengths:
+            cells = {}
+        else:
+            # Console summary uses the training length (first sweep point).
+            cells = entry["by_length"][str(lengths[0])]
+        def fmt(metric):
+            value_ = (cells.get(metric) or {}).get("mean")
+            return f"{value_:>13.4f}" if _finite(value_) else f"{'n/a':>13}"
+        print(f"{label:>22} {fmt('clean_accuracy'):>11} "
+              f"{fmt('cf_value_accuracy')} "
+              f"{fmt('cf_value_follow_rate'):>13} "
+              f"{fmt('cf_distractor_accuracy'):>15} "
+              f"{fmt('cf_relocation_accuracy'):>15}")
+    if contrasts and lengths is None:
+        for rule, row in contrasts.items():
+            ci = row["cf_value_accuracy"]
+            print(f"      {rule} on value-swap accuracy: {_fmt_ci(ci)}")
+    return payload
+
+
 def _factorial_main_effect(cells, metric, factor):
     """Averaged main effect of one factor in the complete calibration 2x2.
 
@@ -12796,6 +12980,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     table["_complexity_cost"] = _complexity_cost_companion(
         settings, out_dir, verdict, by_gate,
         deep_cost=table["_efficiency"]["cells"].get("none"))
+    table["_counterfactual"] = _counterfactual_companion(
+        out_dir, "e1", by_gate, reference="none")
     table["_provenance"] = _stamp(settings)
     if complexity_benchmark is not None:
         table["_complexity_benchmark"] = complexity_benchmark
@@ -14399,6 +14585,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 for r in by_variant[label]])
             for L in lengths}
         for label, *_ in _E2_VARIANTS}
+    e2_summary["_counterfactual"] = _counterfactual_companion(
+        out_dir, "e2", by_variant, lengths=lengths, reference="none")
     e2_summary["_provenance"] = _stamp(settings)
     _write_json(out_dir / "e2_summary.json", e2_summary)
 
@@ -15324,6 +15512,9 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     e3_summary["_capacity_matched_pre"] = capacity_benchmark
     e3_summary["_efficiency"] = efficiency
     e3_summary["_class_frequency_companions"] = metric_robustness
+    e3_summary["_counterfactual"] = _counterfactual_companion(
+        out_dir, "e3", index,
+        reference=lambda cell: ("query", cell[1], cell[2]))
     e3_summary["_provenance"] = _stamp(settings)
     _write_json(out_dir / "e3_summary.json", e3_summary)
 
