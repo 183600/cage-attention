@@ -6,7 +6,12 @@ Design principles
    it tests (``HYPOTHESES``) and a pre-registered decision rule.  The
    runner prints the hypotheses before executing and stores their ids
    with every result record, so the E3 grid is not a blind
-   hyperparameter sweep: each contrast answers a mechanism question.
+   hyperparameter sweep: each contrast answers a mechanism question.  E2
+   additionally reads the trained calibration coefficients (and their
+   implied length/concentration contributions at the base and longest
+   lengths), so the claim that calib *explicitly* corrects ``log T``
+   entropy growth is checked on the learned gate rather than inferred from
+   endpoint accuracy alone.
 2. **Tuned baselines and sanity checks before complex models.**  The
    complexity ladder is explicit and every rung is tuned: the rule
    system (exact ceiling), the trivial floor, a wide-grid-tuned linear
@@ -17,7 +22,14 @@ Design principles
    rather than assumed.  A shared training recipe is tuned on the plain ``none``
     baseline (validation seed), then frozen for all gate variants so the
     E1/E3 comparisons stay controlled (each side of every pre-registered
-    contrast carries a machine-checked controlled-variable audit).  Every
+    contrast carries a machine-checked controlled-variable audit).  Because
+    that frozen point was selected on ``none`` alone, E1 additionally runs a
+    **separate per-variant fairness accounting**: every arm gets its own
+    validation-selected lr (and calib its own ``calib_tau_init``), and the
+    resulting calib-vs-baseline paired benchmark is reported *next to* the
+    controlled columns, never pooled with them.  The primary pre-registered
+    conclusion is still the same-recipe family; the tuned account answers
+    whether it survives when the baselines also get their best shot.  Every
     run record stamps the full optimisation recipe it trained under
     (optimizer family, weight decay, betas, schedule, eta_min, gradient
     clipping, augmentation - from the single source of truth in
