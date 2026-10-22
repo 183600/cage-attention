@@ -7691,9 +7691,11 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
     shift_tests = audit["shift_p_value_bh"]
     rejected = [key for key, item in shift_tests.items() if item["reject"]]
     if fresh:
+        def _tv_max(name):
+            return max(audit[f"{field}_tv_train_{name}"] for field in fields)
+
         detail = "; ".join(
-            f"{name}: tv_max={max(audit[f'{field}_tv_train_{name}']
-                                  for field in fields):.5f}"
+            f"{name}: tv_max={_tv_max(name):.5f}"
             for name in ("val", "test", "stats"))
         floor_txt = ", ".join(f"{field}={floors[field]:.5f}" for field in fields)
         adj_txt = ", ".join(
