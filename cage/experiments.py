@@ -562,10 +562,14 @@ HYPOTHESES = {
                       "where it matters, across lengths)",
         "decision": "paired bootstrap 95% CIs of accuracy(calib - ablated "
                     "arm) and gate_margin(calib - ablated arm) exclude 0 "
-                    "after Benjamini-Hochberg FDR control across the E1 "
-                    "family (q=0.05); the mechanism check validates that "
-                    "each ablation removed the intended pathway and is "
-                    "reported alongside, not as a decision criterion",
+                    "for each *single-term* ablated arm after "
+                    "Benjamini-Hochberg FDR control across the E1 family "
+                    "(q=0.05); the joint both-terms-off cell is not a "
+                    "single-factor row and enters only the registered 2x2 "
+                    "factorial main effect.  The mechanism check "
+                    "validates that each ablation removed the intended "
+                    "pathway and is reported alongside, not as a decision "
+                    "criterion",
         "sesoi": {"accuracy": 0.01, "gate_margin": 0.02,
                   "abs_gate_vs_entropy": 0.05},
         "direction": {"accuracy": "+", "gate_margin": "+",
@@ -1333,6 +1337,24 @@ _CALIB_PLACEBO_CELL = "calib_shuf_ent"
 # only across the length sweep.
 _CALIB_RAW_ENT_CELL = "calib_raw_ent"
 
+# Factor-vector expansion of a declared ``calib_variant`` cell label.  New
+# records carry the resolved ``model_cfg`` (the ground truth), but pooled or
+# legacy records may carry only the label; expanding the label here keeps the
+# single-factor audit meaningful for them too.  ``calib_variant`` names a
+# *cell*, not one factor: e.g. ``calib_no_terms`` turns off both additive
+# terms, while ``calib_raw_ent`` differs from ``calib`` only in the entropy
+# normalisation.
+_CALIB_CELL_FACTORS = {
+    cell: {"calib_use_len": bool(flags[0]),
+           "calib_use_ent": bool(flags[1]),
+           "calib_shuffle_ent": bool(flags[2]),
+           "calib_ent_norm": True}
+    for flags, cell in _CALIB_FACTORIAL.items()
+}
+_CALIB_CELL_FACTORS[_CALIB_RAW_ENT_CELL] = {
+    "calib_use_len": True, "calib_use_ent": True,
+    "calib_shuffle_ent": False, "calib_ent_norm": False}
+
 
 def _calib_cell(run):
     """The calibration-term cell a run actually trained (None when N/A).
@@ -1578,9 +1600,15 @@ def _controlled_audit(runs_a, runs_b):
     3. **Across-side recipe**: the two recipes are identical (the same
        fields as above), so a "gain" that is really a changed optimizer or
        learning-rate schedule is refused instead of reported as a win;
-    4. **Varying factor**: at least one declared model factor (gate / norm /
-       layer_scale / calibration-ablation arm) actually differs, so the
-       contrast is not degenerate;
+    4. **Single varying factor**: exactly one declared model factor (gate /
+       norm / layer_scale / calibration-term or normalisation flag) differs,
+       so the contrast is both non-degenerate and attributable.  A row that
+       flips two factors at once (e.g. full calib vs the arm with *both*
+       additive terms removed) is refused here: its effect is the sum of two
+       manipulations, and it belongs in a registered factorial main effect
+       or interaction rather than in a single-factor decision row.  Records
+       that predate the resolved ``model_cfg`` stamp fall back to the
+       declared factor labels;
     5. **Trained-model ground truth**: when both sides carry the resolved
        ``model_cfg``, every non-factor config key must match across the
        sides (an undeclared architectural difference is a confound even
@@ -1641,6 +1669,8 @@ def _controlled_audit(runs_a, runs_b):
         "seeds_b": sorted((r.get("seed") for r in runs_b), key=_seed_key),
         "varying_factors": {},
         "model_factor_diffs": {},
+        "n_varying_factors": None,
+        "single_factor": None,
         "mismatches": [],
     }
     audit["seeds_paired"] = audit["seeds_a"] == audit["seeds_b"]
@@ -1793,6 +1823,47 @@ def _controlled_audit(runs_a, runs_b):
                     f"{capacity['a']} vs {capacity['b']} parameters - the "
                     f"capacity would be confounded with the shuffled "
                     f"entropy signal")
+        # Single-factor contract (see point 4 above).  The resolved config
+        # is ground truth when both sides carry it; otherwise the declared
+        # labels are the only evidence available.  ``calib_variant`` is a
+        # *cell* label, not an independent factor: counting it alongside the
+        # resolved flags would make an ordinary one-flag ablation look like
+        # a two-factor contrast, so only the resolved diffs are counted when
+        # the model config is present.
+        if audit.get("model_cfg") is not None:
+            factor_keys = set(audit["model_factor_diffs"])
+        else:
+            factor_keys = set(audit["varying_factors"])
+            # Expand a label-only ``calib_variant`` difference into the
+            # factor vector it names, so a legacy record cannot pass a
+            # two-term manipulation (e.g. full vs both-terms-off) as one
+            # factor merely because only the cell label was stamped.
+            if "calib_variant" in factor_keys:
+                fa = [_CALIB_CELL_FACTORS.get(r.get("calib_variant"))
+                      for r in runs_a]
+                fb = [_CALIB_CELL_FACTORS.get(r.get("calib_variant"))
+                      for r in runs_b]
+                if all(x is not None for x in fa + fb):
+                    factor_keys.discard("calib_variant")
+                    audit["varying_factors"].pop("calib_variant", None)
+                    for key in ("calib_use_len", "calib_use_ent",
+                                "calib_shuffle_ent", "calib_ent_norm"):
+                        va = {x[key] for x in fa}
+                        vb = {x[key] for x in fb}
+                        if va != vb:
+                            factor_keys.add(key)
+                            audit["varying_factors"][key] = {
+                                "a": sorted(va), "b": sorted(vb)}
+        audit["n_varying_factors"] = len(factor_keys)
+        audit["single_factor"] = len(factor_keys) == 1
+        if len(factor_keys) > 1:
+            audit["mismatches"].append(
+                f"single-factor contract: the contrast varies "
+                f"{len(factor_keys)} model factor(s) "
+                f"{sorted(factor_keys)}; a controlled contrast must vary "
+                f"exactly one factor, so a multi-factor manipulation has to "
+                f"be read through a registered factorial main effect or "
+                f"interaction instead")
         if not audit["varying_factors"]:
             audit["mismatches"].append(
                 "no declared model factor (gate/norm/layer_scale/"
@@ -10174,11 +10245,16 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                warn=_curve_warn(("query", by_gate["query"]),
                                 ("none", by_gate["none"])),
                direction_key="query_none_accuracy")
-    print(f"\n[e1] H1d calibration-term ablation contrasts (removing a term "
-          f"from the full gate; only the calib_variant factor varies, the "
-          f"recipe stays frozen - every contrast carries its "
-          f"controlled-variable audit):")
-    for label in ("calib_no_terms", "calib_len_only", "calib_ent_only"):
+    print(f"\n[e1] H1d calibration-term ablation contrasts (each row removes "
+          f"exactly one term from the full gate - calib_len_only drops the "
+          f"concentration term, calib_ent_only drops the length term.  Only "
+          f"that one resolved term flag varies, the recipe stays frozen, and "
+          f"every contrast carries its controlled-variable audit.  The "
+          f"calib_no_terms cell disables *both* terms at once, so it is a "
+          f"two-factor manipulation, not a leave-one-out arm: it is read "
+          f"only through the registered 2x2 factorial main effect below "
+          f"and is never given a single-term decision row):")
+    for label in ("calib_len_only", "calib_ent_only"):
         rs = ablation_runs[label]
         warn = _curve_warn(("calib", by_gate["calib"]), (label, rs))
         clog.print(f"calib - {label}", "H1d", "accuracy",
@@ -10186,7 +10262,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         clog.print(f"calib - {label}", "H1d", "gate_margin",
                    _paired_diff(by_gate["calib"], rs, "gate_margin"),
                    warn=warn)
-    for label in ("calib_len_only", "calib_no_terms"):
+    for label in ("calib_len_only", "calib_ent_only"):
         rs = ablation_runs[label]
         clog.print(f"calib - {label}", "H1d", "abs_gate_vs_entropy",
                    _paired_diff(by_gate["calib"], rs, "abs_gate_vs_entropy"),
@@ -11270,8 +11346,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         tuple(label for label, *_ in _E2_VARIANTS),
         planned_seeds=settings.seeds)
     print(f"\n[e2] accuracy by n_pairs (mean +- std over seeds; the "
-          f"calib_len_only / calib_ent_only / calib_no_terms arms are the "
-          f"H2c calibration-term ablations, completing the 2x2 with calib; "
+          f"calib_len_only / calib_ent_only / calib_no_terms arms complete "
+          f"the H2c calibration-term 2x2 with calib - H2c's directional rows "
+          f"use only the single-term ablations, while calib_no_terms (both "
+          f"terms off) enters the factorial main effects/interaction; "
           f"calib_raw_ent is the H2g normalisation ablation - identical "
           f"architecture/parameters, raw entropy instead of H/log T; "
           f"gap@long = mean gap to the per-length rule ceiling at the "
@@ -11731,11 +11809,14 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         clog.print("calib - calib_raw_ent", "H2g", metric,
                    _paired_diff(calib_runs, raw_runs, metric),
                    warn=raw_warn)
-    print(f"\n[e2] H2c length-term ablation contrasts (each ablation arm "
-          f"removes additive terms from the full gate at identical recipe; "
-          f"only the calibration-term flags vary, so the full 2x2 is "
-          f"measured across the length sweep):")
-    for arm in ("calib_ent_only", "calib_no_terms"):
+    print(f"\n[e2] H2c length-term ablation contrast (the single-factor "
+          f"arm removes only the length term from the full gate at "
+          f"identical recipe, leaving the concentration term on; the "
+          f"calib_no_terms cell disables both terms at once, so it is a "
+          f"two-factor manipulation and is read only through the registered "
+          f"2x2 main effects/interaction below, not as a length-term "
+          f"decision row):")
+    for arm in ("calib_ent_only",):
         rs = by_variant[arm]
         warn = _curve_warn(("calib", calib_runs), (arm, rs))
         clog.print(f"calib - {arm}", "H2c", "accuracy_at_longest",
