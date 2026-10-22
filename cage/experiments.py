@@ -185,6 +185,7 @@ from .train import (
     eval_accuracy,
     eval_metrics,
     false_concentration_analysis,
+    false_concentration_by_layer,
     false_concentration_gate_test,
     false_concentration_sweep,
     gate_depth_ratio,
@@ -8701,6 +8702,13 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
     # The sweep already contains the pre-registered 0.5 cut.
     fc = (fc_sweep[0.5] if 0.5 in fc_sweep
           else false_concentration_analysis(stats))
+    # Same readout with the layer axis kept aligned (each layer's own
+    # max-prob against that layer's own gate/null mass).  The aggregate
+    # ``fc`` above remains the pre-registered H1b/H1c contrast; this
+    # companion checks that the "close on false concentration" effect is
+    # not an artifact of mixing a max-over-layers confidence with a
+    # mean-over-layers gate.
+    fc_layers = false_concentration_by_layer(stats)
     ed = error_detection_aucs(stats)
     # Finite-stats-stream uncertainty on gate_on_correct - gate_on_false_conc
     # (the independent two-sample bootstrap over the disjoint row groups).
@@ -8739,6 +8747,39 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
             rec[f"gate_margin_thr{thr:g}"] = (
                 row["gate_on_correct"] - row["gate_on_false_conc"])
     rec["false_conc_sweep"] = fc_sweep
+    rec["false_conc_by_layer"] = fc_layers
+    # Scalar layer-profile summaries for the aggregate table / JSON.  The
+    # list itself stays in the record so a layer-level sign flip or a
+    # single-layer association is visible instead of being averaged away.
+    _layer_rates = [row["false_conc_rate"] for row in fc_layers
+                    if _finite(row.get("false_conc_rate"))]
+    if _layer_rates:
+        rec["false_conc_layer_rate_mean"] = (
+            sum(_layer_rates) / len(_layer_rates))
+    if gate in ("query", "calib"):
+        _margins = [row["gate_margin"] for row in fc_layers
+                    if _finite(row.get("gate_margin"))]
+        if _margins:
+            rec["false_conc_layer_margin_mean"] = (
+                sum(_margins) / len(_margins))
+            rec["false_conc_layer_margin_min"] = min(_margins)
+            rec["false_conc_layer_margin_positive_layers"] = sum(
+                1 for value in _margins if value > 0.0)
+            rec["false_conc_layer_n"] = len(_margins)
+            rec["false_conc_layer_sign_flip"] = float(
+                any(value < 0.0 for value in _margins))
+    if gate == "null":
+        _null_margins = [row["null_mass_error_margin"] for row in fc_layers
+                         if _finite(row.get("null_mass_error_margin"))]
+        if _null_margins:
+            rec["null_mass_layer_margin_mean"] = (
+                sum(_null_margins) / len(_null_margins))
+            rec["null_mass_layer_margin_min"] = min(_null_margins)
+            rec["null_mass_layer_margin_positive_layers"] = sum(
+                1 for value in _null_margins if value > 0.0)
+            rec["null_mass_layer_n"] = len(_null_margins)
+            rec["null_mass_layer_sign_flip"] = float(
+                any(value < 0.0 for value in _null_margins))
     if fc_gate_boot is not None:
         rec["false_conc_gate_boot"] = fc_gate_boot
     if gate == "null":
@@ -9480,6 +9521,66 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
           "gate_on_false_conc lies entirely above 0 - a different "
           "uncertainty from the seed-level margin)")
 
+    # Keep the layer axis aligned: the aggregate table above uses a
+    # max-over-layers confidence and a mean-over-layers gate, which is not
+    # the within-layer quantity the gate actually computes from.  This
+    # profile checks that the false-concentration closure (or the null-slot
+    # error margin) is present in the individual layers and not created by
+    # the layer collapse.
+    print("\n[e1] H1b/H1c per-layer false-concentration profile (mean over "
+          "seeds): each layer's own max-prob forms the confident set and that "
+          "layer's own gate / null mass is read on it.  'margin' = "
+          "gate@correct - gate@false_conc; 'null_margin' = null@error - "
+          "null@correct.  The aggregate rows above remain the pre-registered "
+          "H1b/H1c decision; a positive mean margin carried by one layer, or "
+          "a layer with the opposite sign, is visible here:")
+    print(f"{'arm':>6} {'layer':>6} {'false_conc_rate':>16} "
+          f"{'gate@fc':>10} {'gate@ok':>10} {'margin':>10} "
+          f"{'null@fc':>10} {'null@ok':>10} {'null_margin':>12}")
+    layer_fc = {}
+
+    def _layer_mean(rows, layer, key):
+        vals = []
+        for row_list in rows:
+            if not isinstance(row_list, list) or layer >= len(row_list):
+                continue
+            value = row_list[layer].get(key)
+            if _finite(value):
+                vals.append(float(value))
+        return (sum(vals) / len(vals)) if vals else float("nan"), len(vals)
+
+    for gate in ("query", "calib", "null"):
+        rows_by_seed = [r.get("false_conc_by_layer") for r in by_gate[gate]
+                        if isinstance(r.get("false_conc_by_layer"), list)
+                        and r["false_conc_by_layer"]]
+        if not rows_by_seed:
+            continue
+        n_layers = max(len(row_list) for row_list in rows_by_seed)
+        layer_fc[gate] = []
+        for layer in range(n_layers):
+            profile = {}
+            for key in ("false_conc_rate", "gate_on_false_conc",
+                        "gate_on_correct", "gate_margin", "null_mass_error",
+                        "null_mass_correct", "null_mass_error_margin"):
+                profile[key], profile[f"{key}_n_seeds"] = _layer_mean(
+                    rows_by_seed, layer, key)
+            profile["layer"] = layer
+            layer_fc[gate].append(profile)
+
+            def _cell(key, fmt="{:+.3f}"):
+                value = profile[key]
+                return fmt.format(value) if _finite(value) else "n/a"
+
+            print(f"{gate:>6} {layer:>6} "
+                  f"{_cell('false_conc_rate', '{:.3f}'):>16} "
+                  f"{_cell('gate_on_false_conc', '{:.3f}'):>10} "
+                  f"{_cell('gate_on_correct', '{:.3f}'):>10} "
+                  f"{_cell('gate_margin'):>10} "
+                  f"{_cell('null_mass_error', '{:.3f}'):>10} "
+                  f"{_cell('null_mass_correct', '{:.3f}'):>10} "
+                  f"{_cell('null_mass_error_margin'):>12}")
+    if layer_fc:
+        table["_false_concentration_by_layer"] = layer_fc
 
     print("\n[e1] H1a robustness: rank (Spearman) gate-entropy correlation "
           "alongside Pearson (a monotone effect must survive the change of "

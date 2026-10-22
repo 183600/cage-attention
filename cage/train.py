@@ -2323,6 +2323,88 @@ def false_concentration_sweep(stats, thresholds=(0.3, 0.5, 0.7, 0.9)) -> dict:
             for thr in thresholds}
 
 
+def false_concentration_by_layer(stats, maxprob_thresh=0.5):
+    """Per-layer false-concentration readout (H1b / H1c mechanism check).
+
+    The aggregate :func:`false_concentration_analysis` deliberately collapses
+    layers: it uses the maximum max-prob over layers together with the mean
+    gate over layers.  That summary is readable but it is not the quantity
+    the gate hypothesis is about - a gate is computed *within* a layer from
+    that layer's own attention distribution, so a layer with genuinely
+    concentrated-but-wrong attention can be diluted by another layer whose
+    max-prob is low, and the aggregate gate mean cannot close only where the
+    concentration is false.
+
+    This companion keeps the axes aligned: for every layer it forms the
+    high-max-prob set from **that layer's** max-prob and compares
+    **that layer's** gate (or null-slot mass) on the false-concentrated vs
+    correct rows.  It reports the same names as the aggregate readout
+    (``false_conc_rate`` / ``gate_on_false_conc`` / ``gate_on_correct`` /
+    ``gate_margin``) plus ``null_mass_error_margin`` for the null arm, so the
+    layer profile can be read next to - never instead of - the
+    pre-registered aggregate H1b/H1c contrasts.
+
+    Returns a list of per-layer dicts; empty when the statistics carry no
+    layer axis.  ``gate_margin`` / ``null_mass_error_margin`` are NaN when a
+    layer has no false-concentrated or no confident-correct row (a within-
+    stream sample-size limit, not a model effect).
+    """
+    mp = stats.get("maxprob")
+    corr = stats.get("correct")
+    if mp is None or corr is None or mp.dim() < 2:
+        return []
+    corr = corr.bool()
+    gate = stats.get("gate")
+    null = stats.get("null_mass")
+    threshold = float(maxprob_thresh)
+    n_layers = int(mp.size(1))
+    rows = []
+    for layer in range(n_layers):
+        high = mp[:, layer] > threshold
+        n_high = int(high.sum())
+        n_false = int((high & ~corr).sum())
+        row = {
+            "layer": int(layer),
+            "maxprob_thresh": threshold,
+            "n_high_maxprob": n_high,
+            "n_false_conc": n_false,
+            "false_conc_rate": (n_false / n_high if n_high
+                                else float("nan")),
+        }
+        if n_high:
+            ci = wilson_ci(n_false, n_high)
+            row["false_conc_rate_lo"] = ci["lo"]
+            row["false_conc_rate_hi"] = ci["hi"]
+        if gate is not None and layer < gate.size(1):
+            gm = gate[:, layer]
+            fc, cc = high & ~corr, high & corr
+            row["n_false_conc_gate"] = int(fc.sum())
+            row["n_correct_high_gate"] = int(cc.sum())
+            row["gate_on_false_conc"] = (float(gm[fc].mean()) if bool(fc.any())
+                                         else float("nan"))
+            row["gate_on_correct"] = (float(gm[cc].mean()) if bool(cc.any())
+                                      else float("nan"))
+            row["gate_margin"] = (row["gate_on_correct"]
+                                  - row["gate_on_false_conc"]
+                                  if math.isfinite(row["gate_on_correct"])
+                                  and math.isfinite(row["gate_on_false_conc"])
+                                  else float("nan"))
+        if null is not None and layer < null.size(1):
+            nm = null[:, layer]
+            fc, cc = high & ~corr, high & corr
+            row["null_mass_error"] = (float(nm[fc].mean())
+                                      if bool(fc.any()) else float("nan"))
+            row["null_mass_correct"] = (float(nm[cc].mean())
+                                        if bool(cc.any()) else float("nan"))
+            row["null_mass_error_margin"] = (
+                row["null_mass_error"] - row["null_mass_correct"]
+                if math.isfinite(row["null_mass_error"])
+                and math.isfinite(row["null_mass_correct"])
+                else float("nan"))
+        rows.append(row)
+    return rows
+
+
 def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
                               alpha: float = 0.05) -> dict:
     """Percentile bootstrap CI for ``mean(a) - mean(b)``.
