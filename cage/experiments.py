@@ -7383,25 +7383,28 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
     model_cfg = asdict(model.cfg)
     params = sum(p.numel() for p in model.parameters())
     if curve_points <= 0:
-        eval_every = 0
-    elif curve_points == 1:
-        # The training loop always evaluates step 0 and the final step, so
-        # one configured point is represented by the final check.
-        eval_every = max(1, train_steps - 1)
+        eval_every, eval_steps = 0, None
     else:
-        # ``curve_points`` is the number of checks per run (Settings).  The
-        # final step is always checked in addition to the periodic ones, so
-        # the spacing must divide the interval between the first and final
-        # step into curve_points - 1 gaps; ``steps // curve_points`` adds an
-        # extra check in the common case.
-        eval_every = max(
-            1, math.ceil((train_steps - 1) / (curve_points - 1)))
+        # ``curve_points`` is the number of checks per run (Settings).  An
+        # arithmetic ``eval_every`` cannot hit that count for every
+        # (steps, curve_points) pair (e.g. 12 steps with 10 points), so
+        # pass the exact evenly-spaced schedule.  A run cannot have more
+        # checks than iterations; cap there instead of duplicating steps.
+        points = min(curve_points, train_steps)
+        if points == 1:
+            eval_steps = {train_steps - 1}
+        else:
+            eval_steps = {
+                int(round(i * (train_steps - 1) / (points - 1)))
+                for i in range(points)}
+        eval_every = 0
     early_stop_info = {}
     seeding = {}
     hist = train_model(model, steps=train_steps, batch=settings.batch,
                        n_pairs=settings.n_pairs, lr=lr, vocab=settings.vocab,
                        device=settings.device, log_every=0, seed=seed,
-                       eval_every=eval_every, val_batches=settings.val_batches,
+                       eval_every=eval_every, eval_steps=eval_steps,
+                       val_batches=settings.val_batches,
                        permute_labels=permute_labels,
                        early_stop_info=early_stop_info,
                        deterministic=settings.deterministic,

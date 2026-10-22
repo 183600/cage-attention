@@ -753,7 +753,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                 early_stop_info=None, fixed_batch=None,
                 disable_regularization=False, grad_flow_info=None,
                 regularization_info=None, batch_metrics=False,
-                deterministic=False, seed_info=None):
+                deterministic=False, seed_info=None, eval_steps=None):
     """Train on the recall task with optional learning-curve monitoring.
 
     ``seed`` governs *all* run-to-run randomness: ``cage.repro.seed_everything``
@@ -903,6 +903,39 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             f"eval_every must be a non-negative integer, got "
             f"{raw_eval_every!r}")
     eval_every = int(eval_every_num)
+    # Optional explicit validation steps.  ``eval_every`` can only produce
+    # a periodic grid, which cannot hit an arbitrary configured number of
+    # checks for every (steps, curve_points) pair; the experiment layer
+    # passes the exact evenly-spaced schedule through this argument.
+    if eval_steps is not None:
+        if isinstance(eval_steps, (str, bytes)) or isinstance(eval_steps, bool):
+            raise ValueError(
+                f"eval_steps must be an iterable of integer step indices, "
+                f"got {eval_steps!r}")
+        try:
+            raw_eval_steps = list(eval_steps)
+        except TypeError as exc:
+            raise ValueError(
+                f"eval_steps must be an iterable of integer step indices, "
+                f"got {eval_steps!r}") from exc
+        checked = set()
+        for raw_step in raw_eval_steps:
+            if isinstance(raw_step, bool):
+                raise ValueError(
+                    f"eval_steps entries must be integers, got "
+                    f"{raw_step!r}")
+            try:
+                step_index = operator.index(raw_step)
+            except TypeError as exc:
+                raise ValueError(
+                    f"eval_steps entries must be integers, got "
+                    f"{raw_step!r}") from exc
+            if step_index < 0 or step_index >= steps:
+                raise ValueError(
+                    f"eval_steps entries must lie in [0, {steps}), got "
+                    f"{step_index!r}")
+            checked.add(int(step_index))
+        eval_steps = frozenset(checked) or None
     if early_stop_patience is not None:
         raw_patience = early_stop_patience
         early_stop_patience = _positive_integer(raw_patience)
@@ -910,7 +943,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             raise ValueError(
                 f"early_stop_patience must be a positive integer, got "
                 f"{raw_patience!r}")
-    if eval_every > 0:
+    if eval_every > 0 or eval_steps is not None:
         raw_val_batches = val_batches
         val_batches = _positive_integer(raw_val_batches)
         if val_batches is None:
@@ -934,10 +967,11 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         if seed_info is not None:
             seed_info.update(applied)
             seed_info["reseeded"] = True
-    if early_stop_patience is not None and eval_every <= 0:
+    if early_stop_patience is not None and eval_every <= 0 \
+            and eval_steps is None:
         raise ValueError(
-            "early_stop_patience requires eval_every > 0: there is no "
-            "validation curve to stop on otherwise")
+            "early_stop_patience requires eval_every > 0 or eval_steps: "
+            "there is no validation curve to stop on otherwise")
     stream_seed = 0 if seed is None else int(seed)
     gen = stream_generator(stream_seed, device)
     # Labels are permuted from their own stream so the negative control
@@ -1000,7 +1034,10 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                     (qlogits.argmax(-1) == meta["answer"]).to(
                         torch.float64).mean())
         is_log = (log_every > 0 and step % log_every == 0) or step == steps - 1
-        do_val = (eval_every > 0 and (step % eval_every == 0 or step == steps - 1))
+        do_val = bool(
+            (eval_every > 0
+             and (step % eval_every == 0 or step == steps - 1))
+            or (eval_steps is not None and step in eval_steps))
         if not math.isfinite(lv):
             diag = diagnose_nonfinite(model, idx, diag_tgt, meta, vocab,
                                       device=device, dense_lm=dense_lm)
