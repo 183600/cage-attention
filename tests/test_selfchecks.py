@@ -188,6 +188,25 @@ class NegativeControlPermutationTest(unittest.TestCase):
         self.assertTrue(torch.equal(permuted.sort(dim=0).values,
                                     targets.sort(dim=0).values))
 
+    def test_sparse_targets_keep_one_deranged_label_per_row(self):
+        import torch
+
+        from cage.train import _permute_batch_labels
+
+        # The recall task stores one supervised column per row.  A row
+        # shift would move that label to the donor's column, leaving the
+        # receiving row's own query column at -1; the control must instead
+        # move the label value and keep every row trainable.
+        targets = torch.full((4, 4), -1, dtype=torch.long)
+        columns = torch.arange(4)
+        targets[torch.arange(4), columns] = torch.tensor([10, 11, 12, 13])
+        permuted = _permute_batch_labels(targets,
+                                         torch.Generator().manual_seed(0))
+        self.assertTrue(bool(permuted.ne(-1).sum(dim=1).eq(1).all()))
+        for row in range(4):
+            self.assertNotEqual(int(permuted[row, columns[row]]),
+                                int(targets[row, columns[row]]))
+
     def test_permutation_needs_a_partner_row(self):
         import torch
 

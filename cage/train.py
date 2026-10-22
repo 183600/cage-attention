@@ -766,6 +766,23 @@ def _permute_batch_labels(tgt: torch.Tensor, gen: torch.Generator) -> torch.Tens
     shift = int(torch.randint(1, n, (1,), generator=gen,
                               device=tgt.device).item())
     order = (torch.arange(n, device=tgt.device) + shift) % n
+    # Sparse targets (the recall task) carry exactly one supervised column
+    # per row (the query position).  Shifting whole rows would move that
+    # label to the donor's query column, which is usually *not* the
+    # receiving row's query column: ``train_model`` supervises the original
+    # column, sees ``-1`` there, and either trains on a fraction of the
+    # batch or (when no query positions coincide) raises "no supervised
+    # position".  Permute only the label values while keeping each row's
+    # own supervised position, which is the same deranged label signal
+    # without dropping rows or crashing the control.
+    supervised = tgt.ne(-1)
+    if bool(supervised.sum(dim=1).eq(1).all()):
+        columns = supervised.to(torch.int64).argmax(dim=1)
+        donor = tgt.gather(1, columns.unsqueeze(1)).squeeze(1)
+        permuted = tgt.new_full(tgt.shape, -1)
+        permuted.scatter_(1, columns.unsqueeze(1),
+                          donor.index_select(0, order).unsqueeze(1))
+        return permuted
     return tgt.index_select(0, order)
 
 
