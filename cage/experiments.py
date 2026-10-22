@@ -4877,6 +4877,11 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
         failed.append("HB4 (violated: control interval above tolerance)")
     elif hb4_state == "untestable":
         failed.append("HB4 (untestable)")
+    elif hb4_state not in ("supported", "inconclusive"):
+        # A malformed/unknown state must fail closed: treating it as a
+        # pass would let a hand-edited verdict bypass the negative-control
+        # gate entirely.
+        failed.append(f"HB4 (unrecognised state {hb4_state!r})")
     if failed:
         raise BaselineVerdictError(
             f"{tag}: baseline validity gate(s) {', '.join(failed)} failed "
