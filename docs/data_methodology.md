@@ -157,3 +157,88 @@ make check
 
 所有 probe 都是确定性的，不消耗 RNG 流；同一 seed、同一评测流下重复
 评测得到同一组计数。
+
+## 6. 关联暴露审计：行级去重之外的必要一层
+
+### 6.1 为什么整行重复不够
+
+`split_leakage_audit` / `actual_stream_overlap_audit` 的整行指纹回答的是
+“生成器是否抽到了同一条完整序列”。在合成任务里这个事件几乎不发生：
+两条序列只要其他 pair 不同，整行就不同；但**同一个 query key 与同一个
+value 的关联**（下称 pair）仍可能同时出现在训练流和评测流。模型完全
+可以记住 `key -> value`，在干净评测上答对，而整行泄漏审计仍显示 0。
+
+因此数据层需要把“评测 item 的精确 `(query key, answer value)` 关联是否
+在训练流中出现过”作为独立读数。它回答的是**记忆机会**，不是模型是否
+真的在记忆；后者由第 1–5 节的反事实 probe 回答。
+
+### 6.2 实现
+
+- `cage.data.association_codes` 从已通过 `validate_batch` 的 batch 中取出
+  query pair，编码为 `key * vocab + value`；同时校验 `key_pos`、最终
+  query token 与 `meta['answer']` 一致，畸形 batch 直接 `ValueError`。
+- `actual_stream_overlap_audit` 在重放每个消费流时顺带记录 pair code 与
+  query key 集合，训练组（`group="train"`）的并集作为参考；held-out 流
+  只被**打分**，不参与参考拟合。
+- `eval_metrics(..., train_association_codes=...)` 用同一参考把每个评测
+  item 分为：
+  - `seen`：精确 pair 在训练流中出现过，记忆即可作答；
+  - `unseen`：精确 pair 未出现，必须从上下文读取。
+  该划分只依赖训练数据，不依赖模型输出，是**处理前**协变量。
+
+### 6.3 读数
+
+`association_exposure`（审计 JSON，逐 held-out 流）：
+
+```text
+n_items / n_unique_pairs / n_unique_keys
+pair_seen_train / pair_seen_train_rate      # 精确关联已见率
+key_seen_train / key_seen_train_rate        # key 已见（任意 value）
+pair_unseen_key_seen / ..._rate             # key 已见但该 value 未配对
+pair_seen_unique / ..._rate                 # 去重 pair 口径
+```
+
+`train_association_summary` 报告训练流的 pair 空间覆盖：
+
+```text
+n_items / n_unique_pairs / n_unique_keys
+n_possible_pairs / n_possible_keys / pair_space_coverage
+```
+
+`eval_metrics` 的 `association_exposure` 块逐 cohort 报告：
+
+```text
+seen/unseen: n, n_correct, accuracy,
+             cf_value_accuracy, cf_value_follow_rate,
+             cf_value_stubborn_rate,
+             distractor_accuracy, relocation_accuracy
+accuracy_gap_seen_minus_unseen
+```
+
+扁平字段 `assoc_exposure_*` 供 `_aggregate_runs` 与汇总表直接使用；分母
+为零时比率为 `NaN`，不把“该 cohort 没有样本”读成 0。
+
+### 6.4 解释边界
+
+- `pair_seen_train_rate` 是**记忆机会的上界读数**，不是泄漏判定：共享
+  vocabulary 下部分关联重合是任务构造的必然结果。跨组整行重合、跨组
+  seed 复用仍是硬失败；关联暴露只披露、不改变 HB3 的通过条件。
+- `seen` 与 `unseen` 两个 cohort 的 item 组成不同（例如已见 pair 可能
+  集中在更常见的 key 上），所以 `accuracy_gap_seen_minus_unseen` 是
+  描述性读数，不是因果效应；要判断“准确率是否来自上下文检索”，必须
+  同时看两个 cohort 的 `cf_value_accuracy` / `cf_value_follow_rate`。
+- 一个健康的检索模型应在 `unseen` cohort 上仍有高于机会的
+  `cf_value_accuracy`；若干净 accuracy 的增益集中在 `seen`，而
+  `seen` 的 value-swap follow rate 很低，则不能把增益写成“更好地利用
+  了上下文配对信息”。
+
+### 6.5 复现
+
+```bash
+python3 -m unittest tests.test_association_audit -v
+python3 -m cage.experiments --only sanity --quick --out results_quick
+make check
+```
+
+关联重放与 probe 一样不消耗 RNG；同一 Settings / 同一训练几何下重复
+审计得到同一组计数。

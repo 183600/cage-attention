@@ -715,6 +715,118 @@ def make_batch(batch: int, n_pairs: int, vocab: int, device, dense_lm: bool = Fa
     return idx, targets, meta
 
 
+def association_codes(idx, meta, vocab) -> dict:
+    """Per-row exact ``(query key, answer value)`` association of a batch.
+
+    The split audit's exact-row fingerprints answer "did the generator draw
+    the same *sequence* twice?".  In a synthetic task that question is
+    almost always false, because the surrounding pairs differ, yet the same
+    *key -> value association* can still recur across the training and
+    held-out streams.  A model can memorise that association instead of
+    reading the value from the context, so this helper exposes the unit the
+    exposure audit needs: the query key, its paired value and a compact
+    integer code ``key * vocab + value``.
+
+    The batch is checked against the same task contract as the cleaning
+    gate: ``meta`` must carry ``key_pos`` (an even column index into the
+    query's key/value pair) and ``answer``; the final query token must equal
+    the key at ``key_pos`` and the value at ``key_pos + 1`` must equal the
+    recorded answer.  A malformed or mismatched batch raises ``ValueError``
+    instead of contributing a fabricated association to the audit.
+    """
+    vocab = _batch_vocab_int(vocab)
+    if vocab * vocab > (1 << 63) - 1:
+        raise ValueError(
+            "vocab is too large for an int64 association code "
+            f"(vocab={vocab}); the key*value encoding would overflow")
+    if not _is_integer_tensor(idx) or idx.dim() != 2:
+        raise ValueError(
+            f"idx must be a (batch, T) integer tensor, got {type(idx)}")
+    if not isinstance(meta, Mapping) or "key_pos" not in meta \
+            or "answer" not in meta:
+        raise ValueError(
+            "association codes need meta with 'key_pos' and 'answer'")
+    batch, width = idx.shape
+    key_pos = meta["key_pos"]
+    answer = meta["answer"]
+    if not _is_integer_tensor(key_pos) or not _is_integer_tensor(answer):
+        raise ValueError(
+            "meta['key_pos'] and meta['answer'] must have an integer dtype")
+    key_pos = key_pos.to(device=idx.device, dtype=torch.long).reshape(-1)
+    answer = answer.to(device=idx.device, dtype=torch.long).reshape(-1)
+    if key_pos.shape != (batch,) or answer.shape != (batch,):
+        raise ValueError(
+            "meta['key_pos'] and meta['answer'] must carry one entry per row")
+    if batch:
+        if bool((key_pos < 0).any()) or bool((key_pos >= width - 1).any()):
+            raise ValueError(
+                "meta['key_pos'] is outside the key/value columns")
+        if bool(key_pos.remainder(2).ne(0).any()):
+            raise ValueError("meta['key_pos'] must be an even key position")
+        if bool((answer < 2).any()) or bool((answer >= vocab).any()):
+            raise ValueError(
+                f"meta['answer'] must be a selectable id in [2, {vocab})")
+    key = idx.gather(1, key_pos.unsqueeze(1)).squeeze(1)
+    value = idx.gather(1, (key_pos + 1).unsqueeze(1)).squeeze(1)
+    if batch and not bool(key.eq(idx[:, -1]).all()):
+        raise ValueError(
+            "the final query token does not match meta['key_pos']; the "
+            "association row would describe a different pair")
+    if batch and not bool(value.eq(answer).all()):
+        raise ValueError(
+            "meta['answer'] does not match the value at meta['key_pos']+1")
+    if batch and (bool((key < 2).any()) or bool((key >= vocab).any())):
+        raise ValueError(
+            f"the paired key must be a selectable id in [2, {vocab})")
+    code = key.mul(vocab).add(value)
+    return {"key": key, "value": value, "code": code}
+
+
+def association_reference_codes(codes) -> frozenset:
+    """Normalize a training-stream association-code reference.
+
+    ``eval_metrics`` scores each evaluated item against the exact pairs a
+    training stream realized.  The reference arrives from the audit as a
+    Python set, but it may cross a process boundary as another iterable or
+    as JSON-style integral floats.  Accept only non-negative integers (bool
+    and fractional values are rejected rather than silently coerced to a
+    different pair code) and return an immutable set so the readout cannot
+    be mutated between batches.
+    """
+    if isinstance(codes, (str, bytes)) or isinstance(codes, Mapping):
+        raise ValueError(
+            "association reference must be an iterable of integer codes, "
+            f"got {type(codes).__name__}")
+    try:
+        iterator = iter(codes)
+    except TypeError as exc:
+        raise ValueError(
+            "association reference must be an iterable of integer codes, "
+            f"got {type(codes).__name__}") from exc
+    out = set()
+    for code in iterator:
+        if isinstance(code, bool):
+            raise ValueError(
+                f"association codes must be integers, got {code!r}")
+        if isinstance(code, float):
+            # JSON round-trips may spell an integral code as 2.0; accept
+            # those but never truncate a genuinely fractional one.
+            if not math.isfinite(code) or not code.is_integer():
+                raise ValueError(
+                    f"association codes must be integers, got {code!r}")
+            code = int(code)
+        try:
+            value = operator.index(code)
+        except TypeError as exc:
+            raise ValueError(
+                f"association codes must be integers, got {code!r}") from exc
+        if value < 0:
+            raise ValueError(
+                f"association codes must be non-negative, got {code!r}")
+        out.add(int(value))
+    return frozenset(out)
+
+
 def _count_duplicate_rows(idx) -> int:
     """Exact duplicate rows in ``idx`` (content comparison, no fitting).
 
@@ -1210,19 +1322,39 @@ def _draw_stream_keys(seed, n_pairs, vocab, device, batch, units):
     batch passes the shared cleaning gate, so a stream that would be
     rejected during training/evaluation aborts the audit instead of being
     hashed.
+
+    Returns ``(payload, n_rows)`` where ``payload`` holds the exact-row
+    fingerprints (``row_keys``), the per-item query associations in draw
+    order (``associations``), their unique set (``association_set``) and the
+    set of query keys seen in the stream (``key_set``).  The association
+    lists are what lets the audit report memorisation exposure, not only
+    duplicate *sequences*.
     """
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     batch = _positive_audit_count(batch, "batch")
     units = _positive_audit_count(units, "units")
     keys, n_rows = set(), 0
+    associations, association_set, key_set = [], set(), set()
     for _ in range(units):
         idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
                                     gen=gen)
         validate_batch(idx, tgt, meta, vocab, diagnostics=False)
         batch_keys = _row_keys(idx)
         keys.update(batch_keys)
+        codes = association_codes(
+            idx, meta, vocab)["code"].tolist()
+        for code in codes:
+            code = int(code)
+            associations.append(code)
+            association_set.add(code)
+            key_set.add(code // int(vocab))
         n_rows += len(batch_keys)
-    return keys, n_rows
+    return {
+        "row_keys": keys,
+        "associations": associations,
+        "association_set": association_set,
+        "key_set": key_set,
+    }, n_rows
 
 
 def _audit_stream_name(name, kind):
@@ -1240,7 +1372,8 @@ def _audit_stream_name(name, kind):
 
 
 def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
-                                train_specs=None, heldout_specs=None):
+                                train_specs=None, heldout_specs=None,
+                                include_train_association_codes=False):
     """Exact content overlap of the streams a run *actually* consumes.
 
     ``split_leakage_audit`` checks the first ``batch * batches`` samples of
@@ -1275,9 +1408,26 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
     collision across groups is leakage even when the content matrices are
     empty.
 
-    It returns per-stream row/duplicate counts and the pairwise overlap
-    matrix over row-content fingerprints.  Any cross-group overlap or
-    seed-key collision is leakage; the caller decides how to gate on it.
+    **Association exposure.** Exact-row duplicates are the wrong leakage
+    unit for a synthetic sequence task: two draws almost never repeat the
+    whole sequence, but the same query ``(key, value)`` association can
+    recur across splits, and a model can memorise it.  The replay therefore
+    also records every item's association code (see
+    :func:`association_codes`).  For each non-training group it reports the
+    item-weighted share whose exact pair was observed in a training stream
+    (``pair_seen_train_rate``) and the share whose query key was observed
+    with any value (``key_seen_train_rate``).  This is a *disclosure*, not
+    a leakage verdict: a shared vocabulary makes some association overlap
+    expected, while only cross-group *row* overlap and seed reuse are hard
+    failures.  Pass ``include_train_association_codes=True`` to also return
+    the training code set (``train_association_codes``, a Python set that
+    is not JSON-serializable) for exposure-stratified evaluation; callers
+    must pop it before persisting the audit.
+
+    It returns per-stream row/duplicate counts, the pairwise overlap matrix
+    over row-content fingerprints, and the association-exposure readout.
+    Any cross-group row overlap or seed-key collision is leakage; the
+    caller decides how to gate on it.
     """
     train_specs = dict(train_specs or {})
     heldout_specs = dict(heldout_specs or {})
@@ -1295,6 +1445,7 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
             "stream names must be unique across train_specs and "
             f"heldout_specs; duplicated: {shared_names}")
     key_sets, streams, groups, seed_keys = {}, {}, {}, {}
+    associations, association_sets, query_key_sets = {}, {}, {}
     all_specs = ([(name, spec, "train")
                   for name, spec in train_specs.items()]
                  + [(name, spec, "heldout")
@@ -1328,8 +1479,12 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
         units = _positive_audit_count(
             spec[unit_key], f"{kind} spec {name!r} {unit_key}")
         seed_key = stream_seed_key(seed)
-        keys, n_rows = _draw_stream_keys(
+        replay, n_rows = _draw_stream_keys(
             seed, n_pairs, vocab, device, batch, units)
+        keys = replay["row_keys"]
+        associations[name] = replay["associations"]
+        association_sets[name] = replay["association_set"]
+        query_key_sets[name] = replay["key_set"]
         key_sets[name] = keys
         seed_keys[name] = seed_key
         groups[name] = str(spec.get(
@@ -1340,6 +1495,7 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
             "batch": batch, "units": units,
             "n_rows": int(n_rows), "n_unique_rows": int(len(keys)),
             "n_duplicate_rows": int(n_rows - len(keys)),
+            "n_unique_associations": int(len(association_sets[name])),
         }
 
     names = list(key_sets)
@@ -1365,7 +1521,67 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
     heldout_vs_heldout = [
         pairwise[f"{a}|{b}"] for i, a in enumerate(heldout_names)
         for b in heldout_names[i + 1:]]
-    return {
+
+    # Association exposure: the training groups' exact query pairs form the
+    # reference; held-out items are only *scored* against it (nothing is
+    # fitted on held-out data).  Item-weighted rates are reported because
+    # the question is "what share of the evaluated items could be answered
+    # from a memorised association?", not "how many distinct pair types
+    # recur".  A split that is itself in a training group (e.g. the
+    # validation stream re-read at a second geometry) is not held-out and
+    # is left out of this readout.
+    train_codes, train_keys_seen = set(), set()
+    for name in names:
+        if groups[name] == "train":
+            train_codes.update(association_sets[name])
+            train_keys_seen.update(query_key_sets[name])
+    vocab_int = int(vocab)
+    exposure = {}
+    for name in names:
+        if groups[name] == "train":
+            continue
+        codes = associations[name]
+        n = len(codes)
+        pair_seen = sum(1 for code in codes if code in train_codes)
+        key_seen = sum(
+            1 for code in codes if code // vocab_int in train_keys_seen)
+        unique = set(codes)
+        pair_seen_unique = len(unique & train_codes)
+        exposure[name] = {
+            "group": groups[name],
+            "n_items": int(n),
+            "n_unique_pairs": int(len(unique)),
+            "n_unique_keys": int(len({code // vocab_int for code in codes})),
+            "pair_seen_train": int(pair_seen),
+            "pair_seen_train_rate": (pair_seen / n if n else float("nan")),
+            "key_seen_train": int(key_seen),
+            "key_seen_train_rate": (key_seen / n if n else float("nan")),
+            # Seen key, unseen exact pair: the item's key occurred in
+            # training but not with this value, so a memorised key -> value
+            # lookup cannot directly supply the answer.  This is the cohort
+            # where in-context retrieval is required.
+            "pair_unseen_key_seen": int(key_seen - pair_seen),
+            "pair_unseen_key_seen_rate": (
+                (key_seen - pair_seen) / n if n else float("nan")),
+            "pair_seen_unique": int(pair_seen_unique),
+            "pair_seen_unique_rate": (
+                pair_seen_unique / len(unique) if unique else float("nan")),
+        }
+    train_summary = {
+        "n_items": int(sum(len(associations[name]) for name in names
+                          if groups[name] == "train")),
+        "n_unique_pairs": int(len(train_codes)),
+        "n_unique_keys": int(len(train_keys_seen)),
+        "n_possible_pairs": int((vocab_int - 2) ** 2),
+        "n_possible_keys": int(vocab_int - 2),
+        "pair_space_coverage": (
+            len(train_codes) / ((vocab_int - 2) ** 2)
+            if vocab_int > 2 else float("nan")),
+    }
+    max_exposure = max(
+        (row["pair_seen_train_rate"] for row in exposure.values()
+         if math.isfinite(row["pair_seen_train_rate"])), default=float("nan"))
+    out = {
         "train_specs": {k: dict(v) for k, v in train_specs.items()},
         "heldout_specs": {k: dict(v) for k, v in heldout_specs.items()},
         "streams": streams,
@@ -1376,7 +1592,25 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
         "heldout_vs_heldout_max": max(heldout_vs_heldout, default=0),
         "max_overlap": max(cross_group, default=0),
         "n_rows_total": int(sum(s["n_rows"] for s in streams.values())),
+        "train_association_summary": train_summary,
+        "association_exposure": exposure,
+        "max_heldout_pair_exposure": float(max_exposure),
+        "association_exposure_note": (
+            "item-weighted share of held-out query (key, value) pairs whose "
+            "exact association was observed in a training-group stream. "
+            "This is a memorisation-opportunity disclosure, not a leakage "
+            "verdict: exact-pair exposure is expected with a shared "
+            "vocabulary, while cross-group whole-row overlap and seed reuse "
+            "remain hard failures.  Read clean and counterfactual accuracy "
+            "separately on the exposure cohorts before attributing an "
+            "accuracy gain to in-context retrieval."),
     }
+    if include_train_association_codes:
+        # Not JSON-serializable on purpose: the caller must pop it before
+        # persisting the audit (the experiment layer does so when it hands
+        # the set to exposure-stratified evaluation).
+        out["train_association_codes"] = train_codes
+    return out
 
 
 # Audit fields: pooled tokens, the supervised answer distribution (the

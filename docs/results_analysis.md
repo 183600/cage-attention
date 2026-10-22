@@ -220,3 +220,24 @@ pair。读法：
 若 accuracy 提升但 `cf_value_accuracy` 没有提升，不能把结果写成“更好地
 利用了上下文配对”；只能写成“在该数据分布上准确率更高，但检索操控检验
 未同步改善”。详细定义、字段与边界见 `docs/data_methodology.md`。
+
+## 6. 关联暴露与 exposure-stratified accuracy（补充阅读顺序）
+
+整行重复为 0 不代表评测 item 的精确 `(query key, answer value)` 关联没有
+在训练中出现过。训练流重放现在同时记录每个 item 的 pair code，并在
+`<tag>_split_audit.json` 的 `association_exposure` 中逐 held-out 流报告
+`pair_seen_train_rate` / `key_seen_train_rate` / `pair_unseen_key_seen_rate`。
+`eval_metrics` 用训练 pair 集合把每个评测 item 分为 `seen` / `unseen`，
+在 `association_exposure` 与扁平 `assoc_exposure_*` 字段中分别报告
+clean accuracy、value-swap accuracy 与 follow/stubborn rate。
+
+读法：
+
+1. `pair_seen_train_rate` 高说明“干净准确率可以由记忆解释”的机会大，
+   本身不是泄漏；它提醒必须读反事实 probe。
+2. `unseen` cohort 的 `cf_value_accuracy` 才是必须在上下文中完成检索的
+   读数；它接近机会水平时，不能声称模型学会了按 key 检索。
+3. `accuracy_gap_seen_minus_unseen` 是描述性差异（两个 cohort 的 item
+   组成不同），不是因果效应，也不进入 FDR 族或预注册判定。
+4. 若 accuracy 提升集中在 `seen` 且 `seen` 的 `cf_value_follow_rate` 低，
+   应写“准确率提升伴随对已见关联的依赖”，而不是“检索能力提升”。

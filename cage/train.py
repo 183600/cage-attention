@@ -16,6 +16,8 @@ from .data import (
     DEFAULT_DIFFICULTY_KEY_BINS,
     STATS_SEED,
     VAL_SEED,
+    association_codes,
+    association_reference_codes,
     batch_fingerprint,
     check_train_seed,
     difficulty_strata,
@@ -2482,9 +2484,144 @@ def _counterfactual_summary(counts) -> dict:
     }
 
 
+def _blank_exposure_cohort() -> dict:
+    """Integer accumulators for one exposure cohort (paired across batches)."""
+    return {
+        "n": 0,
+        "n_correct": 0,
+        "n_value_swap": 0,
+        "n_value_correct": 0,
+        "n_value_follow": 0,
+        "n_value_stubborn": 0,
+        "n_distractor_correct": 0,
+        "n_relocation_correct": 0,
+    }
+
+
+def _association_exposure_accumulate(totals, idx, meta, vocab, reference,
+                                     pred, answer, swap_pred=None,
+                                     swap_answer=None, distractor_pred=None,
+                                     relocation_pred=None) -> None:
+    """Add one batch to the exposure-stratified clean/probe counters.
+
+    The cohort label is fixed by the *training* stream (was this exact
+    query key-value pair realized there?), never by the model's answer, so
+    the comparison is a pre-treatment stratification.  Per-item correctness
+    and the counterfactual value-swap outcomes are accumulated separately
+    for seen and unseen pairs; no rate is formed until every batch has been
+    added, so a zero-row cohort abstains instead of contributing 0.
+    """
+    codes = association_codes(idx, meta, vocab)["code"].tolist()
+    if not isinstance(reference, frozenset):
+        reference = association_reference_codes(reference)
+    seen = torch.tensor([int(code) in reference for code in codes],
+                        dtype=torch.bool, device=pred.device)
+    if seen.numel() != pred.numel():
+        raise ValueError(
+            "association exposure has "
+            f"{int(seen.numel())} entries for {int(pred.numel())} rows")
+    correct = pred.eq(answer)
+    for name, mask in (("seen", seen), ("unseen", ~seen)):
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        entry = totals.setdefault(name, _blank_exposure_cohort())
+        entry["n"] += n
+        entry["n_correct"] += int(correct[mask].sum())
+        if swap_pred is not None:
+            if swap_answer is None:
+                raise ValueError(
+                    "swap_answer is required when swap_pred is provided")
+            swap_correct = swap_pred.eq(swap_answer)
+            entry["n_value_swap"] += n
+            entry["n_value_correct"] += int(swap_correct[mask].sum())
+            entry["n_value_follow"] += int(
+                (correct & swap_correct)[mask].sum())
+            entry["n_value_stubborn"] += int(
+                (correct & swap_pred.eq(answer))[mask].sum())
+        if distractor_pred is not None:
+            entry["n_distractor_correct"] += int(
+                distractor_pred.eq(answer)[mask].sum())
+        if relocation_pred is not None:
+            entry["n_relocation_correct"] += int(
+                relocation_pred.eq(answer)[mask].sum())
+
+
+def _association_exposure_summary(totals) -> dict:
+    """Rates and flat record fields for the exposure-stratified readout."""
+    def rate(num, den):
+        return float(num) / float(den) if den else float("nan")
+
+    def cohort(name):
+        entry = totals.get(name, _blank_exposure_cohort())
+        n = int(entry["n"])
+        n_correct = int(entry["n_correct"])
+        n_swap = int(entry["n_value_swap"])
+        return {
+            "n": n,
+            "n_correct": n_correct,
+            "accuracy": rate(n_correct, n),
+            "n_value_swappable": n_swap,
+            "n_value_correct": int(entry["n_value_correct"]),
+            "cf_value_accuracy": rate(entry["n_value_correct"], n_swap),
+            "n_value_follow": int(entry["n_value_follow"]),
+            "cf_value_follow_rate": rate(entry["n_value_follow"], n_correct),
+            "n_value_stubborn": int(entry["n_value_stubborn"]),
+            "cf_value_stubborn_rate": rate(
+                entry["n_value_stubborn"], n_correct),
+            "distractor_accuracy": rate(
+                entry["n_distractor_correct"], n_swap),
+            "relocation_accuracy": rate(
+                entry["n_relocation_correct"], n_swap),
+        }
+
+    seen, unseen = cohort("seen"), cohort("unseen")
+    n_items = seen["n"] + unseen["n"]
+    gap = (seen["accuracy"] - unseen["accuracy"]
+           if math.isfinite(seen["accuracy"])
+           and math.isfinite(unseen["accuracy"]) else float("nan"))
+    out = {
+        "definition": (
+            "exposure cohort = whether the exact evaluated (query key, "
+            "answer value) association was realized by a training stream"),
+        "reference": "training-stream association replay",
+        "n_items": n_items,
+        "n_seen": seen["n"],
+        "n_unseen": unseen["n"],
+        "seen_rate": rate(seen["n"], n_items),
+        "seen": seen,
+        "unseen": unseen,
+        "accuracy_gap_seen_minus_unseen": gap,
+        "note": (
+            "descriptive pre-treatment stratification, not a causal "
+            "contrast: items whose association occurred in training can in "
+            "principle be answered by memorisation, items whose exact pair "
+            "did not must be resolved from context.  Read the clean and "
+            "counterfactual accuracy together; a large seen-minus-unseen "
+            "gap with high clean but low value-swap accuracy is evidence "
+            "that clean accuracy is not purely in-context retrieval."),
+    }
+    out["flat"] = {
+        "assoc_exposure_n": int(n_items),
+        "assoc_exposure_n_seen": int(seen["n"]),
+        "assoc_exposure_n_unseen": int(unseen["n"]),
+        "assoc_exposure_seen_rate": out["seen_rate"],
+        "assoc_exposure_accuracy_seen": seen["accuracy"],
+        "assoc_exposure_accuracy_unseen": unseen["accuracy"],
+        "assoc_exposure_accuracy_gap": gap,
+        "assoc_exposure_cf_value_accuracy_seen": seen["cf_value_accuracy"],
+        "assoc_exposure_cf_value_accuracy_unseen": unseen["cf_value_accuracy"],
+        "assoc_exposure_cf_value_follow_rate_seen":
+            seen["cf_value_follow_rate"],
+        "assoc_exposure_cf_value_follow_rate_unseen":
+            unseen["cf_value_follow_rate"],
+    }
+    return out
+
+
 @torch.inference_mode()
 def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
-                 seed=VAL_SEED, topk=5):
+                 seed=VAL_SEED, topk=5, train_association_codes=None):
     """Full metric panel at the query position.
 
     Same evaluation protocol as ``eval_accuracy`` (eval mode restored
@@ -2515,6 +2652,17 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     separate in-context retrieval from memorisation, fixed-position copying
     and global edit sensitivity without drawing a second evaluation stream;
     see ``out['counterfactual']`` and the flat ``cf_*`` scalars.
+
+    ``train_association_codes`` optionally supplies the exact ``(key,
+    value)`` association codes realized by the *training* streams (from
+    :func:`cage.data.actual_stream_overlap_audit`).  When present, every
+    item is classified as "seen" (its exact association occurred in
+    training, so memorisation could answer it) or "unseen" (it could not),
+    and clean / value-swap accuracy is reported per cohort under
+    ``out['association_exposure']``.  The split is pre-treatment: it depends
+    only on the training data, never on the model's answer, so it can expose
+    an accuracy gain that is concentrated on memorisable pairs instead of
+    being attributed to in-context retrieval.
     """
     raw_batch, raw_batches = batch, batches
     batch = _positive_integer(raw_batch)
@@ -2534,12 +2682,15 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     # coverage by cells that can never be observed.
     n_key_bins = DEFAULT_DIFFICULTY_KEY_BINS
     n_realizable_key_bins = min(n_key_bins, max(1, int(n_pairs)))
+    reference_codes = (None if train_association_codes is None else
+                       association_reference_codes(train_association_codes))
     training_states = {module: module.training for module in model.modules()}
     try:
         model.eval()
         logits_all, tgt_all, strata_all = [], [], []
         digest_batches = []
         cf_totals = None
+        exposure_totals = {}
         for i in range(batches):
             idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
             validate_batch(idx, tgt, meta, vocab, diagnostics=False)
@@ -2557,13 +2708,14 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
             # edited contexts go through the same cleaning gate, so a probe
             # can never compare predictions on malformed data.
             edits = _counterfactual_edits(idx, meta, n_pairs, vocab)
+            pred = logits.squeeze(1).argmax(-1)
+            swap_pred = distractor_pred = relocation_pred = None
             if edits is not None:
                 validate_batch(edits["value_swap"], None,
                                edits["value_swap_meta"], vocab,
                                diagnostics=False)
                 swap_logits, _, _ = model(edits["value_swap"])
                 swap_pred = swap_logits.squeeze(1).argmax(-1)
-                distractor_pred = relocation_pred = None
                 if edits["distractor_swap"] is not None:
                     validate_batch(edits["distractor_swap"], None,
                                    edits["distractor_swap_meta"], vocab,
@@ -2577,7 +2729,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
                     relocation_logits, _, _ = model(edits["relocation"])
                     relocation_pred = relocation_logits.squeeze(1).argmax(-1)
                 counts = _counterfactual_counts(
-                    logits.squeeze(1).argmax(-1), meta["answer"], swap_pred,
+                    pred, meta["answer"], swap_pred,
                     edits["value_swap_answer"], distractor_pred,
                     relocation_pred)
                 if cf_totals is None:
@@ -2585,6 +2737,14 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
                 else:
                     for key in cf_totals:
                         cf_totals[key] += counts[key]
+            if reference_codes is not None:
+                _association_exposure_accumulate(
+                    exposure_totals, idx, meta, vocab, reference_codes,
+                    pred, meta["answer"], swap_pred=swap_pred,
+                    swap_answer=(None if edits is None
+                                 else edits["value_swap_answer"]),
+                    distractor_pred=distractor_pred,
+                    relocation_pred=relocation_pred)
         if logits_all:
             logits_cat = torch.cat(logits_all, dim=0).cpu()
             tgt_cat = torch.cat(tgt_all, dim=0).cpu()
@@ -2675,6 +2835,10 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         cf_summary = _counterfactual_summary(cf_totals or {})
         out["counterfactual"] = cf_summary
         out.update(cf_summary["flat"])
+        if reference_codes is not None:
+            exposure = _association_exposure_summary(exposure_totals)
+            out["association_exposure"] = exposure
+            out.update(exposure["flat"])
         return out
     finally:
         for module, training in training_states.items():

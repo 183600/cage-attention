@@ -8465,17 +8465,33 @@ def _reproducibility_audit(settings: Settings) -> dict:
     seed_everything(other)
     init_other = _model_state_hash(build(cfg, compile=False))
 
+    def _same_metric_value(va, vb):
+        """Structural equality that treats NaN as a stable abstention.
+
+        Metric records carry nested blocks (e.g. the exposure cohorts) as
+        well as top-level floats.  A NaN inside such a block is the
+        documented "undefined at this sample size" value, so two replay
+        runs must compare equal there; plain ``==`` on a dict containing
+        NaN is always false and would make a deterministic evaluation look
+        irreproducible.
+        """
+        if isinstance(va, float) and isinstance(vb, float):
+            if math.isnan(va) and math.isnan(vb):
+                return True
+        if isinstance(va, Mapping) and isinstance(vb, Mapping):
+            return (va.keys() == vb.keys()
+                    and all(_same_metric_value(va[key], vb[key])
+                            for key in va))
+        if isinstance(va, (list, tuple)) and isinstance(vb, (list, tuple)):
+            return (len(va) == len(vb)
+                    and all(_same_metric_value(x, y)
+                            for x, y in zip(va, vb)))
+        return va == vb
+
     def _same_metrics(a, b):
         if a.keys() != b.keys():
             return False
-        for key in a:
-            va, vb = a[key], b[key]
-            if isinstance(va, float) and isinstance(vb, float):
-                if math.isnan(va) and math.isnan(vb):
-                    continue
-            if va != vb:
-                return False
-        return True
+        return all(_same_metric_value(a[key], b[key]) for key in a)
 
     def _eval_isolation():
         """Evaluation must neither consume the global RNG nor change modes.
@@ -8862,7 +8878,9 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
                        seed_info=seeding)
     metrics = eval_metrics(model, settings.n_pairs, settings.vocab,
                            settings.device, batch=settings.eval_batch,
-                           batches=settings.eval_batches, seed=eval_seed)
+                           batches=settings.eval_batches, seed=eval_seed,
+                           train_association_codes=getattr(
+                               settings, "_train_association_codes", None))
     return model, params, metrics, _curve_record(
         hist, early_stop_info, seeding), model_cfg
 
@@ -9358,11 +9376,22 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
                     "batches": settings.probe_eval_batches,
                     "group": "test",
                 },
-            })
+            },
+            include_train_association_codes=True)
+        # The code set is not JSON-serializable and can be large; keep it on
+        # the in-process Settings so exposure-stratified evaluation can use
+        # it, and persist only the aggregate exposure readout below.
+        settings._train_association_codes = frozenset(
+            actual.pop("train_association_codes", ()))
         audit["actual_stream_overlap"] = actual
         audit["max_actual_stream_overlap"] = actual["max_overlap"]
         audit["actual_stream_seed_collisions"] = actual[
             "cross_group_seed_collisions"]
+        audit["train_association_summary"] = actual[
+            "train_association_summary"]
+        audit["association_exposure"] = actual["association_exposure"]
+        audit["max_heldout_pair_exposure"] = actual[
+            "max_heldout_pair_exposure"]
         # Training-stationarity diagnostic (train-only halves): reported and
         # BH-adjusted across its own family, but it warns rather than blocks,
         # because a drifting training stream is a property to disclose, not
@@ -9459,6 +9488,21 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
         print(f"[{tag}] split audit (HB3, train seeds {list(train_seeds)}): "
               f"deterministic result reused; hb3_supported="
               f"{audit['hb3_supported']}")
+    exposure = audit.get("association_exposure") or {}
+    if exposure:
+        train_assoc = audit.get("train_association_summary") or {}
+        cells = ", ".join(
+            f"{name}={row['pair_seen_train_rate']:.4f} "
+            f"(key_seen={row['key_seen_train_rate']:.4f})"
+            for name, row in sorted(exposure.items()))
+        print(f"[{tag}] association exposure (exact query key-value pair "
+              f"seen in a training stream): {cells}; training pair-space "
+              f"coverage={train_assoc.get('pair_space_coverage', float('nan')):.4f} "
+              f"({train_assoc.get('n_unique_pairs', 0)}/"
+              f"{train_assoc.get('n_possible_pairs', 0)} possible pairs). "
+              f"This is a memorisation-opportunity disclosure, not a "
+              f"leakage verdict; exposure-stratified accuracy is stamped "
+              f"on every metric record.")
     if rejected:
         print(f"[{tag}] WARNING: calibrated shift test rejects "
               f"{', '.join(rejected)}: held-out counts differ from the "
@@ -13676,7 +13720,9 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                 long_metrics = eval_metrics(
                     model, lengths[-1], settings.vocab, settings.device,
                     batch=settings.eval_batch,
-                    batches=settings.eval_batches, seed=TEST_SEED)
+                    batches=settings.eval_batches, seed=TEST_SEED,
+                    train_association_codes=getattr(
+                        settings, "_train_association_codes", None))
                 rec = {
                     "experiment": "e2_per_variant_tuning",
                     "hypotheses": ["H2a", "H2d"],
@@ -13975,7 +14021,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                                     settings.device,
                                     batch=settings.eval_batch,
                                     batches=settings.eval_batches,
-                                    seed=eval_seed))
+                                    seed=eval_seed,
+                                    train_association_codes=getattr(
+                                        settings,
+                                        "_train_association_codes", None)))
             want_errors = length == lengths[-1]
             # Only the last length also collects the error-mining
             # record.
