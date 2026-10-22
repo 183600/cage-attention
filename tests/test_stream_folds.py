@@ -248,6 +248,21 @@ class PairedStreamDigestTest(unittest.TestCase):
         self.assertTrue(out["digest_verified"])
         self.assertEqual(out["stream_digest"], "ABC123")
 
+    def test_malformed_run_record_abstains(self):
+        a = [[1] * 16]
+        b = [[0] * 16]
+        by_a, by_b = self._records(a, b)
+        out = _paired_stream_test({0: "bad-record"}, by_b, [0],
+                                  "accuracy", 1.0)
+        self.assertFalse(out["applicable"])
+        self.assertIn("malformed", out["reason"])
+        out = _paired_stream_test(by_a, {0: None}, [0], "accuracy", 1.0)
+        self.assertFalse(out["applicable"])
+        self.assertIn("missing", out["reason"])
+        out = _paired_stream_test([], {}, [0], "accuracy", 1.0)
+        self.assertFalse(out["applicable"])
+        self.assertIn("mapping", out["reason"])
+
     def test_non_accuracy_metric_still_abstains(self):
         a = [[1] * 16]
         b = [[0] * 16]

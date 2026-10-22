@@ -149,6 +149,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from collections.abc import Mapping
 import hashlib
 import io
 import json
@@ -2745,6 +2746,10 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
     if metric != "accuracy":
         out["reason"] = "only accuracy stores per-item correctness"
         return out
+    if not isinstance(by_a, Mapping) or not isinstance(by_b, Mapping):
+        out["reason"] = (
+            "paired run records must be mappings keyed by training seed")
+        return out
     masks_a, masks_b, ns = [], [], []
     digests_a, digests_b = set(), set()
     digest_pairs_present = 0
@@ -2752,6 +2757,11 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
         ra, rb = by_a.get(seed), by_b.get(seed)
         if ra is None or rb is None:
             out["reason"] = f"missing run for seed {seed}"
+            return out
+        if not isinstance(ra, Mapping) or not isinstance(rb, Mapping):
+            out["reason"] = (
+                f"malformed run record for seed {seed}: expected a mapping, "
+                f"got {type(ra).__name__} / {type(rb).__name__}")
             return out
         ea, eb = ra.get("correct_bitmask"), rb.get("correct_bitmask")
         na = _positive_integer(ra.get("n", ra.get("eval_n")))
