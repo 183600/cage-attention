@@ -7000,14 +7000,18 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
     table = []
     for train_steps in step_candidates:
         for lr in settings.lr_grid:
-            accs, verdicts = [], []
+            accs, verdicts, tuning_runs = [], [], []
             for seed in tune_seeds:
-                _, _, metrics, curve, _ = _train_and_eval(
+                _, params, metrics, curve, _ = _train_and_eval(
                     settings, seed, lr, eval_seed=VAL_SEED, selection=True,
                     steps=train_steps, gate="none", n_layers=1,
                     d_model=wide_d)
                 accs.append(metrics["accuracy"])
                 verdicts.append(curve["curve_verdict"])
+                tuning_runs.append({
+                    "seed": int(seed), "params": int(params),
+                    "val_accuracy": metrics["accuracy"],
+                    "eval_seed": int(VAL_SEED), "curve": curve})
             mean = sum(accs) / len(accs)
             std = ((sum((a - mean) ** 2 for a in accs)
                     / (len(accs) - 1)) ** 0.5 if len(accs) > 1 else 0.0)
@@ -7017,7 +7021,8 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
                           "curve_verdicts": verdicts,
                           "curve_invalid_runs": sum(
                               v in CURVE_INVALID_VERDICTS
-                              for v in verdicts)})
+                              for v in verdicts),
+                          "runs": tuning_runs})
     finite = [row for row in table if _finite(row["val_accuracy_mean"])]
     base.update({"tuning_table": table})
     if not finite:
