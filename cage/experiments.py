@@ -216,8 +216,8 @@ from .train import (
 
 HYPO_IDS = ("HB0", "HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7",
             "H1a", "H1b",
-            "H1c", "H1d", "H1e", "H1f", "H2a", "H2b", "H2c", "H2d", "H2e",
-            "H2f", "H3a", "H3b", "H3c")
+            "H1c", "H1d", "H1e", "H1f", "H1g", "H2a", "H2b", "H2c", "H2d",
+            "H2e", "H2f", "H3a", "H3b", "H3c")
 
 # Every hypothesis entry may carry ``"sesoi"``: the smallest effect size of
 # interest per metric (same metric keys as the pre-registered contrasts).
@@ -632,6 +632,39 @@ HYPOTHESES = {
                   "abs_gate_vs_entropy": 0.05},
         "direction": {"accuracy": "+", "gate_margin": "+",
                       "abs_gate_vs_entropy": "+"},
+    },
+    "H1g": {
+        "experiment": "e1",
+        "question": "Is the variant difference in attention-distribution use "
+                    "visible at the correlation level itself: calib's gate "
+                    "is associated with entropy / max-prob, while the "
+                    "query-only gate is not strongly associated?",
+        "hypothesis": "H1a tests that calib's |r| is larger than query's.  "
+                      "A difference of two near-zero associations would not "
+                      "show that calib reads the distribution, and "
+                      "'query not significant' would not show that it does "
+                      "not.  This correlation-level claim makes both halves "
+                      "falsifiable: calib's one-sample |r| must clear a "
+                      "practical floor, and query's must lie inside a "
+                      "pre-registered near-zero band.",
+        "prediction": "calib |r|(gate, entropy) and |r|(gate, max-prob) > 0 "
+                      "by at least the SESOI; query's two |r| values lie "
+                      "inside the equivalence bound 0.10",
+        "decision": "one-sample bootstrap 95% CIs through the same "
+                    "Benjamini-Hochberg E1 family (q=0.05): calib rows are "
+                    "directional (CI excludes 0 and effect >= SESOI), query "
+                    "rows are bootstrap-TOST equivalence tests (CI inside "
+                    "+-bound).  A query CI that merely includes 0 while "
+                    "spanning the bound is 'not established', not evidence "
+                    "of no association",
+        "sesoi": {"calib_abs_gate_vs_entropy": 0.05,
+                  "calib_abs_gate_vs_maxprob": 0.05,
+                  "query_abs_gate_vs_entropy": 0.10,
+                  "query_abs_gate_vs_maxprob": 0.10},
+        "direction": {"calib_abs_gate_vs_entropy": "+",
+                      "calib_abs_gate_vs_maxprob": "+"},
+        "sesoi_test": {"query_abs_gate_vs_entropy": "equivalence",
+                       "query_abs_gate_vs_maxprob": "equivalence"},
     },
     "H2a": {
         "experiment": "e2",
@@ -8840,7 +8873,8 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
                     if gate in ("query", "calib") else None)
     rec = {
         "experiment": "e1",
-        "hypotheses": ["H1a", "H1b", "H1c", "H1d", "H1e", "H1f"],
+        "hypotheses": ["H1a", "H1b", "H1c", "H1d", "H1e", "H1f",
+                        "H1g"],
         "gate": gate, "seed": seed, "lr": lr,
         "eval_seed": eval_seed, "stats_seed": stats_seed,
         "params": params, "model_cfg": model_cfg,
@@ -8858,6 +8892,19 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
         rec["abs_gate_vs_entropy"] = abs(rec["gate_vs_entropy"])
     if _finite(rec.get("gate_vs_maxprob")):
         rec["abs_gate_vs_maxprob"] = abs(rec["gate_vs_maxprob"])
+    # H1g reads the correlation-level claim per arm with separate metric
+    # keys, so a calib one-sample row and a query equivalence row cannot
+    # inherit each other's direction/bound through the shared display key.
+    if gate == "calib":
+        if _finite(rec.get("abs_gate_vs_entropy")):
+            rec["calib_abs_gate_vs_entropy"] = rec["abs_gate_vs_entropy"]
+        if _finite(rec.get("abs_gate_vs_maxprob")):
+            rec["calib_abs_gate_vs_maxprob"] = rec["abs_gate_vs_maxprob"]
+    elif gate == "query":
+        if _finite(rec.get("abs_gate_vs_entropy")):
+            rec["query_abs_gate_vs_entropy"] = rec["abs_gate_vs_entropy"]
+        if _finite(rec.get("abs_gate_vs_maxprob")):
+            rec["query_abs_gate_vs_maxprob"] = rec["abs_gate_vs_maxprob"]
     if _finite(fc.get("gate_on_correct")) and \
             _finite(fc.get("gate_on_false_conc")):
         rec["gate_margin"] = fc["gate_on_correct"] - fc["gate_on_false_conc"]
@@ -8941,7 +8988,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
 
 
 def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("H1a", "H1b", "H1c", "H1d", "H1e", "H1f"))
+    _announce(("H1a", "H1b", "H1c", "H1d", "H1e", "H1f", "H1g"))
     # HB1/HB3/HB4/HB5 hard gate: the baselines verdict must exist, be
     # current for this exact protocol and pass, before any grid trains
     # (their pre-registered semantics invalidate everything above them;
@@ -9890,7 +9937,8 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"so no contrast below may be read as a mechanism statement")
     print("\n[e1] pre-registered contrasts (calib vs query/none):")
     clog = ContrastLog("e1",
-                       hypotheses=("H1a", "H1b", "H1c", "H1d", "H1e", "H1f"),
+                       hypotheses=("H1a", "H1b", "H1c", "H1d", "H1e", "H1f",
+                                      "H1g"),
                        min_seeds=settings.min_seeds_for_claim,
                        competence=competence,
                        coverage=(ablation_coverage, design_coverage),
@@ -9931,6 +9979,27 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                             "abs_gate_vs_maxprob"),
                warn=_curve_warn(("calib", by_gate["calib"]),
                                 ("query", by_gate["query"])))
+    # H1g: the correlation-level halves of the same variant difference.
+    # A calib-vs-query difference of two near-zero associations would not
+    # show that calib reads the distribution; "query not significant" would
+    # not show that it does not.  Calib rows are one-sample directional
+    # tests, query rows are pre-registered equivalence (TOST) tests.
+    for metric, label in (
+        ("calib_abs_gate_vs_entropy", "entropy"),
+        ("calib_abs_gate_vs_maxprob", "max-prob"),
+    ):
+        clog.print(f"calib |r| {label} vs 0", "H1g", metric,
+                   _one_sample_contrast(by_gate["calib"], metric),
+                   warn=_curve_warn(("calib", by_gate["calib"])))
+    for metric, label in (
+        ("query_abs_gate_vs_entropy", "entropy"),
+        ("query_abs_gate_vs_maxprob", "max-prob"),
+    ):
+        bound = float(HYPOTHESES["H1g"]["sesoi"][metric])
+        clog.print_equivalence_ci(
+            f"query |r| {label} within {bound:g}", "H1g", metric,
+            _one_sample_contrast(by_gate["query"], metric, bound=bound),
+            warn=_curve_warn(("query", by_gate["query"])))
     clog.print("calib - query", "H1b", "gate_margin",
                _paired_diff(by_gate["calib"], by_gate["query"],
                             "gate_margin"),
