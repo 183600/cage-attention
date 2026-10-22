@@ -11535,10 +11535,12 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     # it adds no runs or grid points: it asks *which* term moves with length,
     # the explicit mechanism H2b/H2c is about.
     print(f"\n[e2] implied calibration-term contributions at the base and "
-          f"longest sweep lengths (a*log T and c_eff*H/log T, using the "
-          f"trained coefficients; mean±std over seeds).  A length term that "
-          f"is on should show a non-zero drift a*(log T_long - log T_base); "
-          f"a stable concentration term drifts only with H/log T:")
+          f"longest sweep lengths (a*log T and c_eff*S, using the trained "
+          f"coefficients; mean±std over seeds).  S is the concentration "
+          f"signal the arm actually reads: H/log T for the registered gate, "
+          f"raw H for the H2g raw-entropy arm.  A length term that is on "
+          f"should show a non-zero drift a*(log T_long - log T_base); a "
+          f"stable concentration term drifts only with its own signal:")
     print(f"{'arm':>16} {'length@base':>17} {'length@long':>17} "
           f"{'length_drift':>17} {'conc@base':>17} {'conc@long':>17} "
           f"{'conc_drift':>17}")
@@ -11556,8 +11558,17 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             base_L, long_L = settings.n_pairs, lengths[-1]
             log_base = math.log(max(2 * base_L + 2, 2))
             log_long = math.log(max(2 * long_L + 2, 2))
-            h_base = r["entropy_norm_by_length"][base_L]
-            h_long = r["entropy_norm_by_length"][long_L]
+            # The H2g arm reads raw row-mean entropy, not H/log T.  Using
+            # the normalised series for it would understate the trained
+            # concentration contribution by log T (and describe a gate that
+            # was not the one trained), so select the signal per arm from
+            # the resolved coefficient readout.
+            if coeff.get("concentration_signal") == "H":
+                h_base = r["entropy_by_length"][base_L]
+                h_long = r["entropy_by_length"][long_L]
+            else:
+                h_base = r["entropy_norm_by_length"][base_L]
+                h_long = r["entropy_norm_by_length"][long_L]
             per_run.append({
                 "length_base": a * log_base if _finite(a) else float("nan"),
                 "length_long": a * log_long if _finite(a) else float("nan"),
