@@ -8585,6 +8585,8 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
             supported = bool(
                 _finite(ci.get("lo")) and _finite(ci.get("hi"))
                 and (ci["lo"] > 0.0 or ci["hi"] < 0.0))
+            measured = bool(int(ci.get("n") or 0) > 0
+                            and _finite(ci.get("mean")))
             row = {
                 "rule": rule, "metric": metric, "lr": float(alt_lr),
                 "reference_lr": reference_lr,
@@ -8598,10 +8600,11 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
                 "controlled": audit.get("controlled"),
                 "control_mismatches": audit.get("mismatches"),
                 "capacity": audit.get("capacity"),
+                "measured": measured,
                 "ci_excludes_zero": supported,
             }
             rows.append(row)
-            if _finite(ci.get("mean")):
+            if measured:
                 stability.append(float(ci["mean"]))
             print(f"{rule:>24} {metric:>24} {alt_lr:>10g} "
                   f"{_fmt_ci(ci):>28} "
@@ -8613,12 +8616,14 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
             sign_flip = has_pos and has_neg
             same_sign = (not sign_flip) and (has_pos or has_neg) \
                 and not has_zero
+            measured_rows = [
+                row for row in rows
+                if row["rule"] == rule and row["metric"] == metric
+                and row.get("measured")]
             all_exclude = all(
-                row["ci_excludes_zero"] for row in rows
-                if row["rule"] == rule and row["metric"] == metric)
+                row["ci_excludes_zero"] for row in measured_rows)
             any_exclude = any(
-                row["ci_excludes_zero"] for row in rows
-                if row["rule"] == rule and row["metric"] == metric)
+                row["ci_excludes_zero"] for row in measured_rows)
             if sign_flip:
                 verdict = ("SIGN FLIP across learning rates: the effect is "
                            "recipe-specific")
