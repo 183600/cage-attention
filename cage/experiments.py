@@ -3760,12 +3760,14 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
         if math.isfinite(var_best) and math.isfinite(var_second) \
         else float("nan")
     within_noise = None
-    if math.isfinite(margin_se):
-        # An exact tie has no winner even when both rows happen to have
-        # zero seed variance; ``margin < margin_se`` would call that
-        # resolved (0 < 0 is false) and stamp the arbitrary argmax as
-        # reliable.
-        within_noise = bool(margin <= 0.0 or margin < margin_se)
+    if margin <= 0.0:
+        # An exact tie has no winner even when no seed-variance estimate is
+        # available (e.g. one run per row): ``margin < margin_se`` would
+        # call that resolved (0 < 0 is false) and stamp the arbitrary argmax
+        # as reliable.
+        within_noise = True
+    elif math.isfinite(margin_se):
+        within_noise = bool(margin < margin_se)
 
     curve_invalid_best = None
     verdicts = r_best.get(curve_key)

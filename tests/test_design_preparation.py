@@ -189,6 +189,15 @@ class DesignPlanTest(unittest.TestCase):
             "equivalence", 0.0, 0.01, 50, 0.05, bound=0.01)
         self.assertGreater(equiv, 0.5)
 
+    def test_exact_selection_tie_is_unresolved_without_an_se(self):
+        from cage.experiments import _selection_reliability
+
+        rows = [{"val_accuracy_mean": 0.5, "val_accuracy_std": 0.0,
+                 "n_seeds": 1} for _ in range(3)]
+        audit = _selection_reliability(rows)
+        self.assertIs(audit["within_noise"], True)
+        self.assertIs(audit["reliable"], False)
+
     def test_settings_reject_invalid_design_fields(self):
         with self.assertRaises(ValueError):
             Settings(design_alpha=0.0)
