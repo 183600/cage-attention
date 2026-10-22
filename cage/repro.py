@@ -93,7 +93,11 @@ def configure_determinism(deterministic: bool) -> dict:
     resolved value is reported and recorded rather than pretending the
     environment was restored.
     """
-    deterministic = bool(deterministic)
+    if not isinstance(deterministic, bool):
+        raise ValueError(
+            f"deterministic must be a bool, got {deterministic!r}: a truthy "
+            f"string such as 'False' would silently request deterministic "
+            f"kernels and TF32 suppression")
     if deterministic:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     try:
