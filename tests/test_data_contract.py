@@ -36,6 +36,29 @@ class UniformityInputTest(unittest.TestCase):
             answer_uniformity_test(torch.tensor([True, False]))
 
 
+class AuditCountInputTest(unittest.TestCase):
+    def test_boolean_counts_are_not_silently_cast_to_categories(self):
+        from cage.data import _counts, _distribution_shift_p
+
+        for values in (torch.tensor([True, False]),
+                       [True, False, True]):
+            with self.subTest(values=values):
+                with self.assertRaises(ValueError):
+                    _counts(values, 2)
+                with self.assertRaises(ValueError):
+                    _distribution_shift_p(values, torch.tensor([1, 1]))
+
+    def test_malformed_shift_count_containers_raise_value_error(self):
+        from cage.data import _distribution_shift_p
+
+        for bad in (None, "x", object()):
+            with self.subTest(bad=type(bad).__name__):
+                with self.assertRaises(ValueError):
+                    _distribution_shift_p(bad, torch.tensor([1, 1]))
+                with self.assertRaises(ValueError):
+                    _distribution_shift_p(torch.tensor([1, 1]), bad)
+
+
 class SplitAuditInputTest(unittest.TestCase):
     def test_non_iterable_train_seeds_raise_value_error(self):
         from cage.data import split_leakage_audit

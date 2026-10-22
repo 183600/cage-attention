@@ -1931,11 +1931,22 @@ def _counts(values, n_categories):
     if n_categories < 0:
         raise ValueError(
             f"n_categories must be non-negative, got {n_categories}")
-    raw = values.reshape(-1)
+    try:
+        raw = torch.as_tensor(values)
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+        raise ValueError(
+            "audit values must be a real numeric vector, got "
+            f"{type(values).__name__}") from exc
+    raw = raw.reshape(-1)
     # ``Tensor.to(long)`` silently discards the imaginary part (with only a
     # warning), which would fabricate a count the caller never supplied.
     if raw.is_complex():
         raise ValueError("audit values must be real integers")
+    # A boolean is a flag, not a category id: casting it to long would
+    # silently turn ``[True, False]`` into the categories 1 and 0 and
+    # fabricate counts the caller never supplied.
+    if raw.dtype == torch.bool:
+        raise ValueError("audit values must be integers, not booleans")
     if raw.is_floating_point() and not bool(raw.eq(raw.round()).all()):
         raise ValueError("audit values must be integers")
     flat = raw.to(torch.long).cpu()
@@ -2037,10 +2048,26 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
     ``python3 -m cage.data``: same-source draws are not flagged, a
     half-range split is).  Returns ``(nan, nan)`` for empty inputs.
     """
-    if observed.is_complex() or reference.is_complex():
-        raise ValueError("observed and reference counts must be real integers")
-    obs = observed.detach().cpu().reshape(-1).to(torch.float64)
-    ref = reference.detach().cpu().reshape(-1).to(torch.float64)
+    def _as_count_vector(values, name):
+        try:
+            raw = torch.as_tensor(values)
+        except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+            raise ValueError(
+                f"{name} counts must be a real numeric vector, got "
+                f"{type(values).__name__}") from exc
+        if raw.is_complex():
+            raise ValueError(f"{name} counts must be real integers")
+        if raw.dtype == torch.bool:
+            raise ValueError(
+                f"{name} counts must be integers, not booleans")
+        try:
+            return raw.detach().cpu().reshape(-1).to(torch.float64)
+        except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+            raise ValueError(
+                f"{name} counts must be a real numeric vector") from exc
+
+    obs = _as_count_vector(observed, "observed")
+    ref = _as_count_vector(reference, "reference")
     if obs.numel() != ref.numel():
         raise ValueError(
             f"observed and reference count vectors must have the same "
