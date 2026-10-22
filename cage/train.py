@@ -2448,7 +2448,8 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
         return t[torch.isfinite(t)]
 
     alpha = _float_or_nan(alpha)
-    a, b = _flat(a), _flat(b)
+    a = _flat(a)
+    b = _flat(b).to(a.device)
     n_a, n_b = a.numel(), b.numel()
     observed = float(a.mean() - b.mean()) if n_a and n_b else float("nan")
     if n_a == 0 or n_b == 0 or not _bootstrap_args_ok(n_boot, alpha):
@@ -2463,7 +2464,7 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
     idx_a = torch.randint(0, n_a, (n_boot, n_a), generator=gen,
                           device=a.device)
     idx_b = torch.randint(0, n_b, (n_boot, n_b), generator=gen,
-                          device=b.device)
+                          device=a.device)
     boot = a[idx_a].mean(dim=1) - b[idx_b].mean(dim=1)
     lo = float(torch.quantile(boot, alpha / 2.0))
     hi = float(torch.quantile(boot, 1.0 - alpha / 2.0))
@@ -2475,11 +2476,24 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
     var_b = float(b.var(unbiased=True)) if n_b > 1 else float("nan")
     sd_a = math.sqrt(var_a) if math.isfinite(var_a) else float("nan")
     sd_b = math.sqrt(var_b) if math.isfinite(var_b) else float("nan")
+    # A group with one observation contributes no within-group variance,
+    # but the pooled variance is still estimable from the other group
+    # (its (n-1) term is zero).  Treating that one group as NaN threw away
+    # the estimable pooled SD/SE; only the degenerate n_a=n_b=1 case has no
+    # variance information at all.
+    var_a_pool = var_a if n_a > 1 else 0.0
+    var_b_pool = var_b if n_b > 1 else 0.0
     df = n_a + n_b - 2
-    sd = (math.sqrt(((n_a - 1) * var_a + (n_b - 1) * var_b) / df)
-          if df > 0 else float("nan"))
-    se = (math.sqrt(var_a / n_a + var_b / n_b)
-          if n_a > 1 and n_b > 1 else float("nan"))
+    pooled_var = (((n_a - 1) * var_a_pool
+                   + (n_b - 1) * var_b_pool) / df
+                  if df > 0 else float("nan"))
+    sd = math.sqrt(pooled_var) if math.isfinite(pooled_var) else float("nan")
+    if n_a > 1 and n_b > 1:
+        se = math.sqrt(var_a / n_a + var_b / n_b)
+    elif math.isfinite(pooled_var):
+        se = math.sqrt(pooled_var * (1.0 / n_a + 1.0 / n_b))
+    else:
+        se = float("nan")
     return {
         "mean": observed,
         "lo": lo,
