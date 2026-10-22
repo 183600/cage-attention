@@ -97,7 +97,10 @@ def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
     if batches is None:
         raise ValueError(
             f"batches must be a positive integer, got {raw_batches!r}")
-    gen = torch.Generator(device=device).manual_seed(seed)
+    # Same canonical stream key as ``cage.repro.stream_generator`` and
+    # ``stream_fingerprint``: the baseline is scored on the exact
+    # realization the run record versions, for aliased seeds too.
+    gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
     extra = {}
@@ -276,7 +279,7 @@ def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
     if batches is None:
         raise ValueError(
             f"batches must be a positive integer, got {raw_batches!r}")
-    gen = torch.Generator(device=device).manual_seed(seed)
+    gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0
     for i in range(batches):

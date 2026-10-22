@@ -15,6 +15,7 @@ from .data import (
     batch_fingerprint,
     check_train_seed,
     make_batch,
+    stream_seed_key,
     validate_batch,
 )
 from .metrics import (
@@ -1200,7 +1201,7 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     last_batch = None
     first_bad_batch = None
     batch_losses = []
-    val_gen.manual_seed(VAL_SEED)
+    val_gen.manual_seed(stream_seed_key(VAL_SEED))
     for i in range(max(1, batches)):
         # Batch construction stays outside inference_mode so the returned
         # triage batch remains usable by a grad-enabled triage/backward.
@@ -1359,7 +1360,7 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     C, H = cfg.d_model, cfg.n_heads
     dk = C // H
     inv_scale = dk ** -0.5
-    gen = torch.Generator(device=device).manual_seed(seed)
+    gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     training_states = {module: module.training for module in model.modules()}
     model.eval()
 
@@ -1839,7 +1840,7 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     if batches is None:
         raise ValueError(
             f"batches must be a positive integer, got {raw_batches!r}")
-    gen = torch.Generator(device=device).manual_seed(seed)
+    gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     training_states = {module: module.training for module in model.modules()}
     model.eval()
     correct = torch.zeros((), dtype=torch.int64, device=device)
@@ -1933,7 +1934,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     if batches is None:
         raise ValueError(
             f"batches must be a positive integer, got {raw_batches!r}")
-    gen = torch.Generator(device=device).manual_seed(seed)
+    gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     training_states = {module: module.training for module in model.modules()}
     model.eval()
     logits_all, tgt_all = [], []

@@ -280,8 +280,11 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
     first.scatter_reduce_(0, inverse,
                           torch.arange(n, dtype=torch.long), reduce="amin")
     order = torch.argsort(first)
+    # Canonicalise exactly like the data-stream generators: a split assigned
+    # under an aliased seed must be the same split, never a different one.
     perm = order[torch.randperm(
-        n_groups, generator=torch.Generator().manual_seed(int(seed)))]
+        n_groups,
+        generator=torch.Generator().manual_seed(stream_seed_key(seed)))]
     counts = torch.bincount(inverse, minlength=n_groups).to(torch.float64)
     cuts = (float(train_frac) * n, float(train_frac + val_frac) * n)
     assigned = {"train": [], "val": [], "test": []}
@@ -2052,6 +2055,9 @@ def _self_test() -> int:
     g_split_again = group_disjoint_split(groups, seed=3)
     check("group_split_deterministic",
           all(torch.equal(g_split[k], g_split_again[k]) for k in g_split))
+    g_split_alias = group_disjoint_split(groups, seed=3 + 2 ** 32)
+    check("group_split_seed_alias_canonical",
+          all(torch.equal(g_split[k], g_split_alias[k]) for k in g_split))
     try:
         assert_group_disjoint(
             groups, {"train": torch.arange(0, 100),
