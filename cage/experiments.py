@@ -1595,6 +1595,15 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
     if not masks_a:
         out["reason"] = "no paired seeds"
         return out
+    if len(set(ns)) != 1:
+        # Every training seed is scored on the same sealed stream, so one
+        # seed with a different item count is a protocol mismatch.  Pooling
+        # the masks would still concatenate, but the per-seed and pooled
+        # discordant tables would describe different samples.
+        out["reason"] = (
+            f"evaluation item counts differ across paired seeds: "
+            f"{sorted(set(ns))}")
+        return out
     ca = torch.cat(masks_a)
     cb = torch.cat(masks_b)
     if ca.numel() != cb.numel() or ca.numel() == 0:
