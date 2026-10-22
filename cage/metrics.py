@@ -103,6 +103,7 @@ from __future__ import annotations
 
 import math
 import operator
+from collections.abc import Mapping
 from statistics import NormalDist
 
 import torch
@@ -1781,8 +1782,20 @@ def benjamini_hochberg(p_values, q: float = 0.05) -> list:
     null.
     """
     # Materialize once: a one-shot iterable must not be consumed by the
-    # output scaffold and then silently read as an all-NaN family.
-    p_values = list(p_values)
+    # output scaffold and then silently read as an all-NaN family.  A bare
+    # string/bytes/mapping is iterable but names characters/keys/byte
+    # values, not p-values; a scalar has no family at all.  Reject these
+    # malformed containers instead of manufacturing a testable family.
+    if isinstance(p_values, (str, bytes)) or isinstance(p_values, Mapping):
+        raise ValueError(
+            "p_values must be an iterable of p-values, got "
+            f"{type(p_values).__name__}")
+    try:
+        p_values = list(p_values)
+    except TypeError as exc:
+        raise ValueError(
+            "p_values must be an iterable of p-values, got "
+            f"{type(p_values).__name__}") from exc
     out = [{"p": float("nan"), "p_adj": float("nan"), "reject": False}
            for _ in p_values]
     # The FDR level is a probability: a boolean (``True == 1.0``) or a

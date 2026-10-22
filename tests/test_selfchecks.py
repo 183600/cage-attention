@@ -151,6 +151,12 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertFalse(outside[1]["reject"])
         self.assertTrue(math.isnan(outside[1]["p"]))
         self.assertTrue(outside[2]["reject"])
+        # A string/bytes/mapping is iterable but does not name p-values;
+        # list() would silently turn it into characters/keys/byte values.
+        for bad in (0.1, "0.05", b"\x01", {"p": 0.05}, object()):
+            with self.subTest(p_values=bad):
+                with self.assertRaises(ValueError):
+                    metrics.benjamini_hochberg(bad)
 
     def test_out_of_range_selection_fraction_abstains(self):
         for frac in (-0.1, 1.5, float("inf")):
