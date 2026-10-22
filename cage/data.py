@@ -364,16 +364,17 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
 
     def _improve_once() -> bool:
         current = _objective()
+        base_masses = _masses()
         best = None
         for donor in split_names:
             if len(assigned[donor]) <= 1:
                 continue
             for gid in assigned[donor]:
+                mass = float(counts[gid])
                 for target in split_names:
                     if target == donor:
                         continue
-                    masses = _masses()
-                    mass = float(counts[gid])
+                    masses = dict(base_masses)
                     masses[donor] -= mass
                     masses[target] += mass
                     candidate = (_objective(masses), 0, donor, target,
@@ -384,10 +385,10 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
             for i, left in enumerate(split_names):
                 for right in split_names[i + 1:]:
                     for gid_left in assigned[left]:
+                        ml = float(counts[gid_left])
                         for gid_right in assigned[right]:
-                            masses = _masses()
-                            ml = float(counts[gid_left])
                             mr = float(counts[gid_right])
+                            masses = dict(base_masses)
                             masses[left] += mr - ml
                             masses[right] += ml - mr
                             candidate = (_objective(masses), 1, left, right,
