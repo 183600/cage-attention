@@ -150,6 +150,10 @@ class BootstrapOverflowTest(unittest.TestCase):
             self.assertFalse(out.get("noninferior", False))
             self.assertFalse(out.get("beyond_sesoi", False))
         self.assertTrue(math.isnan(bootstrap_upper_p(huge, 0.1, n_boot=200)))
+        rep = metrics.replication_interval(huge, direction="+")
+        self.assertFalse(rep["valid"])
+        self.assertTrue(math.isnan(rep["mean"]))
+        self.assertTrue(math.isnan(rep["lo"]))
         # Mixed signs overflow resampled sums even though the full-sample
         # mean is zero and the full-sample SD is finite.
         mixed = [-1e308, 1e308, 1e308, -1e308]

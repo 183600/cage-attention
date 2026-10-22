@@ -1624,8 +1624,13 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
     t_crit = _student_t_ppf(1.0 - alpha / 2.0, df)
     out.update({"valid": True, "n": n, "df": df, "mean": mean, "sd": sd,
                 "t_crit": t_crit})
-    if not (math.isfinite(t_crit) and math.isfinite(sd)):
-        out["reason"] = "t quantile or seed SD is not finite"
+    if not (math.isfinite(t_crit) and math.isfinite(sd)
+            and math.isfinite(mean)):
+        # Finite differences can still overflow their sum/SD.  Do not
+        # report an infinite replication mean next to NaN bounds.
+        out["mean"] = mean if math.isfinite(mean) else float("nan")
+        out["sd"] = sd if math.isfinite(sd) else float("nan")
+        out["reason"] = "t quantile, seed SD or sample mean is not finite"
         out["valid"] = False
         return out
     # A future same-size study's mean, and one individual future seed.
