@@ -6651,6 +6651,75 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
     elif hb4_state == "supported" and verdict.get("hb4_supported") is not True:
         failed.append(
             "HB4 (state says supported but the supported boolean is not true)")
+    # The held-out balance block is nested and its marks gate accuracy
+    # claims.  A malformed block must fail closed here rather than crash the
+    # runners later (``.get`` on a string/list) or be read as "not audited".
+    # Absence of the whole block remains the documented legacy case (None).
+    balance = verdict.get("eval_answer_balance")
+    balance_all_uniform = None
+    balance_streams = {}
+    e2_balance = {}
+    if balance is not None:
+        if not isinstance(balance, Mapping):
+            failed.append(
+                "eval_answer_balance (malformed: expected an object)")
+        else:
+            mark = balance.get("all_uniform")
+            if mark is not None and not isinstance(mark, bool):
+                failed.append(
+                    "eval_answer_balance.all_uniform (malformed: expected a "
+                    "boolean)")
+            else:
+                balance_all_uniform = mark
+            streams = balance.get("streams")
+            if streams is not None and not isinstance(streams, Mapping):
+                failed.append(
+                    "eval_answer_balance.streams (malformed: expected an "
+                    "object)")
+            elif isinstance(streams, Mapping):
+                balance_streams = streams
+                for label, row in streams.items():
+                    uniformity = (row.get("uniformity")
+                                  if isinstance(row, Mapping) else None)
+                    if not isinstance(uniformity, Mapping) or \
+                            not isinstance(
+                                uniformity.get("uniform_supported"), bool):
+                        failed.append(
+                            f"eval_answer_balance.streams[{label!r}] "
+                            f"(malformed: missing boolean uniformity mark)")
+            e2 = balance.get("e2_length_sweep")
+            if e2 is not None:
+                if not isinstance(e2, Mapping):
+                    failed.append(
+                        "eval_answer_balance.e2_length_sweep (malformed: "
+                        "expected an object)")
+                else:
+                    e2_balance = e2
+                    endpoint_mark = e2.get("endpoint_uniform")
+                    if endpoint_mark is not None and not isinstance(
+                            endpoint_mark, bool):
+                        failed.append(
+                            "eval_answer_balance.e2_length_sweep."
+                            "endpoint_uniform (malformed: expected a boolean)")
+                    e2_streams = e2.get("streams")
+                    if e2_streams is not None and not isinstance(
+                            e2_streams, Mapping):
+                        failed.append(
+                            "eval_answer_balance.e2_length_sweep.streams "
+                            "(malformed: expected an object)")
+                    elif isinstance(e2_streams, Mapping):
+                        for label, row in e2_streams.items():
+                            uniformity = (
+                                row.get("uniformity")
+                                if isinstance(row, Mapping) else None)
+                            if not isinstance(uniformity, Mapping) or \
+                                    not isinstance(
+                                        uniformity.get("uniform_supported"),
+                                        bool):
+                                failed.append(
+                                    "eval_answer_balance.e2_length_sweep."
+                                    f"streams[{label!r}] (malformed: "
+                                    "missing boolean uniformity mark)")
     if failed:
         raise BaselineVerdictError(
             f"{tag}: baseline validity gate(s) {', '.join(failed)} failed "
@@ -6675,9 +6744,9 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
         "saturation_depth": verdict.get("saturation_depth"),
         "ladder_competent": verdict.get("ladder_competent"),
         # Held-out-stream balance stamp: ``None`` on an older verdict that
-        # predates the audit, explicit bool otherwise.
-        "eval_answer_balance_all_uniform": (
-            verdict.get("eval_answer_balance") or {}).get("all_uniform"),
+        # predates the audit, explicit bool otherwise.  A malformed mark was
+        # rejected above, so this is either a real bool or the legacy None.
+        "eval_answer_balance_all_uniform": balance_all_uniform,
         "seed_floor": floor,
     }
     settings._baseline_validity = marks
@@ -6698,23 +6767,27 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
               f"displayed as provisional, and no seed-level claim may be "
               f"based on them")
     if marks["eval_answer_balance_all_uniform"] is False:
-        bad = [label for label, row in
-               ((verdict.get("eval_answer_balance") or {}).get("streams")
-                or {}).items()
-               if not row["uniformity"]["uniform_supported"]]
+        bad = [label for label, row in balance_streams.items()
+               if isinstance(row, Mapping)
+               and (row.get("uniformity") or {}).get(
+                   "uniform_supported") is False]
         print(f"[{tag}] WARNING: held-out answer balance failed on stream(s) "
               f"{', '.join(bad) or 'unknown'}: accuracy-based readings on "
               f"those streams are class-prior readings, so the F1/PR-AUC "
               f"companions carry the headline and the balance premise is "
               f"stamped as failed in the baseline validity marks")
-    e2_balance = ((verdict.get("eval_answer_balance") or {})
-                  .get("e2_length_sweep") or {})
     if e2_balance.get("endpoint_uniform") is False:
+        raw_endpoints = e2_balance.get("endpoint_lengths")
+        endpoints = (list(raw_endpoints)
+                     if isinstance(raw_endpoints, (list, tuple)) else [])
+        e2_streams = e2_balance.get("streams")
+        if not isinstance(e2_streams, Mapping):
+            e2_streams = {}
         bad_lengths = [
-            str(length) for length in (e2_balance.get("endpoint_lengths")
-                                       or [])
-            if not ((e2_balance.get("streams") or {}).get(str(length)) or {})
-            .get("uniformity", {}).get("uniform_supported")]
+            str(length) for length in endpoints
+            if (((e2_streams.get(str(length)) or {})
+                 .get("uniformity") or {})
+                .get("uniform_supported")) is not True]
         print(f"[{tag}] WARNING: E2 length-sweep endpoint balance failed at "
               f"length(s) {', '.join(bad_lengths) or 'unknown'}: accuracy at "
               f"the base/longest endpoints is a class-prior reading, so the "
