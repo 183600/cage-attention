@@ -123,6 +123,16 @@ class ContrastSeedFloorValidationTest(unittest.TestCase):
         self.assertEqual(log.min_seeds, 3)
         self.assertIsInstance(log.min_seeds, int)
 
+    def test_malformed_family_containers_are_rejected(self):
+        for kwargs in ({"hypotheses": 5}, {"hypotheses": b"\x01"},
+                       {"hypotheses": {"H1a": 1}},
+                       {"hypotheses": ("H1a",), "competence": []},
+                       {"hypotheses": ("H1a",), "coverage": "x"},
+                       {"hypotheses": ("H1a",), "coverage": [1]}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    ContrastLog("e1", **kwargs)
+
 
 class ContrastExactAuditTest(unittest.TestCase):
     @staticmethod

@@ -4986,7 +4986,24 @@ class ContrastLog:
                  competence: dict | None = None, coverage=(),
                  balance_ok: bool = True):
         self.tag = tag
-        self.hypotheses = tuple(hypotheses)
+        # A string/bytes/mapping is iterable but does not name hypothesis
+        # ids; a scalar is not iterable at all.  Reject the container
+        # rather than turning bytes into integer hypothesis ids.
+        if isinstance(hypotheses, (str, bytes)) \
+                or isinstance(hypotheses, Mapping):
+            raise ValueError(
+                "hypotheses must be an iterable of hypothesis ids, got "
+                f"{type(hypotheses).__name__}")
+        try:
+            self.hypotheses = tuple(hypotheses)
+        except TypeError as exc:
+            raise ValueError(
+                "hypotheses must be an iterable of hypothesis ids, got "
+                f"{type(hypotheses).__name__}") from exc
+        if competence is not None and not isinstance(competence, Mapping):
+            raise ValueError(
+                "competence must be a mapping or None, got "
+                f"{type(competence).__name__}")
         # The seed floor is a pre-registered decision rule.  Coercing a
         # bool/fractional/zero value with ``int`` would silently lower it
         # (``True`` -> 1, ``0`` -> 0) and make underpowered rows eligible.
@@ -5024,9 +5041,24 @@ class ContrastLog:
         # payload and an iterable of payloads are both accepted.
         if coverage is None:
             coverage = ()
-        elif isinstance(coverage, dict):
+        elif isinstance(coverage, Mapping):
             coverage = (coverage,)
-        self.coverage = tuple(coverage)
+        elif isinstance(coverage, (str, bytes)):
+            raise ValueError(
+                "coverage must be a mapping or an iterable of mappings, "
+                f"got {type(coverage).__name__}")
+        try:
+            self.coverage = tuple(coverage)
+        except TypeError as exc:
+            raise ValueError(
+                "coverage must be a mapping or an iterable of mappings, "
+                f"got {type(coverage).__name__}") from exc
+        malformed = [type(payload).__name__ for payload in self.coverage
+                     if not isinstance(payload, Mapping)]
+        if malformed:
+            raise ValueError(
+                "coverage entries must be mappings, got "
+                f"{sorted(set(malformed))}")
 
     def print(self, rule, hyp, metric, ci, warn="",
               direction_key=None) -> None:
