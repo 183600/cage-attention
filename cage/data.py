@@ -1669,6 +1669,24 @@ _AUDIT_FIELDS = ("token", "answer", "key", "value", "key_pos",
                  "value_repeats", "naive_confusable", "difficulty_joint")
 _AUDIT_DERIVED_FIELDS = ("key_pos", "value_repeats", "naive_confusable")
 
+def _audit_seed(value) -> int:
+    """Validate a Monte Carlo audit seed instead of silently truncating it.
+
+    ``torch.Generator.manual_seed`` raises an incidental ``RuntimeError`` for
+    bool/fractional seeds, and an ``int(seed)`` coercion would alias e.g.
+    ``0.5`` to stream 0.  Audit p-values are part of the reproducibility
+    contract, so every non-integral seed is translated into ``ValueError``
+    before a replicate is drawn.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"audit seed must be an integer, got {value!r}")
+    try:
+        return int(operator.index(value))
+    except TypeError as exc:
+        raise ValueError(
+            f"audit seed must be an integer, got {value!r}") from exc
+
+
 # Calibration of the distribution-shift check.  ``_AUDIT_SIM`` Monte Carlo
 # replicates set the p-value resolution to ``1 / (_AUDIT_SIM + 1)`` (500
 # replicates resolve the 0.0024 rank-one threshold of a 21-test
@@ -2096,7 +2114,7 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
     expected = n_h * probs
     chi2 = float((((obs - expected) ** 2) / expected).sum())
 
-    gen = torch.Generator().manual_seed(seed)
+    gen = torch.Generator().manual_seed(_audit_seed(seed))
     ref_sim = torch.poisson((n_ref * probs).expand(n_sim, k).contiguous(),
                             generator=gen)
     h_sim = torch.poisson((n_h * probs).expand(n_sim, k).contiguous(),
@@ -2324,7 +2342,7 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
         raise ValueError("answer counts must be integers, not booleans")
     if raw.is_complex():
         raise ValueError("answer counts must be real integers")
-    c = raw.to(torch.float64)
+    c = raw.detach().cpu().to(torch.float64)
     if not bool(torch.isfinite(c).all()):
         raise ValueError("answer counts contain NaN/Inf")
     if bool((c < 0).any()):
@@ -2350,7 +2368,7 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     n_sim = n_sim_int
     expected = n / k
     chi2 = float((((c - expected) ** 2) / expected).sum())
-    gen = torch.Generator().manual_seed(seed)
+    gen = torch.Generator().manual_seed(_audit_seed(seed))
     sim = torch.poisson(torch.full((n_sim, k), expected), generator=gen)
     chi2_sim = (((sim - expected) ** 2) / expected).sum(1)
     p_value = float((1.0 + (chi2_sim >= chi2).to(torch.float64).sum())

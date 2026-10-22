@@ -48,6 +48,19 @@ class AuditCountInputTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     _distribution_shift_p(values, torch.tensor([1, 1]))
 
+    def test_fractional_or_boolean_audit_seeds_are_rejected(self):
+        from cage.data import _distribution_shift_p, answer_uniformity_test
+
+        for seed in (True, 0.5, 1.0, "1", None, object()):
+            with self.subTest(seed=seed):
+                with self.assertRaises(ValueError):
+                    _distribution_shift_p(
+                        torch.tensor([10, 10]), torch.tensor([8, 12]),
+                        n_sim=10, seed=seed)
+                with self.assertRaises(ValueError):
+                    answer_uniformity_test(
+                        torch.tensor([10, 10]), n_sim=10, seed=seed)
+
     def test_malformed_shift_count_containers_raise_value_error(self):
         from cage.data import _distribution_shift_p
 
