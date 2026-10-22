@@ -4515,6 +4515,19 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
               f"those streams are class-prior readings, so the F1/PR-AUC "
               f"companions carry the headline and the balance premise is "
               f"stamped as failed in the baseline validity marks")
+    e2_balance = ((verdict.get("eval_answer_balance") or {})
+                  .get("e2_length_sweep") or {})
+    if e2_balance.get("endpoint_uniform") is False:
+        bad_lengths = [
+            str(length) for length in (e2_balance.get("endpoint_lengths")
+                                       or [])
+            if not ((e2_balance.get("streams") or {}).get(str(length)) or {})
+            .get("uniformity", {}).get("uniform_supported")]
+        print(f"[{tag}] WARNING: E2 length-sweep endpoint balance failed at "
+              f"length(s) {', '.join(bad_lengths) or 'unknown'}: accuracy at "
+              f"the base/longest endpoints is a class-prior reading, so the "
+              f"length-generalisation accuracy contrasts cannot support a "
+              f"claim")
     return verdict
 
 
@@ -5444,6 +5457,8 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seeds=None):
 # consumer's exact geometry and generator seed, so the tested sample is the
 # sample the models are scored on - a wider audit draw would test a
 # different prefix and could pass while the reported stream is skewed.
+# E2's longer sweep lengths are audited separately in
+# ``_eval_answer_balance`` because the stream realization depends on length.
 _EVAL_BALANCE_STREAMS = (
     ("val", VAL_SEED, "eval"),
     ("test", TEST_SEED, "eval"),
@@ -5472,21 +5487,20 @@ def _eval_answer_balance(settings: Settings) -> dict:
     caveat are the same as ``_answer_balance``; the per-stream
     ``expected_per_class`` is reported so a small quick-mode draw is not
     mistaken for a well-powered balance certificate.
+
+    E2 scores accuracy at every length in its sweep, so the TEST stream is
+    also audited at each sweep length (the stream realization depends on
+    the length).  The pre-registered E2 readouts use only the base and
+    longest endpoints; the serialized per-length rows make a mid-sweep
+    imbalance visible without letting an exploratory length gate the
+    endpoint decision.
     """
-    streams = {}
-    for label, seed, geometry in _EVAL_BALANCE_STREAMS:
+    def _audit_stream(seed, length, batch, batches):
         check_eval_seed(seed)
-        if geometry == "stats":
-            batch, batches = settings.stats_batch, settings.stats_batches
-        elif geometry == "probe":
-            batch, batches = (settings.probe_eval_batch,
-                              settings.probe_eval_batches)
-        else:
-            batch, batches = settings.eval_batch, settings.eval_batches
         gen = stream_generator(seed, settings.device)
         counts = torch.zeros(settings.vocab, dtype=torch.float64)
         for _ in range(max(0, int(batches))):
-            idx, targets, meta = make_batch(batch, settings.n_pairs,
+            idx, targets, meta = make_batch(batch, length,
                                             settings.vocab,
                                             settings.device, gen=gen)
             validate_batch(idx, targets, meta, settings.vocab,
@@ -5497,9 +5511,10 @@ def _eval_answer_balance(settings: Settings) -> dict:
         shares = counts[present] / counts.sum() if counts.sum() > 0 else \
             counts[present]
         uniformity = answer_uniformity_test(counts[2:])
-        streams[label] = {
+        return {
             "stream_seed": int(seed),
             "seed_key": stream_seed_key(seed),
+            "length": int(length),
             "batch": int(batch),
             "batches": int(batches),
             "n": int(counts.sum()),
@@ -5517,11 +5532,53 @@ def _eval_answer_balance(settings: Settings) -> dict:
                 "samples/class does not certify the absence of a small or "
                 "moderate skew"),
         }
+
+    streams = {}
+    for label, seed, geometry in _EVAL_BALANCE_STREAMS:
+        if geometry == "stats":
+            batch, batches = settings.stats_batch, settings.stats_batches
+        elif geometry == "probe":
+            batch, batches = (settings.probe_eval_batch,
+                              settings.probe_eval_batches)
+        else:
+            batch, batches = settings.eval_batch, settings.eval_batches
+        streams[label] = _audit_stream(seed, settings.n_pairs, batch, batches)
     all_uniform = all(row["uniformity"]["uniform_supported"]
                       for row in streams.values())
+
+    try:
+        e2_lengths = length_sweep_lengths(
+            base=settings.n_pairs, factor=2, n=4,
+            max_len=settings.max_len)
+    except ValueError as exc:
+        e2_sweep = {
+            "lengths": [], "streams": {}, "endpoint_lengths": [],
+            "endpoint_uniform": None, "all_uniform": None,
+            "error": str(exc),
+        }
+    else:
+        e2_streams = {}
+        for length in e2_lengths:
+            e2_streams[str(length)] = (
+                dict(streams["test"]) if length == settings.n_pairs else
+                _audit_stream(TEST_SEED, length, settings.eval_batch,
+                              settings.eval_batches))
+        endpoints = [settings.n_pairs, e2_lengths[-1]]
+        e2_sweep = {
+            "lengths": [int(L) for L in e2_lengths],
+            "streams": e2_streams,
+            "endpoint_lengths": [int(L) for L in endpoints],
+            "endpoint_uniform": bool(all(
+                e2_streams[str(L)]["uniformity"]["uniform_supported"]
+                for L in endpoints)),
+            "all_uniform": bool(all(
+                row["uniformity"]["uniform_supported"]
+                for row in e2_streams.values())),
+        }
     return {
         "streams": streams,
         "all_uniform": bool(all_uniform),
+        "e2_length_sweep": e2_sweep,
         "geometry": {
             "eval_batch": int(settings.eval_batch),
             "eval_batches": int(settings.eval_batches),
@@ -6749,6 +6806,28 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
               "pass the gross-imbalance test at the reported geometry "
               "(finite-stream test; see baselines_eval_balance.json for "
               "expected samples/class)")
+    e2_balance = eval_balance.get("e2_length_sweep") or {}
+    if e2_balance.get("lengths"):
+        cells = []
+        for length in e2_balance["lengths"]:
+            row = (e2_balance.get("streams") or {}).get(str(length)) or {}
+            ok = (row.get("uniformity") or {}).get("uniform_supported")
+            cells.append(f"L={length}:{'uniform' if ok else 'NOT uniform'}")
+        print("[baselines] E2 length-sweep answer balance (TEST stream at "
+              "each sweep length): " + ", ".join(cells))
+        if e2_balance.get("endpoint_uniform") is False:
+            bad_lengths = [
+                str(length) for length in e2_balance["endpoint_lengths"]
+                if not ((e2_balance.get("streams") or {})
+                        .get(str(length)) or {})
+                .get("uniformity", {}).get("uniform_supported")]
+            print("[baselines] WARNING: E2 length-sweep endpoint balance "
+                  f"failed at length(s) {', '.join(bad_lengths)}: the "
+                  "length-generalisation accuracy read is a class-prior "
+                  "reading on that endpoint")
+    elif e2_balance.get("error"):
+        print("[baselines] E2 length-sweep answer balance: not audited "
+              f"({e2_balance['error']})")
 
     # HB5 first: a broken training loop invalidates every learned number
     # below it (including the negative control).  The tiny batch is run
@@ -9050,13 +9129,17 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
               f"the training length; the grid did not demonstrably learn the "
               f"task at this step count, so no contrast below may be read as a "
               f"mechanism statement")
+    eval_balance = verdict.get("eval_answer_balance") or {}
+    e2_balance = eval_balance.get("e2_length_sweep") or {}
+    balance_ok = e2_balance.get("endpoint_uniform")
+    if balance_ok is None:
+        balance_ok = eval_balance.get("all_uniform")
     print("\n[e2] pre-registered contrasts:")
     clog = ContrastLog("e2", hypotheses=("H2a", "H2b", "H2c", "H2d", "H2e"),
                        min_seeds=settings.min_seeds_for_claim,
                        competence=competence,
                        coverage=(ablation_coverage, design_coverage),
-                       balance_ok=((verdict.get("eval_answer_balance") or {})
-                                   .get("all_uniform")))
+                       balance_ok=balance_ok)
     calib_runs = by_variant["calib"]
     calib_warn = _curve_warn(("calib", calib_runs))
     clog.print("calib - none", "H2a", "accuracy_at_longest",
