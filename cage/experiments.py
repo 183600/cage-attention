@@ -12988,8 +12988,10 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                 index[(gate, "pre", layer_scale)], "H3a"))
     metric_robustness = _class_frequency_companions(
         robustness_rules, "e3")
-    e3_summary = {f"{g}|{n}|{ls}": _aggregate_runs(rs)
-                  for (g, n, ls), rs in index.items()}
+    e3_summary = {
+        f"{g}|{n}|{'off' if ls is None else f'{ls:g}'}":
+            _aggregate_runs(rs)
+        for (g, n, ls), rs in index.items()}
     e3_summary["_capacity_matched_pre"] = capacity_benchmark
     e3_summary["_efficiency"] = efficiency
     e3_summary["_class_frequency_companions"] = metric_robustness
