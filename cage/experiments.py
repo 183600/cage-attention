@@ -503,7 +503,9 @@ HYPOTHESES = {
                       "must not fall below the no-gate ``none`` arm - a "
                       "significant accuracy loss would mean the null slot "
                       "buys its suppression by breaking recall.",
-        "prediction": "null_mass_error_margin > 0; and the null arm's "
+        "prediction": "null_mass_error_margin > 0 (and the same margin "
+                      "remains positive on the high-maxprob false-"
+                      "concentration subset); and the null arm's "
                       "accuracy relative to ``none`` stays inside the "
                       "pre-registered non-inferiority bound (null - none "
                       ">= -SESOI, i.e. the 95% CI of null - none lies above "
@@ -517,8 +519,10 @@ HYPOTHESES = {
                     "the registered bound (-accuracy SESOI), so a confidence "
                     "interval entirely below it refutes the claim rather than "
                     "being read as a null result",
-        "sesoi": {"null_mass_error_margin": 0.02, "accuracy": 0.01},
-        "direction": {"null_mass_error_margin": "+"},
+        "sesoi": {"null_mass_error_margin": 0.02,
+                  "null_mass_false_conc_margin": 0.02, "accuracy": 0.01},
+        "direction": {"null_mass_error_margin": "+",
+                      "null_mass_false_conc_margin": "+"},
         # The accuracy companion is a null/non-inferiority prediction: its
         # bound is the accuracy SESOI above, tested one-sided (CI above the
         # negative bound), not a directional superiority claim.
@@ -8877,6 +8881,19 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
                 rec["null_mass_error"] = float(mass[~corr].mean())
             if bool(corr.any()):
                 rec["null_mass_correct"] = float(mass[corr].mean())
+            # False-concentration subset: the H1c margin on the same
+            # high-maxprob rows used by H1b, so the null arm's suppression
+            # claim is testable where the gate claim is tested instead of
+            # only on the all-rows average (which mixes confident and
+            # unconfident errors).
+            high = stats["maxprob"].max(dim=1)[0] > 0.5
+            fc = high & ~corr
+            cc = high & corr
+            if bool(fc.any()) and bool(cc.any()):
+                rec["null_mass_false_conc_error"] = float(mass[fc].mean())
+                rec["null_mass_false_conc_correct"] = float(mass[cc].mean())
+                rec["null_mass_false_conc_margin"] = float(
+                    mass[fc].mean() - mass[cc].mean())
     return rec, errors
 
 
@@ -9899,6 +9916,15 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     clog.print("null margin vs 0", "H1c", "null_mass_error_margin",
                _one_sample_contrast(by_gate["null"],
                                     "null_mass_error_margin"),
+               warn=_curve_warn(("null", by_gate["null"])))
+    # The same H1c claim on the H1b false-concentration subset: a null slot
+    # that absorbs writes only on unconfident errors but not on confident
+    # false concentration would not support the suppression reading at the
+    # operating point the gate mechanism is evaluated.
+    clog.print("null false-conc margin vs 0", "H1c",
+               "null_mass_false_conc_margin",
+               _one_sample_contrast(by_gate["null"],
+                                    "null_mass_false_conc_margin"),
                warn=_curve_warn(("null", by_gate["null"])))
     # H1c completeness companion: the null arm's *accuracy* relative to the
     # no-gate baseline.  The within-arm margin above only shows the slot
