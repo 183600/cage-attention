@@ -1309,6 +1309,10 @@ def seeds_for_power(sd, effect, alpha: float = 0.05,
     ``effect`` is zero/non-finite, and the raw (non-integer) count
     otherwise - callers round up.
     """
+    if any(isinstance(value, bool)
+           for value in (sd, effect, alpha, power)):
+        # Booleans are flags, not effect sizes / variances / probabilities.
+        return float("inf")
     try:
         sd = float(sd)
         effect = float(effect)
