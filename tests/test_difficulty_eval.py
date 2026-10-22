@@ -300,6 +300,7 @@ class DifficultyVectorAlignmentTest(unittest.TestCase):
                 {"strata": [{"id": 0, "n": 2}, {"n": 2, "correct": 1}]},
                 {"strata": "not-a-list"},
                 {"strata": [["not", "a", "row"]]},
+                {"n_strata": 1, "strata": [{"id": 2, "n": 1, "correct": 1}]},
                 ["not", "a", "block"]):
             with self.subTest(block=block):
                 self.assertEqual(_difficulty_vectors(block), ([], []))

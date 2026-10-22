@@ -1301,8 +1301,9 @@ def _difficulty_vectors(difficulty):
         # are genuine zero-count strata, not a different encoding).
         size = max(ids) + 1
         declared = (difficulty or {}).get("n_strata")
-        if (isinstance(declared, int) and not isinstance(declared, bool)
-                and declared >= size):
+        if isinstance(declared, int) and not isinstance(declared, bool):
+            if declared < size:
+                return [], []
             size = declared
         totals = [0] * size
         correct = [0] * size
