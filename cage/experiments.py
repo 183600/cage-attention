@@ -977,6 +977,24 @@ class Settings:
         # because ``--seeds`` is applied to the attribute afterwards.
         self.seeds = _validate_training_seeds(self.seeds)
         check_data_geometry(self.n_pairs, self.vocab, self.max_len)
+        raw_q = self.fdr_q
+        try:
+            q = float(raw_q)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"fdr_q must be a finite number strictly between 0 and 1, "
+                f"got {raw_q!r}") from exc
+        if not (math.isfinite(q) and 0.0 < q < 1.0):
+            raise ValueError(
+                f"fdr_q must be a finite number strictly between 0 and 1, "
+                f"got {raw_q!r}")
+        self.fdr_q = q
+        floor = _positive_integer(self.min_seeds_for_claim)
+        if floor is None:
+            raise ValueError(
+                f"min_seeds_for_claim must be a positive integer, got "
+                f"{self.min_seeds_for_claim!r}")
+        self.min_seeds_for_claim = int(floor)
         if not isinstance(self.per_variant_tuning, bool):
             raise ValueError(
                 f"per_variant_tuning must be a bool, got "
@@ -1022,13 +1040,19 @@ def _depth_step_candidates(settings: Settings) -> tuple:
     omits 1.0.
     """
     multipliers = tuple(settings.depth_step_multipliers or (1.0,))
-    steps = {int(settings.steps)}
+    raw_steps = settings.steps
+    base_steps = _positive_integer(raw_steps)
+    if base_steps is None:
+        raise ValueError(
+            f"steps must be a positive integer before the depth ladder can "
+            f"build its step grid, got {raw_steps!r}")
+    steps = {int(base_steps)}
     for multiplier in multipliers:
         if not _finite(multiplier) or float(multiplier) <= 0.0:
             raise ValueError(
                 f"depth_step_multipliers must be finite positive numbers, "
                 f"got {multiplier!r}")
-        steps.add(max(1, int(round(settings.steps * float(multiplier)))))
+        steps.add(max(1, int(round(base_steps * float(multiplier)))))
     return tuple(sorted(steps))
 
 
@@ -1407,6 +1431,23 @@ def _controlled_audit(runs_a, runs_b):
             return (0, float(seed), "")
         return (0, float("inf"), str(seed))
 
+    def _stream_key(seed):
+        """Canonical data-stream key used to detect aliased seeds.
+
+        ``0`` and ``2**32`` draw the same CPU stream (see
+        ``cage.data.stream_seed_key``), so a pooled record carrying both is
+        one independent run counted twice even though the raw seed values
+        differ.  Non-numeric legacy seeds fall back to their string form.
+        """
+        if seed is None:
+            return None
+        if isinstance(seed, bool):
+            return ("raw", repr(seed))
+        try:
+            return ("stream", stream_seed_key(seed))
+        except (TypeError, ValueError, OverflowError):
+            return ("raw", str(seed))
+
     audit = {
         "controlled": True,
         "seeds_paired": False,
@@ -1429,13 +1470,21 @@ def _controlled_audit(runs_a, runs_b):
             audit["mismatches"].append(
                 f"side {side} has {missing} run(s) without a training seed: "
                 f"the contrast cannot be paired")
+        stream_counts = {}
+        for s in seeds:
+            if s is None:
+                continue
+            key = _stream_key(s)
+            stream_counts[key] = stream_counts.get(key, 0) + 1
         repeats = sorted({s for s in seeds
-                          if s is not None and seeds.count(s) > 1},
+                          if s is not None
+                          and stream_counts[_stream_key(s)] > 1},
                          key=_seed_key)
         if repeats:
             audit["mismatches"].append(
-                f"side {side} repeats training seed(s) {repeats}: a "
-                f"repeated seed is one run counted twice, so the paired n "
+                f"side {side} repeats training seed/stream(s) {repeats}: a "
+                f"repeated seed (including a 32-bit stream alias such as "
+                f"0 vs 2**32) is one run counted twice, so the paired n "
                 f"would be inflated and the difference is not independent")
     # Capacity: the parameter count each side actually trained (recorded for
     # every contrast; the placebo-specific enforcement happens below, where
@@ -10439,7 +10488,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         tail_s = (f"{tail['mean']:+.3f}" if _finite(tail["mean"]) else "n/a")
         vse_s = f"{vse['mean']:.4f}" if _finite(vse["mean"]) else "n/a"
         print(f"{label:>16} "
-              f"{invalid}/{len(by_variant[label])} "
+              f"{len(by_variant[label]) - invalid}/{len(by_variant[label])} "
               f"{late:>5} {tail_s:>11} {vse_s:>8} "
               f"{'/'.join(verdicts):>10}")
 
@@ -11179,7 +11228,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                       f"{ratio['mean']:>9.4f}±{ratio['std']:<8.4f} "
                       f"{growth['mean']:>7.3f}±{growth['std']:<6.3f} "
                       f"{params['mean']:>9.0f} "
-                      f"{invalid}/{len(rs)} "
+                      f"{len(rs) - invalid}/{len(rs)} "
                       f"{late:>3}({late_sig}) {overfit_sig:>5} "
                       f"{tail_s:>7} {vse_s:>7} "
                       f"{'/'.join(verdicts):>10}")
