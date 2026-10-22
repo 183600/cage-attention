@@ -2493,7 +2493,9 @@ def _blank_exposure_cohort() -> dict:
         "n_value_correct": 0,
         "n_value_follow": 0,
         "n_value_stubborn": 0,
+        "n_distractor": 0,
         "n_distractor_correct": 0,
+        "n_relocation": 0,
         "n_relocation_correct": 0,
     }
 
@@ -2540,9 +2542,11 @@ def _association_exposure_accumulate(totals, idx, meta, vocab, reference,
             entry["n_value_stubborn"] += int(
                 (correct & swap_pred.eq(answer))[mask].sum())
         if distractor_pred is not None:
+            entry["n_distractor"] += n
             entry["n_distractor_correct"] += int(
                 distractor_pred.eq(answer)[mask].sum())
         if relocation_pred is not None:
+            entry["n_relocation"] += n
             entry["n_relocation_correct"] += int(
                 relocation_pred.eq(answer)[mask].sum())
 
@@ -2557,6 +2561,8 @@ def _association_exposure_summary(totals) -> dict:
         n = int(entry["n"])
         n_correct = int(entry["n_correct"])
         n_swap = int(entry["n_value_swap"])
+        n_distractor = int(entry["n_distractor"])
+        n_relocation = int(entry["n_relocation"])
         return {
             "n": n,
             "n_correct": n_correct,
@@ -2569,10 +2575,12 @@ def _association_exposure_summary(totals) -> dict:
             "n_value_stubborn": int(entry["n_value_stubborn"]),
             "cf_value_stubborn_rate": rate(
                 entry["n_value_stubborn"], n_correct),
+            "n_distractor": n_distractor,
             "distractor_accuracy": rate(
-                entry["n_distractor_correct"], n_swap),
+                entry["n_distractor_correct"], n_distractor),
+            "n_relocation": n_relocation,
             "relocation_accuracy": rate(
-                entry["n_relocation_correct"], n_swap),
+                entry["n_relocation_correct"], n_relocation),
         }
 
     seen, unseen = cohort("seen"), cohort("unseen")

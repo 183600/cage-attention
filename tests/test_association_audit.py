@@ -267,6 +267,24 @@ class ExposureStratifiedEvalTest(unittest.TestCase):
                                  batch=4, batches=1, seed=123,
                                  train_association_codes=bad)
 
+    def test_single_pair_cohort_abstains_on_placebo_probes(self):
+        # ``n_pairs == 1`` has no distractor pair to edit, so the
+        # distractor/relocation probes abstain.  Reporting 0.0 against the
+        # value-swap denominator would look like a failed placebo check
+        # instead of an unavailable one.
+        reference = frozenset(self.eval_codes)
+        out = eval_metrics(_OracleRetrieval(17), 1, 17, "cpu", batch=8,
+                           batches=2, seed=123,
+                           train_association_codes=reference)
+        block = out["association_exposure"]
+        for cohort in ("seen", "unseen"):
+            row = block[cohort]
+            self.assertEqual(row["n_value_swappable"], row["n"])
+            self.assertEqual(row["n_distractor"], 0)
+            self.assertEqual(row["n_relocation"], 0)
+            self.assertTrue(math.isnan(row["distractor_accuracy"]))
+            self.assertTrue(math.isnan(row["relocation_accuracy"]))
+
     def test_empty_cohort_rates_abstain(self):
         # Every evaluated pair is in the reference: the unseen cohort has
         # n=0 and must report NaN, not accuracy 0.
