@@ -319,6 +319,17 @@ class DesignPlanTest(unittest.TestCase):
         self.assertIn("accuracy", payload["accuracy_unpowerable"])
         self.assertIs(payload["all_accuracy_plans_powered"], False)
 
+    def test_degenerate_pilot_is_not_reported_as_fully_powered(self):
+        settings = Settings.quick()
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _design_sensitivity_plan(
+                    settings, self._verdict(sd=0.0), pathlib.Path(tmp),
+                    "e1")
+        self.assertIs(payload["all_accuracy_plans_powered"], False)
+        statuses = {row["metric"]: row["status"] for row in payload["rows"]}
+        self.assertEqual(statuses["accuracy"], "pilot_degenerate")
+
     def test_plan_passes_when_pilot_sd_is_small(self):
         settings = Settings.quick()
         with tempfile.TemporaryDirectory() as tmp:

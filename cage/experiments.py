@@ -2736,7 +2736,7 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
         rows.append(row)
     accuracy_rows = [r for r in rows if "accuracy" in r["metric"]
                      and r["status"] in ("powered", "underpowered",
-                                         "unpowerable")]
+                                         "unpowerable", "pilot_degenerate")]
     underpowered = sorted({r["metric"] for r in accuracy_rows
                            if r["status"] == "underpowered"})
     unpowerable = sorted({r["metric"] for r in accuracy_rows
