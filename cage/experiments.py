@@ -2072,6 +2072,21 @@ def _registered_sesoi_metrics(experiment: str) -> list:
     return out
 
 
+def _pilot_mapping(value) -> dict:
+    """A nested pilot payload, or an empty mapping when malformed."""
+    return value if isinstance(value, dict) else {}
+
+
+def _pilot_seed_accuracies(row) -> list[float]:
+    """Usable per-seed accuracies from one pilot row, never raising."""
+    if not isinstance(row, dict):
+        return []
+    by_seed = row.get("accuracy_by_seed")
+    if not isinstance(by_seed, dict):
+        return []
+    return [float(v) for v in by_seed.values() if _finite(v)]
+
+
 def _pilot_accuracy_sd(verdict) -> tuple[float, str | None]:
     """Seed-level accuracy SD from the baseline pilot (largest rung).
 
@@ -2090,13 +2105,11 @@ def _pilot_accuracy_sd(verdict) -> tuple[float, str | None]:
     if not isinstance(verdict, dict):
         return float("nan"), None
     candidates: list[tuple[float, str]] = []
-    ladder = verdict.get("depth_ladder") or {}
-    for depth, row in (ladder.get("by_depth") or {}).items():
+    ladder = _pilot_mapping(verdict.get("depth_ladder"))
+    for depth, row in _pilot_mapping(ladder.get("by_depth")).items():
         if not isinstance(row, dict) or row.get("unmeasured"):
             continue
-        values = [float(v) for v in
-                  (row.get("accuracy_by_seed") or {}).values()
-                  if _finite(v)]
+        values = _pilot_seed_accuracies(row)
         if len(values) >= 2:
             mean = sum(values) / len(values)
             sd = math.sqrt(sum((v - mean) ** 2 for v in values)
@@ -2106,16 +2119,15 @@ def _pilot_accuracy_sd(verdict) -> tuple[float, str | None]:
         sd = row.get("accuracy_std")
         if _finite(sd) and float(sd) >= 0.0:
             candidates.append((float(sd), f"depth_ladder.d{depth}.std"))
-    shallow = verdict.get("shallow_none") or {}
-    shallow_values = [float(v) for v in
-                      (shallow.get("accuracy_by_seed") or {}).values()
-                      if _finite(v)]
+    shallow = _pilot_mapping(verdict.get("shallow_none"))
+    shallow_values = _pilot_seed_accuracies(shallow)
     if len(shallow_values) >= 2:
         mean = sum(shallow_values) / len(shallow_values)
         sd = math.sqrt(sum((v - mean) ** 2 for v in shallow_values)
                        / (len(shallow_values) - 1))
         candidates.append((sd, "shallow_none"))
-    elif _finite(shallow.get("accuracy_std")):
+    elif _finite(shallow.get("accuracy_std")) \
+            and float(shallow["accuracy_std"]) >= 0.0:
         candidates.append((float(shallow["accuracy_std"]),
                            "shallow_none.std"))
     if not candidates:
@@ -2140,24 +2152,19 @@ def _pilot_accuracy_level(verdict) -> tuple[float, str | None]:
     if not isinstance(verdict, dict):
         return float("nan"), None
     values: list[float] = []
-    ladder = verdict.get("depth_ladder") or {}
-    for row in (ladder.get("by_depth") or {}).values():
+    ladder = _pilot_mapping(verdict.get("depth_ladder"))
+    for row in _pilot_mapping(ladder.get("by_depth")).values():
         if not isinstance(row, dict) or row.get("unmeasured"):
             continue
-        values.extend(float(v) for v in
-                      (row.get("accuracy_by_seed") or {}).values()
-                      if _finite(v))
-        if not (row.get("accuracy_by_seed") or {}) \
-                and _finite(row.get("accuracy_mean")):
+        row_values = _pilot_seed_accuracies(row)
+        values.extend(row_values)
+        if not row_values and _finite(row.get("accuracy_mean")):
             values.append(float(row["accuracy_mean"]))
-    shallow = verdict.get("shallow_none") or {}
-    if isinstance(shallow, dict):
-        values.extend(float(v) for v in
-                      (shallow.get("accuracy_by_seed") or {}).values()
-                      if _finite(v))
-        if not (shallow.get("accuracy_by_seed") or {}) \
-                and _finite(shallow.get("accuracy_mean")):
-            values.append(float(shallow["accuracy_mean"]))
+    shallow = _pilot_mapping(verdict.get("shallow_none"))
+    shallow_values = _pilot_seed_accuracies(shallow)
+    values.extend(shallow_values)
+    if not shallow_values and _finite(shallow.get("accuracy_mean")):
+        values.append(float(shallow["accuracy_mean"]))
     if not values:
         return float("nan"), None
     return (sum(values) / len(values),
@@ -2207,9 +2214,10 @@ def _pilot_paired_accuracy_sd(verdict) -> tuple[float, str | None, list]:
             "note": ("paired SD under independent arm effects, "
                      "Var(A-B)=Var(A)+Var(B) with equal arm variances"),
         })
-    ladder = (verdict.get("depth_ladder") or {}) if isinstance(verdict, dict) \
-        else {}
-    for name, row in (ladder.get("adjacent_contrasts") or {}).items():
+    ladder = (_pilot_mapping(verdict.get("depth_ladder"))
+              if isinstance(verdict, dict) else {})
+    for name, row in _pilot_mapping(
+            ladder.get("adjacent_contrasts")).items():
         if not isinstance(row, dict):
             continue
         n = _positive_integer(row.get("n"))
@@ -4369,7 +4377,14 @@ class ContrastLog:
         # audited) leave the decision untouched; only an explicit failure
         # gates the accuracy rows.  Macro-F1/balanced-accuracy and PR-AUC
         # rows are unaffected.
-        self.balance_ok = balance_ok is not False
+        # Fail closed on a malformed mark: a stored ``"False"`` (or any
+        # other non-bool) is not evidence that the balance audit passed.
+        # ``None`` means the older verdict predates the audit and leaves the
+        # decision untouched.
+        if balance_ok is None or isinstance(balance_ok, bool):
+            self.balance_ok = True if balance_ok is None else balance_ok
+        else:
+            self.balance_ok = False
         # HB0: the family's competence prerequisite (at least one arm above
         # chance).  When it fails, no contrast in the family may support a
         # claim - an underfit grid's differences describe the step count, not
@@ -4902,9 +4917,18 @@ class ContrastLog:
             # the design *before* the next run, not after.)  For an
             # equivalence row the target is the bound: how many seeds
             # until a CI of this width could fit inside +-SESOI.
-            row["n_seeds_for_sesoi"] = (
-                float("inf") if sesoi is None
-                else seeds_for_power(row.get("sd"), sesoi))
+            if sesoi is None:
+                row["n_seeds_for_sesoi"] = float("inf")
+            else:
+                mode = ("equivalence" if row["test"] == "equivalence"
+                        else "noninferiority"
+                        if row["test"] == "noninferiority"
+                        else "superiority")
+                required = _required_seeds(
+                    mode, row.get("sd"), sesoi, q, 0.8)
+                row["n_seeds_for_sesoi"] = (
+                    float(required) if _finite(required)
+                    else float("inf"))
         # Parallel exact-test family: the same BH correction applied to the
         # paired sign-flip p-values.  This is a companion, not a replacement
         # for the pre-registered bootstrap decision; it answers "could this
@@ -5912,6 +5936,14 @@ def _verify_artifacts(out_dir) -> int:
     except (OSError, ValueError, KeyError, TypeError, UnicodeError) as e:
         print(f"[verify] unreadable artifact index {index_path}: {e}")
         return 2
+    # A previous index that could not be read means the cumulative history
+    # was dropped when this index was rewritten.  The surviving list can
+    # still be verified, but it no longer certifies the whole results
+    # directory, so failing closed is the only honest verdict.
+    if payload.get("previous_index_error") is not None:
+        print(f"[verify] FAILED: artifact history is incomplete: "
+              f"{payload.get('previous_index_error')}")
+        return 1
     failures = []
     seen = set()
     for entry in artifacts:
@@ -13844,6 +13876,14 @@ def _e2_difficulty_companions(by_variant: dict, lengths: list) -> dict:
     def tagged(runs):
         rows = []
         for run in runs:
+            # ``accuracy_at_longest`` is the endpoint point estimate, but
+            # the item-level companions must also read the *endpoint*
+            # masks/digest/count.  The top-level fields on a run describe
+            # the base length (the training/evaluation length), so leaving
+            # them in place paired base-length McNemar/fold/crossed
+            # bootstrap results with endpoint accuracy.
+            metrics = ((run.get("metrics_by_length") or {})
+                       .get(endpoint) or {})
             rows.append({
                 **run,
                 "accuracy": run.get("accuracy_at_longest"),
@@ -13851,6 +13891,12 @@ def _e2_difficulty_companions(by_variant: dict, lengths: list) -> dict:
                     "difficulty_standardized_accuracy_at_longest"),
                 "difficulty_standardized_accuracy_drop": run.get(
                     "difficulty_standardized_accuracy_drop"),
+                "correct_bitmask": metrics.get(
+                    "correct_bitmask", run.get("correct_bitmask")),
+                "stream_digest": metrics.get(
+                    "stream_digest", run.get("stream_digest")),
+                "n": (run.get("eval_n_by_length") or {}).get(
+                    endpoint, run.get("n", run.get("eval_n"))),
             })
         return rows
 
