@@ -214,10 +214,15 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     """
     check_train_seed(seed)
     raw_steps = steps
+    raw_batch = batch
     steps = _positive_integer(raw_steps)
+    batch = _positive_integer(raw_batch)
     if steps is None:
         raise ValueError(
             f"steps must be a positive integer, got {raw_steps!r}")
+    if batch is None:
+        raise ValueError(
+            f"batch must be a positive integer, got {raw_batch!r}")
     seed_everything(seed, deterministic=deterministic)
     gen = stream_generator(seed, device)
     model = LinearBagProbe(vocab).to(device)
