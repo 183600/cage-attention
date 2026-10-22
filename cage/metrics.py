@@ -1510,13 +1510,19 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     # probability (Haldane/Jeffreys-style boundary smoothing): interior
     # accuracies are untouched, while the endpoints retain the finite
     # stream's resolution and the CI stays inside [0, 1].
-    boundary = 0.5 / n_stream
-    p_stream = min(max(mean_acc, boundary), 1.0 - boundary)
+    # Beta(0.5, 0.5) posterior predictive: after n successes out of n,
+    # (n + 0.5) / (n + 1), i.e. move an endpoint only as far as half a
+    # pseudo-observation justifies.  Interior accuracies are untouched.
+    boundary = 0.5 / (n_stream + 1.0)
+    p_stream = (boundary if mean_acc <= 0.0 else
+                1.0 - boundary if mean_acc >= 1.0 else mean_acc)
     se_stream = math.sqrt(max(p_stream * (1.0 - p_stream) / n_stream, 0.0))
     gen = torch.Generator().manual_seed(int(seed))
     idx = torch.randint(0, units, (n_boot_int, units), generator=gen)
     mean_star = p[idx].mean(dim=1)
-    draw_p = mean_star.clamp(min=boundary, max=1.0 - boundary)
+    draw_p = torch.where(mean_star <= 0.0, boundary,
+                         torch.where(mean_star >= 1.0, 1.0 - boundary,
+                                     mean_star))
     # One shared finite-stream draw per replicate, not one per seed: the
     # evaluation examples are common to every training seed.
     stream = torch.binomial(
