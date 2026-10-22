@@ -59,6 +59,63 @@ class CrossLengthStandardizationTest(unittest.TestCase):
             rec["difficulty_mix_tv_by_length"][6] >= 0.0)
 
 
+class JsonLengthKeyTest(unittest.TestCase):
+    @staticmethod
+    def _block(n, correct):
+        return {"difficulty": {
+            "n_strata": 12,
+            "strata": [{"id": 0, "n": n, "correct": correct}],
+        }}
+
+    def test_standardization_reads_string_length_keys(self):
+        from cage.experiments import _stamp_difficulty_standardization
+
+        blocks = {3: self._block(10, 8), 6: self._block(10, 5)}
+        by_int = {"metrics_by_length": dict(blocks)}
+        by_str = {"metrics_by_length": {str(k): v for k, v in blocks.items()}}
+        _stamp_difficulty_standardization(by_int, 3, [3, 6])
+        _stamp_difficulty_standardization(by_str, 3, [3, 6])
+        for key in ("difficulty_standardized_accuracy_by_length",
+                    "difficulty_standardized_coverage_by_length",
+                    "difficulty_mix_tv_by_length"):
+            self.assertEqual(by_int[key], by_str[key])
+        self.assertAlmostEqual(
+            by_str["difficulty_standardized_accuracy_drop"], 0.3)
+
+    def test_e2_companions_read_string_length_keys(self):
+        from cage.experiments import _E2_VARIANTS, _e2_difficulty_companions
+
+        def run(seed, gate, std_acc):
+            return {
+                "seed": seed, "gate": gate, "model_cfg": {"gate": gate},
+                "accuracy_at_longest": 0.5,
+                "accuracy_drop": 0.1,
+                "difficulty_standardized_accuracy_at_longest": std_acc,
+                "difficulty_standardized_accuracy_drop": 0.1,
+                "difficulty_standardized_coverage_at_longest": 1.0,
+                "difficulty_standardized_effective_n_at_longest": 10.0,
+                "difficulty_mix_tv_at_longest": 0.0,
+                "metrics_by_length": {
+                    "3": {"accuracy": 0.6},
+                    "6": {"accuracy": 0.5},
+                },
+                "eval_n_by_length": {"3": 10, "6": 10},
+            }
+
+        by_variant = {
+            label: [run(0, gate, 0.4 if gate == "calib" else 0.3)]
+            for label, gate, *_ in _E2_VARIANTS
+        }
+        with contextlib.redirect_stdout(io.StringIO()):
+            payload = _e2_difficulty_companions(by_variant, [3, 6])
+        self.assertAlmostEqual(
+            payload["by_arm"]["calib"][
+                "raw_accuracy_at_longest"]["mean"], 0.5)
+        self.assertAlmostEqual(
+            payload["contrasts"]["calib - none"][
+                "difficulty_standardized_accuracy_at_longest"]["mean"], 0.1)
+
+
 class E2DifficultyCompanionTest(unittest.TestCase):
     @staticmethod
     def _run(gate):

@@ -1727,6 +1727,23 @@ def _difficulty_count(value) -> int | None:
     return None
 
 
+def _length_entry(mapping, length):
+    """Read a per-length record keyed by either an int or its JSON string.
+
+    ``json.dumps`` turns the integer ``n_pairs`` keys of
+    ``metrics_by_length`` / ``accuracy_by_length`` into strings, so a
+    record that has been round-tripped through JSON would otherwise look
+    empty to a companion reading the in-memory integer key.  Prefer the
+    integer key when both exist (the in-memory representation) and fall
+    back to the canonical string form.
+    """
+    if not isinstance(mapping, Mapping):
+        return None
+    if length in mapping:
+        return mapping[length]
+    return mapping.get(str(length))
+
+
 def _difficulty_vectors(difficulty):
     """Extract ``(totals, corrects)`` from an ``eval_metrics`` difficulty block.
 
@@ -1843,7 +1860,7 @@ def _stamp_difficulty_standardization(rec, base_length, lengths):
         metrics_by_length = {}
 
     def _block(length):
-        entry = metrics_by_length.get(length)
+        entry = _length_entry(metrics_by_length, length)
         return entry.get("difficulty") if isinstance(entry, dict) else None
 
     def _bucket(name):
@@ -3944,7 +3961,7 @@ def _counterfactual_companion(out_dir, tag, by_arm, lengths=None,
     def value(run, metric, length):
         if length is None:
             return run.get(metric)
-        block = (run.get("metrics_by_length") or {}).get(length) or {}
+        block = _length_entry(run.get("metrics_by_length"), length) or {}
         return block.get(metric)
 
     arm_map = {arm_label(label): (label, runs)
@@ -8031,16 +8048,18 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
                 for run in valid_runs:
                     seed = run.get("seed")
                     refs = ref_accuracy.get(seed) or {}
-                    truth = (run.get("accuracy_by_length") or {}).get(length)
-                    other = refs.get(length)
+                    truth = _length_entry(run.get("accuracy_by_length"),
+                                          length)
+                    other = _length_entry(refs, length)
                     if _finite(truth) and _finite(other):
                         deltas.append(float(truth) - float(other))
                 all_deltas = []
                 for run in runs:
                     seed = run.get("seed")
                     refs = all_ref_accuracy.get(seed) or {}
-                    truth = (run.get("accuracy_by_length") or {}).get(length)
-                    other = refs.get(length)
+                    truth = _length_entry(run.get("accuracy_by_length"),
+                                          length)
+                    other = _length_entry(refs, length)
                     if _finite(truth) and _finite(other):
                         all_deltas.append(float(truth) - float(other))
                 rec["accuracy_delta_vs_reference"] = (
@@ -13315,12 +13334,15 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
         rule_rows = []
         for length in lengths:
             def _at_length(r):
-                metrics = (r.get("metrics_by_length") or {}).get(length) or {}
+                metrics = _length_entry(
+                    r.get("metrics_by_length"), length) or {}
                 return dict(
-                    r, accuracy=r["accuracy_by_length"][length],
+                    r,
+                    accuracy=_length_entry(r.get("accuracy_by_length"),
+                                           length),
                     correct_bitmask=metrics.get("correct_bitmask"),
                     stream_digest=metrics.get("stream_digest"),
-                    n=(r.get("eval_n_by_length") or {}).get(length))
+                    n=_length_entry(r.get("eval_n_by_length"), length))
             tagged_a = [_at_length(r) for r in runs_a]
             tagged_b = [_at_length(r) for r in runs_b]
             ci = _paired_diff(tagged_a, tagged_b, "accuracy")
@@ -14786,8 +14808,8 @@ def _e2_difficulty_companions(by_variant: dict, lengths: list) -> dict:
             # the base length (the training/evaluation length), so leaving
             # them in place paired base-length McNemar/fold/crossed
             # bootstrap results with endpoint accuracy.
-            metrics = ((run.get("metrics_by_length") or {})
-                       .get(endpoint) or {})
+            metrics = _length_entry(
+                run.get("metrics_by_length"), endpoint) or {}
             rows.append({
                 **run,
                 "accuracy": run.get("accuracy_at_longest"),
@@ -14799,8 +14821,10 @@ def _e2_difficulty_companions(by_variant: dict, lengths: list) -> dict:
                     "correct_bitmask", run.get("correct_bitmask")),
                 "stream_digest": metrics.get(
                     "stream_digest", run.get("stream_digest")),
-                "n": (run.get("eval_n_by_length") or {}).get(
-                    endpoint, run.get("n", run.get("eval_n"))),
+                "n": (_length_entry(run.get("eval_n_by_length"), endpoint)
+                      if _length_entry(run.get("eval_n_by_length"),
+                                       endpoint) is not None
+                      else run.get("n", run.get("eval_n"))),
             })
         return rows
 
@@ -14936,19 +14960,19 @@ def _e2_endpoint_class_companions(by_variant: dict,
     def tagged(runs):
         out = []
         for run in runs:
-            metrics = ((run.get("metrics_by_length") or {})
-                       .get(endpoint) or {})
+            metrics = _length_entry(
+                run.get("metrics_by_length"), endpoint) or {}
             out.append({
                 **run,
                 "accuracy": metrics.get(
-                    "accuracy", (run.get("accuracy_by_length") or {})
-                    .get(endpoint)),
+                    "accuracy", _length_entry(
+                        run.get("accuracy_by_length"), endpoint)),
                 "recall_macro": metrics.get("recall_macro"),
                 "f1_macro": metrics.get("f1_macro"),
                 "f1_weighted": metrics.get("f1_weighted"),
                 "correct_bitmask": metrics.get("correct_bitmask"),
                 "stream_digest": metrics.get("stream_digest"),
-                "n": (run.get("eval_n_by_length") or {}).get(endpoint),
+                "n": _length_entry(run.get("eval_n_by_length"), endpoint),
             })
         return out
 
