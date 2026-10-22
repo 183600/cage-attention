@@ -1515,6 +1515,21 @@ class CAGE(nn.Module):
             flat_t = targets.reshape(-1)
             if sup_pos is not None:
                 positions = sup_pos.reshape(-1)
+                if positions.numel() != targets.size(0):
+                    raise ValueError(
+                        f"sup_pos must give one position per row "
+                        f"({targets.size(0)}), got {positions.numel()}")
+                if positions.dtype == torch.bool \
+                        or positions.is_floating_point() \
+                        or positions.is_complex():
+                    raise ValueError(
+                        f"sup_pos positions must be integers, got "
+                        f"{positions.dtype}")
+                if bool((positions >= T).any()):
+                    raise ValueError(
+                        f"sup_pos positions must be < sequence length {T} "
+                        f"(negative entries are ignored), got "
+                        f"{int(positions.max())}")
                 sup = _arange(targets.size(0), targets.device).mul(
                     targets.size(1)).add_(positions.clamp_min(0))
                 sup = sup[positions >= 0]
