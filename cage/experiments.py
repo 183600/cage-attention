@@ -1884,6 +1884,8 @@ def _calib_cell(run):
     """
     cfg = run.get("model_cfg")
     if cfg is not None:
+        if not isinstance(cfg, Mapping):
+            return "model_cfg_malformed"
         if cfg.get("gate") != "calib":
             return None
         flags = (bool(cfg.get("calib_use_len", True)),
@@ -2602,7 +2604,12 @@ def _recipe_view(run):
     count / early-stop state is included: the intended step count in
     ``training_recipe.steps`` does not prove both sides actually ran it.
     """
-    cfg = run.get("config") or {}
+    cfg = run.get("config")
+    if not isinstance(cfg, Mapping):
+        # ``_controlled_audit`` records this as a mismatch; return an empty
+        # view so the audit still reports every other difference instead of
+        # raising on the malformed object.
+        cfg = {}
     view = {k: cfg.get(k) for k in _AUDIT_RECIPE_KEYS}
     view["lr"] = run.get("lr")
     view["eval_seed"] = run.get("eval_seed")
@@ -2694,6 +2701,12 @@ def _controlled_audit(runs_a, runs_b):
     are therefore not per-run fields; ``lr`` plus ``steps`` pin the schedule
     that factory is combined with.  Returns an audit dict; a contrast whose
     audit fails is not read as supporting its hypothesis.
+
+    Records with a malformed ``config`` / ``model_cfg`` object (for example
+    a string where a mapping was stamped) are refused as a control
+    mismatch instead of raising an ``AttributeError`` halfway through the
+    audit: a provenance field that cannot be read is not evidence that the
+    two sides shared one recipe.
     """
     def _seed_key(seed):
         if seed is None:
@@ -2779,6 +2792,15 @@ def _controlled_audit(runs_a, runs_b):
             "matched": params_a[0] == params_b[0],
         }
     for side, runs in (("a", runs_a), ("b", runs_b)):
+        malformed_configs = [
+            r for r in runs
+            if r.get("config") is not None
+            and not isinstance(r.get("config"), Mapping)]
+        if malformed_configs:
+            audit["mismatches"].append(
+                f"side {side} has {len(malformed_configs)} run(s) with a "
+                f"malformed config object (expected a mapping): the training "
+                f"recipe cannot be verified")
         views = [_recipe_view(r) for r in runs]
         if not views:
             audit["mismatches"].append(f"side {side} has no runs")
@@ -2811,7 +2833,15 @@ def _controlled_audit(runs_a, runs_b):
         # directly rather than the hand-attached labels.
         cfgs_a = [r.get("model_cfg") for r in runs_a]
         cfgs_b = [r.get("model_cfg") for r in runs_b]
-        if all(c is not None for c in cfgs_a + cfgs_b):
+        malformed_cfgs = [
+            c for c in cfgs_a + cfgs_b
+            if c is not None and not isinstance(c, Mapping)]
+        if malformed_cfgs:
+            audit["mismatches"].append(
+                f"malformed model_cfg object(s) (expected mappings): "
+                f"{len(malformed_cfgs)} run(s) cannot be checked against the "
+                f"trained configuration")
+        if all(isinstance(c, Mapping) for c in cfgs_a + cfgs_b):
             for side, cfgs in (("a", cfgs_a), ("b", cfgs_b)):
                 for j, other in enumerate(cfgs[1:], start=1):
                     if other != cfgs[0]:
