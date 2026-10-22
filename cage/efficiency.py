@@ -20,13 +20,14 @@ useful quantity.
 
 from __future__ import annotations
 
+import math
 import platform
 import statistics
 import time
 
 import torch
 
-from .model import Cfg, build
+from .model import Cfg, build, release_eval_scratch
 
 
 def _as_cfg(cfg) -> Cfg:
@@ -134,7 +135,8 @@ def measure_forward(model, cfg, seq_len: int, device, batch: int = 1,
 
     ordered = sorted(timings)
     median_ms = statistics.median(ordered)
-    p90_ms = ordered[min(len(ordered) - 1, int(0.9 * len(ordered)))]
+    p90_ms = ordered[min(len(ordered) - 1,
+                         max(0, math.ceil(0.9 * len(ordered)) - 1))]
     measured_params = int(sum(p.numel() for p in model.parameters()))
     flops = analytic_matmul_flops(cfg, seq_len, batch=batch, head_tokens=1)
     record = {
@@ -183,5 +185,7 @@ def measure_config(cfg, device, seq_len: int, batch: int = 1,
                     else torch.cuda.current_device()]
     with torch.random.fork_rng(devices=cuda_ids):
         model = build(dict(cfg), compile=False).to(device)
-        return measure_forward(model, cfg, seq_len, device, batch=batch,
-                               warmup=warmup, repeats=repeats)
+        record = measure_forward(model, cfg, seq_len, device, batch=batch,
+                                 warmup=warmup, repeats=repeats)
+    release_eval_scratch()
+    return record
