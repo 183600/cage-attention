@@ -11623,18 +11623,28 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     e2_contrast_payload = clog.finalize(out_dir, q=settings.fdr_q)
     h2f_rows = [row for row in (e2_contrast_payload.get("rows") or [])
                 if row.get("hypothesis") == "H2f"]
+    h2f_evaluable = bool(h2f_rows) and all(
+        row.get("claim_eligible", True) for row in h2f_rows)
     h2f_supported = bool(h2f_rows) and all(
         row.get("supports_hypothesis") for row in h2f_rows)
     if not h2f_supported:
-        print(f"[e2] WARNING: H2f not supported - the full calib arm did "
-              f"not show both learned corrections (a>0 and c*scale>0) with "
-              f"FDR-significant, practically-sized coefficients.  The "
-              f"H2a/H2b endpoint and entropy-drift rows remain their own "
-              f"tests, but the 'explicit correction' mechanism reading is "
-              f"not established by the trained coefficients.")
+        if not h2f_evaluable:
+            print(f"[e2] NOTE: H2f is not evaluable on this run (the "
+                  f"coefficient contrasts are claim-ineligible: HB0 "
+                  f"competence, seed floor, coverage or curve filtering), "
+                  f"so neither a positive nor a non-positive coefficient "
+                  f"read is a mechanism conclusion here.")
+        else:
+            print(f"[e2] WARNING: H2f not supported - the full calib arm did "
+                  f"not show both learned corrections (a>0 and c*scale>0) "
+                  f"with FDR-significant, practically-sized coefficients.  "
+                  f"The H2a/H2b endpoint and entropy-drift rows remain their "
+                  f"own tests, but the 'explicit correction' mechanism "
+                  f"reading is not established by the trained coefficients.")
     learned_correction_check = {
         "hypothesis": "H2f",
         "supported": h2f_supported,
+        "evaluable": h2f_evaluable,
         "rows": [{
             "metric": row.get("metric"), "mean": row.get("mean"),
             "lo": row.get("lo"), "hi": row.get("hi"),
