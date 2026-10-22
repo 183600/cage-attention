@@ -3927,7 +3927,7 @@ def _verify_artifacts(out_dir) -> int:
     Exit 0 when every listed file exists with the recorded size and hash,
     1 when any file is missing/changed, 2 when no usable index exists.
     """
-    root = pathlib.Path(out_dir)
+    root = pathlib.Path(out_dir).resolve()
     index_path = root / "artifact_index.json"
     if not index_path.exists():
         print(f"[verify] no artifact index at {index_path}; nothing to check")
@@ -3946,7 +3946,14 @@ def _verify_artifacts(out_dir) -> int:
         return 2
     failures = []
     for entry in artifacts:
-        path = root / str(entry.get("file", ""))
+        name = str(entry.get("file", ""))
+        try:
+            path = (root / name).resolve()
+            path.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            failures.append(
+                f"{name or '<empty>'}: outside results directory")
+            continue
         if not path.is_file():
             failures.append(f"{path.name}: missing")
             continue
