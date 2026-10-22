@@ -548,7 +548,7 @@ def assert_time_ordered(times, splits) -> None:
     """
     try:
         raw = torch.as_tensor(times)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
         raise ValueError(
             "time values must be numeric timestamps, got a non-numeric "
             "container") from exc

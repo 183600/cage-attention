@@ -2123,7 +2123,12 @@ def encode_correct_mask(correct: torch.Tensor) -> str:
     silently turning e.g. ``0.8`` into a *correct* bit and fabricating a
     mask the model never produced.
     """
-    raw = torch.as_tensor(correct).detach().reshape(-1)
+    try:
+        raw = torch.as_tensor(correct).detach().reshape(-1)
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+        raise ValueError(
+            "correctness values must be real booleans/0-1, got "
+            f"{type(correct).__name__}") from exc
     if raw.is_complex():
         raise ValueError("correctness values must be real booleans/0-1")
     if raw.is_floating_point() and (

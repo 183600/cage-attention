@@ -261,6 +261,16 @@ class CorrelationInputValidationTest(unittest.TestCase):
                     self.assertTrue(math.isnan(float(fn(y, x))))
 
 
+class CorrectMaskInputTest(unittest.TestCase):
+    def test_malformed_mask_input_raises_value_error(self):
+        from cage.train import encode_correct_mask
+
+        for bad in (None, "x", object()):
+            with self.subTest(bad=type(bad).__name__):
+                with self.assertRaises(ValueError):
+                    encode_correct_mask(bad)
+
+
 class BootstrapOverflowTest(unittest.TestCase):
     def test_unrepresentable_bootstrap_moments_abstain(self):
         from cage.metrics import (

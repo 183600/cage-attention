@@ -36,6 +36,16 @@ class UniformityInputTest(unittest.TestCase):
             answer_uniformity_test(torch.tensor([True, False]))
 
 
+class TimeOrderInputTest(unittest.TestCase):
+    def test_malformed_timestamp_container_raises_value_error(self):
+        from cage.data import assert_time_ordered
+
+        for bad in (None, "x", object()):
+            with self.subTest(bad=type(bad).__name__):
+                with self.assertRaises(ValueError):
+                    assert_time_ordered(bad, {"train": [0]})
+
+
 class SplitContractTest(unittest.TestCase):
     def test_reserved_training_seed_is_refused(self):
         for seed in RESERVED_EVAL_SEEDS:
