@@ -4499,8 +4499,13 @@ def _hypothesis_evidence_synthesis(rows, hypotheses) -> dict:
         if not hrows:
             status = "no_contrast"
         elif not required:
-            status = ("undirected" if descriptive_support
-                      else "no_directional_prediction")
+            # A hypothesis with only descriptive/two-sided rows has no
+            # conjunction to confirm, whether or not those rows happen to
+            # be significant.  Calling a non-supporting one
+            # "no_directional_prediction" would invent a status outside the
+            # documented set and drop it from the payload's undirected
+            # count.
+            status = "undirected"
         elif refuted:
             status = "refuted"
         elif len(confirmed) == len(required):

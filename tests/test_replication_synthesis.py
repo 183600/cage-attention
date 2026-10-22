@@ -280,6 +280,21 @@ class HypothesisSynthesisTest(unittest.TestCase):
         self.assertEqual(payload["n_hypotheses_undirected"], 1)
         self.assertEqual(payload["n_hypotheses_supported"], 0)
 
+    def test_non_significant_undirected_row_is_still_undirected(self):
+        # A descriptive/two-sided row has no registered conjunction to
+        # confirm.  Whether it happens to exclude zero or not, the status is
+        # "undirected" (the documented category), not an uncounted fifth
+        # state.
+        _, payload, _ = _finalize(
+            "e3", ("H3b",),
+            [("layerscale", "H3b", "resid_norm_last_over_first",
+              [-0.01, 0.01, -0.02, 0.02, 0.0])])
+        synth = payload["hypothesis_synthesis"]["H3b"]
+        self.assertEqual(synth["status"], "undirected")
+        self.assertEqual(synth["n_required"], 0)
+        self.assertEqual(synth["n_descriptive_supporting"], 0)
+        self.assertEqual(payload["n_hypotheses_undirected"], 1)
+
     def test_unrun_hypothesis_is_flagged_as_no_contrast(self):
         _, payload, _ = _finalize("e2", ("H2g",), [])
         synth = payload["hypothesis_synthesis"]["H2g"]
