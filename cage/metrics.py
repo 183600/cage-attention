@@ -748,8 +748,14 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     matching boolean correctness labels; ``n_bins`` equal-width confidence
     bins over [0, 1].
     """
-    raw_p = torch.as_tensor(probs).detach().reshape(-1)
-    raw_c = torch.as_tensor(correct).detach().reshape(-1)
+    # A malformed container is not a calibration sample; abstain instead
+    # of letting ``as_tensor`` escape as a TypeError from a reporting
+    # metric (the same contract the value-level checks below follow).
+    try:
+        raw_p = torch.as_tensor(probs).detach().reshape(-1)
+        raw_c = torch.as_tensor(correct).detach().reshape(-1)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        return float("nan")
     # ``.float()`` silently discards the imaginary part of a complex input;
     # a complex confidence or correctness value is not a real calibration
     # sample, so abstain instead of scoring its real projection.
@@ -785,8 +791,13 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
 
 def brier_score(probs, correct) -> float:
     """Brier score of the top-1 answer correctness prediction."""
-    raw_p = torch.as_tensor(probs).detach().reshape(-1)
-    raw_c = torch.as_tensor(correct).detach().reshape(-1)
+    # As in ECE, malformed containers abstain rather than raising from a
+    # reporting companion.
+    try:
+        raw_p = torch.as_tensor(probs).detach().reshape(-1)
+        raw_c = torch.as_tensor(correct).detach().reshape(-1)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        return float("nan")
     # As in ECE: a complex probability/correctness is not a real outcome
     # and must not be silently reduced to its real part by ``.float()``.
     if raw_p.is_complex() or raw_c.is_complex():

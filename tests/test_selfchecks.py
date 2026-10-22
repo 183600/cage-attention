@@ -35,6 +35,16 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertEqual(out["n"], 2)
         self.assertTrue(math.isfinite(out["accuracy"]))
 
+    def test_malformed_calibration_containers_abstain(self):
+        for probs, correct in ((None, [1.0]), ("x", [1.0]),
+                               ([0.5], object()),
+                               (object(), [1.0])):
+            with self.subTest(probs=probs, correct=correct):
+                self.assertTrue(math.isnan(
+                    metrics.expected_calibration_error(probs, correct)))
+                self.assertTrue(math.isnan(
+                    metrics.brier_score(probs, correct)))
+
     def test_complex_metric_samples_are_rejected_not_truncated(self):
         import torch
 
