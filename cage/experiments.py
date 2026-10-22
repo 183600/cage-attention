@@ -9712,6 +9712,74 @@ def _null_mass_margin(stats):
     return float(mass[~corr].mean() - mass[corr].mean())
 
 
+def _calibration_coefficients(model) -> dict:
+    """Read the learned calibration coefficients of a trained model.
+
+    H2b's mechanism claim is that the calibrated gate *explicitly* corrects
+    the ``log T`` growth of attention entropy.  The gate is
+    ``sigmoid((W_g x - a*log T - c*scale*Hbar)/tau)``, so the direct
+    manipulation check is the sign and size of the learned ``a`` (length
+    term) and effective ``c*scale`` (concentration term) - not another grid
+    point.  A full-calib run whose learned length coefficient is negative
+    would be evidence that the length correction is being used in the
+    opposite direction, whatever the end accuracy; an ablated arm that
+    reports a non-zero ``a`` would mean the ablation did not actually
+    remove the pathway.
+
+    This is a readout, not a new decision rule: the pre-registered H2a/H2c
+    contrasts remain the decisions, and the coefficients explain *how* the
+    trained gate implements (or fails to implement) the mechanism.  Returns
+    ``{"applicable": False}`` for non-calib gates and a per-layer list plus
+    aggregate means/sign counts for calib variants.
+    """
+    rows = []
+    for layer_idx, block in enumerate(getattr(model, "blocks", ())):
+        attn = block.attn
+        tau = getattr(attn, "calib_tau", None)
+        if tau is None:
+            continue
+        scale_p = getattr(attn, "calib_scale", None)
+        scale = (float(scale_p.detach()) if scale_p is not None
+                 else float("nan"))
+        a_p = getattr(attn, "calib_a", None)
+        c_p = getattr(attn, "calib_c", None)
+        a = float(a_p.detach()) if a_p is not None else float("nan")
+        c = float(c_p.detach()) if c_p is not None else float("nan")
+        effective_tau = float(torch.nn.functional.softplus(tau.detach())) + 0.1
+        rows.append({
+            "layer": int(layer_idx),
+            "a": a, "c": c, "scale": scale,
+            "c_effective": (c * scale if math.isfinite(c)
+                            and math.isfinite(scale) else float("nan")),
+            "tau_effective": effective_tau,
+        })
+    if not rows:
+        return {"applicable": False}
+
+    def _mean(key):
+        vals = [row[key] for row in rows if _finite(row.get(key))]
+        return sum(vals) / len(vals) if vals else float("nan")
+
+    def _positive(key):
+        vals = [row[key] for row in rows if _finite(row.get(key))]
+        return sum(1 for v in vals if v > 0.0)
+
+    return {
+        "applicable": True,
+        "layers": rows,
+        "n_layers": len(rows),
+        "a_mean": _mean("a"),
+        "c_mean": _mean("c"),
+        "c_effective_mean": _mean("c_effective"),
+        "scale_mean": _mean("scale"),
+        "tau_effective_mean": _mean("tau_effective"),
+        "a_positive_layers": _positive("a"),
+        "c_effective_positive_layers": _positive("c_effective"),
+        "a_layers": sum(1 for row in rows if _finite(row.get("a"))),
+        "c_layers": sum(1 for row in rows if _finite(row.get("c"))),
+    }
+
+
 # E2 length-generalisation arms: the four gate variants plus the complete
 # 2x2 over the calib gate's two additive terms (the full cell is the
 # ``calib`` arm itself), so the arm that isolates any H2a/H2b effect (the
@@ -9996,6 +10064,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 rec["maxprob_by_length"][length] = float(stats["maxprob"].mean())
                 if stats.get("gate") is not None:
                     rec["gate_by_length"][length] = float(stats["gate"].mean())
+            # Mechanism manipulation check for H2b (no new run/grid point):
+            # the trained length and concentration coefficients say whether
+            # the gate actually implements the explicit log-T / entropy
+            # correction the hypothesis names.
+            rec["calib_coefficients"] = _calibration_coefficients(model)
             base_acc = rec["accuracy_by_length"][settings.n_pairs]
             long_acc = rec["accuracy_by_length"][lengths[-1]]
             rec["accuracy_at_base"] = base_acc
@@ -10107,6 +10180,48 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             print(f"{label:>16} {metric:>8}"
                   + "".join(f"{c:>12}" for c in cells)
                   + f"{drop_s:>17}")
+
+    print(f"\n[e2] learned calibration coefficients (mechanism manipulation "
+          f"check for H2b; read from the trained gates, no extra grid point). "
+          f"The gate computes sigmoid((W_g x - a*log T - c*scale*Hbar)/tau): "
+          f"a>0 is the explicit length correction, c*scale>0 is the "
+          f"concentration correction.  'a+'/'c+' count layers with a positive "
+          f"coefficient; an ablated arm that should not have a term must "
+          f"report n/a there.  Mean over seeds and layers, ± seed std:")
+    print(f"{'arm':>16} {'a':>16} {'c_eff':>16} {'tau_eff':>16} "
+          f"{'a+':>8} {'c+':>8} {'layers':>8}")
+    for label, *_ in _E2_VARIANTS:
+        if not label.startswith("calib"):
+            continue
+        rs = by_variant[label]
+        coeffs = [r.get("calib_coefficients") or {} for r in rs]
+        coeffs = [c for c in coeffs if c.get("applicable")]
+
+        def ccell(key, layers_key=None):
+            if not coeffs:
+                return "n/a"
+            if layers_key:
+                vals = [c.get(layers_key) for c in coeffs]
+                denom_key = ("a_layers" if layers_key.startswith("a_")
+                             else "c_layers")
+                total = sum(c.get(denom_key, 0) for c in coeffs)
+                return f"{sum(vals)}/{total}"
+            agg = _mean_std([c.get(key) for c in coeffs])
+            if not _finite(agg["mean"]):
+                return "n/a"
+            return f"{agg['mean']:+.4f}±{agg['std']:.4f}"
+
+        print(f"{label:>16} {ccell('a_mean'):>16} "
+              f"{ccell('c_effective_mean'):>16} "
+              f"{ccell('tau_effective_mean'):>16} "
+              f"{ccell(None, 'a_positive_layers'):>8} "
+              f"{ccell(None, 'c_effective_positive_layers'):>8} "
+              f"{(coeffs[0].get('n_layers') if coeffs else 0):>8}")
+    print("  (H2c manipulation check: only the arms with the length term "
+          "on should show a finite 'a'; only the arms with the concentration "
+          "term on should show a finite 'c_eff'.  A full-calib run with "
+          "a<=0 or c_eff<=0 is not implementing the correction H2a/H2b "
+          "name, whatever its endpoint accuracy.)")
 
     print(f"\n[e2] training-curve health (curve_ok = curve-valid runs / "
           f"all runs; late = U-shaped val curves; tail_train = relative "
@@ -10366,6 +10481,19 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             for L in lengths}
         for label, *_ in _E2_VARIANTS}
     e2_summary["_per_length_contrasts"] = length_contrasts
+    e2_summary["_calibration_coefficients"] = {
+        label: {
+            key: _mean_std([
+                (r.get("calib_coefficients") or {}).get(key)
+                for r in by_variant[label]
+                if (r.get("calib_coefficients") or {}).get("applicable")])
+            for key in ("a_mean", "c_mean", "c_effective_mean",
+                        "scale_mean", "tau_effective_mean",
+                        "a_positive_layers", "c_effective_positive_layers")
+        }
+        for label, *_ in _E2_VARIANTS
+        if label.startswith("calib")
+    }
     e2_summary["_efficiency"] = length_efficiency
     e2_summary["_class_frequency_companions"] = endpoint_companions
     e2_summary["_provenance"] = _stamp(settings)
