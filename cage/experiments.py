@@ -1183,6 +1183,143 @@ class Settings:
         # runner entry point re-checks (see ``_validate_training_seeds``)
         # because ``--seeds`` is applied to the attribute afterwards.
         self.seeds = _validate_training_seeds(self.seeds)
+        # Numeric geometry and loop sizes are used as lengths, ranges and
+        # loop bounds downstream.  A bool, fractional value or string would
+        # otherwise be coerced somewhere deeper (or fail halfway through a
+        # run), so validate and canonicalise them at the configuration
+        # boundary like ``Cfg`` does.
+        def _positive_int_field(name):
+            raw = getattr(self, name)
+            if isinstance(raw, bool):
+                raise ValueError(f"{name} must be an integer, not bool")
+            try:
+                value = operator.index(raw)
+            except TypeError as exc:
+                raise ValueError(
+                    f"{name} must be an integer, got {raw!r}") from exc
+            if value < 1:
+                raise ValueError(f"{name} must be >= 1, got {raw!r}")
+            setattr(self, name, int(value))
+            return int(value)
+
+        for name in ("d_model", "n_heads", "n_layers", "batch", "steps",
+                     "eval_batch", "eval_batches", "stats_batch",
+                     "stats_batches", "val_batches", "probe_batch",
+                     "probe_steps", "probe_eval_batch",
+                     "probe_eval_batches", "overfit_steps",
+                     "overfit_batch"):
+            _positive_int_field(name)
+        if self.d_model % self.n_heads:
+            raise ValueError(
+                f"d_model={self.d_model} is not a positive multiple of "
+                f"n_heads={self.n_heads}")
+        raw_curve_points = self.curve_points
+        if isinstance(raw_curve_points, bool):
+            raise ValueError(
+                f"curve_points must be a non-negative integer, got "
+                f"{raw_curve_points!r}")
+        try:
+            curve_points = operator.index(raw_curve_points)
+        except TypeError as exc:
+            raise ValueError(
+                f"curve_points must be a non-negative integer, got "
+                f"{raw_curve_points!r}") from exc
+        if curve_points < 0:
+            raise ValueError(
+                f"curve_points must be a non-negative integer, got "
+                f"{raw_curve_points!r}")
+        self.curve_points = int(curve_points)
+
+        def _positive_int_tuple(name, allow_empty=False):
+            raw = getattr(self, name)
+            try:
+                values = tuple(raw)
+            except TypeError as exc:
+                raise ValueError(
+                    f"{name} must be an iterable of positive integers, "
+                    f"got {raw!r}") from exc
+            if not values and not allow_empty:
+                raise ValueError(f"{name} must not be empty")
+            checked = []
+            for value in values:
+                if isinstance(value, bool):
+                    raise ValueError(
+                        f"{name} entries must be integers, got {value!r}")
+                try:
+                    item = operator.index(value)
+                except TypeError as exc:
+                    raise ValueError(
+                        f"{name} entries must be integers, got {value!r}"
+                    ) from exc
+                if item < 1:
+                    raise ValueError(
+                        f"{name} entries must be >= 1, got {value!r}")
+                checked.append(int(item))
+            setattr(self, name, tuple(checked))
+
+        _positive_int_tuple("depth_ladder")
+        _positive_int_tuple("probe_steps_grid", allow_empty=True)
+        raw_multipliers = self.depth_step_multipliers
+        try:
+            multipliers = tuple(raw_multipliers)
+        except TypeError as exc:
+            raise ValueError(
+                "depth_step_multipliers must be an iterable of finite "
+                f"positive numbers, got {raw_multipliers!r}") from exc
+        checked_multipliers = []
+        for value in multipliers:
+            if isinstance(value, bool):
+                raise ValueError(
+                    "depth_step_multipliers entries must be numbers, "
+                    f"got {value!r}")
+            try:
+                number = float(value)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    "depth_step_multipliers entries must be finite "
+                    f"positive numbers, got {value!r}") from exc
+            if not (math.isfinite(number) and number > 0.0):
+                raise ValueError(
+                    "depth_step_multipliers entries must be finite "
+                    f"positive numbers, got {value!r}")
+            checked_multipliers.append(number)
+        self.depth_step_multipliers = tuple(checked_multipliers)
+        for name in ("dropout", "negative_control_tol"):
+            raw = getattr(self, name)
+            if isinstance(raw, bool):
+                raise ValueError(f"{name} must be a finite number, got {raw!r}")
+            try:
+                number = float(raw)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    f"{name} must be a finite number, got {raw!r}") from exc
+            if not math.isfinite(number):
+                raise ValueError(
+                    f"{name} must be a finite number, got {raw!r}")
+            if name == "dropout" and not 0.0 <= number <= 1.0:
+                raise ValueError(
+                    f"dropout must be in [0, 1], got {raw!r}")
+            if name == "negative_control_tol" and number < 0.0:
+                raise ValueError(
+                    f"negative_control_tol must be >= 0, got {raw!r}")
+            setattr(self, name, number)
+        for name in ("lr", "overfit_lr"):
+            raw = getattr(self, name)
+            if raw is None and name == "lr":
+                continue
+            if isinstance(raw, bool):
+                raise ValueError(
+                    f"{name} must be a finite positive number, got {raw!r}")
+            try:
+                number = float(raw)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    f"{name} must be a finite positive number, got "
+                    f"{raw!r}") from exc
+            if not (math.isfinite(number) and number > 0.0):
+                raise ValueError(
+                    f"{name} must be a finite positive number, got {raw!r}")
+            setattr(self, name, number)
         check_data_geometry(self.n_pairs, self.vocab, self.max_len)
         raw_q = self.fdr_q
         try:

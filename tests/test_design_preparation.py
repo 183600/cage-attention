@@ -399,6 +399,49 @@ class DesignPlanTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             Settings(run_order_seed=True)
 
+    def test_settings_reject_invalid_numeric_configuration(self):
+        for field, values in {
+            "batch": (0, -1, 1.5, True, "8"),
+            "steps": (0, -1, 1.5, True),
+            "eval_batch": (0, 1.5, True),
+            "eval_batches": (0, 1.5, True),
+            "stats_batch": (0, 1.5, True),
+            "stats_batches": (0, 1.5, True),
+            "val_batches": (0, 1.5, True),
+            "probe_batch": (0, 1.5, True),
+            "probe_steps": (0, 1.5, True),
+            "probe_eval_batch": (0, 1.5, True),
+            "probe_eval_batches": (0, 1.5, True),
+            "overfit_steps": (0, 1.5, True),
+            "overfit_batch": (0, 1.5, True),
+            "curve_points": (-1, 1.5, True),
+            "d_model": (0, 1.5, True),
+            "n_heads": (0, 1.5, True),
+            "n_layers": (0, 1.5, True),
+            "dropout": (-0.1, 1.1, float("nan"), True),
+            "negative_control_tol": (-0.1, float("nan"), True),
+            "overfit_lr": (0.0, -1.0, float("nan"), True),
+            "lr": (0.0, -1.0, float("nan"), True),
+        }.items():
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    with self.assertRaises(ValueError):
+                        Settings(**{field: value})
+        with self.assertRaises(ValueError):
+            Settings(d_model=10, n_heads=4)
+        for values in ((), (0,), (True,), (1.5,)):
+            with self.subTest(depth_ladder=values):
+                with self.assertRaises(ValueError):
+                    Settings(depth_ladder=values)
+        for values in ((0.0,), (-1.0,), (float("nan"),), (True,)):
+            with self.subTest(depth_step_multipliers=values):
+                with self.assertRaises(ValueError):
+                    Settings(depth_step_multipliers=values)
+        # Empty optional grids keep the documented fallback behaviour.
+        self.assertEqual(Settings(probe_steps_grid=()).probe_steps_grid, ())
+        self.assertEqual(
+            Settings(depth_step_multipliers=()).depth_step_multipliers, ())
+
 
 if __name__ == "__main__":
     unittest.main()
