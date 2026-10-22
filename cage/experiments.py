@@ -1537,8 +1537,13 @@ def _difficulty_vectors(difficulty):
         # are genuine zero-count strata, not a different encoding).
         size = max(ids) + 1
         declared = (difficulty or {}).get("n_strata")
-        if isinstance(declared, int) and not isinstance(declared, bool):
-            if declared < size:
+        if declared is not None:
+            # The declared encoding size follows the same JSON convention as
+            # the counts: an integral float (e.g. ``12.0``) is a valid
+            # round-trip of an integer, while a bool/fractional/negative
+            # value is malformed and must not be silently ignored.
+            declared = _difficulty_count(declared)
+            if declared is None or declared < size:
                 return [], []
             size = declared
         totals = [0] * size

@@ -293,6 +293,19 @@ class DifficultyVectorAlignmentTest(unittest.TestCase):
         })
         self.assertEqual(totals, [0, 0, 5, 0])
         self.assertEqual(correct, [0, 0, 1, 0])
+        # JSON round-trips may spell the declared size as an integral float.
+        totals, correct = _difficulty_vectors({
+            "n_strata": 4.0,
+            "strata": [{"id": 2, "n": 5, "correct": 1}],
+        })
+        self.assertEqual(totals, [0, 0, 5, 0])
+        self.assertEqual(correct, [0, 0, 1, 0])
+        for bad_size in (True, 3.5, -1, "4"):
+            with self.subTest(n_strata=bad_size):
+                self.assertEqual(_difficulty_vectors({
+                    "n_strata": bad_size,
+                    "strata": [{"id": 0, "n": 1, "correct": 1}],
+                }), ([], []))
 
     def test_legacy_rows_without_ids_fall_back_to_order(self):
         from cage.experiments import _difficulty_vectors
