@@ -140,6 +140,19 @@ Design principles
     slow machine drift cannot be aliased with one treatment arm; the
     schedule is deterministic from ``Settings.run_order_seed`` and never
     perturbs the data/dropout RNG streams.
+7. **Replication and claim-level synthesis.**  Two readings sit on top of
+   the per-contrast decision without changing it.  First, every row carries
+   a t-based **same-size replication interval** for a future study's mean
+   (``sqrt(2/n)``, not the CI's ``sqrt(1/n)``) and the probability that a
+   repeat keeps the registered sign, so a significant but noisy effect is
+   labelled *replication-uncertain* instead of "robust".  Second, the
+   pre-registered hypotheses are conjunctions ("A and B and C"); a single
+   surviving row must not be read as "the hypothesis is confirmed".  The
+   report groups rows per hypothesis and marks it ``supported`` only when
+   every registered directional/null-prediction row supports it, with
+   ``partial``/``refuted``/``undirected``/``no_contrast`` as explicit
+   outcomes.  Both are companions: row-level ``supports_hypothesis`` and
+   the BH family are untouched.  See ``docs/results_analysis.md``.
 
 Outputs land in ``results/`` (git-ignored); nothing is written into the
 tracked tree.
@@ -215,6 +228,7 @@ from .metrics import (
     minimum_effect_test,
     noninferiority_test,
     paired_bootstrap_ci,
+    replication_interval,
     standardized_proportion,
     wilson_ci,
 )
@@ -4046,6 +4060,124 @@ def _fmt_ci(ci) -> str:
             f"n={ci['n']} {p_s}{verdict}")
 
 
+def _row_is_refutation(row) -> bool:
+    """Is this row a pre-registered prediction *refuted* by its own test?
+
+    Mirrors the decision branch in :meth:`ContrastLog.finalize`: a
+    directional row that is FDR-significant in the opposite direction, or a
+    null-prediction row whose whole interval lies beyond the registered
+    bound, is a refutation.  Claim-ineligible or confounded rows are not read
+    as a refutation (they are uninformative, not contradictory).  A null
+    row's TOST p-value is a p-value *for* equivalence and is ~1 when the
+    interval is far outside the bound, so the CI rule - not that p-value -
+    decides a null refutation; using the TOST p here would make a large
+    violation look "non-significant".
+    """
+    if row.get("controlled") is False or not row.get("claim_eligible", True):
+        return False
+    test = row.get("test")
+    if test in ("equivalence", "noninferiority"):
+        bound = (row.get("equivalence_bound") if test == "equivalence"
+                 else row.get("noninferiority_bound"))
+        if bound is None or not _finite(bound):
+            return False
+        if test == "equivalence":
+            return bool(_finite(row.get("lo")) and _finite(row.get("hi"))
+                        and (row["lo"] > float(bound)
+                             or row["hi"] < -float(bound)))
+        return bool(_finite(row.get("lo")) and row["lo"] <= -float(bound))
+    return bool(row.get("fdr_reject") and row.get("direction_reversed"))
+
+
+def _hypothesis_evidence_synthesis(rows, hypotheses) -> dict:
+    """Fold a family of contrast rows into a per-hypothesis claim status.
+
+    The pre-registered hypotheses are *conjunctions* ("A and B and C"), but
+    the decision table is row-level.  Reading "H2a supported" off a single
+    surviving row would turn a conjunction into a disjunction and overstate
+    the evidence.  This companion groups the rows by hypothesis and reports
+    how many of its registered prediction rows were confirmed, refuted or
+    left inconclusive:
+
+    * ``supported`` - every registered directional/null-prediction row
+      supports the hypothesis;
+    * ``partial`` - at least one row supports it, but another registered row
+      is inconclusive (or has no decision yet);
+    * ``refuted`` - at least one registered row is a refutation, whatever
+      the other rows say;
+    * ``inconclusive`` - no row supports and none refutes;
+    * ``undirected`` - the hypothesis has only two-sided/descriptive rows
+      (no registered sign or bound to conjoin); their row-level readout
+      stands, but it is not a confirmed signed conjunction;
+    * ``no_contrast`` - nothing was run for the hypothesis.
+
+    Only rows with a registered direction (``+``/``-``) or a registered
+    null-prediction test (``equivalence``/``noninferiority``) enter the
+    conjunction; completeness/robustness companions without a registered
+    direction stay descriptive.  The status is a *reading companion*: it
+    does not change ``supports_hypothesis`` or the FDR family.  A
+    ``partial`` or ``refuted`` status is what the report warns about so a
+    multi-row hypothesis is not credited on one surviving row.
+    """
+    out = {}
+    for hyp in hypotheses:
+        hrows = [r for r in rows if r.get("hypothesis") == hyp]
+        required = [r for r in hrows
+                    if r.get("direction") in ("+", "-")
+                    or r.get("test") in ("equivalence", "noninferiority")]
+        confirmed = [r for r in required if r.get("supports_hypothesis")]
+        refuted = [r for r in required if _row_is_refutation(r)]
+        confirmed_ids = {id(r) for r in confirmed}
+        refuted_ids = {id(r) for r in refuted}
+        inconclusive = [r for r in required
+                        if id(r) not in confirmed_ids
+                        and id(r) not in refuted_ids]
+        required_ids = {id(r) for r in required}
+        descriptive = [r for r in hrows if id(r) not in required_ids]
+        descriptive_support = [r for r in descriptive
+                               if r.get("supports_hypothesis")]
+        if not hrows:
+            status = "no_contrast"
+        elif not required:
+            status = ("undirected" if descriptive_support
+                      else "no_directional_prediction")
+        elif refuted:
+            status = "refuted"
+        elif len(confirmed) == len(required):
+            status = "supported"
+        elif confirmed:
+            status = "partial"
+        else:
+            status = "inconclusive"
+        rep_uncertain = [r for r in confirmed + descriptive_support
+                         if r.get("replication_uncertain")]
+        provisional = [r for r in confirmed
+                       if r.get("sesoi_point_estimate_only")]
+
+        def _label(r):
+            return f"{r.get('rule')} ({r.get('metric')})"
+
+        out[hyp] = {
+            "status": status,
+            "n_rows": len(hrows),
+            "n_required": len(required),
+            "n_confirmed": len(confirmed),
+            "n_refuted": len(refuted),
+            "n_inconclusive": len(inconclusive),
+            "n_descriptive": len(descriptive),
+            "n_descriptive_supporting": len(descriptive_support),
+            "n_replication_uncertain": len(rep_uncertain),
+            "n_practically_provisional": len(provisional),
+            "refuted_contrasts": [_label(r) for r in refuted],
+            "unconfirmed_contrasts": [_label(r) for r in inconclusive],
+            "replication_uncertain_contrasts": [_label(r)
+                                                for r in rep_uncertain],
+            "practically_provisional_contrasts": [_label(r)
+                                                  for r in provisional],
+        }
+    return out
+
+
 # Metrics that are raw accuracy (or an accuracy difference) and therefore
 # inherit the held-out answer-balance premise.  ``f1_macro``,
 # ``recall_macro`` and the PR-AUC family are explicitly excluded: they are
@@ -4405,6 +4537,17 @@ class ContrastLog:
     and ``seeds_undefined``) so a sample that silently shrank - a value
     present on one side only, or a metric undefined for a seed - is
     visible instead of feeding an unpaired comparison.
+
+    Two further companions sit on top of the row decisions and change none
+    of them.  Each row stores a same-size **replication interval** for a
+    future study's mean and its probability of keeping the registered sign
+    (``cage.metrics.replication_interval``); a supported row whose repeat
+    interval still crosses zero is marked ``replication_uncertain``.
+    ``finalize`` also groups the rows by hypothesis and reports whether the
+    pre-registered *conjunction* is ``supported``, ``partial``,
+    ``refuted``, ``inconclusive``, ``undirected`` or ``no_contrast`` - one
+    surviving row is not a confirmed multi-row hypothesis.  Both are
+    reading aids; the pre-registered row rule and FDR family are unchanged.
     """
 
     def __init__(self, tag: str, hypotheses=(), min_seeds: int = 3,
@@ -4488,6 +4631,19 @@ class ContrastLog:
                 f"{sorted(direction_map)}")
         direction = direction_map.get(
             metric if direction_key is None else direction_key)
+        # Replication companion: what a same-size repeat would plausibly
+        # show, not just the precision of the current mean.  Computed here
+        # because the registered direction (and the null-prediction bound)
+        # live in the registry lookup above; finalize() only turns the
+        # interval into the "uncertain" flag once the row's decision is
+        # known, so the pre-registered rule is never changed by it.
+        rep_mode = ("equivalence" if equiv else "noninferiority" if noninf
+                    else "difference")
+        rep = replication_interval(
+            ci.get("diffs"),
+            direction=None if null_test else direction,
+            mode=rep_mode,
+            bound=ci.get("bound") if null_test else None)
         arms = ci.get("arms") or {}
         arm_a, arm_b = arms.get("a") or {}, arms.get("b") or {}
         # Full-run levels are stored alongside the paired levels so a reader
@@ -4587,6 +4743,19 @@ class ContrastLog:
             # whether the supported effect survives (sensitivity, not a
             # replacement for the pre-registered decision rule).
             "diffs": list(ci.get("diffs") or []),
+            # Same-size replication readout (``cage.metrics``): the t-based
+            # interval for a future study mean and the probability that the
+            # repeat keeps the registered sign.  ``replication_uncertain``
+            # is filled by finalize(), after the row's decision is known.
+            "replication": rep,
+            "replication_lo": rep.get("lo"),
+            "replication_hi": rep.get("hi"),
+            "replication_lo_single": rep.get("lo_single"),
+            "replication_hi_single": rep.get("hi_single"),
+            "replication_prob": rep.get("prob_replicates"),
+            "replication_replicates": rep.get("replicates"),
+            "replication_uncertain": False,
+            "replication_reason": rep.get("reason"),
             "curve_invalid_seeds": list(ci.get("curve_invalid_seeds") or []),
             # Item-level companion on the shared finite evaluation stream
             # (McNemar).  ``stream_sign_conflict`` is a hard gate below:
@@ -4736,6 +4905,22 @@ class ContrastLog:
                      if _finite(sf_min) else "")
             line += (f"  [exact sign-flip {sf_alt} p={float(sf_p):.4g}"
                      f"{floor}]")
+        if rep.get("valid"):
+            if null_test:
+                rep_note = ("inside bound" if rep.get("replicates")
+                            else "NOT inside bound")
+                line += (f"  [same-size replication 95% interval="
+                         f"[{rep['lo']:+.4f}, {rep['hi']:+.4f}], "
+                         f"{rep_note}]")
+            elif direction in ("+", "-"):
+                line += (f"  [same-size replication 95% interval="
+                         f"[{rep['lo']:+.4f}, {rep['hi']:+.4f}], "
+                         f"P(repeat {'>' if direction == '+' else '<'} 0)="
+                         f"{rep['prob_replicates']:.2f}]")
+            else:
+                line += (f"  [same-size replication 95% interval="
+                         f"[{rep['lo']:+.4f}, {rep['hi']:+.4f}], "
+                         f"P(same sign)={rep['prob_replicates']:.2f}]")
         flags = small_n_flags(ci)
         if flags:
             line += f"  [{flags}]"
@@ -4910,6 +5095,22 @@ class ContrastLog:
                 row["curve_valid_lo"] = sens.get("lo")
                 row["curve_valid_hi"] = sens.get("hi")
                 row["curve_valid_p"] = sens.get("p_value")
+                # The replication forecast must use the same seed sample as
+                # the sensitivity decision, not the contaminated one: a run
+                # that never learned is no more evidence about a future
+                # replication than it is about the current effect.
+                rep_mode = ("equivalence" if row["test"] == "equivalence"
+                            else "noninferiority"
+                            if row["test"] == "noninferiority"
+                            else "difference")
+                rep_bound = (row.get("equivalence_bound")
+                             if row["test"] == "equivalence"
+                             else row.get("noninferiority_bound")
+                             if row["test"] == "noninferiority"
+                             else None)
+                row["replication_curve_valid"] = replication_interval(
+                    valid_diffs, direction=row.get("direction"),
+                    mode=rep_mode, bound=rep_bound)
                 if (row["claim_eligible"] and row["fdr_reject"]
                         and row["practically_relevant"]
                         and (len(valid_diffs) < self.min_seeds
@@ -4938,6 +5139,18 @@ class ContrastLog:
             row["supports_hypothesis"] = bool(
                 row["fdr_reject"] and row["practically_relevant"]
                 and row["claim_eligible"])
+            # Replication companion: a supported effect whose 95%
+            # same-size-repeat interval still includes zero (or crosses a
+            # null-prediction bound) is not expected to reproduce its sign
+            # at 95% in a fresh run of the same size.  This annotates, and
+            # never changes, the pre-registered decision above.
+            rep = (row.get("replication_curve_valid")
+                   or row.get("replication") or {})
+            row["replication_effective"] = rep
+            row["replication_uncertain"] = bool(
+                row["supports_hypothesis"] and rep.get("valid")
+                and not rep.get("replicates"))
+            row["replication_prob"] = rep.get("prob_replicates")
             # Small-sample robustness: does the *decision* survive when any
             # single seed is dropped (jackknife), and does BCa reach the
             # same decision as the pre-registered percentile interval?
@@ -5023,6 +5236,38 @@ class ContrastLog:
                 and row.get("supports_hypothesis")
                 and row.get("claim_eligible", True)
                 and not row["minimum_effect_established"])
+        # Hypothesis-level evidence synthesis.  The rows above are the
+        # decision unit (the pre-registered FDR family), but the hypotheses
+        # themselves are conjunctions; a single surviving row must not be
+        # read as "the hypothesis is confirmed".  This companion groups the
+        # rows and reports supported / partial / refuted / inconclusive, so
+        # the report cannot silently turn "A and B and C" into "any of
+        # A, B, C".  It is a reading companion and changes no decision.
+        cited_hypotheses = sorted({
+            r.get("hypothesis") for r in self.rows if r.get("hypothesis")})
+        synthesis_order = list(self.hypotheses) + [
+            h for h in cited_hypotheses if h not in self.hypotheses]
+        synthesis = _hypothesis_evidence_synthesis(self.rows,
+                                                   synthesis_order)
+        synth_supported = [h for h, v in synthesis.items()
+                           if v["status"] == "supported"]
+        synth_partial = [h for h, v in synthesis.items()
+                         if v["status"] == "partial"]
+        synth_refuted = [h for h, v in synthesis.items()
+                         if v["status"] == "refuted"]
+        synth_inconclusive = [h for h, v in synthesis.items()
+                              if v["status"] == "inconclusive"]
+        synth_undirected = [h for h, v in synthesis.items()
+                            if v["status"] == "undirected"]
+        synth_no_contrast = [h for h, v in synthesis.items()
+                             if v["status"] == "no_contrast"]
+        synth_rep_uncertain = [
+            h for h, v in synthesis.items()
+            if v["n_replication_uncertain"] and v["status"] in (
+                "supported", "partial", "undirected")]
+        synth_provisional = [
+            h for h, v in synthesis.items()
+            if v["n_practically_provisional"]]
         # Parallel exact-test family: the same BH correction applied to the
         # paired sign-flip p-values.  This is a companion, not a replacement
         # for the pre-registered bootstrap decision; it answers "could this
@@ -5069,6 +5314,8 @@ class ContrastLog:
             and r.get("minimum_effect_established")]
         sesoi_point_only = [
             r for r in supporting if r.get("sesoi_point_estimate_only")]
+        replication_uncertain = [
+            r for r in supporting if r.get("replication_uncertain")]
         loo_flips = [r for r in testable if r.get("loo_flips_decision")]
         bca_differs = [r for r in testable if r.get("bca_disagrees")]
         sign_flip_supporting = [
@@ -5288,6 +5535,53 @@ class ContrastLog:
                   f"contrast(s) also have their whole 95% CI above the "
                   f"registered practical bound (their practical size is "
                   f"established, not just their non-zero sign)")
+        if replication_uncertain:
+            names = ", ".join(
+                f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                for r in replication_uncertain)
+            print(f"[{self.tag}] WARNING: {len(replication_uncertain)}/"
+                  f"{len(supporting)} supported contrast(s) have a 95% "
+                  f"same-size replication interval that still crosses zero "
+                  f"or their null-prediction bound: {names}; the average "
+                  f"effect is supported, but a fresh run of the same size "
+                  f"is NOT expected to reproduce its sign/bound at 95% - "
+                  f"report these as replication-uncertain, not as robust "
+                  f"effects")
+        print(f"[{self.tag}] hypothesis-level synthesis (companion): "
+              f"{len(synth_supported)} fully supported, "
+              f"{len(synth_partial)} partial, {len(synth_refuted)} refuted, "
+              f"{len(synth_inconclusive)} inconclusive, "
+              f"{len(synth_undirected)} undirected-only, "
+              f"{len(synth_no_contrast)} with no contrast; a hypothesis is "
+              f"'fully supported' only when every registered directional/"
+              f"null-prediction row supports it (row-level SURVIVES alone "
+              f"is not a confirmed conjunction)")
+        if synth_partial:
+            names = ", ".join(synth_partial)
+            print(f"[{self.tag}] WARNING: {len(synth_partial)} hypothesis(es) "
+                  f"have only PARTIAL evidence: {names}; at least one "
+                  f"registered prediction row is inconclusive, so the "
+                  f"hypothesis as stated (a conjunction) is not confirmed")
+        if synth_refuted:
+            names = ", ".join(synth_refuted)
+            print(f"[{self.tag}] WARNING: {len(synth_refuted)} hypothesis(es) "
+                  f"are REFUTED by at least one registered prediction row: "
+                  f"{names}; supporting rows in the same hypothesis cannot "
+                  f"overturn the refutation")
+        if synth_rep_uncertain:
+            names = ", ".join(synth_rep_uncertain)
+            print(f"[{self.tag}] WARNING: {len(synth_rep_uncertain)} "
+                  f"hypothesis(es) rest on supported effects that are "
+                  f"replication-uncertain at the same size: {names}; the "
+                  f"direction is supported by the current run, but the "
+                  f"replication interval says a repeat could reverse it")
+        if synth_provisional:
+            names = ", ".join(synth_provisional)
+            print(f"[{self.tag}] note: {len(synth_provisional)} "
+                  f"hypothesis(es) contain supported rows whose practical "
+                  f"size is only point-estimate level ({names}); their "
+                  f"practical significance remains provisional even where "
+                  f"the conjunction is otherwise supported)")
         if equiv_rows:
             print(f"[{self.tag}] equivalence (null-prediction) tests: "
                   f"{len(equivalent)}/{len(equiv_rows)} have their 95% CI "
@@ -5531,6 +5825,22 @@ class ContrastLog:
                    "sesoi_point_estimate_only_contrasts": [
                        f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                        for r in sesoi_point_only],
+                   "n_replication_uncertain": len(replication_uncertain),
+                   "replication_uncertain_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in replication_uncertain],
+                   "hypothesis_synthesis": synthesis,
+                   "n_hypotheses_supported": len(synth_supported),
+                   "n_hypotheses_partial": len(synth_partial),
+                   "n_hypotheses_refuted": len(synth_refuted),
+                   "n_hypotheses_inconclusive": len(synth_inconclusive),
+                   "n_hypotheses_undirected": len(synth_undirected),
+                   "n_hypotheses_no_contrast": len(synth_no_contrast),
+                   "n_hypotheses_replication_uncertain":
+                       len(synth_rep_uncertain),
+                   "partial_hypotheses": synth_partial,
+                   "refuted_hypotheses": synth_refuted,
+                   "replication_uncertain_hypotheses": synth_rep_uncertain,
                    "n_direction_reversed": len(reversed_effects),
                    "n_equivalence": len(equiv_rows),
                    "n_equivalent": len(equivalent),

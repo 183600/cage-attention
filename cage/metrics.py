@@ -89,6 +89,14 @@ Metric choices (and why)
   evaluation items, reporting the interval that also reflects finite-stream
   sampling; a seed-level win whose crossed interval includes 0 is flagged
   as *stream-limited* rather than generalised to the task population.
+* A confidence interval for the current mean is not a forecast for a
+  **replication**: ``replication_interval`` returns the t-based interval
+  for a same-size future study's mean (``sqrt(2/n)``, because a new study's
+  mean carries its own sampling variance) and the probability that the
+  repeat keeps the registered sign.  A supported but noisy effect whose
+  replication interval crosses zero is reported as *replication-uncertain*
+  rather than "robust"; this is the results-analysis counterpart of the
+  design/power layers, not a replacement for the pre-registered decision.
 """
 
 from __future__ import annotations
@@ -115,6 +123,7 @@ __all__ = [
     "equivalence_test",
     "noninferiority_test",
     "minimum_effect_test",
+    "replication_interval",
     "bootstrap_upper_p",
     "clustered_proportion_ci",
     "crossed_cluster_bootstrap_ci",
@@ -1305,6 +1314,280 @@ def minimum_effect_test(diffs, bound, direction: str = "+",
     return out
 
 
+# ---------------------------------------------------------------------------
+# Small-sample replication readout (Student-t, no SciPy dependency)
+# ---------------------------------------------------------------------------
+def _beta_continued_fraction(a: float, b: float, x: float) -> float:
+    """Continued fraction for the regularised incomplete beta function.
+
+    Numerical Recipes' ``betacf``; the convergence/underflow guards keep a
+    legitimate tail evaluation finite instead of dividing by zero.
+    """
+    maxit, eps, fpmin = 300, 3e-14, 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < fpmin:
+        d = fpmin
+    d = 1.0 / d
+    h = d
+    for m in range(1, maxit + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < fpmin:
+            d = fpmin
+        c = 1.0 + aa / c
+        if abs(c) < fpmin:
+            c = fpmin
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < fpmin:
+            d = fpmin
+        c = 1.0 + aa / c
+        if abs(c) < fpmin:
+            c = fpmin
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < eps:
+            break
+    return h
+
+
+def _regularized_incomplete_beta(a: float, b: float, x: float) -> float:
+    """``I_x(a, b)`` for ``a, b > 0`` and ``0 <= x <= 1``."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    log_beta = (math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+                + a * math.log(x) + b * math.log1p(-x))
+    front = math.exp(log_beta)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _beta_continued_fraction(a, b, x) / a
+    return 1.0 - front * _beta_continued_fraction(b, a, 1.0 - x) / b
+
+
+def _student_t_cdf(t: float, df: float) -> float:
+    """CDF of Student's t with ``df`` degrees of freedom."""
+    if not math.isfinite(t):
+        return 0.0 if t < 0.0 else 1.0
+    if not (math.isfinite(df) and df > 0.0):
+        return float("nan")
+    x = df / (df + t * t)
+    tail = 0.5 * _regularized_incomplete_beta(df / 2.0, 0.5, x)
+    return 1.0 - tail if t > 0.0 else tail
+
+
+def _student_t_ppf(p: float, df: float) -> float:
+    """Quantile of Student's t (bisection on the monotone CDF).
+
+    ``p`` is restricted to ``(0, 1)``; the symmetry of the t distribution
+    lets the search run on the upper half only.  The very-large-``df``
+    branch avoids spending iterations on a distribution that is normal to
+    machine precision.
+    """
+    if not (0.0 < p < 1.0) or not (math.isfinite(df) and df > 0.0):
+        return float("nan")
+    if p == 0.5:
+        return 0.0
+    if p < 0.5:
+        return -_student_t_ppf(1.0 - p, df)
+    if df > 1e6:
+        return NormalDist().inv_cdf(p)
+    lo, hi = 0.0, 1.0
+    while _student_t_cdf(hi, df) < p:
+        hi *= 2.0
+        if hi > 1e12:
+            return float("inf")
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if _student_t_cdf(mid, df) < p:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo <= 1e-14 * max(1.0, hi):
+            break
+    return 0.5 * (lo + hi)
+
+
+def replication_interval(diffs, direction=None, mode: str = "difference",
+                         bound=None, alpha: float = 0.05) -> dict:
+    """How large would the effect be in a *replication*, not just on average?
+
+    A paired bootstrap CI answers "is the mean seed-level effect nonzero?".
+    It does **not** answer the result-reading question a reviewer asks next:
+    "if this experiment were repeated with the same number of training
+    seeds, how large would the effect plausibly be, and would it keep its
+    sign?".  With five seeds a small but significant mean can coexist with
+    a replicate that is flat or reversed, because the CI shrinks with
+    ``sqrt(n)`` while a new study's mean carries its own sampling variance.
+
+    This function returns the Student-t **replication interval** for the
+    mean of a future study of the same size,
+    ``mean +- t_{1-alpha/2, n-1} * sd * sqrt(2/n)``.  The ``sqrt(2/n)``
+    (instead of the CI's ``sqrt(1/n)``) is the variance of
+    ``mean_new - mean_old`` when both studies have ``n`` seeds and the same
+    seed-level SD, so the interval describes a same-size repeat rather than
+    the precision of the current mean.  ``lo_single``/``hi_single`` give
+    the wider prediction interval for one *individual* future seed,
+    ``mean +- t * sd * sqrt(1 + 1/n)``, as a secondary readout.
+
+    ``prob_replicates`` is the t-distribution probability that a same-size
+    repeat's mean lies in the pre-registered direction (``+``: above 0,
+    ``-``: below 0).  For a two-sided/`undirected` prediction it is the
+    probability that the repeat keeps the observed sign, which is
+    descriptive rather than a claim.  ``replicates`` is the interval-level
+    decision companion: the whole future-study interval must clear zero in
+    the registered direction.  For null predictions the same idea is read
+    against the registered bound: ``mode='equivalence'`` requires the
+    interval inside ``+-bound``, ``mode='noninferiority'`` requires its
+    lower end above ``-bound``.  A future *single* seed inside a tight
+    equivalence bound is usually unattainable even when the mean is
+    compliant, so the same-size-repeat interval is the relevant one.
+
+    The readout assumes seed-level effects are independent and
+    approximately normal with a common SD; at these seed counts that is an
+    explicit modelling assumption, not a distribution-free guarantee.  It
+    is a **companion**, never a replacement for the pre-registered
+    decision rule: a supported row whose replication interval includes
+    zero is reported as *replication-uncertain*, not as unsupported.
+    Returns ``valid=False`` (and NaN fields) for fewer than three paired
+    seeds, non-finite differences, an invalid direction/mode/bound or an
+    invalid ``alpha`` - a design that cannot estimate the seed SD cannot
+    forecast a replication.
+    """
+    bound_is_bool = isinstance(bound, bool)
+    alpha = _float_or_nan(alpha)
+    bound = _float_or_nan(bound)
+    # ``None`` means the caller did not pass the paired differences (e.g. a
+    # display-only CI dict); it is not an empty sample that can be resampled.
+    bad_input = False
+    if diffs is None:
+        d = torch.empty(0, dtype=torch.float64)
+    else:
+        try:
+            d = _flatten_float(diffs)
+        except (TypeError, ValueError, RuntimeError, OverflowError):
+            d = torch.empty(0, dtype=torch.float64)
+            bad_input = True
+    out = {
+        "valid": False,
+        "reason": None,
+        "n": int(d.numel()),
+        "df": float("nan"),
+        "mean": float("nan"),
+        "sd": float("nan"),
+        "alpha": alpha,
+        "t_crit": float("nan"),
+        "lo": float("nan"),
+        "hi": float("nan"),
+        "lo_single": float("nan"),
+        "hi_single": float("nan"),
+        "prob_replicates": float("nan"),
+        "prob_single_same_sign": float("nan"),
+        "replicates": False,
+        "mode": mode,
+        "direction": direction,
+        "bound": bound,
+        "assumptions": ("independent seed effects with a common SD; "
+                        "t-based normal approximation"),
+    }
+    if bound_is_bool:
+        # A boolean is a flag, not an equivalence bound; ``True`` would
+        # otherwise be silently read as 1.0.
+        out["reason"] = "bound must be a number, not a bool"
+        return out
+    if direction not in (None, "+", "-"):
+        out["reason"] = f"unknown direction {direction!r}"
+        return out
+    if mode not in ("difference", "equivalence", "noninferiority"):
+        out["reason"] = f"unknown mode {mode!r}"
+        return out
+    if mode != "difference" and not (
+            math.isfinite(bound) and bound > 0.0):
+        out["reason"] = "null-prediction mode needs a finite positive bound"
+        return out
+    if bad_input:
+        out["reason"] = "paired differences are not a real numeric sample"
+        return out
+    if d.numel() == 0:
+        out["reason"] = "no paired differences supplied"
+        return out
+    if d.numel() == 1 and bool(torch.isfinite(d).all()):
+        out["mean"] = float(d.mean())
+        out["reason"] = "fewer than 3 paired seeds: seed SD not estimable"
+        return out
+    if d.numel() < 3:
+        out["reason"] = "fewer than 3 paired seeds: seed SD not estimable"
+        return out
+    if not bool(torch.isfinite(d).all()):
+        out["reason"] = "non-finite paired difference"
+        return out
+    if not (math.isfinite(alpha) and 0.0 < alpha < 1.0):
+        out["reason"] = "alpha must lie strictly between 0 and 1"
+        return out
+    n = int(d.numel())
+    df = float(n - 1)
+    mean = float(d.mean())
+    sd = float(d.std(unbiased=True))
+    t_crit = _student_t_ppf(1.0 - alpha / 2.0, df)
+    out.update({"valid": True, "n": n, "df": df, "mean": mean, "sd": sd,
+                "t_crit": t_crit})
+    if not (math.isfinite(t_crit) and math.isfinite(sd)):
+        out["reason"] = "t quantile or seed SD is not finite"
+        out["valid"] = False
+        return out
+    # A future same-size study's mean, and one individual future seed.
+    rep_half = t_crit * sd * math.sqrt(2.0 / n)
+    single_half = t_crit * sd * math.sqrt(1.0 + 1.0 / n)
+    out["lo"], out["hi"] = mean - rep_half, mean + rep_half
+    out["lo_single"] = mean - single_half
+    out["hi_single"] = mean + single_half
+
+    def _prob(direction_sign, variance_factor):
+        if sd == 0.0:
+            if mean == 0.0:
+                return 0.5
+            return 1.0 if (mean > 0.0) == (direction_sign > 0) else 0.0
+        scale = sd * math.sqrt(variance_factor)
+        if direction_sign > 0:
+            return _student_t_cdf(mean / scale, df)
+        return _student_t_cdf(-mean / scale, df)
+
+    if direction == "+":
+        out["prob_replicates"] = _prob(1.0, 2.0 / n)
+        out["prob_single_same_sign"] = _prob(1.0, 1.0 + 1.0 / n)
+    elif direction == "-":
+        out["prob_replicates"] = _prob(-1.0, 2.0 / n)
+        out["prob_single_same_sign"] = _prob(-1.0, 1.0 + 1.0 / n)
+    else:
+        # Undirected prediction: report the chance the repeat keeps the
+        # observed sign (descriptive; no direction was registered).
+        if mean == 0.0:
+            out["prob_replicates"] = 0.5
+            out["prob_single_same_sign"] = 0.5
+        else:
+            keep = _prob(1.0 if mean > 0.0 else -1.0, 2.0 / n)
+            out["prob_replicates"] = keep
+            out["prob_single_same_sign"] = _prob(
+                1.0 if mean > 0.0 else -1.0, 1.0 + 1.0 / n)
+    if mode == "equivalence":
+        out["replicates"] = bool(out["lo"] > -bound and out["hi"] < bound)
+    elif mode == "noninferiority":
+        out["replicates"] = bool(out["lo"] > -bound)
+    elif direction == "+":
+        out["replicates"] = bool(out["lo"] > 0.0)
+    elif direction == "-":
+        out["replicates"] = bool(out["hi"] < 0.0)
+    else:
+        out["replicates"] = bool(out["lo"] > 0.0 or out["hi"] < 0.0)
+    return out
+
+
 def seeds_for_power(sd, effect, alpha: float = 0.05,
                     power: float = 0.8) -> float:
     """Paired-design seed count for ``power`` at a given effect size.
@@ -2443,6 +2726,60 @@ def _self_test() -> int:
     check("met_zero_boot_no_claim",
           minimum_effect_test([1.0, 2.0, 3.0], 0.5,
                               n_boot=0)["beyond_sesoi"] is False)
+
+    # Replication interval: a same-size future study, not the CI of the
+    # current mean.  The t quantile is pinned against the standard table
+    # (df=4 -> 2.776445...); a tight effect replicates, a noisy one does
+    # not even though its mean is positive, and the single-seed interval is
+    # wider than the same-size-study interval.
+    rep_strong = replication_interval([0.20, 0.19, 0.21, 0.18, 0.22],
+                                      direction="+")
+    check("rep_t_quantile",
+          rep_strong["valid"]
+          and abs(rep_strong["t_crit"] - 2.7764451051977987) < 1e-12)
+    check("rep_tight_replicates",
+          rep_strong["replicates"] is True and rep_strong["lo"] > 0.0
+          and rep_strong["prob_replicates"] > 0.99)
+    check("rep_single_wider",
+          (rep_strong["hi_single"] - rep_strong["lo_single"])
+          > (rep_strong["hi"] - rep_strong["lo"]))
+    rep_noisy = replication_interval([0.02, 0.03, 0.04, 0.05, 0.15],
+                                     direction="+")
+    check("rep_noisy_mean_positive_but_not_replicated",
+          rep_noisy["mean"] > 0.0 and rep_noisy["replicates"] is False
+          and rep_noisy["lo"] < 0.0 < rep_noisy["hi"]
+          and rep_noisy["prob_replicates"] < 0.975)
+    rep_neg = replication_interval([-0.20, -0.19, -0.21, -0.18, -0.22],
+                                   direction="-")
+    check("rep_negative_direction", rep_neg["replicates"] is True
+          and rep_neg["hi"] < 0.0)
+    rep_eq = replication_interval([0.01, -0.01, 0.02, -0.02, 0.0],
+                                  mode="equivalence", bound=0.05)
+    check("rep_equivalence_replicates", rep_eq["replicates"] is True)
+    rep_shift = replication_interval([0.20, 0.19, 0.21, 0.18, 0.22],
+                                     mode="equivalence", bound=0.05)
+    check("rep_equivalence_shift_not_replicated",
+          rep_shift["replicates"] is False)
+    rep_ni = replication_interval([0.01, -0.01, 0.02, -0.02, 0.0],
+                                  mode="noninferiority", bound=0.05)
+    check("rep_noninferiority_replicates", rep_ni["replicates"] is True)
+    check("rep_small_n_abstains",
+          replication_interval([0.1, 0.2])["valid"] is False
+          and replication_interval([0.1, 0.2, 0.3])["valid"] is True)
+    check("rep_invalid_inputs_abstain",
+          replication_interval([0.1, float("nan"), 0.2])["valid"] is False
+          and replication_interval([0.1, 0.2, 0.3],
+                                   alpha=2.0)["valid"] is False
+          and replication_interval([0.1, 0.2, 0.3],
+                                   direction="up")["valid"] is False
+          and replication_interval([0.1, 0.2, 0.3],
+                                   mode="equivalence",
+                                   bound=0.0)["valid"] is False
+          and replication_interval([0.1, 0.2, 0.3],
+                                   mode="equivalence",
+                                   bound=True)["valid"] is False
+          and replication_interval([0.1, 0.2, 0.3],
+                                   mode="up")["valid"] is False)
 
     # Degenerate inputs must not raise and must not claim anything.
     empty = paired_bootstrap_ci([])
