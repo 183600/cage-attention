@@ -6245,7 +6245,12 @@ def _environment_record(settings: Settings, git_dirty: bool | None = None) -> di
                     env["cpu_model"] = line.split(":", 1)[1].strip()
                     break
     except OSError:
-        env.setdefault("cpu_model", None)
+        pass
+    # ``/proc/cpuinfo`` is absent on some platforms (and ARM kernels may not
+    # expose a ``model name`` line).  Keep the record schema stable: a
+    # missing probe is ``None``, not a missing key that breaks consumers
+    # expecting the documented field.
+    env.setdefault("cpu_model", None)
     for name in ("mkldnn", "openmp"):
         backend = getattr(torch.backends, name, None)
         probe = getattr(backend, "is_available", None)
