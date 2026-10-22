@@ -641,12 +641,17 @@ HYPOTHESES = {
                       "log(T)-normalised entropy, calib degrades less than "
                       "none when evaluated at 2x-spaced lengths.",
         "prediction": "accuracy_drop(calib) < accuracy_drop(none) and "
-                      "accuracy@longest(calib) > accuracy@longest(none)",
+                      "accuracy@longest(calib) > accuracy@longest(none); "
+                      "the fitted accuracy slope on log(T) across the whole "
+                      "sweep is also less negative for calib (endpoint-only "
+                      "reads can hide a mid-sweep reversal)",
         "decision": "paired bootstrap 95% CI of the differences excludes 0 "
                     "after Benjamini-Hochberg FDR control across the E2 "
                     "contrasts (q=0.05)",
-        "sesoi": {"accuracy_at_longest": 0.01, "accuracy_drop": 0.01},
-        "direction": {"accuracy_at_longest": "+", "accuracy_drop": "-"},
+        "sesoi": {"accuracy_at_longest": 0.01, "accuracy_drop": 0.01,
+                  "accuracy_slope_log_len": 0.01},
+        "direction": {"accuracy_at_longest": "+", "accuracy_drop": "-",
+                      "accuracy_slope_log_len": "+"},
     },
     "H2b": {
         "experiment": "e2",
@@ -725,12 +730,16 @@ HYPOTHESES = {
                       "any learned gate.",
         "prediction": "accuracy_at_longest(calib) > "
                       "accuracy_at_longest(query) and "
-                      "accuracy_drop(calib) < accuracy_drop(query)",
+                      "accuracy_drop(calib) < accuracy_drop(query), with "
+                      "the same sign on the whole-sweep accuracy slope on "
+                      "log(T)",
         "decision": "paired bootstrap 95% CI excludes 0 in the "
                     "pre-registered directions after Benjamini-Hochberg FDR "
                     "control across the E2 contrasts (q=0.05)",
-        "sesoi": {"accuracy_at_longest": 0.01, "accuracy_drop": 0.01},
-        "direction": {"accuracy_at_longest": "+", "accuracy_drop": "-"},
+        "sesoi": {"accuracy_at_longest": 0.01, "accuracy_drop": 0.01,
+                  "accuracy_slope_log_len": 0.01},
+        "direction": {"accuracy_at_longest": "+", "accuracy_drop": "-",
+                      "accuracy_slope_log_len": "+"},
     },
     "H2e": {
         "experiment": "e2",
@@ -1130,6 +1139,29 @@ def _mean_std(values):
     else:
         std = 0.0
     return {"mean": mean, "std": std, "n": len(vals)}
+
+
+def _linear_slope(xs, ys):
+    """Least-squares slope of ``ys`` on ``xs`` (NaN when not identifiable).
+
+    Used for the E2 degradation-shape readout: fitting accuracy on
+    ``log(T)`` across the whole sweep tests "degrades more slowly" with all
+    the measured lengths instead of only the endpoint, and is scale-free
+    with respect to the absolute accuracy level.  Non-finite pairs are
+    dropped; fewer than two points or a constant x returns NaN rather than
+    an arbitrary number.
+    """
+    pairs = [(float(x), float(y)) for x, y in zip(xs, ys)
+             if _finite(x) and _finite(y)]
+    if len(pairs) < 2:
+        return float("nan")
+    n = len(pairs)
+    mx = sum(x for x, _ in pairs) / n
+    my = sum(y for _, y in pairs) / n
+    denom = sum((x - mx) ** 2 for x, _ in pairs)
+    if denom <= 0.0:
+        return float("nan")
+    return sum((x - mx) * (y - my) for x, y in pairs) / denom
 
 
 def _aggregate_runs(runs, skip=("seed", "lr", "params", "eval_seed",
@@ -10984,6 +11016,14 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             rec["accuracy_at_base"] = base_acc
             rec["accuracy_at_longest"] = long_acc
             rec["accuracy_drop"] = base_acc - long_acc
+            # Degradation *shape*, not only the endpoint: fit accuracy on
+            # log(T) across the measured sweep.  A mid-sweep reversal can
+            # leave the base-to-longest drop unchanged while contradicting
+            # "degrades more slowly"; this readout uses data already
+            # collected, no extra grid point.
+            rec["accuracy_slope_log_len"] = _linear_slope(
+                [math.log(max(2 * L + 2, 2)) for L in lengths],
+                [rec["accuracy_by_length"][L] for L in lengths])
             base_bal = rec["balanced_accuracy_by_length"][settings.n_pairs]
             long_bal = rec["balanced_accuracy_by_length"][lengths[-1]]
             rec["balanced_accuracy_at_base"] = base_bal
@@ -11062,6 +11102,22 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                   for L in lengths]
     print(f"{'rule ceiling':>16}" + "".join(f"{c:>12}" for c in ceil_cells)
           + f"{'-':>17} {'(gap@long)':>17} {'-':>17}")
+
+    print(f"\n[e2] whole-sweep degradation slope (least-squares accuracy per "
+          f"unit log(T) over all {len(lengths)} measured lengths, "
+          f"mean±std over seeds; more negative = faster degradation).  This "
+          f"is the shape readout behind H2a/H2d's 'degrades more slowly' "
+          f"claim: the endpoint drop alone can hide a mid-sweep reversal:")
+    print(f"{'arm':>16} {'slope/logT':>17} {'seeds_slope<0':>14}")
+    for label, *_ in _E2_VARIANTS:
+        agg = _mean_std([
+            r.get("accuracy_slope_log_len") for r in by_variant[label]])
+        neg = sum(1 for r in by_variant[label]
+                  if _finite(r.get("accuracy_slope_log_len"))
+                  and float(r["accuracy_slope_log_len"]) < 0.0)
+        slope_s = (f"{agg['mean']:+.4f}±{agg['std']:.4f}"
+                   if _finite(agg["mean"]) else "n/a")
+        print(f"{label:>16} {slope_s:>17} {neg:>14}")
 
     # Balanced accuracy (macro recall) is the distribution-robust companion
     # to the headline accuracy at every sweep length.  The values agree
@@ -11340,6 +11396,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                             "accuracy_drop"),
                warn=_curve_warn(("calib", by_variant["calib"]),
                                 ("none", by_variant["none"])))
+    clog.print("calib - none", "H2a", "accuracy_slope_log_len",
+               _paired_diff(by_variant["calib"], by_variant["none"],
+                            "accuracy_slope_log_len"),
+               warn=_curve_warn(("calib", by_variant["calib"]),
+                                ("none", by_variant["none"])))
     # H2d: the same length-robustness read against the closest simpler
     # gate.  ``query`` shares the attention/gating architecture and differs
     # only in the calibration terms, so a calib-vs-query gain is the one
@@ -11353,6 +11414,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     clog.print("calib - query", "H2d", "accuracy_drop",
                _paired_diff(by_variant["calib"], by_variant["query"],
                             "accuracy_drop"),
+               warn=_curve_warn(("calib", by_variant["calib"]),
+                                ("query", by_variant["query"])))
+    clog.print("calib - query", "H2d", "accuracy_slope_log_len",
+               _paired_diff(by_variant["calib"], by_variant["query"],
+                            "accuracy_slope_log_len"),
                warn=_curve_warn(("calib", by_variant["calib"]),
                                 ("query", by_variant["query"])))
     clog.print("calib raw entropy drift vs 0", "H2b", "entropy_drift",
@@ -11537,6 +11603,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         label: {str(L): _mean_std([r["accuracy_by_length"][L]
                                    for r in by_variant[label]])
                 for L in lengths}
+        for label, *_ in _E2_VARIANTS}
+    e2_summary["_accuracy_slope_log_len"] = {
+        label: _mean_std([r.get("accuracy_slope_log_len")
+                          for r in by_variant[label]])
         for label, *_ in _E2_VARIANTS}
     e2_summary["_balanced_accuracy"] = {
         label: {str(L): _mean_std(
