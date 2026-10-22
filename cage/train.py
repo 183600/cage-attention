@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import math
 import operator
+import warnings
 
 import torch
 import torch.nn as nn
@@ -66,6 +67,20 @@ def _make_adamw(params, lr):
     except (TypeError, RuntimeError, ValueError):
         pass
     return torch.optim.AdamW(params, **kw)
+
+
+def _step_scheduler_on_skip(sched) -> None:
+    """Advance the cosine schedule for a skipped (non-finite) iteration.
+
+    The schedule is defined over loop iterations (``T_max=steps``), so a
+    skipped update must not pause it.  Before the first optimizer step
+    PyTorch warns about that intentional ordering; suppress only that known
+    warning instead of leaving the LR one step behind for the rest of the
+    run.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Detected call of")
+        sched.step()
 
 
 def training_recipe(lr, steps=None) -> dict:
@@ -374,7 +389,8 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
 
 def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
                        grad_norm_explode: float = 100.0,
-                       dense_lm: bool = False):
+                       dense_lm: bool = False,
+                       train_mode: bool = True):
     """Staged triage for a non-finite loss.
 
     1. **Data**: NaN/Inf tokens or targets, structural/label violations
@@ -402,6 +418,12 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     with ``True`` every position is (the full-sequence backward is a
     different graph and can surface non-finite values the single-token
     loss never touches).
+
+    ``train_mode`` controls the mode of the diagnostic forward.  Training
+    losses are produced with dropout active, so the default ``True``
+    reproduces them; a non-finite *validation* loss is produced in eval
+    mode and must be diagnosed with ``train_mode=False``, otherwise dropout
+    changes the graph and the triage can blame a different stage.
     """
     training_states = {module: module.training for module in model.modules()}
 
@@ -467,7 +489,10 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
 
     for i, blk in enumerate(model.blocks):
         handles.append(blk.register_forward_hook(_make_hook(i)))
-    model.train()
+    if train_mode:
+        model.train()
+    else:
+        model.eval()
     logits = loss = None
     sup_pos = None
     if not dense_lm and isinstance(meta, dict):
@@ -922,6 +947,12 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                   f"first_bad_stage={diag['first_bad_stage']}")
             hist.append(entry)
             opt.zero_grad(set_to_none=True)
+            # The loop iteration still happened even though the update is
+            # skipped.  Advance the cosine schedule so T_max=steps and the
+            # stamped recipe describe the same iteration axis; otherwise a
+            # skipped step leaves the LR one step behind and the run never
+            # reaches eta_min.
+            _step_scheduler_on_skip(sched)
             if is_log or do_val:
                 if window_loss_n:
                     entry["train_loss_window"] = window_loss_sum / window_loss_n
@@ -946,6 +977,9 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                   f"first_bad_stage={diag['first_bad_stage']}")
             hist.append(entry)
             opt.zero_grad(set_to_none=True)
+            # Same iteration-axis accounting as the non-finite-loss branch:
+            # a skipped gradient update must not pause the cosine schedule.
+            _step_scheduler_on_skip(sched)
             if is_log or do_val:
                 if window_loss_n:
                     entry["train_loss_window"] = window_loss_sum / window_loss_n
@@ -986,7 +1020,8 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                 # told apart from a kernel one.
                 v_idx, v_tgt, v_meta = val_batch
                 diag = diagnose_nonfinite(model, v_idx, v_tgt, v_meta, vocab,
-                                          device=device, dense_lm=dense_lm)
+                                          device=device, dense_lm=dense_lm,
+                                          train_mode=False)
                 entry["val_diagnosis"] = diag
                 print(f"  step {step:5d}  validation loss is non-finite "
                       f"({val_loss}); the run is numerically unstable - "
