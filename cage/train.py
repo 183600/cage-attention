@@ -1214,53 +1214,55 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     of SEs is not distinguishable from re-drawing the validation stream.
     """
     training_states = {module: module.training for module in model.modules()}
-    model.eval()
-    correct = torch.zeros((), dtype=torch.int64, device=device)
-    total = 0
-    last_batch = None
-    first_bad_batch = None
-    batch_losses = []
-    val_gen.manual_seed(stream_seed_key(VAL_SEED))
-    for i in range(max(1, batches)):
-        # Batch construction stays outside inference_mode so the returned
-        # triage batch remains usable by a grad-enabled triage/backward.
-        idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
-                                    dense_lm=dense_lm, gen=val_gen)
-        validate_batch(idx, tgt, meta, vocab, diagnostics=False)
-        last_batch = (idx, tgt, meta)
-        sup_pos = None if dense_lm else meta["query_pos"]
-        with torch.inference_mode():
-            logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
-            batch_losses.append(loss.detach())
-            if (first_bad_batch is None
-                    and not bool(torch.isfinite(loss))):
-                first_bad_batch = last_batch
-            if dense_lm:
-                # Dense training supervises every position, so the forward
-                # returns the full-sequence logits flattened row-major; the
-                # recall accuracy still lives at the query position only.
-                rows = torch.arange(idx.size(0), device=logits.device)
-                qlogits = logits.reshape(
-                    idx.size(0), idx.size(1), -1)[rows, meta["query_pos"]]
-                correct.add_((qlogits.argmax(-1) == meta["answer"]).sum())
-            else:
-                correct.add_((logits.argmax(-1) == meta["answer"]).sum())
-            total += idx.size(0)
-    for module, training in training_states.items():
-        module.train(training)
-    n_batches = max(1, batches)
-    losses = [float(x) for x in batch_losses]
-    if len(losses) > 1:
-        mean_loss = sum(losses) / len(losses)
-        var = sum((x - mean_loss) ** 2 for x in losses) \
-            / (len(losses) - 1)
-        loss_se = math.sqrt(var / len(losses))
-    else:
-        loss_se = float("nan")
-    return (sum(losses) / n_batches,
-            correct.item() / total if total else float("nan"),
-            first_bad_batch if first_bad_batch is not None else last_batch,
-            loss_se)
+    try:
+        model.eval()
+        correct = torch.zeros((), dtype=torch.int64, device=device)
+        total = 0
+        last_batch = None
+        first_bad_batch = None
+        batch_losses = []
+        val_gen.manual_seed(stream_seed_key(VAL_SEED))
+        for i in range(max(1, batches)):
+            # Batch construction stays outside inference_mode so the returned
+            # triage batch remains usable by a grad-enabled triage/backward.
+            idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
+                                        dense_lm=dense_lm, gen=val_gen)
+            validate_batch(idx, tgt, meta, vocab, diagnostics=False)
+            last_batch = (idx, tgt, meta)
+            sup_pos = None if dense_lm else meta["query_pos"]
+            with torch.inference_mode():
+                logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
+                batch_losses.append(loss.detach())
+                if (first_bad_batch is None
+                        and not bool(torch.isfinite(loss))):
+                    first_bad_batch = last_batch
+                if dense_lm:
+                    # Dense training supervises every position, so the forward
+                    # returns the full-sequence logits flattened row-major; the
+                    # recall accuracy still lives at the query position only.
+                    rows = torch.arange(idx.size(0), device=logits.device)
+                    qlogits = logits.reshape(
+                        idx.size(0), idx.size(1), -1)[rows, meta["query_pos"]]
+                    correct.add_((qlogits.argmax(-1) == meta["answer"]).sum())
+                else:
+                    correct.add_((logits.argmax(-1) == meta["answer"]).sum())
+                total += idx.size(0)
+        n_batches = max(1, batches)
+        losses = [float(x) for x in batch_losses]
+        if len(losses) > 1:
+            mean_loss = sum(losses) / len(losses)
+            var = sum((x - mean_loss) ** 2 for x in losses) \
+                / (len(losses) - 1)
+            loss_se = math.sqrt(var / len(losses))
+        else:
+            loss_se = float("nan")
+        return (sum(losses) / n_batches,
+                correct.item() / total if total else float("nan"),
+                first_bad_batch if first_bad_batch is not None else last_batch,
+                loss_se)
+    finally:
+        for module, training in training_states.items():
+            module.train(training)
 
 
 def _label_audit(idx, meta):
