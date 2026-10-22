@@ -11445,7 +11445,7 @@ def main(argv=None) -> int:
                              "is recorded in the run provenance)")
     parser.add_argument("--per-variant-tuning",
                         action=argparse.BooleanOptionalAction, default=None,
-                        help="tune each E1/E3 arm's own lr (and calib's "
+                        help="tune each E1 arm's own lr (and calib's "
                              "calib_tau_init) on validation data as a "
                              "separate fairness benchmark (default: on; the "
                              "same-recipe controlled family is unchanged)")
