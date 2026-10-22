@@ -480,6 +480,21 @@ def _as_indices(index, n: int) -> torch.Tensor:
     return idx
 
 
+def _split_container(splits):
+    """The split assignment must be a name -> indices mapping.
+
+    A list/tuple of pairs, a bare index container or a string is iterable
+    but cannot name the blocks the audit reasons about; translating it to
+    the documented ValueError avoids an incidental ``AttributeError`` from
+    the ``.items()`` calls below.
+    """
+    if not isinstance(splits, Mapping):
+        raise ValueError(
+            "splits must be a mapping of split name to indices, got "
+            f"{type(splits).__name__}")
+    return splits
+
+
 def assert_split_partition(n_samples: int, splits, require_all: bool = True) -> None:
     """Raise unless the split indices are disjoint (and optionally complete).
 
@@ -500,6 +515,7 @@ def assert_split_partition(n_samples: int, splits, require_all: bool = True) -> 
             f"n_samples must be an integer, got {n_samples!r}") from exc
     if n < 1:
         raise ValueError(f"n_samples must be positive, got {n_samples!r}")
+    splits = _split_container(splits)
     seen = torch.zeros(n, dtype=torch.bool)
     for name, indices in splits.items():
         idx = _as_indices(indices, n)
@@ -570,6 +586,7 @@ def assert_time_ordered(times, splits) -> None:
     if not bool(torch.isfinite(t).all()):
         raise ValueError("time values must be finite (no NaN/Inf): a "
                          "non-finite timestamp makes the ordering undefined")
+    splits = _split_container(splits)
     unknown = [name for name in splits
                if name not in ("train", "val", "test")]
     if unknown:

@@ -72,6 +72,22 @@ class TimeOrderInputTest(unittest.TestCase):
                     assert_time_ordered(bad, {"train": [0]})
 
 
+class SplitContainerInputTest(unittest.TestCase):
+    def test_non_mapping_split_containers_raise_value_error(self):
+        from cage.data import (assert_group_disjoint,
+                               assert_split_partition,
+                               assert_time_ordered)
+
+        for bad in (5, "x", b"\x00", [("train", [0])]):
+            with self.subTest(bad=type(bad).__name__):
+                with self.assertRaises(ValueError):
+                    assert_split_partition(2, bad)
+                with self.assertRaises(ValueError):
+                    assert_group_disjoint([0, 1], bad)
+                with self.assertRaises(ValueError):
+                    assert_time_ordered([0, 1], bad)
+
+
 class SplitContractTest(unittest.TestCase):
     def test_reserved_training_seed_is_refused(self):
         for seed in RESERVED_EVAL_SEEDS:
