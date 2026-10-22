@@ -9385,16 +9385,23 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
                  if finite_means else None)
         best = (max(finite_means, key=lambda row: row["mean"])
                 if finite_means else None)
+
+        def _same_mean(row):
+            # A tie for the most extreme point still includes the endpoint:
+            # comparing only the arg-min/arg-max *index* would report
+            # ``endpoint_is_worst=False`` when another length happens to be
+            # returned first by ``min`` despite an equal mean.
+            return bool(row is not None
+                        and _same_number(endpoint["mean"], row["mean"]))
+
         verdict = {
             "endpoint_length": int(lengths[-1]),
             "endpoint_mean": endpoint["mean"],
             "endpoint_signed_direction": endpoint_sign,
             "interior_reversal_lengths": reversals,
             "interior_reversal": bool(reversals),
-            "endpoint_is_worst": bool(worst is not None
-                                      and worst["length"] == lengths[-1]),
-            "endpoint_is_best": bool(best is not None
-                                     and best["length"] == lengths[-1]),
+            "endpoint_is_worst": _same_mean(worst),
+            "endpoint_is_best": _same_mean(best),
             "worst_length": None if worst is None else worst["length"],
             "worst_mean": None if worst is None else worst["mean"],
             "best_length": None if best is None else best["length"],
