@@ -1429,8 +1429,31 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
     Any cross-group row overlap or seed-key collision is leakage; the
     caller decides how to gate on it.
     """
-    train_specs = dict(train_specs or {})
-    heldout_specs = dict(heldout_specs or {})
+    def _spec_mapping(value, label):
+        """Normalise a stream-spec container, rejecting non-mappings.
+
+        ``bytes``/strings are iterable but are not spec mappings (a byte
+        string would otherwise fail deep inside ``dict()`` with an
+        incidental TypeError), and a bare integer is not iterable at all.
+        The audit's input contract is a mapping, so translate every such
+        malformed container into a ValueError like the stream-name and
+        seed checks do.
+        """
+        if value is None:
+            return {}
+        if isinstance(value, (str, bytes)):
+            raise ValueError(
+                f"{label} must be a mapping of stream name to spec, got "
+                f"{type(value).__name__}")
+        try:
+            return dict(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{label} must be a mapping of stream name to spec, got "
+                f"{type(value).__name__}") from exc
+
+    train_specs = _spec_mapping(train_specs, "train_specs")
+    heldout_specs = _spec_mapping(heldout_specs, "heldout_specs")
     if not train_specs or not heldout_specs:
         raise ValueError(
             "actual_stream_overlap_audit needs at least one training and "

@@ -46,6 +46,21 @@ class SplitAuditInputTest(unittest.TestCase):
                     split_leakage_audit(3, 17, batch=4, batches=1,
                                         train_seeds=bad)
 
+    def test_malformed_stream_spec_containers_raise_value_error(self):
+        from cage.data import actual_stream_overlap_audit
+
+        good = {"seed": 0, "batch": 4, "steps": 1}
+        heldout = {"h": {"seed": 1, "batch": 4, "batches": 1}}
+        for bad in (5, "x", b"\x00", object()):
+            with self.subTest(bad=type(bad).__name__):
+                with self.assertRaises(ValueError):
+                    actual_stream_overlap_audit(
+                        3, 17, train_specs=bad, heldout_specs=heldout)
+                with self.assertRaises(ValueError):
+                    actual_stream_overlap_audit(
+                        3, 17, train_specs={"t": good},
+                        heldout_specs=bad)
+
 
 class TimeOrderInputTest(unittest.TestCase):
     def test_malformed_timestamp_container_raises_value_error(self):
