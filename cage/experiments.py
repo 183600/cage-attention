@@ -6618,7 +6618,13 @@ def _verdict_seed_floor(verdict: dict, settings: Settings) -> dict:
         flag_key = f"{key}_claim_eligible"
         if flag_key in stored:
             flag = stored[flag_key]
-            eligible = flag if isinstance(flag, bool) else False
+            # The stored mark cannot override the seed floor: if it says a
+            # claim is eligible while its own count is below the registered
+            # minimum, the verdict is internally inconsistent (or was
+            # hand-edited) and must fail closed.  A genuine ``False`` is
+            # still respected.
+            eligible = (isinstance(flag, bool) and flag
+                        and int(n) >= floor)
         else:
             eligible = bool(int(n) >= floor)
         out[f"{key}_n_seeds"] = int(n)
