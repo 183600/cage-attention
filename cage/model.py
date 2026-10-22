@@ -1336,7 +1336,8 @@ class Attention(nn.Module):
                     stats = None
                 else:
                     stats = self._row_stats(
-                        _pick_rows(p.view(B, h, T, dk), stat_pos), T, True)
+                        _pick_rows(p.view(B, h, T, T + 1), stat_pos), T,
+                        True)
                 if dropping:
                     p = self.attn_dropout(p)
                 pb = p.view(bh, T, T + 1)
@@ -1357,7 +1358,7 @@ class Attention(nn.Module):
                     stats = (_pick_rows(ent, stat_pos), rows.max(-1).values, None)
                 else:
                     stats = self._row_stats(
-                        _pick_rows(p.view(B, h, T, dk), stat_pos), T, False)
+                        _pick_rows(p.view(B, h, T, T), stat_pos), T, False)
                 if dropping:
                     p = self.attn_dropout(p)
                 y4 = torch.bmm(p, packed[2]).view(B, h, T, dk)
