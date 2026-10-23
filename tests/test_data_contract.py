@@ -72,6 +72,26 @@ class AuditCountInputTest(unittest.TestCase):
                     _distribution_shift_p(torch.tensor([1, 1]), bad)
 
 
+class SplitFractionInputTest(unittest.TestCase):
+    def test_malformed_split_fractions_raise_value_error(self):
+        from cage.data import group_disjoint_split, time_ordered_split
+
+        for train_frac, val_frac in ((None, 0.15), (0.7, None),
+                                     (0.7, object())):
+            with self.subTest(train_frac=train_frac, val_frac=val_frac):
+                with self.assertRaises(ValueError):
+                    time_ordered_split(10, train_frac, val_frac)
+                with self.assertRaises(ValueError):
+                    group_disjoint_split([0, 1, 2, 3],
+                                         train_frac=train_frac,
+                                         val_frac=val_frac)
+
+    def test_empty_stream_list_has_no_noise_floor(self):
+        from cage.data import _noise_floor
+
+        self.assertTrue(_noise_floor([], 3) != _noise_floor([], 3))
+
+
 class SplitAuditInputTest(unittest.TestCase):
     def test_non_iterable_train_seeds_raise_value_error(self):
         from cage.data import split_leakage_audit

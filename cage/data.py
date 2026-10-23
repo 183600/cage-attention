@@ -189,16 +189,23 @@ def time_ordered_split(n_samples: int, train_frac: float = 0.7,
         raise ValueError(
             f"time_ordered_split needs at least 3 samples for three "
             f"non-empty blocks, got {n_samples!r}")
-    if not (0.0 < float(train_frac) < 1.0):
+    try:
+        train_frac = float(train_frac)
+        val_frac = float(val_frac)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"train_frac and val_frac must be numbers in (0, 1), got "
+            f"{train_frac!r} and {val_frac!r}") from exc
+    if not (0.0 < train_frac < 1.0):
         raise ValueError(f"train_frac must be in (0, 1), got {train_frac!r}")
-    if not (0.0 < float(val_frac) < 1.0):
+    if not (0.0 < val_frac < 1.0):
         raise ValueError(f"val_frac must be in (0, 1), got {val_frac!r}")
-    if float(train_frac) + float(val_frac) >= 1.0:
+    if train_frac + val_frac >= 1.0:
         raise ValueError(
             f"train_frac + val_frac must leave a test block, got "
             f"{train_frac!r} + {val_frac!r}")
-    n_val = max(1, int(n * float(val_frac)))
-    n_test = max(1, n - int(n * (float(train_frac) + float(val_frac))))
+    n_val = max(1, int(n * val_frac))
+    n_test = max(1, n - int(n * (train_frac + val_frac)))
     n_train = n - n_val - n_test
     if n_train < 1:
         # Extremely skewed fractions at a tiny n: keep one sample per block.
@@ -278,9 +285,15 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
     Use :func:`assert_group_disjoint` to verify the result, and
     :func:`time_ordered_split` instead when the rows also have a time order.
     """
-    if not (0.0 < float(train_frac) < 1.0) or not (
-            0.0 < float(val_frac) < 1.0) or (
-            float(train_frac) + float(val_frac) >= 1.0):
+    try:
+        train_frac = float(train_frac)
+        val_frac = float(val_frac)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"need 0 < train_frac, 0 < val_frac and train_frac + val_frac "
+            f"< 1, got {train_frac!r}, {val_frac!r}") from exc
+    if not (0.0 < train_frac < 1.0) or not (0.0 < val_frac < 1.0) or (
+            train_frac + val_frac >= 1.0):
         raise ValueError(
             f"need 0 < train_frac, 0 < val_frac and train_frac + val_frac "
             f"< 1, got {train_frac!r}, {val_frac!r}")
@@ -306,7 +319,7 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
         n_groups,
         generator=torch.Generator().manual_seed(stream_seed_key(seed)))]
     counts = torch.bincount(inverse, minlength=n_groups).to(torch.float64)
-    cuts = (float(train_frac) * n, float(train_frac + val_frac) * n)
+    cuts = (train_frac * n, (train_frac + val_frac) * n)
     assigned = {"train": [], "val": [], "test": []}
     cumulative = 0.0
     for gid in perm.tolist():
@@ -321,9 +334,9 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
         assigned[name].append(gid)
         cumulative += mass
     targets = {
-        "train": float(train_frac) * n,
-        "val": float(val_frac) * n,
-        "test": (1.0 - float(train_frac) - float(val_frac)) * n,
+        "train": train_frac * n,
+        "val": val_frac * n,
+        "test": (1.0 - train_frac - val_frac) * n,
     }
 
     def _masses():
@@ -2003,6 +2016,11 @@ def _noise_floor(stream_values, n_categories):
     ``n/2`` draws is ``sqrt(2)`` times the TV between two ``n`` draws).
     All inputs are fitted on training data only.
     """
+    if not stream_values:
+        # No training stream to fit a reference floor from; the caller
+        # should treat the floor as undefined rather than crash on an
+        # empty list.
+        return float("nan")
     if len(stream_values) >= 2:
         counts = [_counts(values, n_categories) for values in stream_values]
         dists = [_distribution_from_counts(count) for count in counts]
