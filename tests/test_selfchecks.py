@@ -288,6 +288,8 @@ class PositiveIntegerValidationTest(unittest.TestCase):
         self.assertIsNone(_positive_integer(True))
         self.assertIsNone(_positive_integer(2.5))
         self.assertEqual(_positive_integer("10.0"), 10)
+        exact = 2 ** 53 + 1
+        self.assertEqual(metrics.wilson_ci(exact, exact)["n"], exact)
 
 
 class TinyAlphaQuantileTest(unittest.TestCase):

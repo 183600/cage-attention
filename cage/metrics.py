@@ -2026,6 +2026,10 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
         return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
                 "n": 0}
     try:
+        exact_total = int(operator.index(total))
+    except (TypeError, ValueError, OverflowError):
+        exact_total = None
+    try:
         successes = float(successes)
         total = float(total)
     except (TypeError, ValueError, OverflowError):
@@ -2054,7 +2058,8 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
     half = z * math.sqrt(p * (1.0 - p) / total + z2 / (4.0 * total * total)) / denom
     lo = min(p, max(0.0, center - half))
     hi = max(p, min(1.0, center + half))
-    return {"p": p, "lo": lo, "hi": hi, "n": total}
+    return {"p": p, "lo": lo, "hi": hi,
+            "n": int(exact_total) if exact_total is not None else int(total)}
 
 
 def standardized_proportion(successes, totals, reference_weights=None) -> dict:
