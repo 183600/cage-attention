@@ -319,6 +319,20 @@ class PairedStreamDigestTest(unittest.TestCase):
                 self.assertEqual(_curve_health([bad, good]), ({"ok": 1}, 0))
                 self.assertEqual(_curve_warn(("a", [bad])), "")
 
+    def test_curve_helpers_treat_non_iterable_runs_as_empty(self):
+        self.assertEqual(_curve_valid_runs(None), [])
+        self.assertEqual(_curve_health(None), ({}, 0))
+        self.assertEqual(_curve_warn(("a", None)), "")
+
+    def test_curve_helpers_materialize_a_generator_once(self):
+        runs = ({"seed": seed, "curve_verdict": "ok"} for seed in (0, 1))
+        self.assertEqual(len(_curve_valid_runs(runs)), 2)
+        self.assertEqual(_curve_health(iter([{"curve_verdict": "ok"}])),
+                         ({"ok": 1}, 0))
+        self.assertEqual(
+            _curve_warn(("a", iter([{"curve_verdict": "plateau"}]))),
+            "WARN a: 1/1 curve-invalid (plateau*1)")
+
     def test_digest_mismatch_refuses_item_pairing(self):
         a = [[1] * 16]
         b = [[0] * 16]

@@ -5493,7 +5493,7 @@ CURVE_INVALID_VERDICTS = (
 
 
 def _curve_valid_runs(runs):
-    return [r for r in runs
+    return [r for r in _materialize_runs(runs)
             if isinstance(r, Mapping)
             and r.get("curve_verdict") not in CURVE_INVALID_VERDICTS]
 
@@ -5530,7 +5530,7 @@ def _curve_health(runs):
     ``val_regression_after_best`` instead.
     """
     counts = {}
-    for r in runs:
+    for r in _materialize_runs(runs):
         if not isinstance(r, Mapping):
             continue
         verdict = r.get("curve_verdict")
@@ -5549,6 +5549,7 @@ def _curve_warn(*labeled_runs) -> str:
     """
     parts = []
     for label, runs in labeled_runs:
+        runs = _materialize_runs(runs)
         counts, bad = _curve_health(runs)
         if not bad:
             continue
