@@ -110,7 +110,7 @@ from __future__ import annotations
 import math
 import operator
 from collections.abc import Mapping
-from statistics import NormalDist
+from statistics import NormalDist, StatisticsError
 
 import torch
 
@@ -974,6 +974,20 @@ def _jackknife_means(d: torch.Tensor) -> torch.Tensor:
     return (d.sum() - d) / (n - 1)
 
 
+def _normal_quantile(p: float) -> float:
+    """Standard-normal quantile without ``1 - p`` cancellation.
+
+    ``NormalDist.inv_cdf(1 - alpha/2)`` rounds to exactly 1 for a
+    tiny-but-valid alpha and raises ``StatisticsError``.  Using the
+    symmetry ``z_{1-p} = -z_p`` keeps the upper tail computable whenever the
+    lower-tail probability is representable.
+    """
+    nd = NormalDist()
+    if p > 0.5:
+        return -nd.inv_cdf(1.0 - p)
+    return nd.inv_cdf(p)
+
+
 def _bca_bounds(d: torch.Tensor, means: torch.Tensor,
                 alpha: float):
     """Bias-corrected and accelerated (BCa) bootstrap interval for the mean.
@@ -1033,8 +1047,13 @@ def _bca_bounds(d: torch.Tensor, means: torch.Tensor,
             return None
         return float(nd.cdf(z0 + (z0 + z) / denom))
 
-    a_lo = _adjusted(nd.inv_cdf(alpha / 2.0))
-    a_hi = _adjusted(nd.inv_cdf(1.0 - alpha / 2.0))
+    try:
+        z_lo = _normal_quantile(alpha / 2.0)
+        z_hi = -z_lo
+    except (StatisticsError, ValueError):
+        return None
+    a_lo = _adjusted(z_lo)
+    a_hi = _adjusted(z_hi)
     if a_lo is None or a_hi is None:
         return None
     a_lo = min(max(a_lo, 1e-6), 1.0 - 1e-6)
@@ -1589,7 +1608,7 @@ def _student_t_ppf(p: float, df: float) -> float:
         return float("nan")
     if p == 0.5:
         return 0.0
-    if p < 0.5:
+    if p > 0.5:
         return -_student_t_ppf(1.0 - p, df)
     if df > 1e6:
         return NormalDist().inv_cdf(p)
@@ -1729,7 +1748,7 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
     df = float(n - 1)
     mean = float(d.mean())
     sd = float(d.std(unbiased=True))
-    t_crit = _student_t_ppf(1.0 - alpha / 2.0, df)
+    t_crit = -_student_t_ppf(alpha / 2.0, df)
     out.update({"valid": True, "n": n, "df": df, "mean": mean, "sd": sd,
                 "t_crit": t_crit})
     if not (math.isfinite(t_crit) and math.isfinite(sd)
@@ -1819,8 +1838,11 @@ def seeds_for_power(sd, effect, alpha: float = 0.05,
             or sd <= 0.0 or effect == 0.0 \
             or not 0.0 < alpha < 1.0 or not 0.0 < power < 1.0:
         return float("inf")
-    nd = NormalDist()
-    z = nd.inv_cdf(1.0 - alpha / 2.0) + nd.inv_cdf(power)
+    try:
+        z = (-_normal_quantile(alpha / 2.0)
+             + _normal_quantile(power))
+    except (StatisticsError, ValueError):
+        return float("inf")
     try:
         return float((z * sd / abs(effect)) ** 2)
     except OverflowError:

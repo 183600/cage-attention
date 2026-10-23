@@ -254,6 +254,27 @@ class PositiveIntegerValidationTest(unittest.TestCase):
         self.assertEqual(_positive_integer("10.0"), 10)
 
 
+class TinyAlphaQuantileTest(unittest.TestCase):
+    def test_tiny_alpha_does_not_raise_from_normal_quantile(self):
+        from cage.metrics import (
+            paired_bootstrap_ci,
+            replication_interval,
+            seeds_for_power,
+        )
+
+        self.assertTrue(math.isfinite(
+            seeds_for_power(1.0, 0.5, alpha=1e-16)))
+        ci = paired_bootstrap_ci([1.0, 2.0, 3.0, 4.0, 5.0],
+                                 n_boot=20, alpha=1e-16)
+        self.assertEqual(ci["n"], 5)
+        # The tiny alpha may put the requested quantile beyond the finite
+        # bootstrap grid, but it must be an abstention, not an exception.
+        self.assertTrue(math.isfinite(ci["lo"]) or math.isnan(ci["lo"]))
+        rep = replication_interval([0.1, 0.2, 0.3, 0.4],
+                                   alpha=1e-16)
+        self.assertTrue(isinstance(rep["valid"], bool))
+
+
 class TrainingFlagValidationTest(unittest.TestCase):
     def test_truthy_non_boolean_training_flags_are_rejected(self):
         from cage.train import train_model
