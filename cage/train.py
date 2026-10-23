@@ -2789,6 +2789,10 @@ def _counterfactual_summary(counts) -> dict:
         impossible = not (
             n_correct <= n
             and parsed["n_value_follow"] <= n_correct
+            # A follow row is also a value-swap-correct row (both compare
+            # the swapped prediction with the swapped answer), so the
+            # follow count can never exceed the overall correct count.
+            and parsed["n_value_follow"] <= parsed["n_value_correct"]
             and parsed["n_value_stubborn"] <= n_correct
             and parsed["n_value_flip"] <= n
             and parsed["n_value_correct"] <= n

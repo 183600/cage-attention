@@ -228,6 +228,11 @@ class CounterfactualCountsTest(unittest.TestCase):
             {"n": float("inf")}, {"n": True}, {"n": -1},
             {"n": 1, "n_original_correct": 2},
             {"n": 1, "n_value_follow": 2},
+            # Every follow row is also value-swap-correct, so a follow
+            # count above n_value_correct is impossible even when the
+            # clean-correct and total bounds are satisfied.
+            {"n": 2, "n_original_correct": 2, "n_value_follow": 2,
+             "n_value_correct": 1},
             {"n": 1, "n_value_stubborn": 2},
             {"n": 1, "n_value_flip": 2},
             {"n": 1, "n_value_correct": 2},
