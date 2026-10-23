@@ -2399,9 +2399,10 @@ def _stamp_linked_length_extension(rec, model, settings, lengths, eval_seed):
 
 def _aggregate_runs(runs, skip=("seed", "lr", "params", "eval_seed",
                                 "stats_seed")):
-    keys = sorted({k for r in runs for k, v in r.items()
+    records = [r for r in runs if isinstance(r, Mapping)]
+    keys = sorted({k for r in records for k, v in r.items()
                    if _finite(v) and k not in skip})
-    return {k: _mean_std([r[k] for r in runs if k in r]) for k in keys}
+    return {k: _mean_std([r[k] for r in records if k in r]) for k in keys}
 
 
 # Recipe fields that the controlled-comparison contract requires to be

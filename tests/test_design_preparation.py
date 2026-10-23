@@ -22,6 +22,7 @@ from cage import experiments
 from cage.experiments import (
     DesignPlanError,
     Settings,
+    _aggregate_runs,
     _calib_cell,
     _controlled_audit,
     _blocked_run_order,
@@ -840,6 +841,16 @@ class DesignPlanFreezeTest(unittest.TestCase):
 
 class CoverageMalformedRunTest(unittest.TestCase):
     """Coverage audits must not certify malformed rows or crash on them."""
+
+    def test_aggregate_runs_skips_non_mapping_rows(self):
+        rows = [None, "not-a-row", 3,
+                {"accuracy": 0.5, "seed": 0},
+                {"accuracy": 0.7, "seed": 1}]
+        table = _aggregate_runs(rows)
+        self.assertEqual(table["accuracy"]["n"], 2)
+        self.assertAlmostEqual(table["accuracy"]["mean"], 0.6)
+        self.assertNotIn("seed", table)
+        self.assertEqual(_aggregate_runs([None, "not-a-row"]), {})
 
     def test_malformed_rows_are_skipped_and_fail_closed(self):
         good = {
