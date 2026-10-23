@@ -4917,9 +4917,15 @@ def _factorial_main_effect(cells, metric, factor):
         raise ValueError(
             f"{factor} main effect needs all 2x2 cells; missing {missing}")
     missing_runs = [r for c in required for r in cells[c]
-                    if r.get("seed") is None]
-    by_cell = {c: {r["seed"]: r for r in cells[c]
-                   if r.get("seed") is not None} for c in required}
+                    if _paired_seed(r) is None]
+    by_cell = {}
+    for c in required:
+        keyed = {}
+        for r in cells[c]:
+            seed = _paired_seed(r)
+            if seed is not None:
+                keyed[seed] = r
+        by_cell[c] = keyed
     planned = sorted(set().union(*(set(m) for m in by_cell.values())),
                      key=_seed_order)
     diffs, used, dropped, unpaired, undefined = [], [], [], [], []
@@ -4964,7 +4970,15 @@ def _factorial_main_effect(cells, metric, factor):
 
     mismatches, factors = [], {}
     for left, right in spec["pairs"]:
-        audit = _controlled_audit(cells[left], cells[right])
+        clean_left = [r for r in cells[left] if _paired_seed(r) is not None]
+        clean_right = [r for r in cells[right] if _paired_seed(r) is not None]
+        audit = _controlled_audit(clean_left, clean_right)
+        if len(clean_left) != len(cells[left]) \
+                or len(clean_right) != len(cells[right]):
+            audit["mismatches"].append(
+                f"{left} vs {right}: run(s) without a usable training "
+                f"seed cannot be paired")
+            audit["controlled"] = False
         mismatches.extend(audit.get("mismatches", []))
         factors.update(audit.get("varying_factors", {}))
         diff_keys = set((audit.get("model_factor_diffs") or {}).keys())
@@ -5033,11 +5047,18 @@ def _grid_level_main_effect(metric, level_cells, baseline_cells):
             "grid-level main effect needs equally many level and baseline "
             f"cells (got {n} vs {len(baseline_cells)})")
     missing_runs = [r for rs in level_cells + baseline_cells for r in rs
-                    if r.get("seed") is None]
-    maps = [({r["seed"]: r for r in rs if r.get("seed") is not None})
-            for rs in level_cells]
-    base_maps = [({r["seed"]: r for r in rs if r.get("seed") is not None})
-                 for rs in baseline_cells]
+                    if _paired_seed(r) is None]
+
+    def _keyed(rs):
+        out = {}
+        for r in rs:
+            seed = _paired_seed(r)
+            if seed is not None:
+                out[seed] = r
+        return out
+
+    maps = [_keyed(rs) for rs in level_cells]
+    base_maps = [_keyed(rs) for rs in baseline_cells]
     planned = sorted(set().union(*(set(m) for m in maps + base_maps)),
                      key=_seed_order)
     diffs, used, dropped, unpaired, undefined = [], [], [], [], []
@@ -5091,7 +5112,15 @@ def _grid_level_main_effect(metric, level_cells, baseline_cells):
 
     mismatches, factors = [], {}
     for level_rs, base_rs in zip(level_cells, baseline_cells):
-        audit = _controlled_audit(level_rs, base_rs)
+        clean_level = [r for r in level_rs if _paired_seed(r) is not None]
+        clean_base = [r for r in base_rs if _paired_seed(r) is not None]
+        audit = _controlled_audit(clean_level, clean_base)
+        if len(clean_level) != len(level_rs) \
+                or len(clean_base) != len(base_rs):
+            audit["mismatches"].append(
+                "norm level pair contains run(s) without a usable "
+                "training seed")
+            audit["controlled"] = False
         mismatches.extend(audit.get("mismatches", []))
         factors.update(audit.get("varying_factors", {}))
         diff_keys = set((audit.get("model_factor_diffs") or {}).keys())

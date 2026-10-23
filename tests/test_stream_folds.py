@@ -20,6 +20,8 @@ from cage.experiments import (
     _paired_diff,
     _paired_did,
     _paired_stream_test,
+    _factorial_main_effect,
+    _grid_level_main_effect,
     _one_sample_contrast,
 )
 from cage.metrics import (
@@ -282,6 +284,21 @@ class PairedStreamDigestTest(unittest.TestCase):
                                  "accuracy")
                 self.assertEqual(ci["n"], 0)
                 self.assertFalse(ci["controlled"]["controlled"])
+
+    def test_factorial_and_grid_effects_drop_malformed_runs(self):
+        good = {"seed": 0, "accuracy": 1.0}
+        bad = {"seed": [0], "accuracy": 1.0}
+        cells = {cell: [good] for cell in
+                 ("full", "calib_len_only", "calib_ent_only",
+                  "calib_no_terms")}
+        cells["full"] = [bad]
+        ci = _factorial_main_effect(cells, "accuracy", "length")
+        self.assertEqual(ci["n"], 0)
+        self.assertFalse(ci["controlled"]["controlled"])
+
+        grid = _grid_level_main_effect("accuracy", [[bad]], [[good]])
+        self.assertEqual(grid["n"], 0)
+        self.assertFalse(grid["controlled"]["controlled"])
 
     def test_digest_mismatch_refuses_item_pairing(self):
         a = [[1] * 16]
