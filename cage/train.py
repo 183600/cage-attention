@@ -2447,6 +2447,13 @@ def decode_correct_mask(encoded: str, n: int) -> torch.Tensor:
     values = torch.tensor(list(raw), dtype=torch.int64)
     shifts = torch.arange(7, -1, -1).to(torch.int64)
     bits = ((values.reshape(-1, 1) >> shifts) & 1).reshape(-1)
+    if n % 8 and bool(bits[n:].any()):
+        # The encoder pads the final byte with zeros.  A nonzero padding bit
+        # means the mask was corrupted or produced by a different layout;
+        # ignoring it would still return n apparently valid item bits.
+        raise ValueError(
+            "encoded mask has nonzero padding bits after its "
+            f"{n} recorded items")
     return bits[:n].bool()
 
 

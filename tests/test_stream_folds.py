@@ -8,6 +8,7 @@ two different evaluation realizations from being paired by position.
 
 from __future__ import annotations
 
+import base64
 import math
 import unittest
 
@@ -37,6 +38,7 @@ from cage.metrics import (
 from cage.model import build
 from cage.repro import seed_everything
 from cage.train import (
+    decode_correct_mask,
     encode_correct_mask,
     eval_metrics,
     training_curve_verdict,
@@ -261,6 +263,26 @@ class CrossedClusterBootstrapTest(unittest.TestCase):
                 self.assertFalse(crossed_cluster_bootstrap_ci(
                     [[1, 0], [1, 0]], [[0, 1], [0, 1]],
                     **kwargs)["valid"])
+
+
+class CorrectMaskPaddingTest(unittest.TestCase):
+    def test_nonzero_padding_bits_are_rejected(self):
+        # Three recorded items occupy the top three bits; the remaining
+        # five bits are padding and must be zero.
+        encoded = base64.b64encode(bytes([0b11100001])).decode("ascii")
+        with self.assertRaises(ValueError):
+            decode_correct_mask(encoded, 3)
+        decoded = decode_correct_mask(
+            encode_correct_mask([True, True, False, True]), 4)
+        self.assertEqual(decoded.tolist(), [True, True, False, True])
+
+    def test_zero_padding_round_trips(self):
+        for n in (0, 1, 2, 7, 8, 9, 16):
+            with self.subTest(n=n):
+                expected = [bool(i % 3 == 0) for i in range(n)]
+                decoded = decode_correct_mask(
+                    encode_correct_mask(expected), n)
+                self.assertEqual(decoded.tolist(), expected)
 
 
 class EvalMetricsDigestTest(unittest.TestCase):
