@@ -2111,12 +2111,39 @@ def _report_realized_run_order(out_dir: pathlib.Path, tag: str, runs,
 
 
 def _mean_std(values):
-    vals = [float(v) for v in values if _finite(v)]
+    try:
+        iterator = iter(values)
+    except TypeError:
+        return {"mean": float("nan"), "std": float("nan"), "n": 0}
+    vals = [float(v) for v in iterator if _finite(v)]
     if not vals:
         return {"mean": float("nan"), "std": float("nan"), "n": 0}
     mean = sum(vals) / len(vals)
+    if not math.isfinite(mean):
+        # The sample mean of finite values can still overflow an intermediate
+        # sum (e.g. two 1e308 observations whose true mean is 1e308).  Scale
+        # each term before summing; this cannot overflow.
+        try:
+            mean = math.fsum(v / len(vals) for v in vals)
+        except (OverflowError, ValueError):
+            mean = float("nan")
     if len(vals) > 1:
-        std = math.sqrt(sum((v - mean) ** 2 for v in vals) / (len(vals) - 1))
+        try:
+            var = sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)
+        except OverflowError:
+            var = float("inf")
+        if not math.isfinite(var):
+            # Same overflow issue for the squared deviations; factor out the
+            # largest deviation so the true finite SD remains representable.
+            scale = max(abs(v - mean) for v in vals)
+            if scale > 0.0 and math.isfinite(scale):
+                scaled_var = (sum(((v - mean) / scale) ** 2 for v in vals)
+                              / (len(vals) - 1))
+                std = scale * math.sqrt(scaled_var)
+            else:
+                std = float("nan")
+        else:
+            std = math.sqrt(var)
     else:
         std = 0.0
     return {"mean": mean, "std": std, "n": len(vals)}

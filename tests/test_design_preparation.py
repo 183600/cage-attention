@@ -30,6 +30,7 @@ from cage.experiments import (
     _design_plan_fingerprint,
     _design_plan_outcomes_exist,
     _design_sensitivity_plan,
+    _mean_std,
     _pilot_accuracy_level,
     _pilot_accuracy_sd,
     _pilot_paired_accuracy_sd,
@@ -917,6 +918,18 @@ class CoverageMalformedRunTest(unittest.TestCase):
         self.assertAlmostEqual(table["accuracy"]["mean"], 0.6)
         self.assertNotIn("seed", table)
         self.assertEqual(_aggregate_runs([None, "not-a-row"]), {})
+        # A report aggregation must not crash on a non-iterable container,
+        # and finite-but-huge samples must not turn their true mean/SD into
+        # inf through an intermediate overflow.
+        self.assertEqual(_mean_std(None)["n"], 0)
+        huge = _mean_std([1e308, 1e308])
+        self.assertTrue(math.isfinite(huge["mean"]))
+        self.assertTrue(math.isfinite(huge["std"]))
+        self.assertAlmostEqual(huge["mean"], 1e308)
+        self.assertEqual(huge["std"], 0.0)
+        mixed = _mean_std([-1e308, 1e308])
+        self.assertEqual(mixed["mean"], 0.0)
+        self.assertTrue(math.isfinite(mixed["std"]))
 
     def test_malformed_rows_are_skipped_and_fail_closed(self):
         good = {
