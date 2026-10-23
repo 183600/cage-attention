@@ -138,6 +138,22 @@ class BlockedRunOrderTest(unittest.TestCase):
         self.assertFalse(audit["complete"])
         self.assertTrue(audit["invalid_indices"])
 
+    def test_malformed_schedule_rows_are_reported_not_raised(self):
+        complete = _blocked_run_order(self.CELLS, self.SEEDS, 11)
+        for broken in (list(complete) + [("none", 0, 0)],
+                       list(complete) + [None],
+                       list(complete) + [object()]):
+            with self.subTest(row=broken[-1]):
+                audit = _run_order_audit(broken, self.CELLS, self.SEEDS)
+                self.assertFalse(audit["complete"])
+                self.assertTrue(audit["invalid_indices"])
+
+    def test_non_iterable_schedule_is_not_certified(self):
+        audit = _run_order_audit(None, self.CELLS, self.SEEDS)
+        self.assertFalse(audit["complete"])
+        self.assertTrue(audit["invalid_indices"])
+        self.assertEqual(audit["n_runs"], 0)
+
     def test_two_block_random_schedule_is_not_over_flagged(self):
         # With only two blocks, a random schedule can put one arm first in
         # both by chance; the family-wise check must not call that a design

@@ -1588,6 +1588,10 @@ def _run_order_audit(order, cells, seeds, randomized=True):
     """
     cells = list(cells)
     seeds = list(seeds)
+    try:
+        order = list(order)
+    except TypeError:
+        order = None
     expected = {_coverage_cell_key(c) for c in cells}
     n_cells = len(cells)
     n_blocks = len(seeds)
@@ -1608,13 +1612,33 @@ def _run_order_audit(order, cells, seeds, randomized=True):
         except TypeError:
             return None
 
-    for cell, order_seed, block, position in order:
+    if order is None:
+        # The audit is a reporting helper: a non-iterable schedule is an
+        # invalid schedule, not a reason to leak a TypeError and lose the
+        # rest of the audit evidence.
+        invalid_indices.append({
+            "cell": None, "block": None, "position": None,
+            "reason": "run-order schedule is not iterable"})
+        order = []
+    for index, row in enumerate(order):
+        if not isinstance(row, (tuple, list)) or len(row) != 4:
+            # A short/scalar row used to raise ``ValueError: not enough
+            # values to unpack`` from this loop, aborting the audit before
+            # it could report that the schedule is incomplete.
+            invalid_indices.append({
+                "order_index": index, "cell": None, "block": None,
+                "position": None,
+                "reason": "schedule row is not a (cell, seed, block, "
+                          "position) tuple"})
+            continue
+        cell, order_seed, block, position = row
         key = _coverage_cell_key(cell)
         raw_block, raw_position = block, position
         block, position = _order_index(block), _order_index(position)
         if block is None or position is None:
             invalid_indices.append({
-                "cell": key, "block": repr(raw_block),
+                "order_index": index, "cell": key,
+                "block": repr(raw_block),
                 "position": repr(raw_position),
                 "reason": "block and position must be integers"})
             continue
