@@ -310,6 +310,45 @@ class MalformedLengthRecordTest(unittest.TestCase):
         self.assertTrue(math.isnan(
             rec["difficulty_standardized_accuracy_at_base"]))
 
+    def test_report_companions_skip_non_mapping_run_records(self):
+        from cage.experiments import (
+            _E2_VARIANTS,
+            Settings,
+            _counterfactual_companion,
+            _e2_difficulty_companions,
+            _e2_endpoint_class_companions,
+            _efficiency_companion,
+            _length_efficiency_companion,
+        )
+
+        bad = "not-a-record"
+        by_variant = {label: [bad]
+                      for label, gate, *_ in _E2_VARIANTS}
+        cells = [(label, [bad]) for label, gate, *_ in _E2_VARIANTS]
+        settings = Settings.quick()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            with contextlib.redirect_stdout(io.StringIO()):
+                diff = _e2_difficulty_companions(by_variant, [3, 6])
+                endpoint = _e2_endpoint_class_companions(
+                    by_variant, [3, 6])
+                cf = _counterfactual_companion(
+                    out, "e2", by_variant, lengths=[3, 6],
+                    reference="none")
+                cost = _length_efficiency_companion(
+                    settings, out, "e2", cells, [3, 6])
+                flat = _efficiency_companion(
+                    settings, out, "e2", cells)
+        self.assertEqual(
+            diff["contrasts"]["calib - none"]
+            ["raw_accuracy_at_longest"]["n"], 0)
+        self.assertTrue(all(row["n"] == 0 for row in endpoint["rows"]))
+        self.assertEqual(
+            cf["contrasts"]["calib - none"]["3"]["n"], 0)
+        for label, _ in cells:
+            self.assertFalse(cost["cells"][label]["available"])
+            self.assertFalse(flat["cells"][label]["available"])
+
 
 class StandardizedProportionTest(unittest.TestCase):
     def test_self_weights_reproduce_pooled_rate(self):

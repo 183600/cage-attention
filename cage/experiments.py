@@ -4225,6 +4225,15 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
     return out
 
 
+def _mapping_runs(runs):
+    """Materialize run records, dropping rows that are not mappings."""
+    try:
+        records = list(runs)
+    except TypeError:
+        return []
+    return [run for run in records if isinstance(run, Mapping)]
+
+
 def _paired_seed(run):
     """The usable training seed of a stored run record, or ``None``.
 
@@ -4848,7 +4857,7 @@ def _counterfactual_companion(out_dir, tag, by_arm, lengths=None,
         block = _length_mapping(run.get("metrics_by_length"), length) or {}
         return block.get(metric)
 
-    arm_map = {arm_label(label): (label, runs)
+    arm_map = {arm_label(label): (label, _mapping_runs(runs))
                for label, runs in by_arm.items()}
     arms = {}
     for label, (_, runs) in arm_map.items():
@@ -9624,6 +9633,7 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
     difference against that cell; cost ratios and the accuracy difference
     are read together, never as a new decision rule.
     """
+    cells = [(label, _mapping_runs(runs)) for label, runs in cells]
     seq_len = _efficiency_seq_len(settings)
     measured = {}
     entries = {}
@@ -9944,6 +9954,7 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
         print(f"[{experiment}] inference cost scaling: empty sweep; no "
               f"base/longest point to measure")
         return payload
+    cells = [(label, _mapping_runs(runs)) for label, runs in cells]
     runs_by_label = {str(label): runs for label, runs in cells}
     ref_runs = (runs_by_label.get(str(reference))
                 if reference is not None else None)
@@ -17009,6 +17020,8 @@ def _e2_difficulty_companions(by_variant: dict, lengths: list) -> dict:
             "note": ("empty length sweep: no endpoint to standardize; "
                      "companion abstained"),
         }
+    by_variant = {label: _mapping_runs(runs)
+                  for label, runs in by_variant.items()}
     base_length = int(lengths[0])
     endpoint = int(lengths[-1])
 
@@ -17168,6 +17181,8 @@ def _e2_endpoint_class_companions(by_variant: dict,
     if not lengths:
         return _class_frequency_companions(
             [], "e2 (empty length sweep; no endpoint)")
+    by_variant = {label: _mapping_runs(runs)
+                  for label, runs in by_variant.items()}
     endpoint = int(lengths[-1])
 
     def tagged(runs):
