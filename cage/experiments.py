@@ -12572,8 +12572,12 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
     target_payload = (ladder["depths"].get(target_depth)
                       or ladder["depths"].get(str(target_depth)))
     target_runs = target_payload.get("runs") or []
-    target_params = next((int(r["params"]) for r in target_runs
-                          if _finite(r.get("params"))), None)
+    recorded = [_positive_integer(r.get("params"))
+                for r in target_runs if isinstance(r, Mapping)
+                and "params" in r]
+    target_params = (recorded[0] if recorded
+                     and all(value is not None for value in recorded)
+                     and len(set(recorded)) == 1 else None)
     base = {
         "name": "matched_shallow_none",
         "control_for_depth": target_depth,
@@ -17928,9 +17932,12 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                     "available": False,
                     "reason": "seednorm cell not trained"}
                 continue
-            target_params = next(
-                (int(r["params"]) for r in target_runs
-                 if _finite(r.get("params"))), None)
+            recorded = [_positive_integer(r.get("params"))
+                        for r in target_runs if isinstance(r, Mapping)
+                        and "params" in r]
+            target_params = (recorded[0] if recorded
+                             and all(value is not None for value in recorded)
+                             and len(set(recorded)) == 1 else None)
             if target_params is None:
                 out[f"{gate}|{ls_label}"] = {
                     "available": False,
