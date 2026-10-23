@@ -2244,6 +2244,12 @@ def _stamp_difficulty_standardization(rec, base_length, lengths):
     if not isinstance(rec, Mapping):
         # Not a run record at all; there is nothing to stamp.
         return rec
+    try:
+        lengths = list(lengths)
+    except TypeError:
+        # A non-iterable sweep has no lengths; the empty-sweep branch below
+        # records the undefined companions instead of raising.
+        lengths = []
     # A legacy/malformed record may lack the per-length table (or carry a
     # non-dict placeholder).  The companion then abstains with NaN fields
     # instead of raising in the middle of the E2 loop.
@@ -2342,6 +2348,12 @@ def _stamp_linked_length_extension(rec, model, settings, lengths, eval_seed):
     if not isinstance(rec, Mapping):
         # No run record to stamp; do not fabricate a companion payload.
         return None
+    try:
+        lengths = list(lengths)
+    except TypeError:
+        # ``eval_linked_lengths`` accepts any iterable; materialize once so
+        # the empty check and the longest-length lookups see the same sweep.
+        lengths = []
     if not lengths:
         rec["linked_length_extension"] = None
         rec["linked_accuracy_by_length"] = {}

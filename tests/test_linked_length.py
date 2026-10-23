@@ -235,6 +235,21 @@ class LinkedLengthEvalTest(unittest.TestCase):
         self.assertFalse(rec["linked_base_matches_raw"])
         self.assertIsNone(rec["linked_retention_at_longest"])
 
+    def test_run_record_stamp_accepts_a_length_generator(self):
+        settings = Settings.quick()
+        settings.n_pairs = 4
+        settings.vocab = self.vocab
+        settings.eval_batch = 8
+        settings.eval_batches = 1
+        rec = {"accuracy_by_length": {4: 1.0, 8: 1.0}}
+        _stamp_linked_length_extension(
+            rec, self.rule, settings,
+            (length for length in (4, 8)), TEST_SEED)
+        self.assertEqual(rec["linked_length_extension"]["lengths"], [4, 8])
+        self.assertAlmostEqual(rec["linked_accuracy_at_base"], 1.0)
+        self.assertAlmostEqual(rec["linked_accuracy_at_longest"], 1.0)
+        self.assertTrue(rec["linked_base_matches_raw"])
+
     def test_link_seed_must_be_an_integer_stream_seed(self):
         for bad in (True, False, 1.5, None, "3"):
             with self.subTest(link_seed=bad):
