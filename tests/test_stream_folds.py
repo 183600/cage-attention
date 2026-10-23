@@ -95,6 +95,14 @@ class CurveHistoryInputTest(unittest.TestCase):
                 self.assertTrue(math.isfinite(verdict["n_points"]))
         self.assertEqual(
             _curve_record([{"step": 0, "train_loss": 1.0}])["steps_run"], 1)
+        # A null/missing mandatory loss is a non-finite point, not a crash.
+        for missing in (None, {"train_loss": None}):
+            with self.subTest(missing=missing):
+                hist = [{"step": 0, "val_loss": 2.0}] if missing is None \
+                    else [{"step": 0, **missing}]
+                rec = _curve_record(hist)
+                self.assertEqual(rec["curve_verdict"],
+                                 "numerical_instability")
 
 
 class EvaluationFoldAuditTest(unittest.TestCase):

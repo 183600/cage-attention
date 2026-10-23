@@ -243,8 +243,15 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
         h = dict(row)
         for key in ("train_loss", "train_loss_window", "val_loss",
                     "val_loss_se", "val_acc", "grad_norm", "lr"):
-            if key in h and h[key] is not None:
-                h[key] = _finite_float(h[key])
+            if key not in h:
+                continue
+            if h[key] is None:
+                # ``train_loss`` is mandatory for a finite point; a null
+                # value is a missing loss, not a literal "not recorded".
+                if key == "train_loss":
+                    h[key] = float("nan")
+                continue
+            h[key] = _finite_float(h[key])
         hist.append(h)
     for h in hist:
         raw = h.get("train_loss")
@@ -253,7 +260,7 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
                 and (raw is None or math.isfinite(float(raw)))):
             h["train_loss"] = float(window)
     finite = [h for h in hist
-              if math.isfinite(float(h.get("train_loss", float("nan"))))]
+              if math.isfinite(_finite_float(h.get("train_loss")))]
 
     def _bad(v):
         return v is not None and not math.isfinite(_finite_float(v))
