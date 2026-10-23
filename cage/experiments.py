@@ -4306,6 +4306,8 @@ def _paired_diff(runs_a, runs_b, metric):
     false-concentration cases), so a shrunken sample is never silently
     read as if it were the full seed set.
     """
+    runs_a = _materialize_runs(runs_a)
+    runs_b = _materialize_runs(runs_b)
     missing_a = [r for r in runs_a if _paired_seed(r) is None]
     missing_b = [r for r in runs_b if _paired_seed(r) is None]
     by_a = {}
@@ -4448,6 +4450,8 @@ def _paired_benchmark(runs_a, runs_b, metric, sesoi, reference,
     which treatment was varied; the pre-registered same-recipe rows remain a
     separate accounting.
     """
+    runs_a = _materialize_runs(runs_a)
+    runs_b = _materialize_runs(runs_b)
     excluded = {}
     for side, runs in (("a", runs_a), ("b", runs_b)):
         bad = [r.get("seed") for r in runs
@@ -4512,6 +4516,7 @@ def _one_sample_contrast(runs, metric, bound=None):
     :func:`equivalence_test`).  Runs without a training seed cannot be
     independent units; they are dropped and recorded like an unpaired seed.
     """
+    runs = _materialize_runs(runs)
     missing = [r for r in runs if _paired_seed(r) is None]
     by_seed = {}
     for r in runs:
@@ -4683,6 +4688,9 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
                 out[seed] = r
         return out
 
+    runs_a1, runs_b1, runs_a2, runs_b2 = (
+        _materialize_runs(rs)
+        for rs in (runs_a1, runs_b1, runs_a2, runs_b2))
     missing = [r for rs in (runs_a1, runs_b1, runs_a2, runs_b2)
                for r in rs if _paired_seed(r) is None]
     m1a, m1b, m2a, m2b = (_by_seed(rs)
@@ -9656,15 +9664,16 @@ def _competence_check(named_runs, correct_and_n, chance, what="arm"):
         for run in _mapping_runs(runs):
             try:
                 pair = correct_and_n(run)
+                if pair is None:
+                    continue
+                n_correct, n_total = pair
+                if (n_correct is None or n_total is None
+                        or not int(n_total)):
+                    continue
+                counts.append(int(n_correct))
+                sizes.append(int(n_total))
             except Exception:  # noqa: BLE001 - malformed rows are not evidence
                 continue
-            if pair is None:
-                continue
-            n_correct, n_total = pair
-            if n_correct is None or n_total is None or not int(n_total):
-                continue
-            counts.append(int(n_correct))
-            sizes.append(int(n_total))
         raw.append((str(name), counts, sizes, sum(sizes)))
     n_arms = sum(1 for _, _, _, total in raw if total > 0)
     alpha_per_arm = 0.05 / max(n_arms, 1)

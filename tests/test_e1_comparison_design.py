@@ -23,7 +23,10 @@ from cage.experiments import (
     _e1_cell_of,
     _e1_cell_plan,
     _model_cfg,
+    _paired_benchmark,
     _paired_did,
+    _paired_diff,
+    _one_sample_contrast,
     _print_conf_by_error_type,
     _print_structural_decomposition,
     _run_order_audit,
@@ -127,6 +130,37 @@ class E1FactorialInteractionTest(unittest.TestCase):
         self.assertEqual(ci["seeds_used"], list(self.SEEDS))
         self.assertEqual(ci["seeds_dropped"], [])
 
+    def test_contrast_helpers_materialize_generators_once(self):
+        cells = {
+            "full": self._cell((0.8, 0.7), (True, True), "full"),
+            "calib_len_only": self._cell(
+                (0.6, 0.5), (True, False), "calib_len_only"),
+            "calib_ent_only": self._cell(
+                (0.5, 0.55), (False, True), "calib_ent_only"),
+            "calib_no_terms": self._cell(
+                (0.4, 0.45), (False, False), "calib_no_terms"),
+        }
+        did = _paired_did(
+            (r for r in cells["full"]),
+            (r for r in cells["calib_len_only"]),
+            (r for r in cells["calib_ent_only"]),
+            (r for r in cells["calib_no_terms"]), "accuracy")
+        self.assertEqual(did["n"], 2)
+        self.assertAlmostEqual(did["mean"], 0.1)
+        diff = _paired_diff(
+            (r for r in cells["full"]),
+            (r for r in cells["calib_len_only"]), "accuracy")
+        self.assertEqual(diff["seeds_used"], list(self.SEEDS))
+        self.assertAlmostEqual(diff["mean"], 0.2)
+        one = _one_sample_contrast(
+            (r for r in cells["full"]), "accuracy")
+        self.assertEqual(one["seeds_used"], list(self.SEEDS))
+        self.assertAlmostEqual(one["mean"], 0.75)
+        bench = _paired_benchmark(
+            (r for r in cells["full"]),
+            (r for r in cells["calib_len_only"]), "accuracy", 0.05, "full")
+        self.assertEqual(bench["seeds_used"], list(self.SEEDS))
+
     def test_interaction_row_is_registered_as_two_sided(self):
         registry = HYPOTHESES["H1d"]
         for metric in ("accuracy", "gate_margin", "abs_gate_vs_entropy"):
@@ -160,6 +194,22 @@ class ReportMalformedRunTest(unittest.TestCase):
             [("arm", [None, good, {"accuracy": "x", "n": 100}])],
             lambda r: (int(round(r["accuracy"] * r["n"])), int(r["n"])),
             0.2)
+        self.assertTrue(out["passed"])
+        self.assertEqual(out["arms"]["arm"]["correct"], 100)
+        self.assertEqual(out["arms"]["arm"]["n"], 100)
+
+    def test_competence_skips_unreadable_counts(self):
+        good = {"accuracy": 1.0, "n": 100}
+        bad_count = {"accuracy": 1.0, "n": "not-a-count"}
+        bad_shape = {"accuracy": 1.0, "n": 100, "bad_shape": True}
+
+        def count(run):
+            if run.get("bad_shape"):
+                return 1
+            return (int(round(run["accuracy"] * run["n"])), int(run["n"]))
+
+        out = _competence_check(
+            [("arm", [bad_count, bad_shape, good])], count, 0.2)
         self.assertTrue(out["passed"])
         self.assertEqual(out["arms"]["arm"]["correct"], 100)
         self.assertEqual(out["arms"]["arm"]["n"], 100)
