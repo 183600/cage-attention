@@ -1241,7 +1241,8 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
             or not _finite_moments(d) \
             or not math.isfinite(bound) or bound <= 0.0 \
             or not _bootstrap_args_ok(n_boot, alpha):
-        if d.numel() == 1 and bool(torch.isfinite(d).all()):
+        if d.numel() == 1 and bool(torch.isfinite(d).all()) \
+                and math.isfinite(bound) and bound > 0.0:
             # Report the observed point but not a decision: one paired unit
             # cannot establish equivalence (the exact sign-flip companion
             # already has p=0.5 in this case).
@@ -1321,7 +1322,8 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
             or not _finite_moments(d) \
             or not math.isfinite(bound) or bound <= 0.0 \
             or not _bootstrap_args_ok(n_boot, alpha):
-        if d.numel() == 1 and bool(torch.isfinite(d).all()):
+        if d.numel() == 1 and bool(torch.isfinite(d).all()) \
+                and math.isfinite(bound) and bound > 0.0:
             out["mean"] = float(d.mean())
             out["n"] = 1
         return out
@@ -1436,7 +1438,8 @@ def minimum_effect_test(diffs, bound, direction: str = "+",
             or not math.isfinite(bound) or bound <= 0.0 \
             or not _bootstrap_args_ok(n_boot, alpha):
         if direction in ("+", "-") and d.numel() == 1 \
-                and bool(torch.isfinite(d).all()) and math.isfinite(bound):
+                and bool(torch.isfinite(d).all()) \
+                and math.isfinite(bound) and bound > 0.0:
             # Report the observed point but not a decision: one paired
             # unit cannot estimate the interval the claim rests on.
             out["mean"] = float(d.mean())

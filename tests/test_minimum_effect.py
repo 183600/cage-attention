@@ -19,6 +19,7 @@ import unittest
 
 from cage.experiments import ContrastLog
 from cage.metrics import (
+    equivalence_test,
     minimum_effect_test,
     noninferiority_test,
     paired_bootstrap_ci,
@@ -93,6 +94,22 @@ class MinimumEffectMetricTest(unittest.TestCase):
         self.assertEqual(result["n"], 1)
         self.assertFalse(result["beyond_sesoi"])
         self.assertIsNone(result["bca_agrees"])
+
+    def test_single_unit_with_invalid_bound_abstains(self):
+        # A one-unit point may be reported only for a usable positive
+        # bound; a malformed bound must not leak the point through the
+        # early-return path that normally abstains with NaN fields.
+        tests = (
+            ("equivalence", equivalence_test),
+            ("noninferiority", noninferiority_test),
+            ("minimum_effect", minimum_effect_test),
+        )
+        for name, test in tests:
+            for bound in (0.0, -0.1, float("nan"), float("inf")):
+                with self.subTest(test=name, bound=bound):
+                    result = test([0.5], bound)
+                    self.assertEqual(result["n"], 0)
+                    self.assertTrue(math.isnan(result["mean"]))
 
 
 class ContrastMinimumEffectAuditTest(unittest.TestCase):
