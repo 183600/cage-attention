@@ -241,6 +241,10 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
         if not isinstance(row, Mapping):
             continue
         h = dict(row)
+        # A point without a usable step is not a curve point: ``step`` is
+        # used as the regression abscissa and the best-point readout.
+        if not math.isfinite(_finite_float(h.get("step"))):
+            continue
         for key in ("train_loss", "train_loss_window", "val_loss",
                     "val_loss_se", "val_acc", "grad_norm", "lr"):
             if key not in h:
