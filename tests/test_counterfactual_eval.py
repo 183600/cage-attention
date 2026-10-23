@@ -22,6 +22,8 @@ import torch.nn as nn
 from cage.data import make_batch
 from cage.experiments import _counterfactual_companion
 from cage.train import (
+    _association_exposure_summary,
+    _blank_exposure_cohort,
     _counterfactual_counts,
     _counterfactual_edits,
     _counterfactual_summary,
@@ -218,6 +220,82 @@ class CounterfactualCountsTest(unittest.TestCase):
                     out["distractor_swap"]["unchanged_rate"]))
                 self.assertTrue(math.isnan(
                     out["pair_relocation"]["unchanged_rate"]))
+
+    def test_malformed_or_impossible_counts_abstain(self):
+        cases = (
+            {"n": "x"}, {"n": None}, {"n": 1.5}, {"n": float("nan")},
+            {"n": float("inf")}, {"n": True}, {"n": -1},
+            {"n": 1, "n_original_correct": 2},
+            {"n": 1, "n_value_follow": 2},
+            {"n": 1, "n_value_stubborn": 2},
+            {"n": 1, "n_value_flip": 2},
+            {"n": 1, "n_value_correct": 2},
+            {"n": 2, "n_distractor": 1, "n_distractor_unchanged": 2},
+            {"n": 2, "n_distractor": 1, "n_distractor_correct": 2},
+            {"n": 2, "n_distractor": 3},
+            {"n": 2, "n_relocation": 1, "n_relocation_unchanged": 2},
+            {"n": 2, "n_relocation_correct": 3},
+        )
+        rate_keys = (
+            "cf_value_follow_rate", "cf_value_stubborn_rate",
+            "cf_value_accuracy", "cf_value_flip_rate",
+            "cf_distractor_unchanged_rate", "cf_distractor_accuracy",
+            "cf_relocation_unchanged_rate", "cf_relocation_accuracy",
+        )
+        for counts in cases:
+            with self.subTest(counts=counts):
+                out = _counterfactual_summary(counts)
+                self.assertEqual(out["value_swap"]["n"], 0)
+                self.assertEqual(out["flat"]["cf_n"], 0)
+                for key in rate_keys:
+                    self.assertTrue(math.isnan(out["flat"][key]), key)
+
+    def test_integral_json_float_counts_are_accepted(self):
+        counts = {key: float(value) for key, value in self._counts().items()}
+        out = _counterfactual_summary(counts)
+        self.assertEqual(out["value_swap"]["n"], 4)
+        self.assertEqual(out["value_swap"]["n_correct_after_edit"], 3)
+        self.assertAlmostEqual(out["value_swap"]["follow_rate"], 2 / 3)
+
+
+class AssociationExposureSummaryTest(unittest.TestCase):
+    def test_malformed_or_impossible_cohorts_abstain(self):
+        blank = _blank_exposure_cohort()
+        cases = (
+            {"seen": {}},
+            {"seen": None},
+            {"seen": []},
+            {"seen": {"n": "x"}},
+            {"seen": dict(blank, n=-1)},
+            {"seen": dict(blank, n=1, n_correct=2)},
+            {"seen": dict(blank, n=2, n_value_swap=3)},
+            {"seen": dict(blank, n=2, n_value_swap=2,
+                           n_value_correct=3)},
+            {"seen": dict(blank, n=2, n_correct=1,
+                           n_value_swap=1, n_value_follow=2)},
+            {"seen": dict(blank, n=2, n_distractor=1,
+                           n_distractor_correct=2)},
+            {"seen": dict(blank, n=2, n_relocation=1,
+                           n_relocation_correct=2)},
+        )
+        for totals in cases:
+            with self.subTest(totals=totals):
+                out = _association_exposure_summary(totals)
+                self.assertEqual(out["n_items"], 0)
+                self.assertEqual(out["seen"]["n"], 0)
+                self.assertEqual(out["unseen"]["n"], 0)
+                self.assertTrue(math.isnan(out["seen"]["accuracy"]))
+                self.assertTrue(math.isnan(
+                    out["accuracy_gap_seen_minus_unseen"]))
+
+    def test_missing_cohort_is_a_zero_row_stratum_not_a_malformed_row(self):
+        seen = dict(_blank_exposure_cohort(), n=10, n_correct=8)
+        out = _association_exposure_summary({"seen": seen})
+        self.assertEqual(out["n_items"], 10)
+        self.assertAlmostEqual(out["seen"]["accuracy"], 0.8)
+        self.assertEqual(out["unseen"]["n"], 0)
+        self.assertTrue(math.isnan(out["unseen"]["accuracy"]))
+        self.assertTrue(math.isnan(out["accuracy_gap_seen_minus_unseen"]))
 
 
 class _OracleRetrieval(nn.Module):

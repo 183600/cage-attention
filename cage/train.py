@@ -2726,6 +2726,24 @@ def _counterfactual_counts(original_pred, answer, value_swap_pred,
     return out
 
 
+def _nonnegative_count(value):
+    """One exact non-negative count from a recorded accumulator row.
+
+    ``bool`` and fractional values are rejected rather than truncated: a
+    count that is not a whole number cannot describe evaluated rows.  JSON
+    round-trips may turn an integer into ``3.0``, so integral floats are
+    accepted, and arbitrarily large Python integers stay exact.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if (isinstance(value, float) and math.isfinite(value)
+            and value == int(value)):
+        return int(value) if value >= 0 else None
+    return None
+
+
 def _counterfactual_summary(counts) -> dict:
     """Turn summed probe counts into rates plus flat aggregate fields.
 
@@ -2736,10 +2754,43 @@ def _counterfactual_summary(counts) -> dict:
     a memorising model).
     """
 
-    if not isinstance(counts, Mapping):
-        # A malformed accumulator names no probe counts; report the same
-        # empty/NaN payload as a zero-row probe rather than raising.
-        counts = {}
+    # Every field is a row count, so malformed values (fractional, boolean,
+    # negative, non-finite, non-numeric) or impossible row inequalities make
+    # the whole accumulator unusable.  Report the same empty/NaN payload as a
+    # zero-row probe rather than raising, truncating, or showing a rate whose
+    # denominator silently disagrees with its components.
+    fields = (
+        "n", "n_original_correct", "n_value_follow", "n_value_stubborn",
+        "n_value_flip", "n_value_correct", "n_distractor",
+        "n_distractor_unchanged", "n_distractor_correct", "n_relocation",
+        "n_relocation_unchanged", "n_relocation_correct",
+    )
+    raw = counts if isinstance(counts, Mapping) else {}
+    parsed = {}
+    for name in fields:
+        count = _nonnegative_count(raw.get(name, 0))
+        if count is None:
+            parsed = None
+            break
+        parsed[name] = count
+    if parsed is not None:
+        n = parsed["n"]
+        n_correct = parsed["n_original_correct"]
+        impossible = not (
+            n_correct <= n
+            and parsed["n_value_follow"] <= n_correct
+            and parsed["n_value_stubborn"] <= n_correct
+            and parsed["n_value_flip"] <= n
+            and parsed["n_value_correct"] <= n
+            and parsed["n_distractor"] <= n
+            and parsed["n_distractor_unchanged"] <= parsed["n_distractor"]
+            and parsed["n_distractor_correct"] <= parsed["n_distractor"]
+            and parsed["n_relocation"] <= n
+            and parsed["n_relocation_unchanged"] <= parsed["n_relocation"]
+            and parsed["n_relocation_correct"] <= parsed["n_relocation"])
+        if impossible:
+            parsed = None
+    counts = parsed if parsed is not None else {name: 0 for name in fields}
 
     def rate(num, den):
         return float(num) / float(den) if den else float("nan")
@@ -2876,29 +2927,69 @@ def _association_exposure_accumulate(totals, idx, meta, vocab, reference,
 
 def _association_exposure_summary(totals) -> dict:
     """Rates and flat record fields for the exposure-stratified readout."""
-    if not isinstance(totals, Mapping):
-        totals = {}
+    raw_totals = totals if isinstance(totals, Mapping) else {}
+    fields = tuple(_blank_exposure_cohort())
+
+    def _parse_cohort(entry):
+        if not isinstance(entry, Mapping):
+            return None
+        parsed = {}
+        for name in fields:
+            count = _nonnegative_count(entry.get(name))
+            if count is None:
+                return None
+            parsed[name] = count
+        n = parsed["n"]
+        if not (
+            parsed["n_correct"] <= n
+            and parsed["n_value_swap"] <= n
+            and parsed["n_value_correct"] <= parsed["n_value_swap"]
+            and parsed["n_value_follow"] <= min(
+                parsed["n_correct"], parsed["n_value_correct"])
+            and parsed["n_value_stubborn"] <= parsed["n_correct"]
+            and parsed["n_distractor"] <= n
+            and parsed["n_distractor_correct"] <= parsed["n_distractor"]
+            and parsed["n_relocation"] <= n
+            and parsed["n_relocation_correct"] <= parsed["n_relocation"]
+        ):
+            return None
+        return parsed
+
+    cohorts = {}
+    for name in ("seen", "unseen"):
+        if name in raw_totals:
+            cohorts[name] = _parse_cohort(raw_totals[name])
+        else:
+            # A cohort with no rows is a genuine zero-row stratum, not a
+            # malformed row: it abstains through NaN rates.
+            cohorts[name] = {field: 0 for field in fields}
+    if any(entry is None for entry in cohorts.values()):
+        # One malformed cohort would make the seen-minus-unseen gap
+        # incomparable, so abstain for both instead of publishing a number
+        # built from fabricated zeros.
+        cohorts = {name: {field: 0 for field in fields}
+                   for name in ("seen", "unseen")}
 
     def rate(num, den):
         return float(num) / float(den) if den else float("nan")
 
     def cohort(name):
-        entry = totals.get(name, _blank_exposure_cohort())
-        n = int(entry["n"])
-        n_correct = int(entry["n_correct"])
-        n_swap = int(entry["n_value_swap"])
-        n_distractor = int(entry["n_distractor"])
-        n_relocation = int(entry["n_relocation"])
+        entry = cohorts[name]
+        n = entry["n"]
+        n_correct = entry["n_correct"]
+        n_swap = entry["n_value_swap"]
+        n_distractor = entry["n_distractor"]
+        n_relocation = entry["n_relocation"]
         return {
             "n": n,
             "n_correct": n_correct,
             "accuracy": rate(n_correct, n),
             "n_value_swappable": n_swap,
-            "n_value_correct": int(entry["n_value_correct"]),
+            "n_value_correct": entry["n_value_correct"],
             "cf_value_accuracy": rate(entry["n_value_correct"], n_swap),
-            "n_value_follow": int(entry["n_value_follow"]),
+            "n_value_follow": entry["n_value_follow"],
             "cf_value_follow_rate": rate(entry["n_value_follow"], n_correct),
-            "n_value_stubborn": int(entry["n_value_stubborn"]),
+            "n_value_stubborn": entry["n_value_stubborn"],
             "cf_value_stubborn_rate": rate(
                 entry["n_value_stubborn"], n_correct),
             "n_distractor": n_distractor,
