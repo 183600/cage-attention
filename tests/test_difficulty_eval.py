@@ -465,6 +465,12 @@ class StandardizedProportionTest(unittest.TestCase):
             torch.tensor([1e308, 1e308], dtype=torch.float64))
         self.assertFalse(out["valid"])
         self.assertIn("overflow", out["reason"])
+        pooled = standardized_proportion(
+            torch.tensor([1e308, 1e308], dtype=torch.float64),
+            torch.tensor([1e308, 1e308], dtype=torch.float64),
+            [1.0, 1.0])
+        self.assertFalse(pooled["valid"])
+        self.assertIn("overflow", pooled["reason"])
 
 
 class MissingDifficultyRecordTest(unittest.TestCase):

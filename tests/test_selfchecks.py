@@ -222,6 +222,12 @@ class MetricInputValidationTest(unittest.TestCase):
         exact = metrics.selection_at_fraction(
             list(range(100)), [1] * 100, frac=0.07)
         self.assertEqual(exact["k"], 7)
+        # A genuine excess above an integer is not floating-point noise:
+        # 0.2000000001 * 5 == 1.0000000005, so ceil() must flag two rows.
+        over = metrics.selection_at_fraction(
+            list(range(5)), [0] * 5, frac=0.2000000001)
+        self.assertEqual(over["k"], 2)
+        self.assertAlmostEqual(over["frac"], 0.4)
 
     def test_max_exact_is_capped_not_an_abstention(self):
         # The docstring says the threshold is capped at 20; a caller asking

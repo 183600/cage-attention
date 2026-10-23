@@ -406,7 +406,12 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
     # the documented ``ceil(frac * n)``.
     product = frac * n
     nearest = round(product)
-    if nearest >= 1 and abs(product - nearest) <= 1e-9:
+    # Snap only floating-point noise around an integer (a few ulps), not a
+    # genuine excess as large as 1e-9: ``0.2000000001 * 5`` is
+    # 1.0000000005 and the documented ``ceil`` must flag two rows.
+    tolerance = (4.0 * math.ulp(product)
+                 if math.isfinite(product) and product > 0.0 else 0.0)
+    if nearest >= 1 and abs(product - nearest) <= tolerance:
         k = int(nearest)
     else:
         k = int(math.ceil(product))
@@ -2193,15 +2198,21 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
     effective_n = 1.0 / float(((w_norm ** 2) / counts_used).sum())
     se = float(torch.sqrt(torch.clamp(variance, min=0.0)))
     z = 1.959964
+    used_success = s[usable].sum()
+    used_total = n[usable].sum()
+    if not (bool(torch.isfinite(used_success))
+            and bool(torch.isfinite(used_total))):
+        out["reason"] = "pooled success/total counts overflow"
+        return out
     rate_f = float(rate)
     lo = max(0.0, rate_f - z * se)
     hi = min(1.0, rate_f + z * se)
     out.update({
         "rate": rate_f, "se": se, "lo": lo, "hi": hi,
-        "total_success": int(s[usable].sum().item()),
-        "total_n": int(n[usable].sum().item()),
-        "pooled_rate": (float(s[usable].sum() / n[usable].sum())
-                        if float(n[usable].sum()) > 0.0 else float("nan")),
+        "total_success": int(used_success.item()),
+        "total_n": int(used_total.item()),
+        "pooled_rate": (float(used_success / used_total)
+                        if float(used_total) > 0.0 else float("nan")),
         "effective_n": float(effective_n),
         "min_stratum_n": int(counts_used.min().item()),
         "strata": [
