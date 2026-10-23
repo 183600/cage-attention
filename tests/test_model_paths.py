@@ -58,6 +58,16 @@ class EmptyBatchTest(unittest.TestCase):
                 _, _, layer_stats = model(idx, stat_pos=meta["query_pos"])
                 self.assertEqual(len(layer_stats), 1)
 
+    def test_empty_batch_targets_are_not_a_silent_nan_loss(self):
+        idx, tgt, _meta = make_batch(
+            0, 3, 17, "cpu", gen=torch.Generator().manual_seed(2))
+        model = build({
+            "vocab_size": 17, "d_model": 16, "n_heads": 4,
+            "n_layers": 1, "max_len": 32, "gate": "none",
+        })
+        with self.assertRaises(ValueError):
+            model(idx, tgt)
+
 
 if __name__ == "__main__":
     unittest.main()

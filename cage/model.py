@@ -1662,7 +1662,7 @@ class CAGE(nn.Module):
                 sup = sup[positions >= 0]
             else:
                 sup = (flat_t != -1).nonzero(as_tuple=True)[0]
-                if sup.numel() == flat_t.numel():
+                if flat_t.numel() and sup.numel() == flat_t.numel():
                     sup = None
         if sup is not None and sup.numel() == 0:
             raise ValueError(
