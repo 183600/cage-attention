@@ -859,17 +859,13 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     # of letting ``as_tensor`` escape as a TypeError from a reporting
     # metric (the same contract the value-level checks below follow).
     try:
-        raw_p = torch.as_tensor(probs).detach().reshape(-1)
-        raw_c = torch.as_tensor(correct).detach().reshape(-1)
+        # ``_flatten_float`` asks for float64 directly, so a Python float
+        # list is not first rounded through float32.  A complex input is
+        # returned as an empty sample (calibration abstains).
+        p = _flatten_float(probs)
+        c = _flatten_float(correct).to(p.device)
     except (TypeError, ValueError, RuntimeError, OverflowError):
         return float("nan")
-    # ``.float()`` silently discards the imaginary part of a complex input;
-    # a complex confidence or correctness value is not a real calibration
-    # sample, so abstain instead of scoring its real projection.
-    if raw_p.is_complex() or raw_c.is_complex():
-        return float("nan")
-    p = raw_p.float()
-    c = raw_c.to(p.device).float()
     n = p.numel()
     if n == 0 or c.numel() != n:
         return float("nan")
@@ -888,7 +884,7 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     if not bool(((p >= 0.0) & (p <= 1.0)).all()):
         return float("nan")
     bin_id = (p * n_bins).long().clamp(max=n_bins - 1)
-    counts = torch.bincount(bin_id, minlength=n_bins).float()
+    counts = torch.bincount(bin_id, minlength=n_bins).to(torch.float64)
     conf = torch.bincount(bin_id, weights=p, minlength=n_bins)
     acc = torch.bincount(bin_id, weights=c, minlength=n_bins)
     nz = counts > 0
@@ -901,16 +897,10 @@ def brier_score(probs, correct) -> float:
     # As in ECE, malformed containers abstain rather than raising from a
     # reporting companion.
     try:
-        raw_p = torch.as_tensor(probs).detach().reshape(-1)
-        raw_c = torch.as_tensor(correct).detach().reshape(-1)
+        p = _flatten_float(probs)
+        c = _flatten_float(correct).to(p.device)
     except (TypeError, ValueError, RuntimeError, OverflowError):
         return float("nan")
-    # As in ECE: a complex probability/correctness is not a real outcome
-    # and must not be silently reduced to its real part by ``.float()``.
-    if raw_p.is_complex() or raw_c.is_complex():
-        return float("nan")
-    p = raw_p.float()
-    c = raw_c.to(p.device).float()
     if p.numel() == 0 or c.numel() != p.numel() \
             or not bool(torch.isfinite(p).all()) \
             or not bool(torch.isfinite(c).all()):

@@ -11,6 +11,13 @@ from cage import data, metrics
 
 
 class MetricInputValidationTest(unittest.TestCase):
+    def test_calibration_metrics_preserve_float64_precision(self):
+        self.assertAlmostEqual(metrics.brier_score([0.9], [0]), 0.81,
+                               places=12)
+        self.assertAlmostEqual(
+            metrics.expected_calibration_error([0.9], [0]), 0.9,
+            places=12)
+
     def test_non_binary_correctness_abstains(self):
         self.assertTrue(math.isnan(
             metrics.expected_calibration_error([0.5], [0.5])))
