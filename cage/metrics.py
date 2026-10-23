@@ -1627,7 +1627,7 @@ def _student_t_ppf(p: float, df: float) -> float:
         return float("nan")
     if p == 0.5:
         return 0.0
-    if p > 0.5:
+    if p < 0.5:
         return -_student_t_ppf(1.0 - p, df)
     if df > 1e6:
         return NormalDist().inv_cdf(p)
