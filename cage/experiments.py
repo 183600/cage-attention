@@ -5705,8 +5705,11 @@ def _curve_invalid_seeds_for(used, run_maps):
     recompute the effect without those seeds.
     """
     bad = set()
-    for seed in used:
+    run_maps = _materialize_runs(run_maps)
+    for seed in _materialize_runs(used):
         for runs in run_maps:
+            if not isinstance(runs, Mapping):
+                continue
             run = runs.get(seed)
             verdict = (run.get("curve_verdict")
                        if isinstance(run, Mapping) else None)
@@ -5754,7 +5757,10 @@ def _curve_warn(*labeled_runs) -> str:
     interpretation.
     """
     parts = []
-    for label, runs in labeled_runs:
+    for item in _materialize_runs(labeled_runs):
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            continue
+        label, runs = item
         runs = _materialize_runs(runs)
         counts, bad = _curve_health(runs)
         if not bad:
@@ -10141,8 +10147,14 @@ def _complexity_cost_companion(settings: Settings, out_dir: pathlib.Path,
                                verdict: dict, by_gate: dict,
                                deep_cost=None) -> dict:
     """Report the cost of the deep model against its tuned shallow rungs."""
+    if not isinstance(verdict, Mapping):
+        verdict = {}
     shallow = verdict.get("shallow_none") or {}
+    if not isinstance(shallow, Mapping):
+        shallow = {}
     matched = verdict.get("matched_shallow") or {}
+    if not isinstance(matched, Mapping):
+        matched = {}
     cells = {}
     if not isinstance(by_gate, Mapping):
         by_gate = {}
