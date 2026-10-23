@@ -5613,6 +5613,7 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
     the grid; the selection metric is read with ``_finite`` so a
     missing statistic can never be read as 0.0.
     """
+    rows = _materialize_runs(rows)
     metric_rows = [(i, r) for i, r in enumerate(rows)
                    if isinstance(r, Mapping) and _finite(r.get(metric))]
     out = {"metric": metric, "margin": float("nan"),
@@ -5658,7 +5659,8 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
     if _finite(r_best.get(diverged_key)):
         diverged_best = int(r_best[diverged_key])
     boundary = None
-    boundary_rows = rows if full_rows is None else full_rows
+    boundary_rows = (rows if full_rows is None
+                     else _materialize_runs(full_rows))
     if (full_rows is None and grid is not None
             and len(grid) == len(rows)):
         boundary = bool(i_best in (0, len(rows) - 1))
@@ -5716,6 +5718,7 @@ def _curve_valid_selection_rows(table):
     ``n_invalid`` count among finite rows, the ``n_excluded`` count actually
     removed, and the selection ``pool`` label.
     """
+    table = _materialize_runs(table)
     finite = [row for row in table
               if isinstance(row, Mapping)
               and _finite(row.get("val_accuracy_mean"))]

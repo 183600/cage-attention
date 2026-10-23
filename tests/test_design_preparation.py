@@ -518,6 +518,30 @@ class DesignPlanTest(unittest.TestCase):
                 pick = _curve_valid_selection_rows(rows)
                 self.assertEqual(len(pick["rows"]), 2)
 
+    def test_selection_audits_treat_non_iterable_tables_as_empty(self):
+        from cage.experiments import (
+            _curve_valid_selection_rows,
+            _selection_reliability,
+        )
+
+        audit = _selection_reliability(None)
+        self.assertIsNone(audit["reliable"])
+        self.assertTrue(math.isnan(audit["margin"]))
+        pick = _curve_valid_selection_rows(None)
+        self.assertEqual(pick["rows"], [])
+        self.assertEqual(pick["n_finite"], 0)
+        self.assertEqual(pick["n_invalid"], 0)
+
+    def test_selection_audit_accepts_a_generator_table(self):
+        from cage.experiments import _selection_reliability
+
+        good = {"val_accuracy_std": 0.1, "n_seeds": 2}
+        rows = ({"val_accuracy_mean": value, "lr": lr, **good}
+                for value, lr in ((0.9, 0.001), (0.6, 0.01)))
+        audit = _selection_reliability(rows, grid_keys=("lr",))
+        self.assertEqual(audit["best_index"], 0)
+        self.assertIs(audit["best_at_grid_boundary"], True)
+
     def test_plan_rejects_malformed_planning_probabilities(self):
         for field in ("design_alpha", "power_target"):
             settings = Settings.quick()
