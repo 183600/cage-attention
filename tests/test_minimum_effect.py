@@ -92,6 +92,12 @@ class MinimumEffectMetricTest(unittest.TestCase):
         self.assertFalse(
             minimum_effect_test([0.1, 0.2], 0.05,
                                 alpha=2.0)["beyond_sesoi"])
+        for test in (equivalence_test, noninferiority_test,
+                     minimum_effect_test):
+            with self.subTest(test=test.__name__):
+                out = test([0.1, float("nan")], 0.5)
+                self.assertEqual(out["n"], 2)
+                self.assertFalse(out.get("equivalent", False))
 
     def test_single_unit_reports_point_without_a_decision(self):
         result = minimum_effect_test([0.5], 0.05)

@@ -1291,6 +1291,8 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
             or not _finite_moments(d) \
             or not math.isfinite(bound) or bound <= 0.0 \
             or not _bootstrap_args_ok(n_boot, alpha):
+        if d.numel() and not bool(torch.isfinite(d).all()):
+            out["n"] = int(d.numel())
         if d.numel() == 1 and bool(torch.isfinite(d).all()) \
                 and math.isfinite(bound) and bound > 0.0:
             # Report the observed point but not a decision: one paired unit
@@ -1372,6 +1374,8 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
             or not _finite_moments(d) \
             or not math.isfinite(bound) or bound <= 0.0 \
             or not _bootstrap_args_ok(n_boot, alpha):
+        if d.numel() and not bool(torch.isfinite(d).all()):
+            out["n"] = int(d.numel())
         if d.numel() == 1 and bool(torch.isfinite(d).all()) \
                 and math.isfinite(bound) and bound > 0.0:
             out["mean"] = float(d.mean())
@@ -1487,6 +1491,8 @@ def minimum_effect_test(diffs, bound, direction: str = "+",
             or not _finite_moments(d) \
             or not math.isfinite(bound) or bound <= 0.0 \
             or not _bootstrap_args_ok(n_boot, alpha):
+        if d.numel() and not bool(torch.isfinite(d).all()):
+            out["n"] = int(d.numel())
         if direction in ("+", "-") and d.numel() == 1 \
                 and bool(torch.isfinite(d).all()) \
                 and math.isfinite(bound) and bound > 0.0:
@@ -2854,8 +2860,9 @@ def sign_flip_test(diffs, alternative: str = "two-sided",
                       "two-sided": min(1.0, 2.0 / total)}
         method, n_perm = "exact", total
     else:
-        gen = torch.Generator(device=d.device).manual_seed(
-            seed_int & 0xFFFFFFFF)
+        # Use the full user seed.  Masking to 32 bits silently aliased a
+        # different requested stream (e.g. 0 and 2**32) to the same test.
+        gen = torch.Generator(device=d.device).manual_seed(seed_int)
         chunk = min(n_random_int, 20000)
         done = 0
         while done < n_random_int:
