@@ -17,7 +17,11 @@ import pathlib
 import tempfile
 import unittest
 
-from cage.experiments import ContrastLog
+from cage.experiments import (
+    ContrastLog,
+    _fmt_ci,
+    _row_is_refutation,
+)
 from cage.metrics import (
     equivalence_test,
     minimum_effect_test,
@@ -215,6 +219,49 @@ class ContrastMinimumEffectAuditTest(unittest.TestCase):
         self.assertTrue(math.isnan(row["minimum_effect_p"]))
         self.assertFalse(row["sesoi_point_estimate_only"])
         self.assertFalse(row["minimum_effect_established"])
+
+    def test_noninferiority_straddling_bound_is_inconclusive_not_refuted(self):
+        # lo below the negative bound alone is the non-inferiority test's
+        # non-rejection, not evidence that the whole interval is materially
+        # worse.  Only hi < -bound is a refutation.
+        diffs = [-0.05, 0.0, 0.02, -0.01, 0.01]
+        ci = noninferiority_test(diffs, 0.01)
+        self.assertLess(ci["lo"], -ci["bound"])
+        self.assertGreater(ci["hi"], -ci["bound"])
+        self.assertFalse(ci["noninferior"])
+        self.assertIn("inconclusive", _fmt_ci(ci))
+        self.assertNotIn("refuted", _fmt_ci(ci))
+        row = {
+            "test": "noninferiority", "noninferiority_bound": 0.01,
+            "lo": ci["lo"], "hi": ci["hi"], "controlled": True,
+            "claim_eligible": True,
+        }
+        self.assertFalse(_row_is_refutation(row))
+        ci["diffs"] = list(diffs)
+        ci["controlled"] = {
+            "controlled": True, "mismatches": [],
+            "varying_factors": {"gate": {"a": ["calib"], "b": ["none"]}},
+            "capacity": {"matched": True, "a": 10, "b": 10,
+                         "delta_b_minus_a": 0},
+        }
+        log = ContrastLog("e1", hypotheses=("H1c",), min_seeds=3)
+        with contextlib.redirect_stdout(io.StringIO()):
+            log.print("calib-none", "H1c", "accuracy", ci)
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = log.finalize(pathlib.Path(tmp), q=0.05)
+        self.assertEqual(
+            payload["hypothesis_synthesis"]["H1c"]["status"],
+            "inconclusive")
+        # A genuinely material loss (the whole CI below -bound) remains a
+        # refutation.
+        worse = noninferiority_test([-0.20, -0.19, -0.21, -0.18, -0.22],
+                                    0.01)
+        self.assertTrue(_row_is_refutation({
+            "test": "noninferiority", "noninferiority_bound": 0.01,
+            "lo": worse["lo"], "hi": worse["hi"], "controlled": True,
+            "claim_eligible": True,
+        }))
 
 
 if __name__ == "__main__":

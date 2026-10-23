@@ -5484,8 +5484,8 @@ def _fmt_ci(ci) -> str:
         bound = ci.get("bound", float("nan"))
         if ci.get("noninferior"):
             verdict = f"CI lower bound above -{bound:g} (prediction holds)"
-        elif ci["lo"] <= -bound:
-            verdict = f"CI lower bound below -{bound:g} (prediction refuted)"
+        elif _finite(ci.get("hi")) and ci["hi"] < -bound:
+            verdict = f"CI entirely below -{bound:g} (prediction refuted)"
         else:
             verdict = f"CI not above -{bound:g} (inconclusive)"
         return (f"{ci['mean']:+.4f} [{ci['lo']:+.4f}, {ci['hi']:+.4f}] "
@@ -5528,7 +5528,7 @@ def _row_is_refutation(row) -> bool:
             return bool(_finite(row.get("lo")) and _finite(row.get("hi"))
                         and (row["lo"] > float(bound)
                              or row["hi"] < -float(bound)))
-        return bool(_finite(row.get("lo")) and row["lo"] <= -float(bound))
+        return bool(_finite(row.get("hi")) and row["hi"] < -float(bound))
     return bool(row.get("fdr_reject") and row.get("direction_reversed"))
 
 
@@ -6984,7 +6984,8 @@ class ContrastLog:
             elif null_test and sesoi is not None and (
                     (equiv and (r["lo"] > float(sesoi)
                                 or r["hi"] < -float(sesoi)))
-                    or (noninf and r["lo"] <= -float(sesoi))):
+                    or (noninf and _finite(r.get("hi"))
+                        and r["hi"] < -float(sesoi))):
                 verdict = ("REFUTED (CI entirely beyond the "
                            f"{'equivalence' if equiv else 'non-inferiority'} "
                            "bound, null prediction fails)")
