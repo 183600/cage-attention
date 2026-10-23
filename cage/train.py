@@ -1076,6 +1076,14 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         else:
             idx, tgt, meta = fixed_batch
         validate_batch(idx, tgt, meta, vocab, diagnostics=False)
+        # ``validate_batch`` accepts any integer dtype, but the embedding
+        # and cross-entropy require long targets.  Normalise only after the
+        # cleaning gate has accepted the values (so a float batch still
+        # fails closed instead of being truncated here).
+        if idx.dtype != torch.long:
+            idx = idx.to(torch.long)
+        if tgt.dtype != torch.long:
+            tgt = tgt.to(torch.long)
         diag_tgt = tgt
         if permute_labels:
             tgt = _permute_batch_labels(tgt, perm_gen)

@@ -311,15 +311,17 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
             f"non-empty splits, got {n_groups}")
     # First-appearance order keeps the allocation deterministic across runs
     # and independent of tensor hashing / dtype.
-    first = torch.full((n_groups,), n, dtype=torch.long)
+    first = torch.full((n_groups,), n, dtype=torch.long, device=g.device)
     first.scatter_reduce_(0, inverse,
-                          torch.arange(n, dtype=torch.long), reduce="amin")
+                          torch.arange(n, dtype=torch.long, device=g.device),
+                          reduce="amin")
     order = torch.argsort(first)
     # Canonicalise exactly like the data-stream generators: a split assigned
     # under an aliased seed must be the same split, never a different one.
     perm = order[torch.randperm(
-        n_groups,
-        generator=torch.Generator().manual_seed(stream_seed_key(seed)))]
+        n_groups, device=g.device,
+        generator=torch.Generator(device=g.device).manual_seed(
+            stream_seed_key(seed)))]
     counts = torch.bincount(inverse, minlength=n_groups).to(torch.float64)
     cuts = (train_frac * n, (train_frac + val_frac) * n)
     assigned = {"train": [], "val": [], "test": []}
@@ -437,7 +439,9 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
             break
     out = {}
     for name, gids in assigned.items():
-        mask = torch.isin(inverse, torch.tensor(gids, dtype=torch.long))
+        mask = torch.isin(
+            inverse,
+            torch.tensor(gids, dtype=torch.long, device=g.device))
         out[name] = torch.nonzero(mask, as_tuple=False).flatten()
     assert_split_partition(n, out)
     assert_group_disjoint(g, out)
@@ -716,6 +720,9 @@ def make_batch(batch: int, n_pairs: int, vocab: int, device, dense_lm: bool = Fa
         except TypeError as exc:
             raise ValueError(
                 f"{name} must be an integer, got {value!r}") from exc
+    if not isinstance(dense_lm, bool):
+        raise ValueError(
+            f"dense_lm must be a bool, got {dense_lm!r}")
     batch, n_pairs, vocab = (canonical["batch"], canonical["n_pairs"],
                              canonical["vocab"])
     if batch < 0:
@@ -931,7 +938,11 @@ def validate_batch(idx, targets, meta, vocab, diagnostics: bool = True) -> dict:
     vocab = _batch_vocab_int(vocab)
     if not _batch_invariants_hold(idx, targets, meta, vocab):
         _validate_batch_strict(idx, targets, meta, vocab)
-    out = {"n": int(idx.size(0)), "unique_key_rate": 1.0}
+    n_rows = int(idx.size(0))
+    # A zero-row batch has no keys, so "unique" is undefined rather than a
+    # perfect 1.0 score.
+    out = {"n": n_rows,
+           "unique_key_rate": 1.0 if n_rows else float("nan")}
     if diagnostics:
         out["n_duplicate_rows"] = _count_duplicate_rows(idx)
     return out
@@ -1245,7 +1256,9 @@ def _validate_batch_strict(idx, targets, meta, vocab) -> dict:
                 "label alignment: the final target entry is neither -1 nor "
                 "the sample's answer"
             )
-    return {"n": int(idx.size(0)), "unique_key_rate": 1.0,
+    n_rows = int(idx.size(0))
+    return {"n": n_rows,
+            "unique_key_rate": 1.0 if n_rows else float("nan"),
             "n_duplicate_rows": _count_duplicate_rows(idx)}
 
 

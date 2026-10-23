@@ -313,6 +313,38 @@ class TinyAlphaQuantileTest(unittest.TestCase):
         self.assertTrue(isinstance(rep["valid"], bool))
 
 
+class FixedBatchDtypeTest(unittest.TestCase):
+    def test_narrow_integer_fixed_batch_is_widened(self):
+        import torch
+
+        from cage.data import make_batch
+        from cage.model import build
+        from cage.train import train_model
+
+        idx, tgt, meta = make_batch(
+            2, 3, 300, "cpu", gen=torch.Generator().manual_seed(1))
+        model = build({
+            "vocab_size": 300, "d_model": 16, "n_heads": 2,
+            "n_layers": 1, "max_len": 32, "gate": "none",
+        })
+        hist = train_model(
+            model, steps=1, batch=2, n_pairs=3, vocab=300, seed=None,
+            fixed_batch=(idx.to(torch.int16), tgt.to(torch.int32), meta),
+            log_every=1)
+        self.assertEqual(len(hist), 1)
+
+
+class AnalyticFlopsValidationTest(unittest.TestCase):
+    def test_head_tokens_cannot_exceed_sequence_length(self):
+        from cage.efficiency import analytic_matmul_flops
+        from cage.model import Cfg
+
+        cfg = Cfg(vocab_size=8, d_model=4, n_heads=1, n_layers=1,
+                  max_len=8)
+        with self.assertRaises(ValueError):
+            analytic_matmul_flops(cfg, 4, head_tokens=5)
+
+
 class TrainingFlagValidationTest(unittest.TestCase):
     def test_truthy_non_boolean_training_flags_are_rejected(self):
         from cage.train import train_model

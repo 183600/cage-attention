@@ -60,6 +60,10 @@ def analytic_matmul_flops(cfg, seq_len: int, batch: int = 1,
         raise ValueError(
             f"batch and head_tokens must be positive integers, got "
             f"{raw_batch!r} and {raw_head_tokens!r}")
+    if head_tokens > seq_len:
+        raise ValueError(
+            f"head_tokens={head_tokens} cannot exceed seq_len={seq_len}: "
+            f"at most one vocabulary-head row per sequence position")
 
     d = int(cfg.d_model)
     t = seq_len

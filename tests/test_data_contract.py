@@ -253,6 +253,27 @@ class StreamContentDigestTest(unittest.TestCase):
                     stream_content_digest([batch])
 
 
+class BatchSwitchAndEmptyRateTest(unittest.TestCase):
+    def test_dense_lm_must_be_a_real_boolean(self):
+        from cage.data import make_batch
+
+        for value in ("False", 0, 1, None):
+            with self.subTest(dense_lm=value):
+                with self.assertRaises(ValueError):
+                    make_batch(2, 3, 32, "cpu", dense_lm=value)
+
+    def test_empty_batch_has_an_undefined_unique_key_rate(self):
+        from cage.data import make_batch, validate_batch
+
+        import math
+
+        idx, tgt, meta = make_batch(
+            0, 3, 32, "cpu", gen=torch.Generator().manual_seed(1))
+        out = validate_batch(idx, tgt, meta, 32)
+        self.assertEqual(out["n"], 0)
+        self.assertTrue(math.isnan(out["unique_key_rate"]))
+
+
 class BatchValidationTest(unittest.TestCase):
     def setUp(self):
         self.gen = torch.Generator().manual_seed(1234)
