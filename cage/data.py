@@ -2486,7 +2486,16 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
         raise ValueError("answer counts must be integers, not booleans")
     if raw.is_complex():
         raise ValueError("answer counts must be real integers")
-    c = raw.detach().cpu().to(torch.float64)
+    # Convert the *original* container straight to float64.  Converting the
+    # probe instead would first capture Python float lists as float32: a
+    # finite count as large as 1e39 then becomes +inf (and is rejected as
+    # non-finite), while an integral count above 2**24 is rounded and
+    # silently changes the sample size.
+    try:
+        c = torch.as_tensor(counts, dtype=torch.float64).detach(
+        ).cpu().reshape(-1)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        return empty
     if not bool(torch.isfinite(c).all()):
         raise ValueError("answer counts contain NaN/Inf")
     if bool((c < 0).any()):
@@ -2495,10 +2504,16 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
         raise ValueError("answer counts must be integers")
     n = float(c.sum())
     k = c.numel()
-    out = {"n": int(n), "n_classes": int(k),
-           "expected_per_class": float(n / k) if k else float("nan"),
+    out = {"n": int(n) if math.isfinite(n) else 0, "n_classes": int(k),
+           "expected_per_class": (float(n / k)
+                                  if k and math.isfinite(n)
+                                  else float("nan")),
            "chi2": float("nan"), "df": int(max(k - 1, 0)),
            "p_value": float("nan"), "uniform_supported": False}
+    if not math.isfinite(n):
+        # Individually finite counts can still overflow their sum; an
+        # infinite expected count cannot be simulated or tested.
+        return out
     if k < 2 or n <= 0.0:
         return out
     if isinstance(n_sim, bool):
@@ -2513,10 +2528,16 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     expected = n / k
     chi2 = float((((c - expected) ** 2) / expected).sum())
     gen = torch.Generator().manual_seed(_audit_seed(seed))
-    sim = torch.poisson(torch.full((n_sim, k), expected), generator=gen)
-    chi2_sim = (((sim - expected) ** 2) / expected).sum(1)
-    p_value = float((1.0 + (chi2_sim >= chi2).to(torch.float64).sum())
-                    / (n_sim + 1.0))
+    try:
+        sim = torch.poisson(torch.full((n_sim, k), expected), generator=gen)
+        chi2_sim = (((sim - expected) ** 2) / expected).sum(1)
+        p_value = float((1.0 + (chi2_sim >= chi2).to(torch.float64).sum())
+                        / (n_sim + 1.0))
+    except (RuntimeError, ValueError, OverflowError):
+        # The expected count can be finite but too large for the Poisson
+        # sampler's internal float conversion.  This audit is a reporting
+        # companion; abstain rather than abort the whole report.
+        return out
     out.update({"chi2": chi2, "p_value": p_value,
                 "uniform_supported": bool(p_value > 0.05)})
     return out

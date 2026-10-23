@@ -35,6 +35,25 @@ class UniformityInputTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             answer_uniformity_test(torch.tensor([True, False]))
 
+    def test_float_counts_are_not_truncated_through_float32(self):
+        from cage.data import answer_uniformity_test
+
+        # 2**24 + 1 is not representable in float32; the original Python
+        # float container must be widened straight to float64 so the audit
+        # sees the exact sample size instead of rounding it down.
+        large = float(2 ** 24 + 1)
+        out = answer_uniformity_test([large, large], n_sim=1)
+        self.assertEqual(out["n"], 2 * (2 ** 24 + 1))
+
+    def test_overflowing_count_sum_and_sampler_abstain(self):
+        from cage.data import answer_uniformity_test
+
+        for counts in ([1e308, 1e308], [1e39, 1e39]):
+            with self.subTest(counts=counts):
+                out = answer_uniformity_test(counts, n_sim=1)
+                self.assertFalse(out["uniform_supported"])
+                self.assertTrue(out["p_value"] != out["p_value"])
+
 
 class AuditCountInputTest(unittest.TestCase):
     def test_boolean_counts_are_not_silently_cast_to_categories(self):
