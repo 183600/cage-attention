@@ -225,6 +225,15 @@ class ControlledAuditProvenanceTest(unittest.TestCase):
         self.assertTrue(any("training_recipe" in msg
                             for msg in audit["mismatches"]))
 
+    def test_non_mapping_run_record_fails_the_audit_instead_of_raising(self):
+        good = self._run()
+        for bad in ("not-a-record", None, 3):
+            with self.subTest(record=bad):
+                audit = _controlled_audit([good], [bad])
+                self.assertFalse(audit["controlled"])
+                self.assertTrue(any("non-mapping" in msg
+                                    for msg in audit["mismatches"]))
+
 
 class PilotSdTest(unittest.TestCase):
     def test_largest_rung_sd_is_used(self):

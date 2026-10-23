@@ -3694,6 +3694,14 @@ def _controlled_audit(runs_a, runs_b):
     audit: a provenance field that cannot be read is not evidence that the
     two sides shared one recipe.
     """
+    def _audit_row(run):
+        return run if isinstance(run, Mapping) else {}
+
+    malformed_a = sum(1 for r in runs_a if not isinstance(r, Mapping))
+    malformed_b = sum(1 for r in runs_b if not isinstance(r, Mapping))
+    runs_a = [_audit_row(r) for r in runs_a]
+    runs_b = [_audit_row(r) for r in runs_b]
+
     def _seed_key(seed):
         if seed is None:
             return (1, 0.0, "")
@@ -3731,6 +3739,11 @@ def _controlled_audit(runs_a, runs_b):
         "single_factor": None,
         "mismatches": [],
     }
+    for side, count in (("a", malformed_a), ("b", malformed_b)):
+        if count:
+            audit["mismatches"].append(
+                f"side {side} has {count} non-mapping run record(s): the "
+                f"controlled-variable contract cannot be verified")
     audit["seeds_paired"] = audit["seeds_a"] == audit["seeds_b"]
     if not audit["seeds_paired"]:
         audit["mismatches"].append(
