@@ -503,6 +503,15 @@ class BootstrapOverflowTest(unittest.TestCase):
         mixed = [-1e308, 1e308, 1e308, -1e308]
         self.assertTrue(math.isnan(
             paired_bootstrap_ci(mixed, n_boot=200)["lo"]))
+        # The exact sign-flip companion must abstain too: a finite sample
+        # can overflow its own mean/sign-flip sums.
+        for sample in (huge, mixed):
+            with self.subTest(sample=sample):
+                sf = metrics.sign_flip_test(sample)
+                self.assertFalse(sf["valid"])
+                self.assertTrue(math.isnan(sf["p_value"]))
+        self.assertFalse(
+            paired_bootstrap_ci(huge, n_boot=10)["sign_flip_valid"])
 
 
 class BaselineArgumentValidationTest(unittest.TestCase):

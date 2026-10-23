@@ -2811,9 +2811,16 @@ def sign_flip_test(diffs, alternative: str = "two-sided",
     seed_int = seed
 
     obs = float(d.mean())
+    if not math.isfinite(obs):
+        # Finite observations can still overflow their sum/mean (e.g.
+        # several 1e308 differences).  The sign-flip distribution is then
+        # not representable and a p-value from it would be fabricated.
+        out["reason"] = "paired differences overflow the sample mean"
+        return out
     abs_obs = abs(obs)
     tol = 1e-12 * max(1.0, abs_obs)
     counts = {"greater": 0, "less": 0, "two-sided": 0}
+    overflow = False
     if n <= max_exact_int:
         total = 1 << n
         chunk = min(total, 65536)
@@ -2825,9 +2832,15 @@ def sign_flip_test(diffs, alternative: str = "two-sided",
             bits = (idx.unsqueeze(1) >> shifts) & 1
             signs = bits.to(dtype=d.dtype) * 2.0 - 1.0
             means = (signs * d).sum(dim=1) / float(n)
+            if not bool(torch.isfinite(means).all()):
+                overflow = True
+                break
             counts["greater"] += int((means >= obs - tol).sum())
             counts["less"] += int((means <= obs + tol).sum())
             counts["two-sided"] += int((means.abs() >= abs_obs - tol).sum())
+        if overflow:
+            out["reason"] = "sign-flip means overflow float64"
+            return out
         p_values = {key: counts[key] / float(total) for key in counts}
         # Two-sided tails contain the all-plus and all-minus assignments, so
         # their exact floor is twice the one-sided floor (capped at 1).
@@ -2845,6 +2858,9 @@ def sign_flip_test(diffs, alternative: str = "two-sided",
                                   generator=gen, device=d.device)
             signs = signs.to(dtype=d.dtype) * 2.0 - 1.0
             means = (signs * d).sum(dim=1) / float(n)
+            if not bool(torch.isfinite(means).all()):
+                out["reason"] = "sign-flip means overflow float64"
+                return out
             counts["greater"] += int((means >= obs - tol).sum())
             counts["less"] += int((means <= obs + tol).sum())
             counts["two-sided"] += int((means.abs() >= abs_obs - tol).sum())
