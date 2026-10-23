@@ -18,7 +18,9 @@ from cage.experiments import (
     Settings,
     _model_cfg,
     _paired_diff,
+    _paired_did,
     _paired_stream_test,
+    _one_sample_contrast,
 )
 from cage.metrics import (
     crossed_cluster_bootstrap_ci,
@@ -260,6 +262,26 @@ class PairedStreamDigestTest(unittest.TestCase):
                 self.assertEqual(paired["n"], 0)
                 self.assertFalse(paired["controlled"]["controlled"])
                 self.assertGreaterEqual(len(paired["seeds_unpaired"]), 1)
+
+    def test_one_sample_contrast_drops_malformed_runs(self):
+        for bad in ("not-a-record", {"seed": [0], "accuracy": 1.0},
+                    {"seed": True, "accuracy": 1.0},
+                    {"seed": 0.5, "accuracy": 1.0}):
+            with self.subTest(record=bad):
+                ci = _one_sample_contrast([bad], "accuracy")
+                self.assertEqual(ci["n"], 0)
+                self.assertTrue(ci["seeds_dropped"])
+
+    def test_paired_did_drops_malformed_runs(self):
+        good = {"seed": 0, "accuracy": 1.0}
+        for bad in ("not-a-record", {"seed": [0], "accuracy": 1.0},
+                    {"seed": True, "accuracy": 1.0},
+                    {"seed": 0.5, "accuracy": 1.0}):
+            with self.subTest(record=bad):
+                ci = _paired_did([bad], [good], [good], [good],
+                                 "accuracy")
+                self.assertEqual(ci["n"], 0)
+                self.assertFalse(ci["controlled"]["controlled"])
 
     def test_digest_mismatch_refuses_item_pairing(self):
         a = [[1] * 16]

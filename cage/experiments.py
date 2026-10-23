@@ -4398,8 +4398,12 @@ def _one_sample_contrast(runs, metric, bound=None):
     :func:`equivalence_test`).  Runs without a training seed cannot be
     independent units; they are dropped and recorded like an unpaired seed.
     """
-    missing = [r for r in runs if r.get("seed") is None]
-    by_seed = {r["seed"]: r for r in runs if r.get("seed") is not None}
+    missing = [r for r in runs if _paired_seed(r) is None]
+    by_seed = {}
+    for r in runs:
+        seed = _paired_seed(r)
+        if seed is not None:
+            by_seed[seed] = r
     used, values = [], []
     for seed in sorted(by_seed, key=_seed_order):
         value = by_seed[seed].get(metric)
@@ -4558,10 +4562,15 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     cannot be paired; they are dropped and recorded as unpaired.
     """
     def _by_seed(rs):
-        return {r["seed"]: r for r in rs if r.get("seed") is not None}
+        out = {}
+        for r in rs:
+            seed = _paired_seed(r)
+            if seed is not None:
+                out[seed] = r
+        return out
 
     missing = [r for rs in (runs_a1, runs_b1, runs_a2, runs_b2)
-               for r in rs if r.get("seed") is None]
+               for r in rs if _paired_seed(r) is None]
     m1a, m1b, m2a, m2b = (_by_seed(rs)
                           for rs in (runs_a1, runs_b1, runs_a2, runs_b2))
     planned = sorted(set(m1a) | set(m1b) | set(m2a) | set(m2b),
@@ -4616,10 +4625,18 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     ci["seeds_unpaired"] = (sorted(unpaired, key=_seed_order)
                             + [None] * len(missing))
     ci["seeds_undefined"] = sorted(undefined, key=_seed_order)
-    audits = [_controlled_audit(runs_a1, runs_b1),
-              _controlled_audit(runs_a2, runs_b2),
-              _controlled_audit(runs_a1, runs_a2),
-              _controlled_audit(runs_b1, runs_b2)]
+    audits = []
+    for left, right in ((runs_a1, runs_b1), (runs_a2, runs_b2),
+                        (runs_a1, runs_a2), (runs_b1, runs_b2)):
+        clean_left = [r for r in left if _paired_seed(r) is not None]
+        clean_right = [r for r in right if _paired_seed(r) is not None]
+        audit = _controlled_audit(clean_left, clean_right)
+        if len(clean_left) != len(left) or len(clean_right) != len(right):
+            audit["mismatches"].append(
+                "interaction edge contains run(s) without a usable "
+                "(hashable, non-boolean) training seed")
+            audit["controlled"] = False
+        audits.append(audit)
     mismatches = [msg for audit in audits
                   for msg in audit.get("mismatches", [])]
     # A difference-in-differences is only an interaction of *the same*
