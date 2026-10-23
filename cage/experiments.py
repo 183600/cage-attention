@@ -144,7 +144,10 @@ Design principles
     runs themselves are scheduled as randomised complete blocks (one block
     per training seed, every cell once per block, recorded in
     ``<tag>_run_order.json``), so a slow machine drift cannot be aliased
-    with one treatment arm; the schedule is deterministic from
+    with one treatment arm; E1's calibration-term ablations and its
+    active-control placebo are part of the *same* schedule as the four gate
+    variants, so an ablation-vs-full contrast is not two grids run at
+    different times.  The schedule is deterministic from
     ``Settings.run_order_seed`` and never perturbs the data/dropout RNG
     streams.  After the grid, ``<tag>_run_order_realized.json`` checks the
     rows' recorded block/position against that frozen schedule: a resumed
@@ -616,21 +619,39 @@ HYPOTHESES = {
                       "(the fixed-length main effect of the length term is "
                       "expected to be small because at a fixed T it is a "
                       "constant absorbed by the gate bias; H2c tests it "
-                      "where it matters, across lengths)",
+                      "where it matters, across lengths).  The complete 2x2 "
+                      "additionally reports the two-term interaction as a "
+                      "two-sided additivity check: a near-zero interaction "
+                      "supports reading the terms as additive, a large one "
+                      "requires each contribution to be stated conditional "
+                      "on the other",
         "decision": "paired bootstrap 95% CIs of accuracy(calib - ablated "
                     "arm) and gate_margin(calib - ablated arm) exclude 0 "
                     "for each *single-term* ablated arm after "
                     "Benjamini-Hochberg FDR control across the E1 family "
                     "(q=0.05); the joint both-terms-off cell is not a "
                     "single-factor row and enters only the registered 2x2 "
-                    "factorial main effect.  The mechanism check "
+                    "factorial design.  That design is read completely: the "
+                    "concentration main effect is directional, and the "
+                    "length x concentration interaction is a two-sided "
+                    "additivity check (no registered sign) that must still "
+                    "exceed its SESOI to count as practically meaningful - "
+                    "a large interaction means each term's contribution is "
+                    "conditional on the other, so the additive claim is "
+                    "not supported as stated.  The mechanism check "
                     "validates that each ablation removed the intended "
                     "pathway and is reported alongside, not as a decision "
                     "criterion",
         "sesoi": {"accuracy": 0.01, "gate_margin": 0.02,
                   "abs_gate_vs_entropy": 0.05},
         "direction": {"accuracy": "+", "gate_margin": "+",
-                      "abs_gate_vs_entropy": "+"},
+                      "abs_gate_vs_entropy": "+",
+                      # The interaction rows reuse the same display metrics
+                      # but are explicitly two-sided: an undirected key keeps
+                      # them from inheriting the main-effect sign.
+                      "interaction_accuracy": None,
+                      "interaction_gate_margin": None,
+                      "interaction_abs_gate_vs_entropy": None},
     },
     "H1e": {
         "experiment": "e1",
@@ -12859,6 +12880,68 @@ _E1_CALIB_PLACEBO = (
                         "calib_shuffle_ent": True}),
 )
 
+_E1_ABLATION_LABELS = tuple(
+    label for label, _ in _E1_CALIB_ABLATION + _E1_CALIB_PLACEBO)
+
+
+def _e1_cell_plan() -> dict:
+    """The E1 cells that enter one shared complete-block schedule.
+
+    E1 has two conceptually different groups of conditions: the four gate
+    variants (the pre-registered E1 family) and the calibration-term
+    ablation / active-control arms that complete the 2x2 and the placebo.
+    Scheduling them as two separate grids would make every ablation
+    contrast compare a full-calib run from the first grid with an ablated
+    run from the second: any slow machine drift between the two invocations
+    would then be aliased with the ablation factor, exactly the confound the
+    complete-block randomisation exists to remove.  They therefore share
+    one seed block and one frozen schedule.
+
+    ``e1_cell`` is the schedule label.  The full-calib cell keeps the gate
+    label ``"calib"`` (its result-file row still carries
+    ``calib_variant="full"``), and every ablation/placebo cell is labelled
+    by its ``calib_variant`` value.  ``overrides`` maps each non-gate cell
+    to the resolved ``Cfg`` flags it varies, and ``gate_of`` says which gate
+    implementation that cell builds, so the runner dispatches from one
+    single source of truth instead of reconstructing the mapping inline.
+    """
+    cells = tuple(GATES) + _E1_ABLATION_LABELS
+    overrides = {
+        label: dict(flags)
+        for label, flags in _E1_CALIB_ABLATION + _E1_CALIB_PLACEBO}
+    gate_of = {gate: gate for gate in GATES}
+    gate_of.update({label: "calib" for label in _E1_ABLATION_LABELS})
+    variant_of = {"calib": "full"}
+    variant_of.update({label: label for label in _E1_ABLATION_LABELS})
+    return {
+        "cells": cells,
+        "overrides": overrides,
+        "gate_of": gate_of,
+        "variant_of": variant_of,
+    }
+
+
+def _e1_cell_of(run) -> str | None:
+    """Recover an E1 record's schedule cell.
+
+    New records stamp ``e1_cell`` directly.  Legacy records predate the
+    shared schedule, so fall back to the resolved labels: ``calib`` with
+    ``calib_variant="full"`` is the main-grid cell, an ablation label is its
+    own cell, and every other gate is its own cell.
+    """
+    if not isinstance(run, Mapping):
+        return None
+    cell = run.get("e1_cell")
+    if isinstance(cell, str) and cell:
+        return cell
+    variant = run.get("calib_variant")
+    if variant == "full":
+        return "calib"
+    if isinstance(variant, str) and variant:
+        return variant
+    gate = run.get("gate")
+    return gate if isinstance(gate, str) and gate else None
+
 
 # Learning-rate sensitivity points for the primary gate contrast, expressed
 # as multiplicative factors of the frozen shared lr.  The controlled audit
@@ -13658,17 +13741,42 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     lr = _resolve_lr(settings, out_dir, "e1")
     runs = []
     examples = {}
-    main_cells = tuple(GATES)
-    main_order = _blocked_run_order(
-        main_cells, settings.seeds, settings.run_order_seed,
+    ablation_runs = {}
+    cell_plan = _e1_cell_plan()
+    # All E1 cells - the four gate variants and the calibration-term
+    # ablation/active-control arms - are co-randomised in the same complete
+    # blocks.  Running the ablation arms in a second grid would alias the
+    # full-vs-ablated contrasts with whatever changed on the machine between
+    # the two invocations; one schedule keeps the whole 2x2 and the placebo
+    # comparable to the full calib cell block by block.
+    e1_cells = cell_plan["cells"]
+    e1_order = _blocked_run_order(
+        e1_cells, settings.seeds, settings.run_order_seed,
         shuffle=settings.randomize_run_order)
-    _write_run_order(settings, out_dir, "e1", main_order, main_cells,
+    _write_run_order(settings, out_dir, "e1", e1_order, e1_cells,
                      settings.seeds)
-    for gate, seed, block, position in main_order:
-        # The full calib cell is labelled too, so the audit can see that
-        # the ablation contrasts vary exactly the calibration-term flag.
-        extra = {"calib_variant": "full"} if gate == "calib" else {}
-        extra.update({"run_block": block, "run_position": position})
+    for cell, seed, block, position in e1_order:
+        gate = cell_plan["gate_of"][cell]
+        extra = {"e1_cell": cell, "run_block": block,
+                 "run_position": position}
+        variant = cell_plan["variant_of"].get(cell)
+        if variant is not None:
+            # The full calib cell is labelled too, so the audit can see that
+            # the ablation contrasts vary exactly the calibration-term flag.
+            extra["calib_variant"] = variant
+        if cell in cell_plan["overrides"]:
+            label = cell
+            rec, errors = _e1_run(
+                settings, seed, lr, gate, extra,
+                **cell_plan["overrides"][label])
+            for case in errors["cases"]:
+                _write_result(out_dir / "e1_error_cases.jsonl",
+                              {"experiment": "e1", **_stamp(settings),
+                               "gate": gate, "ablation": label,
+                               "seed": seed, "lr": lr, **case})
+            _write_result(out_dir / "e1_runs.jsonl", rec)
+            ablation_runs.setdefault(label, []).append(rec)
+            continue
         rec, errors = _e1_run(settings, seed, lr, gate, extra)
         if gate not in examples or \
                 errors["summary"]["n_errors"] > examples[gate][0]:
@@ -13682,38 +13790,10 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                            "lr": lr, **case})
         _write_result(out_dir / "e1_runs.jsonl", rec)
         runs.append(rec)
-    _report_realized_run_order(
-        out_dir, "e1", runs, main_order, main_cells, settings.seeds,
-        lambda run: run.get("gate"))
-    ablation_runs = {}
-    ablation_cells = tuple(
-        label for label, _ in _E1_CALIB_ABLATION + _E1_CALIB_PLACEBO)
-    ablation_overrides = {
-        label: overrides
-        for label, overrides in _E1_CALIB_ABLATION + _E1_CALIB_PLACEBO}
-    ablation_order = _blocked_run_order(
-        ablation_cells, settings.seeds, settings.run_order_seed,
-        shuffle=settings.randomize_run_order)
-    _write_run_order(settings, out_dir, "e1_ablation", ablation_order,
-                     ablation_cells, settings.seeds)
-    for label, seed, block, position in ablation_order:
-        rec, errors = _e1_run(
-            settings, seed, lr, "calib",
-            {"calib_variant": label, "run_block": block,
-             "run_position": position},
-            **ablation_overrides[label])
-        for case in errors["cases"]:
-            _write_result(out_dir / "e1_error_cases.jsonl",
-                          {"experiment": "e1", **_stamp(settings),
-                           "gate": "calib", "ablation": label,
-                           "seed": seed, "lr": lr, **case})
-        _write_result(out_dir / "e1_runs.jsonl", rec)
-        ablation_runs.setdefault(label, []).append(rec)
     ablation_flat = [r for rs in ablation_runs.values() for r in rs]
     _report_realized_run_order(
-        out_dir, "e1_ablation", ablation_flat, ablation_order,
-        ablation_cells, settings.seeds,
-        lambda run: run.get("calib_variant"))
+        out_dir, "e1", runs + ablation_flat, e1_order, e1_cells,
+        settings.seeds, _e1_cell_of)
     by_gate = {g: [r for r in runs if r["gate"] == g] for g in GATES}
     table = {g: _aggregate_runs(rs) for g, rs in by_gate.items()}
     ablation_coverage = _report_ablation_coverage(
@@ -14809,6 +14889,32 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     for metric in ("accuracy", "gate_margin", "abs_gate_vs_entropy"):
         ci = _factorial_main_effect(factorial_cells, metric, "concentration")
         clog.print("concentration main effect (2x2)", "H1d", metric, ci,
+                   warn=factorial_warn)
+    # A main effect alone cannot distinguish an additive two-term gate from
+    # one whose terms substitute for each other: the average of the
+    # concentration effect can be positive while its size depends on whether
+    # the length term is on.  The interaction is the missing row of the
+    # complete 2x2 (the E2 design already reads it as H2e), so it is
+    # registered here as a two-sided additivity check with its own
+    # undirected registry keys.  It is not a directional claim: either sign
+    # is admissible, but a practically negligible interaction supports the
+    # additive reading while a large one says the "each term carries its own
+    # contribution" story must be stated conditionally.
+    print(f"\n[e1] H1d factorial interaction (length x concentration, "
+          f"two-sided additivity check): (full - len_only) - "
+          f"(ent_only - no_terms), i.e. the concentration effect with the "
+          f"length term on minus the concentration effect with it off.  The "
+          f"term main effects above are averages over this interaction; a "
+          f"large interaction means the terms are not interchangeable and "
+          f"each component's contribution must be reported conditional on "
+          f"the other:")
+    for metric in ("accuracy", "gate_margin", "abs_gate_vs_entropy"):
+        ci = _paired_did(
+            factorial_cells["full"], factorial_cells["calib_len_only"],
+            factorial_cells["calib_ent_only"],
+            factorial_cells["calib_no_terms"], metric)
+        clog.print("length x concentration interaction (2x2)", "H1d", metric,
+                   ci, direction_key=f"interaction_{metric}",
                    warn=factorial_warn)
     print(f"\n[e1] H1f active-control (placebo) contrasts: full calib vs "
           f"the shuffled-entropy arm (identical architecture/parameters/"
