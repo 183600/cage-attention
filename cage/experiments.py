@@ -234,7 +234,10 @@ from .efficiency import measure_config
 from .metrics import (
     _positive_integer,
     benjamini_hochberg,
+    benjamini_yekutieli,
+    holm_bonferroni,
     mcnemar_test,
+    simes_test,
     clustered_proportion_ci,
     crossed_cluster_bootstrap_ci,
     equivalence_test,
@@ -5775,6 +5778,17 @@ class ContrastLog:
     reads support as CI-within-bound - never as "CI includes 0".  Its
     TOST p-value joins the same BH family as the directional p-values.
 
+    Because rows in one family share training seeds and a sealed
+    evaluation stream, the independence/PRDS premise behind BH is not
+    established.  :meth:`finalize` therefore also reports Benjamini-
+    Yekutieli (FDR under arbitrary dependence) and Holm (family-wise
+    error) adjusted decisions, plus a Simes omnibus p-value.  These are
+    sensitivity companions: the pre-registered BH verdict and the
+    ``supports_hypothesis`` flag are never changed, but a BH-supported
+    claim that fails either dependence-robust model is named in the
+    console warning and in ``<tag>_contrasts.json`` as multiplicity-model
+    sensitive.
+
     ``hypotheses`` lists the pre-registered ids this family is supposed to
     evaluate; :meth:`finalize` audits coverage (registered but absent, or
     rows citing unknown ids) and records it in the payload, so a
@@ -6629,6 +6643,48 @@ class ContrastLog:
                 and float(exact_row["sign_flip_min_p"]) > q)
         surviving = [r for r in testable if r["fdr_reject"]]
         supporting = [r for r in testable if r["supports_hypothesis"]]
+        # Multiplicity-model sensitivity companions.  BH's FDR guarantee
+        # assumes independent or positively dependent tests, but contrasts
+        # in one family share training seeds and a sealed evaluation
+        # stream, so that premise is not established.  BY stays valid under
+        # arbitrary dependence; Holm controls the family-wise error rate.
+        # Both are reported next to the pre-registered BH decision, which is
+        # left unchanged, so a claim that survives only under the
+        # independence assumption is visible rather than assumed.
+        p_family = [r.get("p_value") for r in self.rows]
+        by_adj = benjamini_yekutieli(p_family, q=q)
+        holm_adj = holm_bonferroni(p_family, q=q)
+        for row, by_a, holm_a in zip(self.rows, by_adj, holm_adj):
+            row["p_adj_by"] = by_a["p_adj"]
+            row["by_fdr_reject"] = bool(
+                by_a["reject"] and row.get("controlled") is not False)
+            row["by_supports"] = bool(
+                row["by_fdr_reject"]
+                and row.get("practically_relevant")
+                and row.get("claim_eligible", True))
+            row["p_adj_holm"] = holm_a["p_adj"]
+            row["holm_fw_reject"] = bool(
+                holm_a["reject"] and row.get("controlled") is not False)
+            row["holm_supports"] = bool(
+                row["holm_fw_reject"]
+                and row.get("practically_relevant")
+                and row.get("claim_eligible", True))
+            row["by_disagrees"] = bool(
+                _finite(row.get("p_adj")) and _finite(row.get("p_adj_by"))
+                and bool(row.get("supports_hypothesis"))
+                != bool(row["by_supports"]))
+            row["holm_disagrees"] = bool(
+                _finite(row.get("p_adj")) and _finite(row.get("p_adj_holm"))
+                and bool(row.get("supports_hypothesis"))
+                != bool(row["holm_supports"]))
+        family_simes = simes_test(p_family, alpha=q)
+        by_supporting = [r for r in testable if r.get("by_supports")]
+        holm_supporting = [r for r in testable if r.get("holm_supports")]
+        by_conflicts = [r for r in testable if r.get("by_disagrees")]
+        holm_conflicts = [r for r in testable if r.get("holm_disagrees")]
+        dependence_weaker = [
+            r for r in supporting
+            if not (r.get("by_supports") and r.get("holm_supports"))]
         met_established = [
             r for r in supporting
             if r.get("claim_eligible", True)
@@ -6777,12 +6833,16 @@ class ContrastLog:
                        f" (min {float(r['sign_flip_min_p']):.4f})"
                        if _finite(exact_p) and _finite(r.get("sign_flip_min_p"))
                        else "")
+            dep_s = (f", BY p_adj={float(r['p_adj_by']):.4f}, "
+                     f"Holm p_adj={float(r['p_adj_holm']):.4f}"
+                     if _finite(r.get("p_adj_by"))
+                     and _finite(r.get("p_adj_holm")) else "")
             sesoi_note = ("  [SESOI point-estimate only: 95% CI does not "
                           "clear the practical bound]"
                           if r.get("sesoi_point_estimate_only") else "")
             print(f"  [{r['hypothesis']}] {r['rule']} ({r['metric']}): "
                   f"p={r['p_value']:.4f} -> p_adj={r['p_adj']:.4f} "
-                  f"{exact_s} {verdict}{sesoi_note} "
+                  f"{exact_s}{dep_s} {verdict}{sesoi_note} "
                   f"(effect={r['mean']:+.4f}{rel_s}{dz_s}, "
                   f"MDE80={r['mde80']:.4f}{', ' if sesoi_s else ''}"
                   f"{sesoi_s}, seeds={r['n']}, "
@@ -7111,6 +7171,32 @@ class ContrastLog:
                   f"{names}): their direction is not falsifiable with the "
                   f"current seed count, so add seeds rather than reading the "
                   f"bootstrap p as confirmation")
+        if testable:
+            simes_s = (f"global Simes p={float(family_simes['p']):.4f}"
+                       if family_simes.get("valid") else
+                       "global Simes p=n/a")
+            print(f"[{self.tag}] dependence-robust multiplicity companions "
+                  f"(pre-registered BH decision unchanged): {simes_s}; "
+                  f"BY-arbitrary-dependence {len(by_supporting)}/"
+                  f"{len(testable)} supports, Holm-FWER "
+                  f"{len(holm_supporting)}/{len(testable)} supports; "
+                  f"{len(by_conflicts)} BY and {len(holm_conflicts)} Holm "
+                  f"verdict(s) disagree with BH")
+        if dependence_weaker:
+            shown = dependence_weaker[:5]
+            names = ", ".join(
+                f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                for r in shown)
+            if len(dependence_weaker) > len(shown):
+                names += (f", ... (+{len(dependence_weaker) - len(shown)}"
+                          f" more)")
+            print(f"[{self.tag}] WARNING: {len(dependence_weaker)}/"
+                  f"{len(supporting)} BH-supported contrast(s) do NOT "
+                  f"survive both dependence-robust companions ({names}): "
+                  f"the family reuses seeds and a shared evaluation stream, "
+                  f"so the BH-only support is conditional on an "
+                  f"independence/PRDS premise; report these as "
+                  f"multiplicity-model sensitive, not as robust claims")
         registered = list(self.hypotheses)
         covered = sorted({r["hypothesis"] for r in self.rows})
         uncovered = [h for h in registered if h not in covered]
@@ -7195,6 +7281,14 @@ class ContrastLog:
                        len(sign_flip_unfalsifiable),
                    "n_bootstrap_below_exact_floor":
                        len(sign_flip_below_floor),
+                   "simes_family_p": family_simes.get("p"),
+                   "simes_family_reject": bool(
+                       family_simes.get("reject")),
+                   "n_by_supporting": len(by_supporting),
+                   "n_by_disagree": len(by_conflicts),
+                   "n_holm_supporting": len(holm_supporting),
+                   "n_holm_disagree": len(holm_conflicts),
+                   "n_dependence_weaker": len(dependence_weaker),
                    "direction_reversed_contrasts": [
                        f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                        for r in reversed_effects],
@@ -7225,6 +7319,15 @@ class ContrastLog:
                    "bootstrap_below_exact_floor_contrasts": [
                        f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                        for r in sign_flip_below_floor],
+                   "by_disagree_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in by_conflicts],
+                   "holm_disagree_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in holm_conflicts],
+                   "dependence_weaker_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in dependence_weaker],
                    "registered_hypotheses": registered,
                    "covered_hypotheses": covered,
                    "uncovered_hypotheses": uncovered,

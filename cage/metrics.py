@@ -57,7 +57,13 @@ Metric choices (and why)
   ``benjamini_hochberg`` controls the false-discovery rate across that
   family; an uncorrected per-contrast 95% readout would be expected to
   produce ~1 false "supported" claim per experiment made of all-null
-  hypotheses.
+  hypotheses.  The contrasts are not independent (they share training
+  seeds and one evaluation stream), so ``benjamini_yekutieli`` (valid under
+  arbitrary dependence) and ``holm_bonferroni`` (family-wise error) are
+  reported as multiplicity-model companions next to the pre-registered BH
+  decision.  ``simes_test`` gives the corresponding family-wide omnibus
+  p-value, and a BH-supported claim that fails the dependence-robust
+  companions is flagged rather than presented as assumption-free.
 * Statistical significance is not practical significance: every
   hypothesis pre-registers a **SESOI** (smallest effect size of interest)
   per metric, and ``seeds_for_power`` is the *planning* counterpart of the
@@ -111,6 +117,9 @@ import torch
 __all__ = [
     "average_ranks",
     "benjamini_hochberg",
+    "benjamini_yekutieli",
+    "holm_bonferroni",
+    "simes_test",
     "roc_auc",
     "pr_auc",
     "roc_auc_ci",
@@ -1796,6 +1805,52 @@ def seeds_for_power(sd, effect, alpha: float = 0.05,
         return float("inf")
 
 
+def _validated_p_family(p_values, q):
+    """Materialize a p-value family and validate its error level.
+
+    Shared by the multiplicity procedures so a malformed container, a
+    boolean level, or a p-value outside ``[0, 1]`` is handled the same way
+    everywhere: the family is still reported, but the malformed entries
+    stay untestable and an invalid level rejects nothing.
+    """
+    if isinstance(p_values, (str, bytes)) or isinstance(p_values, Mapping):
+        raise ValueError(
+            "p_values must be an iterable of p-values, got "
+            f"{type(p_values).__name__}")
+    try:
+        p_values = list(p_values)
+    except TypeError as exc:
+        raise ValueError(
+            "p_values must be an iterable of p-values, got "
+            f"{type(p_values).__name__}") from exc
+    out = [{"p": float("nan"), "p_adj": float("nan"), "reject": False}
+           for _ in p_values]
+    q = _float_or_nan(q)
+    q_ok = math.isfinite(q) and 0.0 < q < 1.0
+    finite = []
+    for i, p in enumerate(p_values):
+        if p is None:
+            continue
+        fp = _float_or_nan(p)
+        if math.isfinite(fp) and 0.0 <= fp <= 1.0:
+            finite.append((i, fp))
+    return out, finite, q, q_ok
+
+
+def _step_up_adjusted(finite, scale: float = 1.0) -> dict:
+    """Monotone step-up adjusted p-values for already-validated entries."""
+    m = len(finite)
+    order = sorted(finite, key=lambda t: (t[1], t[0]))
+    adjusted: dict[int, float] = {}
+    prev = 1.0
+    for rank in range(m, 0, -1):
+        i, p = order[rank - 1]
+        value = min(prev, p * m * scale / rank, 1.0)
+        adjusted[i] = value
+        prev = value
+    return adjusted
+
+
 def benjamini_hochberg(p_values, q: float = 0.05) -> list:
     """Benjamini-Hochberg step-up FDR control over one contrast family.
 
@@ -1812,52 +1867,87 @@ def benjamini_hochberg(p_values, q: float = 0.05) -> list:
     # string/bytes/mapping is iterable but names characters/keys/byte
     # values, not p-values; a scalar has no family at all.  Reject these
     # malformed containers instead of manufacturing a testable family.
-    if isinstance(p_values, (str, bytes)) or isinstance(p_values, Mapping):
-        raise ValueError(
-            "p_values must be an iterable of p-values, got "
-            f"{type(p_values).__name__}")
-    try:
-        p_values = list(p_values)
-    except TypeError as exc:
-        raise ValueError(
-            "p_values must be an iterable of p-values, got "
-            f"{type(p_values).__name__}") from exc
-    out = [{"p": float("nan"), "p_adj": float("nan"), "reject": False}
-           for _ in p_values]
-    # The FDR level is a probability: a boolean (``True == 1.0``) or a
-    # non-numeric level would silently turn the whole family into "reject
-    # everything".  Treat an invalid level like an untestable family (no
-    # rejection) while still reporting the adjusted p-values.
-    q = _float_or_nan(q)
-    q_ok = math.isfinite(q) and 0.0 < q < 1.0
-    finite = []
-    for i, p in enumerate(p_values):
-        if p is None:
-            continue
-        # Malformed/complex/boolean p-values are not testable; skip them
-        # rather than letting ``float()`` raise or read ``True`` as 1.0.
-        # A finite value outside [0, 1] is equally malformed: clamping a
-        # negative p-value to zero would turn it into the strongest
-        # possible rejection, and clamping a value above one would let a
-        # caller believe it was tested.  Both stay untestable (NaN).
-        fp = _float_or_nan(p)
-        if math.isfinite(fp) and 0.0 <= fp <= 1.0:
-            finite.append((i, fp))
+    out, finite, q, q_ok = _validated_p_family(p_values, q)
+    m = len(finite)
+    if not m:
+        return out
+    adjusted = _step_up_adjusted(finite)
+    for i, p in finite:
+        out[i] = {"p": p, "p_adj": adjusted[i],
+                  "reject": bool(q_ok and adjusted[i] <= q)}
+    return out
+
+
+def benjamini_yekutieli(p_values, q: float = 0.05) -> list:
+    """Benjamini-Yekutieli FDR control under arbitrary dependence.
+
+    BH's FDR guarantee assumes independent or positively dependent tests.
+    These contrast families reuse the same training seeds and one sealed
+    evaluation stream, so that premise is not established.  BY multiplies
+    each BH adjusted p-value by the harmonic factor
+    ``c(m) = sum(1/i, i=1..m)``, which restores FDR control at ``q`` under
+    arbitrary dependence at the cost of conservativeness.
+
+    Returns the same per-row shape as ``benjamini_hochberg``.  This is a
+    reporting companion: the pre-registered BH decision is unchanged.
+    """
+    out, finite, q, q_ok = _validated_p_family(p_values, q)
+    m = len(finite)
+    if not m:
+        return out
+    factor = sum(1.0 / i for i in range(1, m + 1))
+    adjusted = _step_up_adjusted(finite, factor)
+    for i, p in finite:
+        out[i] = {"p": p, "p_adj": adjusted[i],
+                  "reject": bool(q_ok and adjusted[i] <= q)}
+    return out
+
+
+def holm_bonferroni(p_values, q: float = 0.05) -> list:
+    """Holm-Bonferroni step-down family-wise error control.
+
+    Unlike FDR procedures, Holm bounds the probability of *any* false
+    rejection in the family at ``q``.  It is valid under arbitrary
+    dependence and uniformly more powerful than plain Bonferroni.  Reported
+    next to the pre-registered BH decision as a multiplicity-model
+    sensitivity companion.
+    """
+    out, finite, q, q_ok = _validated_p_family(p_values, q)
     m = len(finite)
     if not m:
         return out
     order = sorted(finite, key=lambda t: (t[1], t[0]))
     adjusted: dict[int, float] = {}
-    prev = 1.0
-    for rank in range(m, 0, -1):
-        i, p = order[rank - 1]
-        value = min(prev, p * m / rank)
+    prev = 0.0
+    for rank, (i, p) in enumerate(order, start=1):
+        value = min(1.0, max(prev, (m - rank + 1) * p))
         adjusted[i] = value
         prev = value
     for i, p in finite:
         out[i] = {"p": p, "p_adj": adjusted[i],
                   "reject": bool(q_ok and adjusted[i] <= q)}
     return out
+
+
+def simes_test(p_values, alpha: float = 0.05) -> dict:
+    """Simes global test of the family-wide null.
+
+    Answers "does this family contain any signal at all?" with
+    ``min_i m * p_(i) / i`` before any per-contrast claim is read.  Under
+    the global null the Simes p-value is valid when the tests are
+    independent or positively dependent; it is a descriptive omnibus
+    companion, not a substitute for the per-row adjusted decisions.
+    """
+    _, finite, alpha, alpha_ok = _validated_p_family(p_values, alpha)
+    m = len(finite)
+    if not m:
+        return {"p": float("nan"), "m": 0, "reject": False, "valid": False}
+    order = sorted(finite, key=lambda t: (t[1], t[0]))
+    p_simes = min(1.0, min(p * m / rank
+                           for rank, (_, p) in enumerate(order, start=1)))
+    return {"p": p_simes, "m": m,
+            "reject": bool(alpha_ok and p_simes <= alpha),
+            "valid": bool(alpha_ok)}
 
 
 def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
@@ -3155,6 +3245,53 @@ def _self_test() -> int:
         (p for p in [0.001, 0.004, 0.2, 0.8, float("nan")]), q=0.05)
     check("bh_generator_input",
           [r["reject"] for r in gen_adj] == [r["reject"] for r in adj])
+
+    # Dependence-robust companions.  BH rejects all four p-values at 0.05,
+    # while Holm's step-down and BY's harmonic factor (c(4)=2.0833) keep
+    # only the smallest.  The family is deliberately chosen so the three
+    # multiplicity models disagree on the same data.
+    dep_p = [0.001, 0.02, 0.03, 0.04, float("nan")]
+    dep_bh = benjamini_hochberg(dep_p, q=0.05)
+    dep_by = benjamini_yekutieli(dep_p, q=0.05)
+    dep_holm = holm_bonferroni(dep_p, q=0.05)
+    c4 = 1.0 + 1.0 / 2.0 + 1.0 / 3.0 + 1.0 / 4.0
+    check("by_harmonic_factor_pinned",
+          abs(dep_by[0]["p_adj"] - 0.004 * c4) < 1e-12)
+    check("by_is_never_less_conservative",
+          all(b["p_adj"] >= a["p_adj"]
+              for a, b in zip(dep_bh[:4], dep_by[:4])))
+    check("by_can_reject_fewer_than_bh",
+          all(r["reject"] for r in dep_bh[:4])
+          and sum(r["reject"] for r in dep_by[:4]) == 1
+          and dep_by[0]["reject"])
+    check("holm_adjusted_pinned",
+          abs(dep_holm[0]["p_adj"] - 0.004) < 1e-12
+          and abs(dep_holm[1]["p_adj"] - 0.06) < 1e-12)
+    check("holm_step_down_rejects_only_first",
+          dep_holm[0]["reject"]
+          and not any(r["reject"] for r in dep_holm[1:4]))
+    check("by_nan_untestable",
+          dep_by[4]["p_adj"] != dep_by[4]["p_adj"]
+          and not dep_by[4]["reject"])
+    check("by_invalid_q_no_rejection",
+          not any(r["reject"]
+                  for r in benjamini_yekutieli(dep_p, q=True)))
+    check("holm_invalid_q_no_rejection",
+          not any(r["reject"]
+                  for r in holm_bonferroni(dep_p, q=float("nan"))))
+    simes = simes_test(dep_p, alpha=0.05)
+    check("simes_global_p_pinned",
+          simes["valid"] and simes["reject"]
+          and abs(simes["p"] - 0.004) < 1e-12)
+    simes_null = simes_test([0.5, 0.6], alpha=0.05)
+    check("simes_global_null_not_rejected",
+          simes_null["valid"] and not simes_null["reject"]
+          and abs(simes_null["p"] - 0.6) < 1e-12)
+    check("simes_empty_no_claim",
+          not simes_test([])["valid"]
+          and simes_test([float("nan")])["m"] == 0)
+    check("simes_invalid_alpha_no_claim",
+          not simes_test(dep_p, alpha=True)["valid"])
 
     # Wilson interval brackets the point estimate, including exact endpoints.
     w = wilson_ci(60, 100)
