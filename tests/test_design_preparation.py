@@ -953,6 +953,21 @@ class CoverageMalformedRunTest(unittest.TestCase):
             self.assertEqual(payload["present_cells"], ["none"])
             self.assertFalse(payload["complete"])
             self.assertFalse(payload["seed_balanced"])
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _report_ablation_coverage(
+                    pathlib.Path(tmp), "e1", [good],
+                    cells=(c for c in ("full",)), planned_seeds=(0,))
+            self.assertTrue(payload["complete"])
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _report_design_coverage(
+                    pathlib.Path(tmp), "e1",
+                    [{"gate": "none", "seed": 0}], "gate",
+                    lambda run: run.get("gate"),
+                    (c for c in ("none", "query")), planned_seeds=(0,))
+            self.assertEqual(payload["present_cells"], ["none"])
+            self.assertFalse(payload["complete"])
 
     def test_non_iterable_runs_fail_closed(self):
         # A missing run container is not evidence of coverage: every audit

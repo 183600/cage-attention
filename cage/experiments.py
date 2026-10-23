@@ -2703,6 +2703,7 @@ def _report_ablation_coverage(out_dir, tag, runs, cells=_CALIB_FACTORIAL_CELLS,
     ``<tag>_ablation_coverage.json`` next to the run records.
     """
     runs = _materialize_runs(runs)
+    cells = _materialize_runs(cells)
     present = sorted({c for c in (_calib_cell(r) for r in runs) if c in cells})
     missing = [c for c in cells if c not in present]
     balance, unbalanced = _cell_seed_balance(runs, _calib_cell, cells,
@@ -2752,6 +2753,7 @@ def _report_design_coverage(out_dir, tag, runs, design, extract, expected,
     stored in ``<tag>_<design>_coverage.json``.
     """
     runs = _materialize_runs(runs)
+    expected = _materialize_runs(expected)
     observed = set()
     for run in runs:
         if not isinstance(run, Mapping):
