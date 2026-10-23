@@ -67,6 +67,15 @@ class AuditCountInputTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     _distribution_shift_p(values, torch.tensor([1, 1]))
 
+    def test_python_float_categories_keep_float64_precision(self):
+        from cage.data import _counts
+
+        # float32 rounds 16777217 to 16777216, which would merge two
+        # distinct audit categories and fabricate a duplicate count.
+        counts = _counts([16777216.0, 16777217.0], 16777218)
+        self.assertEqual(int(counts[16777216]), 1)
+        self.assertEqual(int(counts[16777217]), 1)
+
     def test_fractional_or_boolean_audit_seeds_are_rejected(self):
         from cage.data import _distribution_shift_p, answer_uniformity_test
 

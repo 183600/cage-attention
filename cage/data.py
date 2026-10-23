@@ -2106,12 +2106,31 @@ def _counts(values, n_categories):
     if n_categories < 0:
         raise ValueError(
             f"n_categories must be non-negative, got {n_categories}")
-    try:
-        raw = torch.as_tensor(values)
-    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
-        raise ValueError(
+    def _bad_values(exc=None):
+        return ValueError(
             "audit values must be a real numeric vector, got "
-            f"{type(values).__name__}") from exc
+            f"{type(values).__name__}")
+
+    if torch.is_tensor(values):
+        raw = values
+    else:
+        try:
+            raw = torch.as_tensor(values)
+        except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+            # A list of finite floats too large for float32 can fail the
+            # default conversion; retry directly at float64.
+            try:
+                raw = torch.as_tensor(values, dtype=torch.float64)
+            except (TypeError, ValueError, RuntimeError, OverflowError):
+                raise _bad_values(exc) from exc
+        if raw.is_floating_point():
+            # ``as_tensor`` captures a Python float list as float32, which
+            # rounds integral category ids above 2**24 to a different
+            # category.  Keep the caller's Python values at float64.
+            try:
+                raw = torch.as_tensor(values, dtype=torch.float64)
+            except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+                raise _bad_values(exc) from exc
     raw = raw.reshape(-1)
     # ``Tensor.to(long)`` silently discards the imaginary part (with only a
     # warning), which would fabricate a count the caller never supplied.
@@ -2229,12 +2248,32 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
     half-range split is).  Returns ``(nan, nan)`` for empty inputs.
     """
     def _as_count_vector(values, name):
-        try:
-            raw = torch.as_tensor(values)
-        except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
-            raise ValueError(
+        def _bad(exc=None):
+            return ValueError(
                 f"{name} counts must be a real numeric vector, got "
-                f"{type(values).__name__}") from exc
+                f"{type(values).__name__}")
+
+        if torch.is_tensor(values):
+            raw = values
+        else:
+            try:
+                raw = torch.as_tensor(values)
+            except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+                # Finite float values can exceed float32's range even though
+                # they are valid counts; retry the conversion at float64.
+                try:
+                    raw = torch.as_tensor(values, dtype=torch.float64)
+                except (TypeError, ValueError, RuntimeError, OverflowError):
+                    raise _bad(exc) from exc
+            if raw.is_floating_point():
+                # Avoid the default float32 capture for Python float lists:
+                # it silently rounds large integral counts (and can make a
+                # finite count look infinite).
+                try:
+                    raw = torch.as_tensor(values, dtype=torch.float64)
+                except (TypeError, ValueError, RuntimeError,
+                        OverflowError) as exc:
+                    raise _bad(exc) from exc
         if raw.is_complex():
             raise ValueError(f"{name} counts must be real integers")
         if raw.dtype == torch.bool:
