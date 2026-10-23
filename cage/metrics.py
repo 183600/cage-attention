@@ -1197,7 +1197,7 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 "cohens_d": float("nan"), "hedges_g": float("nan"),
                 "bootstrap_below_sign_flip_floor": False,
                 **signflip}
-    n_boot = int(float(n_boot))
+    n_boot = _positive_integer(n_boot)
     means = _bootstrap_means(d, n_boot, seed)
     if not bool(torch.isfinite(means).all()):
         # A resample overshot the float64 range even though the observed
@@ -1327,7 +1327,7 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
             out["mean"] = float(d.mean())
             out["n"] = 1
         return out
-    n_boot = int(float(n_boot))
+    n_boot = _positive_integer(n_boot)
     means = _bootstrap_means(d, n_boot, seed)
     if not bool(torch.isfinite(means).all()):
         return out
@@ -1407,7 +1407,7 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
             out["mean"] = float(d.mean())
             out["n"] = 1
         return out
-    n_boot = int(float(n_boot))
+    n_boot = _positive_integer(n_boot)
     means = _bootstrap_means(d, n_boot, seed)
     if not bool(torch.isfinite(means).all()):
         return out
@@ -1452,7 +1452,7 @@ def bootstrap_upper_p(diffs, bound, n_boot: int = 10000, seed: int = 0) -> float
             or not math.isfinite(bound) \
             or not _bootstrap_args_ok(n_boot, 0.05):
         return float("nan")
-    n_boot = int(float(n_boot))
+    n_boot = _positive_integer(n_boot)
     means = _bootstrap_means(d, n_boot, seed)
     if not bool(torch.isfinite(means).all()):
         return float("nan")
@@ -1527,7 +1527,7 @@ def minimum_effect_test(diffs, bound, direction: str = "+",
             out["mean"] = float(d.mean())
             out["n"] = 1
         return out
-    n_boot = int(float(n_boot))
+    n_boot = _positive_integer(n_boot)
     means = _bootstrap_means(d, n_boot, seed)
     if not bool(torch.isfinite(means).all()):
         return out

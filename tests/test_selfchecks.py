@@ -304,6 +304,43 @@ class PositiveIntegerValidationTest(unittest.TestCase):
         self.assertEqual(metrics.wilson_ci(exact, exact)["n"], exact)
 
 
+class BootstrapReplicateCountTest(unittest.TestCase):
+    def test_large_replicate_counts_are_not_rounded_through_float(self):
+        import torch
+        from unittest import mock
+
+        from cage import metrics
+
+        exact = 2 ** 53 + 1
+        seen = []
+
+        def fake_means(diffs, n_boot, seed):
+            seen.append(n_boot)
+            return torch.linspace(-1.0, 1.0, 9, dtype=torch.float64)
+
+        calls = (
+            lambda: metrics.paired_bootstrap_ci(
+                [0.1, 0.2, 0.3], n_boot=exact),
+            lambda: metrics.equivalence_test(
+                [0.1, 0.2, 0.3], 0.5, n_boot=exact),
+            lambda: metrics.noninferiority_test(
+                [0.1, 0.2, 0.3], 0.5, n_boot=exact),
+            lambda: metrics.minimum_effect_test(
+                [0.1, 0.2, 0.3], 0.01, n_boot=exact),
+            lambda: metrics.bootstrap_upper_p(
+                [0.1, 0.2, 0.3], 0.5, n_boot=exact),
+        )
+        with mock.patch.object(metrics, "_bootstrap_means", fake_means):
+            for call in calls:
+                call()
+        self.assertEqual(seen, [exact] * len(calls))
+        # An unrepresentable count must abstain before sizing a loop.
+        self.assertIsNone(metrics._positive_integer(10 ** 400))
+        out = metrics.paired_bootstrap_ci(
+            [0.1, 0.2, 0.3], n_boot=10 ** 400)
+        self.assertTrue(math.isnan(out["lo"]))
+
+
 class TinyAlphaQuantileTest(unittest.TestCase):
     def test_tiny_alpha_does_not_raise_from_normal_quantile(self):
         from cage.metrics import (
