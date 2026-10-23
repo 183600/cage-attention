@@ -69,7 +69,10 @@ def _finite_float(value) -> float:
     numeric field can be missing, null, a numeric string, or malformed.  A
     malformed value must abstain (NaN) rather than abort the curve report:
     the non-finite verdict is what tells the reader the history is unusable.
+    A boolean is a flag, not a measurement, so it must not become 0/1.
     """
+    if isinstance(value, bool):
+        return float("nan")
     try:
         return float(value)
     except (TypeError, ValueError, OverflowError):

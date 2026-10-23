@@ -111,6 +111,18 @@ class CurveHistoryInputTest(unittest.TestCase):
                 rec = _curve_record(hist)
                 self.assertEqual(rec["curve_verdict"],
                                  "numerical_instability")
+        # A boolean mandatory loss/step is a flag, not a measurement: it
+        # must abstain instead of being read as 0/1 on the curve.
+        for bad in (True, False):
+            with self.subTest(field="train_loss", bad=bad):
+                out = training_curve_verdict(
+                    [{"step": 0, "train_loss": bad}])
+                self.assertEqual(out["n_points"], 0)
+                self.assertEqual(out["verdict"], "numerical_instability")
+            with self.subTest(field="step", bad=bad):
+                out = training_curve_verdict(
+                    [{"step": bad, "train_loss": 1.0}])
+                self.assertEqual(out["n_points"], 0)
 
 
 class EvaluationFoldAuditTest(unittest.TestCase):
