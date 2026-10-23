@@ -451,6 +451,21 @@ class StandardizedProportionTest(unittest.TestCase):
                 self.assertFalse(out["valid"])
                 self.assertTrue(out["reason"])
 
+    def test_large_python_float_counts_keep_exact_precision(self):
+        exact = 2 ** 24 + 1
+        out = standardized_proportion([float(exact)], [float(exact)])
+        self.assertTrue(out["valid"])
+        self.assertEqual(out["total_success"], exact)
+        self.assertEqual(out["total_n"], exact)
+        self.assertEqual(out["min_stratum_n"], exact)
+
+    def test_overflowing_reference_weights_abstain(self):
+        out = standardized_proportion(
+            [1, 1], [1, 1],
+            torch.tensor([1e308, 1e308], dtype=torch.float64))
+        self.assertFalse(out["valid"])
+        self.assertIn("overflow", out["reason"])
+
 
 class MissingDifficultyRecordTest(unittest.TestCase):
     def test_stamp_does_not_require_a_mapping(self):

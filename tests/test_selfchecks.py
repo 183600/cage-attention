@@ -46,6 +46,29 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertEqual(out["n"], 0)
         self.assertTrue(math.isnan(out["accuracy"]))
 
+    def test_python_float_logits_keep_their_precision(self):
+        # A Python list is captured as float32 by ``as_tensor`` by default;
+        # that would turn this near-tie into an exact tie and flip accuracy.
+        out = metrics.multiclass_metrics([[1.0, 1.0 + 1e-9]], [1])
+        self.assertEqual(out["n"], 1)
+        self.assertEqual(out["accuracy"], 1.0)
+
+    def test_fractional_float_targets_are_not_rounded_to_integers(self):
+        # 0.99999999 is not a class id.  A float32 capture would round it to
+        # 1.0 and silently accept it.
+        out = metrics.multiclass_metrics(
+            [[2.0, 0.0], [0.0, 2.0]], [0.99999999, 1.0])
+        self.assertEqual(out["n"], 0)
+        self.assertTrue(math.isnan(out["accuracy"]))
+
+    def test_boolean_logits_abstain(self):
+        import torch
+
+        out = metrics.multiclass_metrics(
+            torch.tensor([[True, False]]), [0])
+        self.assertEqual(out["n"], 0)
+        self.assertTrue(math.isnan(out["accuracy"]))
+
     def test_complex_multiclass_logits_abstain(self):
         import torch
 

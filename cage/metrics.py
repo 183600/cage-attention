@@ -718,15 +718,29 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     # letting ``as_tensor``/tuple-unpacking escape as a TypeError from a
     # reporting metric.
     try:
-        logits = torch.as_tensor(logits).detach()
-        raw_targets = torch.as_tensor(targets).detach().reshape(-1)
+        if torch.is_tensor(logits):
+            logits = logits.detach()
+            if logits.is_complex() or logits.dtype == torch.bool:
+                return _abstain()
+        else:
+            probe = torch.as_tensor(logits)
+            if probe.is_complex() or probe.dtype == torch.bool:
+                return _abstain()
+            # Python float lists would otherwise be captured as float32,
+            # rounding distinct logits into the same value and changing
+            # argmax/NLL.  Convert the original container at float64.
+            logits = torch.as_tensor(logits, dtype=torch.float64).detach()
+        if torch.is_tensor(targets):
+            raw_targets = targets.detach().reshape(-1)
+            if raw_targets.is_complex() or raw_targets.dtype == torch.bool:
+                return _abstain()
+        else:
+            probe = torch.as_tensor(targets)
+            if probe.is_complex() or probe.dtype == torch.bool:
+                return _abstain()
+            raw_targets = torch.as_tensor(
+                targets, dtype=torch.float64).detach().reshape(-1)
     except (TypeError, ValueError, RuntimeError, OverflowError):
-        return _abstain()
-    if logits.is_complex():
-        # ``argmax`` has no complex ordering and the float cast used for
-        # NLL would silently drop the imaginary part; a complex logit
-        # panel is not a multiclass score matrix, so abstain rather than
-        # scoring an arbitrary projection of it.
         return _abstain()
     if logits.dim() == 1:
         logits = logits.unsqueeze(0)
@@ -2086,9 +2100,17 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
         if raw.numel() == 0:
             return None, "empty counts"
         try:
-            out = raw.detach().reshape(-1).to(device="cpu",
-                                              dtype=torch.float64)
-        except (TypeError, ValueError, RuntimeError):
+            if torch.is_tensor(values):
+                out = values.detach().reshape(-1).to(device="cpu",
+                                                     dtype=torch.float64)
+            else:
+                # Python float lists are captured as float32 by
+                # ``as_tensor``; converting *after* that would round exact
+                # integral counts above 2**24.  Ask for float64 directly.
+                out = torch.as_tensor(values, dtype=torch.float64).detach(
+                ).reshape(-1)
+                out = out.to(device="cpu")
+        except (TypeError, ValueError, RuntimeError, OverflowError):
             return None, "values must be numeric counts"
         if not bool(torch.isfinite(out).all()):
             return None, "counts must be finite"
@@ -2136,7 +2158,14 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
         if bool((w < 0).any()):
             out["reason"] = "reference_weights must be non-negative"
             return out
-    if float(w.sum()) <= 0.0:
+    weight_total = float(w.sum())
+    if not math.isfinite(weight_total):
+        # Normalizing by an infinite total would make every weight zero and
+        # then ``1 / 0`` in the effective-n readout; all inputs were finite,
+        # so abstain instead of leaking a ZeroDivisionError.
+        out["reason"] = "reference weights overflow when summed"
+        return out
+    if weight_total <= 0.0:
         out["reason"] = "reference weights sum to zero"
         return out
     usable = (n > 0) & (w > 0)
@@ -2149,6 +2178,9 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
                     torch.zeros_like(s))
     w_used = w[usable]
     weight_sum = w_used.sum()
+    if not (math.isfinite(float(weight_sum)) and float(weight_sum) > 0.0):
+        out["reason"] = "reference weights overflow when summed"
+        return out
     w_norm = w_used / weight_sum
     counts_used = torch.clamp(n[usable], min=1.0)
     rate = (w_used * p[usable]).sum() / weight_sum
