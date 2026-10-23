@@ -5568,7 +5568,7 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
     missing statistic can never be read as 0.0.
     """
     metric_rows = [(i, r) for i, r in enumerate(rows)
-                   if _finite(r.get(metric))]
+                   if isinstance(r, Mapping) and _finite(r.get(metric))]
     out = {"metric": metric, "margin": float("nan"),
            "margin_se": float("nan"), "within_noise": None,
            "curve_invalid_best": None, "diverged_runs_best": None,
@@ -5624,7 +5624,7 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
     if grid_keys:
         for key in grid_keys:
             vals = sorted({float(r[key]) for r in boundary_rows
-                           if _finite(r.get(key))})
+                           if isinstance(r, Mapping) and _finite(r.get(key))})
             if len(vals) >= 2 and _finite(r_best.get(key)):
                 axis_boundaries[str(key)] = bool(
                     float(r_best[key]) in (vals[0], vals[-1]))
@@ -5670,7 +5670,9 @@ def _curve_valid_selection_rows(table):
     ``n_invalid`` count among finite rows, the ``n_excluded`` count actually
     removed, and the selection ``pool`` label.
     """
-    finite = [row for row in table if _finite(row.get("val_accuracy_mean"))]
+    finite = [row for row in table
+              if isinstance(row, Mapping)
+              and _finite(row.get("val_accuracy_mean"))]
     valid = [row for row in finite if not row.get("curve_invalid_runs")]
     if valid:
         return {"rows": valid, "n_finite": len(finite),

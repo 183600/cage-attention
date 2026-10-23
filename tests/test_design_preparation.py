@@ -489,6 +489,25 @@ class DesignPlanTest(unittest.TestCase):
         self.assertIs(audit["within_noise"], True)
         self.assertIs(audit["reliable"], False)
 
+    def test_selection_audits_skip_non_mapping_rows(self):
+        from cage.experiments import (
+            _curve_valid_selection_rows,
+            _selection_reliability,
+        )
+
+        good = {"val_accuracy_mean": 0.5, "val_accuracy_std": 0.1,
+                "n_seeds": 2, "lr": 1e-3}
+        for bad in (None, "not-a-row", 3):
+            with self.subTest(row=bad):
+                rows = [bad, dict(good, val_accuracy_mean=0.9),
+                        dict(good, val_accuracy_mean=0.6)]
+                audit = _selection_reliability(
+                    rows, grid=[0.001, 0.01], grid_keys=["lr"],
+                    full_rows=[bad] + rows)
+                self.assertEqual(audit["best_index"], 1)
+                pick = _curve_valid_selection_rows(rows)
+                self.assertEqual(len(pick["rows"]), 2)
+
     def test_plan_rejects_malformed_planning_probabilities(self):
         for field in ("design_alpha", "power_target"):
             settings = Settings.quick()
