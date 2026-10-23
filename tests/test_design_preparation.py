@@ -41,7 +41,9 @@ from cage.experiments import (
     _report_realized_run_order,
     _required_seeds,
     _run_order_audit,
+    _seed_order,
     _verdict_seed_floor,
+    _write_run_order,
 )
 
 
@@ -164,6 +166,46 @@ class BlockedRunOrderTest(unittest.TestCase):
         self.assertFalse(audit["complete"])
         self.assertTrue(audit["invalid_indices"])
         self.assertEqual(audit["n_runs"], 0)
+
+    def test_large_integer_seeds_are_not_float_truncated(self):
+        huge = 10 ** 400
+        # The old helper converted every integer through float and raised
+        # OverflowError while sorting/auditing a pooled seed.
+        self.assertEqual(_seed_order(huge)[:2], (0, huge))
+        order = [("none", huge, 0, 0)]
+        audit = _run_order_audit(order, ("none",), (huge,))
+        self.assertTrue(audit["complete"], audit)
+        self.assertEqual(audit["seeds"], [huge])
+        controlled = _controlled_audit(
+            [{"seed": huge}], [{"seed": huge}])
+        self.assertEqual(controlled["seeds_a"], [huge])
+        self.assertEqual(controlled["seeds_b"], [huge])
+
+    def test_invalid_declared_seeds_fail_closed_instead_of_raising(self):
+        for seed in (None, object(), 1.5, True):
+            with self.subTest(seed=seed):
+                audit = _run_order_audit([], ("none",), (seed,))
+                self.assertFalse(audit["complete"])
+                self.assertTrue(audit["invalid_seeds"])
+                self.assertEqual(len(audit["seeds"]), 1)
+                self.assertNotIsInstance(audit["seeds"][0], int)
+
+    def test_run_order_writer_materializes_generators_once(self):
+        cells = ("none", "query")
+        seeds = (0, 1)
+        order = _blocked_run_order(cells, seeds, 11)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _write_run_order(
+                    Settings.quick(), out, "e1",
+                    (row for row in order),
+                    (cell for cell in cells),
+                    (seed for seed in seeds))
+        self.assertTrue(payload["complete"], payload)
+        self.assertEqual(payload["n_runs"], len(order))
+        self.assertEqual(payload["seeds"], list(seeds))
+        self.assertEqual(len(payload["order"]), len(order))
 
     def test_two_block_random_schedule_is_not_over_flagged(self):
         # With only two blocks, a random schedule can put one arm first in

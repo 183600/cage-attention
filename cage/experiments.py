@@ -1590,10 +1590,28 @@ def _depth_step_candidates(settings: Settings) -> tuple:
     return tuple(sorted(steps))
 
 
+def _declared_seed(value):
+    """The exact integer declared as a training seed, or ``None``.
+
+    Sorting/auditing a pooled record must not convert an arbitrarily large
+    JSON integer through ``float`` (which can overflow) or reject a valid
+    integer merely because it is outside the float64 exact range.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(operator.index(value))
+    except TypeError:
+        return None
+
+
 def _seed_order(seed):
     """Deterministic ordering for seed labels of mixed / missing types."""
-    if isinstance(seed, (int, float)) and not isinstance(seed, bool):
-        return (0, float(seed), "")
+    exact = _declared_seed(seed)
+    if exact is not None:
+        return (0, exact, "")
+    if isinstance(seed, float) and math.isfinite(seed):
+        return (0, seed, "")
     return (1, 0.0, str(seed))
 
 
@@ -1672,6 +1690,12 @@ def _run_order_audit(order, cells, seeds, randomized=True):
     expected = {_coverage_cell_key(c) for c in cells}
     n_cells = len(cells)
     n_blocks = len(seeds)
+    invalid_seeds = [
+        {"block": block, "seed": repr(seed),
+         "reason": "declared training seed is not an integer"}
+        for block, seed in enumerate(seeds)
+        if _declared_seed(seed) is None
+    ]
     per_block: dict[int, dict[str, int]] = {}
     positions: dict[str, list[int]] = {key: [] for key in expected}
     per_block_positions: dict[int, list[int]] = {}
@@ -1780,13 +1804,16 @@ def _run_order_audit(order, cells, seeds, randomized=True):
         if block not in per_block or seed not in block_seeds.get(block, [])
     ]
     duplicate_seeds = sorted({seed for seed in seeds
-                              if seeds.count(seed) > 1})
+                              if _declared_seed(seed) is not None
+                              and seeds.count(seed) > 1},
+                             key=_seed_order)
     complete = (bool(cells) and bool(seeds)
                 and set(per_block) == set(range(n_blocks))
                 and not missing and not duplicated and not unexpected
                 and not invalid_positions and not invalid_indices
                 and not seed_mismatches and not unexpected_seeds
-                and not missing_seeds and not duplicate_seeds)
+                and not missing_seeds and not duplicate_seeds
+                and not invalid_seeds)
     always_first = sorted(
         key for key, vals in positions.items()
         if len(vals) == n_blocks and vals and all(v == 0 for v in vals))
@@ -1808,7 +1835,8 @@ def _run_order_audit(order, cells, seeds, randomized=True):
     finite_means = [v for v in mean_position.values() if _finite(v)]
     return {
         "cells": [_coverage_cell_key(c) for c in cells],
-        "seeds": [int(s) for s in seeds],
+        "seeds": [_declared_seed(s) if _declared_seed(s) is not None
+                  else repr(s) for s in seeds],
         "n_runs": len(order),
         "complete": bool(complete),
         "missing": missing,
@@ -1816,6 +1844,7 @@ def _run_order_audit(order, cells, seeds, randomized=True):
         "unexpected": unexpected,
         "invalid_positions": invalid_positions,
         "invalid_indices": invalid_indices,
+        "invalid_seeds": invalid_seeds,
         "seed_mismatches": seed_mismatches,
         "unexpected_seeds": unexpected_seeds,
         "missing_seeds": missing_seeds,
@@ -1838,17 +1867,46 @@ def _run_order_audit(order, cells, seeds, randomized=True):
 def _write_run_order(settings: Settings, out_dir: pathlib.Path, tag: str,
                      order, cells, seeds) -> dict:
     """Persist the realised complete-block schedule before training."""
+    # Materialise once: the audit below consumes iterables, and the payload
+    # must describe the same schedule/cells/seeds it certified.  A
+    # non-iterable container is reported by the audit as invalid rather
+    # than aborting the write with an incidental TypeError.
+    try:
+        order = list(order)
+    except TypeError:
+        order = []
+    try:
+        cells = list(cells)
+    except TypeError:
+        cells = []
+    try:
+        seeds = list(seeds)
+    except TypeError:
+        seeds = []
     audit = _run_order_audit(
         order, cells, seeds, randomized=settings.randomize_run_order)
+    order_rows = []
+    for row in order:
+        if not isinstance(row, (tuple, list)) or len(row) != 4:
+            order_rows.append({
+                "cell": None, "seed": None, "block": None, "position": None,
+                "malformed": repr(row)})
+            continue
+        cell, seed, block, position = row
+        order_rows.append({
+            "cell": _coverage_cell_key(cell),
+            "seed": (_declared_seed(seed) if _declared_seed(seed) is not None
+                     else repr(seed)),
+            "block": (int(block) if _declared_seed(block) is not None
+                      else repr(block)),
+            "position": (int(position)
+                         if _declared_seed(position) is not None
+                         else repr(position))})
     payload = {
         "experiment": tag,
         "schedule_seed": int(settings.run_order_seed),
         "randomized": bool(settings.randomize_run_order),
-        "order": [
-            {"cell": _coverage_cell_key(cell), "seed": int(seed),
-             "block": int(block), "position": int(position)}
-            for cell, seed, block, position in order
-        ],
+        "order": order_rows,
         **audit,
         **_stamp(settings),
     }
@@ -3731,8 +3789,11 @@ def _controlled_audit(runs_a, runs_b):
     def _seed_key(seed):
         if seed is None:
             return (1, 0.0, "")
-        if isinstance(seed, (int, float)) and not isinstance(seed, bool):
-            return (0, float(seed), "")
+        exact = _declared_seed(seed)
+        if exact is not None:
+            return (0, exact, "")
+        if isinstance(seed, float) and math.isfinite(seed):
+            return (0, seed, "")
         return (0, float("inf"), str(seed))
 
     def _stream_key(seed):
