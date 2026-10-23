@@ -18,7 +18,11 @@ import tempfile
 import unittest
 
 from cage.experiments import ContrastLog
-from cage.metrics import minimum_effect_test, paired_bootstrap_ci
+from cage.metrics import (
+    minimum_effect_test,
+    noninferiority_test,
+    paired_bootstrap_ci,
+)
 
 
 class MinimumEffectMetricTest(unittest.TestCase):
@@ -114,6 +118,33 @@ class ContrastMinimumEffectAuditTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with contextlib.redirect_stdout(io.StringIO()):
                 return log.finalize(pathlib.Path(tmp), q=0.05)
+
+    def test_noninferiority_row_gets_a_real_power_plan(self):
+        # The row stores the test name "noninferiority", while the power
+        # helper names the one-sided mode "noninferior".  Passing the test
+        # name through used to make every non-inferiority row report
+        # n_seeds_for_sesoi=inf regardless of its seed-level SD.
+        diffs = [-0.005, -0.002, 0.001, -0.003, 0.0]
+        ci = noninferiority_test(diffs, 0.05)
+        ci["diffs"] = list(diffs)
+        ci["controlled"] = {
+            "controlled": True,
+            "mismatches": [],
+            "varying_factors": {"norm": {"a": ["seednorm"], "b": ["pre"]}},
+            "capacity": {"matched": False, "a": 10, "b": 8,
+                         "delta_b_minus_a": -2},
+        }
+        log = ContrastLog("e3", hypotheses=("H3a",), min_seeds=3)
+        with contextlib.redirect_stdout(io.StringIO()):
+            log.print("step", "H3a", "accuracy", ci)
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = log.finalize(pathlib.Path(tmp), q=0.05)
+        row = payload["rows"][0]
+        self.assertEqual(row["test"], "noninferiority")
+        self.assertTrue(math.isfinite(row["n_seeds_for_sesoi"]),
+                        row["n_seeds_for_sesoi"])
+        self.assertGreater(row["n_seeds_for_sesoi"], 0.0)
 
     def test_point_estimate_only_row_is_flagged_without_changing_verdict(self):
         payload = self._finalize(

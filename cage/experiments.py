@@ -6431,8 +6431,14 @@ class ContrastLog:
             if sesoi is None:
                 row["n_seeds_for_sesoi"] = float("inf")
             else:
+                # ``_required_seeds`` names the one-sided mode
+                # ``"noninferior"`` (the registry's spelling), while the row
+                # stores the test name ``"noninferiority"``.  Passing the
+                # latter straight through used to make the helper reject the
+                # mode and report every non-inferiority power plan as
+                # unattainable (``inf``).
                 mode = ("equivalence" if row["test"] == "equivalence"
-                        else "noninferiority"
+                        else "noninferior"
                         if row["test"] == "noninferiority"
                         else "superiority")
                 required = _required_seeds(
