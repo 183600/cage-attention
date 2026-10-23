@@ -484,6 +484,12 @@ class DesignPlanTest(unittest.TestCase):
                     Settings(**{field: b"\x01\x02"})
         self.assertEqual(Settings(lr_grid=[1e-3]).lr_grid, (1e-3,))
 
+    def test_settings_reject_overflowing_grid_values(self):
+        for field in ("lr_grid", "probe_lr_grid", "calib_tau_grid"):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    Settings(**{field: (10 ** 400,)})
+
     def test_settings_reject_non_sequence_or_byte_seeds(self):
         # ``bytes`` is iterable and would otherwise silently turn into its
         # integer byte values; a bare int/None is not a seed sequence.

@@ -1445,16 +1445,35 @@ class Settings:
                 raise ValueError(
                     f"{name} must be a non-empty tuple of finite positive "
                     f"numbers, got {raw!r}") from exc
-            if not values or any(
-                    not isinstance(v, (int, float)) or isinstance(v, bool)
-                    or not math.isfinite(float(v)) or float(v) <= 0.0
-                    for v in values):
+            if not values:
                 raise ValueError(
                     f"{name} must be a non-empty tuple of finite positive "
                     f"numbers, got {values!r}")
+            checked = []
+            for value in values:
+                if not isinstance(value, (int, float)) \
+                        or isinstance(value, bool):
+                    raise ValueError(
+                        f"{name} must be a non-empty tuple of finite positive "
+                        f"numbers, got {values!r}")
+                try:
+                    number = float(value)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    # A JSON integer can be arbitrarily large; converting it
+                    # to float raises OverflowError.  That is a malformed
+                    # configuration value, not a reason to leak the
+                    # conversion error out of Settings.
+                    raise ValueError(
+                        f"{name} must be a non-empty tuple of finite positive "
+                        f"numbers, got {values!r}") from exc
+                if not (math.isfinite(number) and number > 0.0):
+                    raise ValueError(
+                        f"{name} must be a non-empty tuple of finite positive "
+                        f"numbers, got {values!r}")
+                checked.append(value)
             # Canonicalise so a caller's list cannot be mutated after
             # validation and silently change the grid used downstream.
-            setattr(self, name, tuple(values))
+            setattr(self, name, tuple(checked))
 
     @classmethod
     def quick(cls, device: str = "cpu") -> "Settings":
