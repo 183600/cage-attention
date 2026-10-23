@@ -2102,7 +2102,16 @@ def _field_categories(field, vocab, n_pairs):
 
 
 def _counts(values, n_categories):
-    n_categories = int(n_categories)
+    if isinstance(n_categories, bool):
+        raise ValueError(
+            f"n_categories must be a non-negative integer, got "
+            f"{n_categories!r}")
+    try:
+        n_categories = int(operator.index(n_categories))
+    except TypeError as exc:
+        raise ValueError(
+            f"n_categories must be a non-negative integer, got "
+            f"{n_categories!r}") from exc
     if n_categories < 0:
         raise ValueError(
             f"n_categories must be non-negative, got {n_categories}")

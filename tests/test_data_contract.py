@@ -67,6 +67,14 @@ class AuditCountInputTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     _distribution_shift_p(values, torch.tensor([1, 1]))
 
+    def test_malformed_category_count_raises_value_error(self):
+        from cage.data import _counts
+
+        for bad in (True, 1.5, object(), None):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    _counts([0], bad)
+
     def test_python_float_categories_keep_float64_precision(self):
         from cage.data import _counts
 
