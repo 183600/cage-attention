@@ -959,6 +959,29 @@ class CoverageMalformedRunTest(unittest.TestCase):
         self.assertEqual(mixed["mean"], 0.0)
         self.assertTrue(math.isfinite(mixed["std"]))
 
+    def test_malformed_or_empty_coverage_declarations_fail_closed(self):
+        good = {"seed": 0, "calib_variant": "full",
+                "cell": "none", "gate": "none"}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            for cells in (5, None, (), ""):
+                with self.subTest(cells=cells):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        payload = _report_ablation_coverage(
+                            out, "e1", [good], cells=cells,
+                            planned_seeds=(0,))
+                    self.assertFalse(payload["complete"])
+                    self.assertFalse(payload["seed_balanced"])
+            for expected in (5, None, (), ""):
+                with self.subTest(expected=expected):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        payload = _report_design_coverage(
+                            out, "e1", [good], "gate",
+                            lambda run: run.get("gate"), expected,
+                            planned_seeds=(0,))
+                    self.assertFalse(payload["complete"])
+                    self.assertFalse(payload["seed_balanced"])
+
     def test_malformed_rows_are_skipped_and_fail_closed(self):
         good = {
             "seed": 0,

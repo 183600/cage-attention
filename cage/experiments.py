@@ -2748,13 +2748,16 @@ def _report_ablation_coverage(out_dir, tag, runs, cells=_CALIB_FACTORIAL_CELLS,
         "expected_cells": list(cells),
         "present_cells": present,
         "missing_cells": missing,
-        "complete": not missing,
+        "complete": bool(cells) and not missing,
         "cell_seed_balance": balance,
         "unbalanced_cells": unbalanced,
-        "seed_balanced": not unbalanced,
+        "seed_balanced": bool(cells) and not unbalanced,
         "n_runs": len(runs),
     }
-    if missing:
+    if not cells:
+        print(f"[{tag}] WARNING: calibration-term ablation coverage has no "
+              f"declared cells; coverage cannot be certified")
+    elif missing:
         print(f"[{tag}] WARNING: calibration-term ablation coverage "
               f"incomplete: {len(present)}/{len(cells)} cells trained "
               f"(missing {', '.join(missing)}); the corresponding term "
@@ -2818,13 +2821,16 @@ def _report_design_coverage(out_dir, tag, runs, design, extract, expected,
                           for c in present],
         "missing_cells": [list(c) if isinstance(c, tuple) else c
                           for c in missing],
-        "complete": not missing,
+        "complete": bool(expected) and not missing,
         "cell_seed_balance": balance,
         "unbalanced_cells": unbalanced,
-        "seed_balanced": not unbalanced,
+        "seed_balanced": bool(expected) and not unbalanced,
         "n_runs": len(runs),
     }
-    if missing:
+    if not expected:
+        print(f"[{tag}] WARNING: {design} coverage has no declared cells; "
+              f"coverage cannot be certified")
+    elif missing:
         print(f"[{tag}] WARNING: {design} coverage incomplete: "
               f"{len(present)}/{len(expected)} cells trained "
               f"(missing {missing}); those effects are not measured")
