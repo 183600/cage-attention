@@ -4,7 +4,9 @@ Associative-recall style LM: sequence of key-value pairs plus a query; the
 model must recall the value. This makes attention quality (and false
 concentration) measurable: we know the *correct* target token. Length
 generalisation (E2) evaluates this same task at multiple sequence lengths
-via ``length_sweep_lengths``.
+via ``length_sweep_lengths``.  ``make_length_linked_batch`` additionally
+extends one validated batch in place for the within-item E2 counterfactual
+(the same query/answer/pair index gains distractor pairs).
 
 Format (vocab 0..V-1):
     [k1 v1 k2 v2 ... kn vn, SEP, qi, <predict vi>]
@@ -927,6 +929,107 @@ def validate_batch(idx, targets, meta, vocab, diagnostics: bool = True) -> dict:
     if diagnostics:
         out["n_duplicate_rows"] = _count_duplicate_rows(idx)
     return out
+
+
+def make_length_linked_batch(idx, meta, n_pairs, target_pairs, vocab,
+                             gen: torch.Generator | None = None):
+    """Extend a validated recall batch with fresh distractors, paired by item.
+
+    The natural length sweep generates an independent stream at every
+    ``n_pairs``, so a base-length item and a long-length item are different
+    samples.  Comparing raw accuracy across those streams therefore mixes
+    the length effect with a changing item/difficulty composition (later
+    retrieval positions, more repeated values, more naive-confusable
+    queries).  Post-stratification can reweight the observed strata, but it
+    cannot recover the counterfactual "what would this *same* item score at
+    a longer length?".
+
+    This helper constructs that counterfactual without changing the task
+    distribution.  Starting from a validated ``[k1 v1 ... kn vn SEP q]``
+    batch, it copies the first ``n_pairs`` pairs verbatim and appends
+    ``target_pairs - n_pairs`` fresh pairs before SEP/query:
+
+    * the queried key, its paired answer and its pair index are unchanged,
+      so every row keeps its exact ``(query key, answer)`` association;
+    * the added keys are drawn uniformly *without replacement* from the
+      ids not already used as keys (exactly the conditional draw of the
+      natural generator at the longer length);
+    * the added values are drawn uniformly from the selectable ids, so
+      repeated values occur with the same probability as in natural data.
+
+    Conditional on the base rows, the result is distributed like a natural
+    ``target_pairs`` sample whose first ``n_pairs`` pairs are fixed.  It is
+    therefore a within-item length manipulation, not a different task.
+    Callers can chain the calls to build a nested sweep (the longer batch
+    contains the shorter one as a prefix).  Targets are sparse (``-1``
+    except at the query position), the same convention as ``make_batch``'s
+    default.  The returned batch passes the same :func:`validate_batch`
+    cleaning gate as every generated batch.
+
+    ``meta`` must be the base batch's metadata (``query_pos``, ``answer``
+    and optionally ``key_pos``).  ``target_pairs`` must be at least
+    ``n_pairs``; the geometry is checked before any draw so an impossible
+    extension raises ``ValueError`` instead of failing in ``topk``.
+    """
+    n_pairs = _positive_audit_count(n_pairs, "n_pairs")
+    target_pairs = _positive_audit_count(target_pairs, "target_pairs")
+    vocab = _batch_vocab_int(vocab)
+    if target_pairs < n_pairs:
+        raise ValueError(
+            f"target_pairs={target_pairs} is shorter than the source batch "
+            f"({n_pairs} pairs); length extension can only add pairs")
+    check_data_geometry(target_pairs, vocab)
+    if not _is_integer_tensor(idx) or idx.dim() != 2:
+        raise ValueError(
+            f"idx must be a (batch, 2*n_pairs + 2) integer tensor, got "
+            f"{type(idx)}")
+    batch, width = idx.shape
+    if width != 2 * n_pairs + 2:
+        raise ValueError(
+            f"idx width {width} does not match n_pairs={n_pairs} "
+            f"(expected {2 * n_pairs + 2} positions)")
+    validate_batch(idx, None, meta, vocab, diagnostics=False)
+    answer = meta["answer"].to(device=idx.device, dtype=torch.long).reshape(-1)
+    if answer.shape != (batch,):
+        raise ValueError(
+            "meta['answer'] must carry one entry per row of idx")
+    keys = idx[:, :2 * n_pairs:2]
+    query = idx[:, -1]
+    match = keys.eq(query.unsqueeze(1))
+    key_pos = match.to(torch.long).argmax(dim=1).mul(2)
+
+    extra = target_pairs - n_pairs
+    out = torch.empty((batch, 2 * target_pairs + 2), dtype=idx.dtype,
+                      device=idx.device)
+    out[:, :2 * n_pairs].copy_(idx[:, :2 * n_pairs])
+    if extra:
+        n_avail = vocab - 2
+        scores = torch.rand((batch, n_avail), generator=gen,
+                            device=idx.device)
+        # Reserved/used keys keep an -inf score, so ``topk`` samples the
+        # remaining ids without replacement, exactly like ``_sample_keys``.
+        scores.scatter_(1, keys.to(torch.long) - 2, float("-inf"))
+        new_keys = scores.topk(extra, dim=1).indices.add(2)
+        new_values = torch.randint(2, vocab, (batch, extra), generator=gen,
+                                   device=idx.device)
+        out[:, 2 * n_pairs:2 * target_pairs:2].copy_(
+            new_keys.to(dtype=idx.dtype))
+        out[:, 2 * n_pairs + 1:2 * target_pairs:2].copy_(
+            new_values.to(dtype=idx.dtype))
+    out[:, 2 * target_pairs].fill_(SEP_ID)
+    out[:, 2 * target_pairs + 1].copy_(query)
+
+    targets = torch.full_like(out, -1)
+    rows = torch.arange(batch, device=idx.device)
+    targets[rows, 2 * target_pairs + 1] = answer
+    out_meta = {
+        "query_pos": torch.full((batch,), 2 * target_pairs + 1,
+                                dtype=torch.long, device=idx.device),
+        "key_pos": key_pos.to(device=idx.device, dtype=torch.long),
+        "answer": answer,
+    }
+    validate_batch(out, targets, out_meta, vocab, diagnostics=False)
+    return out, targets, out_meta
 
 
 def _batch_invariants_hold(idx, targets, meta, vocab) -> bool:
@@ -3095,6 +3198,70 @@ def _self_test() -> int:
             check(f"batch_geometry_rejected_{args}", False)
         except ValueError:
             check(f"batch_geometry_rejected_{args}", True)
+
+    # Within-item length extension: the queried association must survive,
+    # keys must stay distinct, and chaining must keep the shorter sequence
+    # as a prefix (the nested design behind the E2 linked companion).
+    try:
+        base_idx, base_tgt, base_meta = make_batch(
+            6, 4, 32, "cpu", gen=torch.Generator().manual_seed(71))
+        ext_idx, ext_tgt, ext_meta = make_length_linked_batch(
+            base_idx, base_meta, 4, 8, 32,
+            gen=torch.Generator().manual_seed(72))
+        validate_batch(ext_idx, ext_tgt, ext_meta, 32)
+        check("linked_width", int(ext_idx.size(1)) == 2 * 8 + 2)
+        check("linked_prefix_preserved",
+              torch.equal(ext_idx[:, :2 * 4], base_idx[:, :2 * 4]))
+        check("linked_query_preserved",
+              torch.equal(ext_idx[:, -1], base_idx[:, -1]))
+        check("linked_answer_preserved",
+              torch.equal(ext_meta["answer"], base_meta["answer"]))
+        check("linked_key_pos_preserved",
+              torch.equal(ext_meta["key_pos"], base_meta["key_pos"]))
+        base_code = association_codes(base_idx, base_meta, 32)["code"]
+        check("linked_association_preserved",
+              torch.equal(association_codes(ext_idx, ext_meta, 32)["code"],
+                          base_code))
+        linked_keys = ext_idx[:, :2 * 8:2]
+        ordered_keys = linked_keys.sort(dim=1).values
+        check("linked_keys_distinct",
+              bool((ordered_keys[:, 1:] != ordered_keys[:, :-1]).all()))
+        check("linked_new_keys_fresh",
+              not bool((
+                  ext_idx[:, 2 * 4:2 * 8:2].unsqueeze(2)
+                  == base_idx[:, :2 * 4:2].unsqueeze(1)).any()))
+        repeat_idx, repeat_tgt, _ = make_length_linked_batch(
+            base_idx, base_meta, 4, 8, 32,
+            gen=torch.Generator().manual_seed(72))
+        check("linked_deterministic",
+              torch.equal(ext_idx, repeat_idx)
+              and torch.equal(ext_tgt, repeat_tgt))
+        nested_idx, nested_tgt, nested_meta = make_length_linked_batch(
+            ext_idx, ext_meta, 8, 12, 32,
+            gen=torch.Generator().manual_seed(73))
+        validate_batch(nested_idx, nested_tgt, nested_meta, 32)
+        check("linked_nested_prefix",
+              torch.equal(nested_idx[:, :2 * 8], ext_idx[:, :2 * 8]))
+        check("linked_nested_association",
+              torch.equal(
+                  association_codes(nested_idx, nested_meta, 32)["code"],
+                  base_code))
+        check("linked_same_length_noop",
+              torch.equal(
+                  make_length_linked_batch(base_idx, base_meta, 4, 4, 32)[0],
+                  base_idx))
+        try:
+            make_length_linked_batch(base_idx, base_meta, 4, 3, 32)
+            check("linked_shorter_rejected", False)
+        except ValueError:
+            check("linked_shorter_rejected", True)
+        try:
+            make_length_linked_batch(base_idx, base_meta, 4, 40, 32)
+            check("linked_geometry_rejected", False)
+        except ValueError:
+            check("linked_geometry_rejected", True)
+    except Exception as exc:  # noqa: BLE001 - surface unexpected failures
+        failures.append(f"linked_length_batch:{exc}")
 
     # Length-sweep geometry: a one-point "sweep" would make the base-to-
     # longest drop and entropy drift identically zero, turning H2b's

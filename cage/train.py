@@ -24,6 +24,7 @@ from .data import (
     stream_content_digest,
     difficulty_stratum_labels,
     make_batch,
+    make_length_linked_batch,
     stream_seed_key,
     validate_batch,
 )
@@ -2121,6 +2122,191 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
             correct.add_((pred == meta["answer"]).sum())
             total += idx.size(0)
         return correct.item() / total if total else float("nan")
+    finally:
+        for module, training in training_states.items():
+            module.train(training)
+        release_eval_scratch()
+
+
+def _linked_positive_int(value, name):
+    """Strict positive integer for the linked-length geometry.
+
+    ``make_batch`` rejects bool/fractional geometry rather than truncating
+    it, and this probe constructs/validates batches itself, so it must not
+    be looser than the generator it sits on.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    try:
+        number = operator.index(value)
+    except TypeError as exc:
+        raise ValueError(
+            f"{name} must be an integer, got {value!r}") from exc
+    if number < 1:
+        raise ValueError(f"{name} must be >= 1, got {number!r}")
+    return int(number)
+
+
+@torch.inference_mode()
+def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
+                        batches=4, seed=VAL_SEED, link_seed=271828):
+    """Within-item length extension: the paired counterfactual of E2.
+
+    The E2 sweep evaluates *independently generated* batches at every
+    ``n_pairs``.  Base-length and long-length accuracy therefore come from
+    different items, so the observed drop mixes the length effect with a
+    different item/difficulty/retrieval-position composition.
+    Post-stratification narrows
+    that gap, but only this probe holds the item fixed: every base sample
+    is extended in place with fresh distractor pairs
+    (:func:`cage.data.make_length_linked_batch`), keeping its query key,
+    answer and pair index unchanged.  Each longer sequence is a nested
+    extension of the previous one, so the item is literally the same and
+    only the amount of context changes.
+
+    For each length the result reports the accuracy, the **retention**
+    ``P(correct at L | correct at base)``, the **rescue**
+    ``P(correct at L | wrong at base)``, the paired net change and the
+    exact McNemar test on the discordant items (``b`` = base wrong / long
+    right, ``c`` = base right / long wrong).  A raw E2 drop that also
+    appears here is a length effect; a raw drop that disappears under
+    linked extension is composition.  Because the target pair index is
+    held fixed, this is an added-context / dilution effect, not an estimate
+    of the natural target-position distribution.  The probe is a companion:
+    it does not replace the pre-registered raw-sweep decision.
+
+    ``lengths`` must start at ``n_pairs``, be strictly increasing and
+    contain at least two lengths.  The base stream is drawn with the same
+    seed/geometry as :func:`eval_metrics`, so ``base_accuracy`` is directly
+    comparable to the ordinary E2 base row.  Extra distractors are drawn
+    from a length-specific deterministic stream derived from ``link_seed``;
+    the same ``(seed, link_seed, geometry)`` therefore reproduces the exact
+    linked items.
+    """
+    n_pairs = _linked_positive_int(n_pairs, "n_pairs")
+    batch = _linked_positive_int(batch, "batch")
+    batches = _linked_positive_int(batches, "batches")
+    if isinstance(lengths, (str, bytes)):
+        raise ValueError(
+            f"lengths must be an iterable of integers, got "
+            f"{type(lengths).__name__}")
+    try:
+        raw_lengths = list(lengths)
+    except TypeError as exc:
+        raise ValueError(
+            f"lengths must be an iterable of integers, got "
+            f"{type(lengths).__name__}") from exc
+    parsed = []
+    for value in raw_lengths:
+        if isinstance(value, bool):
+            raise ValueError(
+                f"lengths must be integers, got {value!r}")
+        try:
+            length = operator.index(value)
+        except TypeError as exc:
+            raise ValueError(
+                f"lengths must be integers, got {value!r}") from exc
+        if length < 1:
+            raise ValueError(f"lengths must be >= 1, got {length!r}")
+        parsed.append(int(length))
+    if len(parsed) < 2:
+        raise ValueError(
+            "eval_linked_lengths needs the base length and at least one "
+            f"longer length, got {parsed!r}")
+    if len(set(parsed)) != len(parsed) or any(
+            right <= left for left, right in zip(parsed, parsed[1:])):
+        raise ValueError(
+            f"lengths must be strictly increasing, got {parsed!r}")
+    if parsed[0] != n_pairs:
+        raise ValueError(
+            f"lengths must start at the base n_pairs={n_pairs}, got "
+            f"{parsed!r}")
+
+    training_states = {module: module.training for module in model.modules()}
+    try:
+        model.eval()
+        gen = torch.Generator(device=device).manual_seed(
+            stream_seed_key(seed))
+        correct = {length: [] for length in parsed}
+        for i in range(batches):
+            idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
+                                        gen=gen)
+            validate_batch(idx, tgt, meta, vocab, diagnostics=False)
+            cur_idx, cur_meta, cur_pairs = idx, meta, n_pairs
+            for length in parsed:
+                if length != cur_pairs:
+                    link_gen = torch.Generator(device=device).manual_seed(
+                        stream_seed_key(link_seed + 1000003 * length + i))
+                    cur_idx, _, cur_meta = make_length_linked_batch(
+                        cur_idx, cur_meta, cur_pairs, length, vocab,
+                        gen=link_gen)
+                    cur_pairs = length
+                logits, _, _ = model(cur_idx)
+                pred = logits.squeeze(1).argmax(-1)
+                correct[length].append(
+                    pred.eq(cur_meta["answer"]).detach().cpu())
+        cat = {}
+        for length in parsed:
+            parts = correct[length]
+            cat[length] = (torch.cat(parts) if parts else
+                           torch.empty(0, dtype=torch.bool))
+        base_correct = cat[n_pairs]
+        base_n = int(base_correct.numel())
+        base_acc = (float(base_correct.to(torch.float64).mean())
+                    if base_n else float("nan"))
+        n_base_correct = int(base_correct.sum())
+        n_base_wrong = int(base_n - n_base_correct)
+        out = {
+            "base_seed": int(seed),
+            "link_seed": int(link_seed),
+            "n_pairs": int(n_pairs),
+            "lengths": [int(L) for L in parsed],
+            "batch": int(batch),
+            "batches": int(batches),
+            "n_items": int(base_n),
+            "base_accuracy": base_acc,
+            "base_n_correct": n_base_correct,
+            "base_n_wrong": n_base_wrong,
+            "nested_extension": True,
+            "link_formula": (
+                "stream_seed_key(link_seed + 1000003 * length + batch_index)"
+            ),
+            "accuracy_by_length": {},
+            "n_by_length": {},
+            "retention_by_length": {},
+            "rescue_by_length": {},
+            "net_change_by_length": {},
+            "mcnemar_by_length": {},
+            "note": (
+                "within-item nested length extension: each item keeps its "
+                "query key/answer/pair index and only gains distractor pairs, "
+                "so the paired change isolates length from item/position "
+                "composition. "
+                "Companion to the raw independent-stream E2 sweep, not a "
+                "replacement for its pre-registered decision."),
+        }
+        for length in parsed:
+            rows = cat[length]
+            acc = (float(rows.to(torch.float64).mean())
+                   if rows.numel() else float("nan"))
+            retained = int((base_correct & rows).sum())
+            rescued = int((~base_correct & rows).sum())
+            retention = (retained / n_base_correct
+                         if n_base_correct else None)
+            rescue = (rescued / n_base_wrong if n_base_wrong else None)
+            mc = mcnemar_test(base_correct, rows)
+            out["accuracy_by_length"][length] = acc
+            out["n_by_length"][length] = int(rows.numel())
+            out["retention_by_length"][length] = retention
+            out["rescue_by_length"][length] = rescue
+            out["net_change_by_length"][length] = (
+                acc - base_acc if math.isfinite(acc)
+                and math.isfinite(base_acc) else None)
+            out["mcnemar_by_length"][length] = {
+                "b": int(mc["b"]), "c": int(mc["c"]),
+                "p_exact": float(mc["p_exact"]),
+            }
+        return out
     finally:
         for module, training in training_states.items():
             module.train(training)

@@ -253,6 +253,7 @@ from .train import (
     collect_stats_and_errors,
     error_detection_aucs,
     eval_accuracy,
+    eval_linked_lengths,
     eval_metrics,
     false_concentration_analysis,
     false_concentration_by_layer,
@@ -2191,6 +2192,76 @@ def _stamp_difficulty_standardization(rec, base_length, lengths):
     rec["difficulty_mix_tv_at_longest"] = rec.get(
         "difficulty_mix_tv_by_length", {}).get(lengths[-1], float("nan"))
     return rec
+
+
+def _stamp_linked_length_extension(rec, model, settings, lengths, eval_seed):
+    """Add the within-item length-extension companion to one E2 record.
+
+    The ordinary sweep generates a new stream at every length, so a raw
+    accuracy drop mixes length with a changed item/retrieval-position
+    composition.  This
+    helper evaluates each *same* base item after appending fresh distractors
+    (:func:`cage.train.eval_linked_lengths`) and stamps the paired
+    accuracy / retention / McNemar fields.  It is isolated from the E2 loop
+    so the exact record contract is unit-tested and a malformed sweep can
+    abstain instead of aborting the runner.
+
+    The companion is exploratory: the pre-registered H2 decision still
+    reads the raw ``accuracy_*`` fields.
+    """
+    if not lengths:
+        rec["linked_length_extension"] = None
+        rec["linked_accuracy_by_length"] = {}
+        rec["linked_accuracy_at_base"] = float("nan")
+        rec["linked_accuracy_at_longest"] = float("nan")
+        rec["linked_accuracy_drop"] = float("nan")
+        rec["linked_retention_at_longest"] = None
+        rec["linked_rescue_at_longest"] = None
+        rec["linked_net_change_at_longest"] = None
+        rec["linked_mcnemar_p_at_longest"] = float("nan")
+        rec["linked_composition_effect_at_longest"] = float("nan")
+        rec["linked_base_matches_raw"] = False
+        return None
+    linked = eval_linked_lengths(
+        model, settings.n_pairs, settings.vocab, settings.device,
+        lengths=lengths, batch=settings.eval_batch,
+        batches=settings.eval_batches, seed=eval_seed)
+    longest = lengths[-1]
+    base = settings.n_pairs
+    rec["linked_length_extension"] = linked
+    rec["linked_accuracy_by_length"] = linked["accuracy_by_length"]
+    rec["linked_accuracy_at_base"] = linked["accuracy_by_length"].get(base)
+    rec["linked_accuracy_at_longest"] = linked["accuracy_by_length"].get(
+        longest)
+    rec["linked_accuracy_drop"] = (
+        rec["linked_accuracy_at_base"] - rec["linked_accuracy_at_longest"]
+        if _finite(rec["linked_accuracy_at_base"])
+        and _finite(rec["linked_accuracy_at_longest"]) else float("nan"))
+    rec["linked_retention_at_longest"] = linked["retention_by_length"].get(
+        longest)
+    rec["linked_rescue_at_longest"] = linked["rescue_by_length"].get(longest)
+    rec["linked_net_change_at_longest"] = linked["net_change_by_length"].get(
+        longest)
+    rec["linked_mcnemar_p_at_longest"] = linked["mcnemar_by_length"].get(
+        longest, {}).get("p_exact")
+    raw_base = _length_entry(rec.get("accuracy_by_length"), base)
+    raw_long = _length_entry(rec.get("accuracy_by_length"), longest)
+    raw_drop = (raw_base - raw_long
+                if _finite(raw_base) and _finite(raw_long)
+                else float("nan"))
+    rec["linked_composition_effect_at_longest"] = (
+        raw_drop - rec["linked_accuracy_drop"]
+        if _finite(raw_drop) and _finite(rec["linked_accuracy_drop"])
+        else float("nan"))
+    rec["linked_base_matches_raw"] = bool(
+        _finite(rec["linked_accuracy_at_base"]) and _finite(raw_base)
+        and abs(rec["linked_accuracy_at_base"] - raw_base) <= 1e-12)
+    if not rec["linked_base_matches_raw"]:
+        print(f"[e2] WARNING: linked base accuracy "
+              f"{rec['linked_accuracy_at_base']!r} does not reproduce the "
+              f"raw base accuracy {raw_base!r}; the paired length companion "
+              f"is not comparable to the raw sweep")
+    return linked
 
 
 def _aggregate_runs(runs, skip=("seed", "lr", "params", "eval_seed",
@@ -15556,6 +15627,15 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                     corr_by_len.get("gate_vs_entropy", float("nan")))
                 rec["gate_vs_maxprob_by_length"][length] = (
                     corr_by_len.get("gate_vs_maxprob", float("nan")))
+        # Within-item length extension.  The independent-stream sweep above
+        # changes both length and the item/retrieval-position composition;
+        # this paired probe keeps
+        # each base item's query/answer/pair index and only appends fresh
+        # distractors (nested across the sweep).  It is the counterfactual
+        # post-stratification can only approximate, and it uses data already
+        # drawn from the sealed base stream.  Exploratory companion: H2's
+        # pre-registered decision still reads the raw sweep.
+        _stamp_linked_length_extension(rec, model, settings, lengths, eval_seed)
         # Difficulty-composition control.  A length sweep is not a pure
         # length manipulation: more pairs per sequence also raise the
         # chance that the answer value repeats and that the query token
@@ -15686,6 +15766,49 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                   for L in lengths]
     print(f"{'rule ceiling':>16}" + "".join(f"{c:>12}" for c in ceil_cells)
           + f"{'-':>17} {'(gap@long)':>17} {'-':>17}")
+
+    print(f"\n[e2] within-item linked length extension (nested: each base "
+          f"item keeps its query/answer/pair index and only gains "
+          f"distractors; retention=P(correct@L|correct@base), rescue="
+          f"P(correct@L|wrong@base); exploratory companion, the H2 decision "
+          f"still reads the raw sweep):")
+    print(f"{'arm':>16} {'raw_drop':>17} {'linked_drop':>17} "
+          f"{'retain@long':>14} {'rescue@long':>14} {'net@long':>17} "
+          f"{'raw-linked':>15} {'p<.05':>7}")
+
+    def _fmt_cell(agg, signed=False):
+        if not _finite(agg["mean"]):
+            return "n/a"
+        width = "+.3f" if signed else ".3f"
+        return f"{format(agg['mean'], width)}±{agg['std']:.3f}"
+
+    for label, *_ in _E2_VARIANTS:
+        rs = by_variant[label]
+        raw_drop = _mean_std([r.get("accuracy_drop") for r in rs])
+        linked_drop = _mean_std([r.get("linked_accuracy_drop") for r in rs])
+        retain = _mean_std([r.get("linked_retention_at_longest") for r in rs])
+        rescue = _mean_std([r.get("linked_rescue_at_longest") for r in rs])
+        net = _mean_std([r.get("linked_net_change_at_longest") for r in rs])
+        composition = _mean_std(
+            [r.get("linked_composition_effect_at_longest") for r in rs])
+        sig = sum(
+            1 for r in rs
+            if _finite(r.get("linked_mcnemar_p_at_longest"))
+            and float(r["linked_mcnemar_p_at_longest"]) < 0.05)
+        print(f"{label:>16} {_fmt_cell(raw_drop):>17} "
+              f"{_fmt_cell(linked_drop):>17} {_fmt_cell(retain):>14} "
+              f"{_fmt_cell(rescue):>14} {_fmt_cell(net, True):>17} "
+              f"{_fmt_cell(composition, True):>15} "
+              f"{sig:>3}/{len(rs):<3}")
+    linked_reproduced = sum(
+        1 for rs in by_variant.values() for r in rs
+        if r.get("linked_base_matches_raw"))
+    print(f"  linked base reproduces the raw base accuracy in "
+          f"{linked_reproduced}/{sum(len(rs) for rs in by_variant.values())} "
+          f"runs; a linked drop smaller than raw means composition inflated "
+          f"the raw length loss, a linked drop larger than raw means an "
+          f"easier composition masked a within-item length loss, and a drop "
+          f"present in both is a length effect.")
 
     print(f"\n[e2] whole-sweep degradation slope (least-squares accuracy per "
           f"unit log(T) over all {len(lengths)} measured lengths, "
@@ -16327,6 +16450,45 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 _length_entry(r.get("difficulty_mix_tv_by_length"), L)
                 for r in by_variant[label]])
             for L in lengths}
+        for label, *_ in _E2_VARIANTS}
+    e2_summary["_linked_length_extension"] = {
+        label: {
+            "accuracy_by_length": {
+                str(L): _mean_std([
+                    _length_entry(r.get("linked_accuracy_by_length"), L)
+                    for r in by_variant[label]])
+                for L in lengths},
+            "raw_accuracy_drop": _mean_std(
+                [r.get("accuracy_drop") for r in by_variant[label]]),
+            "linked_accuracy_drop": _mean_std(
+                [r.get("linked_accuracy_drop") for r in by_variant[label]]),
+            "retention_at_longest": _mean_std(
+                [r.get("linked_retention_at_longest")
+                 for r in by_variant[label]]),
+            "rescue_at_longest": _mean_std(
+                [r.get("linked_rescue_at_longest")
+                 for r in by_variant[label]]),
+            "net_change_at_longest": _mean_std(
+                [r.get("linked_net_change_at_longest")
+                 for r in by_variant[label]]),
+            "composition_effect_at_longest": _mean_std(
+                [r.get("linked_composition_effect_at_longest")
+                 for r in by_variant[label]]),
+            # A p-value is not an effect size: never average it across
+            # seeds.  The per-seed values stay in the run records; the
+            # summary only counts how many seeds' paired McNemar test
+            # rejects at 0.05.
+            "mcnemar_significant_seeds_at_longest": sum(
+                1 for r in by_variant[label]
+                if _finite(r.get("linked_mcnemar_p_at_longest"))
+                and float(r["linked_mcnemar_p_at_longest"]) < 0.05),
+            "mcnemar_seeds_at_longest": sum(
+                1 for r in by_variant[label]
+                if _finite(r.get("linked_mcnemar_p_at_longest"))),
+            "base_matches_raw": all(
+                bool(r.get("linked_base_matches_raw"))
+                for r in by_variant[label]),
+        }
         for label, *_ in _E2_VARIANTS}
     e2_summary["_counterfactual"] = _counterfactual_companion(
         out_dir, "e2", by_variant, lengths=lengths, reference="none")
