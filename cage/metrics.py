@@ -2453,6 +2453,8 @@ def crossed_cluster_bootstrap_ci(correct_a, correct_b, n_boot: int = 4000,
         empty["reason"] = (
             "correct_a and correct_b must have the same (seed, item) shape")
         return empty
+    if b.device != a.device:
+        b = b.to(a.device)
     n_units, n_items = int(a.shape[0]), int(a.shape[1])
     empty["n_units"], empty["n_items"] = n_units, n_items
     if n_units < 2:
@@ -2612,6 +2614,8 @@ def evaluation_fold_audit(correct_a, correct_b, n_folds=8) -> dict:
             out["reason"] = f"{name} must contain only 0/1 (or booleans)"
             return out
     a = a.to(torch.bool)
+    if b.device != a.device:
+        b = b.to(a.device)
     b = b.to(torch.bool)
     n_units, n_items = int(a.size(0)), int(a.size(1))
     if n_items < 4:
