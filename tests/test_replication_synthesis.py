@@ -23,7 +23,7 @@ import pathlib
 import tempfile
 import unittest
 
-from cage.experiments import ContrastLog
+from cage.experiments import ContrastLog, _hypothesis_evidence_synthesis
 from cage.metrics import (
     equivalence_test,
     paired_bootstrap_ci,
@@ -202,6 +202,21 @@ class ContrastReplicationAuditTest(unittest.TestCase):
 
 
 class HypothesisSynthesisTest(unittest.TestCase):
+    def test_malformed_rows_and_containers_do_not_abort_synthesis(self):
+        # A pooled/legacy row can be a scalar or a non-mapping object.  It is
+        # not evidence for any hypothesis, so the companion must skip it
+        # instead of raising AttributeError from ``.get``.
+        row = {"hypothesis": "H2a", "direction": "+",
+               "supports_hypothesis": True}
+        out = _hypothesis_evidence_synthesis(
+            [None, "not-a-row", 3, row], ["H2a"])
+        self.assertEqual(out["H2a"]["n_rows"], 1)
+        self.assertEqual(out["H2a"]["n_confirmed"], 1)
+        self.assertEqual(out["H2a"]["status"], "supported")
+        empty = _hypothesis_evidence_synthesis(None, ["H2a"])
+        self.assertEqual(empty["H2a"]["status"], "no_contrast")
+        self.assertEqual(empty["H2a"]["n_rows"], 0)
+
     def test_full_conjunction_is_supported(self):
         _, payload, _ = _finalize(
             "e2", ("H2a",),

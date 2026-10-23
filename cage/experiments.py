@@ -5423,6 +5423,13 @@ def _hypothesis_evidence_synthesis(rows, hypotheses) -> dict:
     ``partial`` or ``refuted`` status is what the report warns about so a
     multi-row hypothesis is not credited on one surviving row.
     """
+    # This is a report companion: a pooled/legacy result row that is not a
+    # mapping (or a non-iterable container) cannot name a hypothesis and must
+    # not abort the synthesis half-way through finalize().
+    rows = _mapping_runs(rows)
+    if isinstance(hypotheses, str):
+        hypotheses = (hypotheses,)
+    hypotheses = _materialize_runs(hypotheses)
     out = {}
     for hyp in hypotheses:
         hrows = [r for r in rows if r.get("hypothesis") == hyp]
