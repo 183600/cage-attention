@@ -341,6 +341,19 @@ class AssociationExposureSummaryTest(unittest.TestCase):
                            n_value_correct=3)},
             {"seen": dict(blank, n=2, n_correct=1,
                            n_value_swap=1, n_value_follow=2)},
+            # Stubborn rows emit the clean answer, so they cannot overlap
+            # with value-swap-correct rows or exceed the swappable rows.
+            {"seen": dict(blank, n=2, n_correct=2, n_value_swap=2,
+                           n_value_correct=2, n_value_stubborn=2)},
+            {"seen": dict(blank, n=2, n_correct=2, n_value_stubborn=2)},
+            # Follow and stubborn are disjoint clean-correct subsets.
+            {"seen": dict(blank, n=4, n_correct=1, n_value_swap=4,
+                           n_value_correct=2, n_value_follow=1,
+                           n_value_stubborn=1)},
+            # Clean-correct and value-swap-correct sets intersect exactly
+            # on the follow rows; their union must fit in the rows.
+            {"seen": dict(blank, n=2, n_correct=2, n_value_swap=2,
+                           n_value_correct=2)},
             {"seen": dict(blank, n=2, n_distractor=1,
                            n_distractor_correct=2)},
             {"seen": dict(blank, n=2, n_relocation=1,

@@ -3016,7 +3016,21 @@ def _association_exposure_summary(totals) -> dict:
             and parsed["n_value_correct"] <= parsed["n_value_swap"]
             and parsed["n_value_follow"] <= min(
                 parsed["n_correct"], parsed["n_value_correct"])
+            # Stubborn rows only exist where the value-swap probe ran, and
+            # a stubborn row keeps the clean answer while a value-correct
+            # row emits the (different) swapped answer, so the two groups
+            # are disjoint inside the swappable rows.
+            and parsed["n_value_stubborn"] <= parsed["n_value_swap"]
+            and (parsed["n_value_stubborn"] + parsed["n_value_correct"]
+                 <= parsed["n_value_swap"])
             and parsed["n_value_stubborn"] <= parsed["n_correct"]
+            # Follow and stubborn are disjoint clean-correct subsets.
+            and (parsed["n_value_follow"] + parsed["n_value_stubborn"]
+                 <= parsed["n_correct"])
+            # Inclusion-exclusion: clean-correct and value-swap-correct
+            # intersect exactly on the follow rows.
+            and (parsed["n_correct"] + parsed["n_value_correct"]
+                 - parsed["n_value_follow"] <= n)
             and parsed["n_distractor"] <= n
             and parsed["n_distractor_correct"] <= parsed["n_distractor"]
             and parsed["n_relocation"] <= n
