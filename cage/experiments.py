@@ -2515,6 +2515,11 @@ def _calib_cell(run):
     are on and the entropy is not shuffled (the flags that define H2g's
     single-factor arm).
     """
+    if not isinstance(run, Mapping):
+        # A malformed pooled row cannot name a trained cell; reporting it
+        # here instead of raising lets the coverage audit flag the missing
+        # cell and continue with the remaining evidence.
+        return None
     cfg = run.get("model_cfg")
     if cfg is not None:
         if not isinstance(cfg, Mapping):
@@ -2564,12 +2569,30 @@ def _cell_seed_balance(runs, cell_of, expected, planned_seeds):
     enters exploratory reads).  Returns the per-cell seed payload and the
     list of unbalanced cell keys.
     """
-    planned = sorted({int(s) for s in planned_seeds}) if planned_seeds else []
+    try:
+        planned = (sorted({int(s) for s in planned_seeds if
+                           isinstance(s, int) and not isinstance(s, bool)})
+                   if planned_seeds else [])
+    except TypeError:
+        # A non-iterable planned set is not a seed plan; the resulting
+        # empty plan makes every cell unbalanced (fail closed) rather than
+        # crashing the coverage report.
+        planned = []
     seen: dict[str, set] = {}
     for run in runs:
-        cell = cell_of(run)
+        # Coverage is evidence about real runs: a non-mapping row, a cell
+        # extractor that raises, or a malformed seed cannot certify that a
+        # planned cell/seed was trained.  Skip it so the missing seed stays
+        # visible as unbalanced instead of being silently coerced.
+        if not isinstance(run, Mapping):
+            continue
+        try:
+            cell = cell_of(run)
+        except Exception:  # noqa: BLE001 - malformed rows are not evidence
+            continue
         seed = run.get("seed")
-        if cell is None or seed is None:
+        if cell is None or isinstance(seed, bool) \
+                or not isinstance(seed, int):
             continue
         seen.setdefault(_coverage_cell_key(cell), set()).add(int(seed))
     balance = {}
@@ -2645,7 +2668,23 @@ def _report_design_coverage(out_dir, tag, runs, design, extract, expected,
     trained only part of the planned seed set are printed as warnings and
     stored in ``<tag>_<design>_coverage.json``.
     """
-    observed = {extract(r) for r in runs if extract(r) is not None}
+    observed = set()
+    for run in runs:
+        if not isinstance(run, Mapping):
+            continue
+        try:
+            value = extract(run)
+        except Exception:  # noqa: BLE001 - malformed rows are not evidence
+            continue
+        if value is None:
+            continue
+        try:
+            observed.add(value)
+        except TypeError:
+            # An unhashable "cell" is not a declared design cell; skipping
+            # it leaves the expected cell missing instead of aborting the
+            # coverage report.
+            continue
     present = [c for c in expected if any(c == o for o in observed)]
     missing = [c for c in expected if not any(c == p for p in present)]
     balance, unbalanced = _cell_seed_balance(runs, extract, expected,

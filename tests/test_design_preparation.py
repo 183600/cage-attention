@@ -25,6 +25,7 @@ from cage.experiments import (
     _calib_cell,
     _controlled_audit,
     _blocked_run_order,
+    _cell_seed_balance,
     _design_plan_fingerprint,
     _design_plan_outcomes_exist,
     _design_sensitivity_plan,
@@ -34,6 +35,8 @@ from cage.experiments import (
     _power_at_effect,
     _power_z,
     _realized_order_audit,
+    _report_ablation_coverage,
+    _report_design_coverage,
     _report_realized_run_order,
     _required_seeds,
     _run_order_audit,
@@ -805,6 +808,46 @@ class DesignPlanFreezeTest(unittest.TestCase):
         self.assertNotEqual(_design_plan_fingerprint(base),
                             _design_plan_fingerprint(changed))
         self.assertIsNone(_design_plan_fingerprint("not a plan"))
+
+
+class CoverageMalformedRunTest(unittest.TestCase):
+    """Coverage audits must not certify malformed rows or crash on them."""
+
+    def test_malformed_rows_are_skipped_and_fail_closed(self):
+        good = {
+            "seed": 0,
+            "model_cfg": {
+                "gate": "calib", "calib_use_len": True,
+                "calib_use_ent": True, "calib_shuffle_ent": False,
+                "calib_ent_norm": True,
+            },
+        }
+        self.assertIsNone(experiments._calib_cell(None))
+        # A string/float/bool seed that happens to equal a planned seed must
+        # not be truncated into a certified run.
+        for bad_seed in ("0", 0.5, True):
+            balance, unbalanced = _cell_seed_balance(
+                [{"seed": bad_seed, "cell": "none"}],
+                lambda run: run.get("cell"), ("none",), (0,))
+            self.assertEqual(balance["none"]["seeds"], [])
+            self.assertEqual(unbalanced, ["none"])
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _report_ablation_coverage(
+                    pathlib.Path(tmp), "e1", [None, good], cells=("full",),
+                    planned_seeds=(0,))
+            self.assertTrue(payload["complete"])
+            self.assertTrue(payload["seed_balanced"])
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _report_design_coverage(
+                    pathlib.Path(tmp), "e1",
+                    [None, {"gate": "none", "seed": 0}],
+                    "gate", lambda run: run.get("gate"), ("none", "query"),
+                    planned_seeds=(0,))
+            self.assertEqual(payload["present_cells"], ["none"])
+            self.assertFalse(payload["complete"])
+            self.assertFalse(payload["seed_balanced"])
 
 
 class RealizedRunOrderAuditTest(unittest.TestCase):
