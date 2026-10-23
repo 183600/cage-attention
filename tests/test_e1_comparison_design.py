@@ -9,6 +9,8 @@ schedule and the interaction row that completes the calibration-term 2x2.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import unittest
 
 from cage.experiments import (
@@ -17,10 +19,13 @@ from cage.experiments import (
     Settings,
     _E1_ABLATION_LABELS,
     _blocked_run_order,
+    _competence_check,
     _e1_cell_of,
     _e1_cell_plan,
     _model_cfg,
     _paired_did,
+    _print_conf_by_error_type,
+    _print_structural_decomposition,
     _run_order_audit,
 )
 
@@ -144,6 +149,35 @@ class E1FactorialInteractionTest(unittest.TestCase):
             "accuracy")
         self.assertFalse(ci["controlled"]["controlled"])
         self.assertTrue(ci["controlled"]["mismatches"])
+
+
+class ReportMalformedRunTest(unittest.TestCase):
+    """Malformed rows are uninformative; reports must not abort on them."""
+
+    def test_competence_ignores_non_mapping_and_unreadable_rows(self):
+        good = {"accuracy": 1.0, "n": 100}
+        out = _competence_check(
+            [("arm", [None, good, {"accuracy": "x", "n": 100}])],
+            lambda r: (int(round(r["accuracy"] * r["n"])), int(r["n"])),
+            0.2)
+        self.assertTrue(out["passed"])
+        self.assertEqual(out["arms"]["arm"]["correct"], 100)
+        self.assertEqual(out["arms"]["arm"]["n"], 100)
+
+    def test_competence_abstains_when_runs_are_not_iterable(self):
+        out = _competence_check(
+            [("arm", None)], lambda r: (0, 1), 0.2)
+        self.assertFalse(out["passed"])
+        self.assertEqual(out["arms"]["arm"]["n"], 0)
+
+    def test_error_tables_skip_non_mapping_rows(self):
+        conf = {"err_conf_by_error_type": {"retrieval_miss": 0.9}}
+        structural = {"err_taxonomy_hard_structural_naive_only": 0.2}
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            _print_conf_by_error_type([("arm", [None, conf])])
+            _print_structural_decomposition([("arm", [None, structural])])
+        self.assertIn("arm", buf.getvalue())
+        self.assertIn("arm", buf.getvalue())
 
 
 if __name__ == "__main__":

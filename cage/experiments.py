@@ -7411,6 +7411,7 @@ def _print_conf_by_error_type(named_runs, title="[e1]"):
     width = max(16, max(len(t) for t in _ERROR_TYPES) + 1)
     print(f"{'arm':>{width}}" + "".join(f"{t:>{width}}" for t in _ERROR_TYPES))
     for label, rs in named_runs:
+        rs = _mapping_runs(rs)
         cells = []
         for etype in _ERROR_TYPES:
             vals = [
@@ -7437,6 +7438,7 @@ def _print_structural_decomposition(named_runs, title="[e1]"):
     print(f"{'arm':>23} {'naive_only':>12} {'repeat_only':>12} "
           f"{'both':>12}")
     for label, rs in named_runs:
+        rs = _mapping_runs(rs)
         cells = []
         for key in ("naive_only", "repeat_only", "both"):
             agg = _mean_std([
@@ -9644,8 +9646,11 @@ def _competence_check(named_runs, correct_and_n, chance, what="arm"):
     for name, runs in named_runs:
         counts = []
         sizes = []
-        for run in runs:
-            pair = correct_and_n(run)
+        for run in _mapping_runs(runs):
+            try:
+                pair = correct_and_n(run)
+            except Exception:  # noqa: BLE001 - malformed rows are not evidence
+                continue
             if pair is None:
                 continue
             n_correct, n_total = pair
