@@ -228,6 +228,14 @@ class LinkedLengthEvalTest(unittest.TestCase):
         self.assertFalse(rec["linked_base_matches_raw"])
         self.assertIsNone(rec["linked_retention_at_longest"])
 
+    def test_link_seed_must_be_an_integer_stream_seed(self):
+        for bad in (True, False, 1.5, None, "3"):
+            with self.subTest(link_seed=bad):
+                with self.assertRaises(ValueError):
+                    eval_linked_lengths(
+                        self.rule, 4, self.vocab, "cpu", [4, 8],
+                        link_seed=bad, **self.kwargs)
+
     def test_geometry_and_count_contract_is_validated(self):
         for kwargs in ({"batch": 0}, {"batch": 8.0}, {"batches": 0},
                        {"batches": True}):

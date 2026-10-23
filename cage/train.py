@@ -2186,6 +2186,12 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
     n_pairs = _linked_positive_int(n_pairs, "n_pairs")
     batch = _linked_positive_int(batch, "batch")
     batches = _linked_positive_int(batches, "batches")
+    # ``link_seed`` feeds the per-length extension generator, so it is a
+    # data-stream seed like ``seed``.  Validate it before the arithmetic
+    # below: a bool would otherwise be silently read as 0/1, while None or a
+    # string would leak an incidental TypeError from ``link_seed + ...``
+    # instead of the documented ValueError.
+    stream_seed_key(link_seed)
     if isinstance(lengths, (str, bytes)):
         raise ValueError(
             f"lengths must be an iterable of integers, got "
