@@ -264,6 +264,50 @@ class EmptySweepCompanionTest(unittest.TestCase):
         self.assertIsNone(difficulty["reference_length"])
         self.assertEqual(endpoint["rows"], [])
 
+    def test_missing_variants_abstain_instead_of_keyerror(self):
+        from cage.experiments import (
+            Settings,
+            _e2_difficulty_companions,
+            _e2_endpoint_class_companions,
+            _e2_per_length_contrasts,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            with contextlib.redirect_stdout(io.StringIO()):
+                difficulty = _e2_difficulty_companions({}, [3, 6])
+                endpoint = _e2_endpoint_class_companions({}, [3, 6])
+                per_length = _e2_per_length_contrasts(
+                    Settings.quick(), out, {}, [3, 6])
+        self.assertEqual(difficulty["reference_length"], 3)
+        self.assertEqual(difficulty["endpoint_length"], 6)
+        self.assertTrue(difficulty["by_arm"])
+        self.assertEqual(
+            difficulty["contrasts"]["calib - none"]
+            ["raw_accuracy_at_longest"]["n"], 0)
+        self.assertTrue(endpoint["rows"])
+        self.assertTrue(all(row["n"] == 0 for row in endpoint["rows"]))
+        self.assertTrue(per_length["contrasts"])
+        self.assertTrue(all(
+            row["n"] == 0
+            for contrast in per_length["contrasts"].values()
+            for row in contrast["rows"]))
+
+    def test_invalid_length_entries_abstain_instead_of_raising(self):
+        from cage.experiments import (
+            _counterfactual_companion,
+            _e2_difficulty_companions,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cf = _counterfactual_companion(
+                    pathlib.Path(tmp), "e2", {"none": [], "calib": []},
+                    lengths=[object()])
+                diff = _e2_difficulty_companions({}, [object(), None])
+        self.assertEqual(cf["lengths"], [])
+        self.assertEqual(diff["by_arm"], {})
+
     def test_empty_sweep_cost_and_tuned_companions_abstain(self):
         from cage.experiments import (
             Settings,

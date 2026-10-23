@@ -2191,6 +2191,16 @@ def _length_mapping(mapping, length):
     return entry if isinstance(entry, Mapping) else None
 
 
+def _positive_lengths(lengths) -> list[int]:
+    """Materialise a length sweep, dropping entries that are not positive ints."""
+    out = []
+    for value in _materialize_runs(lengths):
+        length = _positive_integer(value)
+        if length is not None:
+            out.append(length)
+    return out
+
+
 def _difficulty_vectors(difficulty):
     """Extract ``(totals, corrects)`` from an ``eval_metrics`` difficulty block.
 
@@ -2302,12 +2312,7 @@ def _stamp_difficulty_standardization(rec, base_length, lengths):
     if not isinstance(rec, Mapping):
         # Not a run record at all; there is nothing to stamp.
         return rec
-    try:
-        lengths = list(lengths)
-    except TypeError:
-        # A non-iterable sweep has no lengths; the empty-sweep branch below
-        # records the undefined companions instead of raising.
-        lengths = []
+    lengths = _positive_lengths(lengths)
     # A legacy/malformed record may lack the per-length table (or carry a
     # non-dict placeholder).  The companion then abstains with NaN fields
     # instead of raising in the middle of the E2 loop.
@@ -2406,12 +2411,7 @@ def _stamp_linked_length_extension(rec, model, settings, lengths, eval_seed):
     if not isinstance(rec, Mapping):
         # No run record to stamp; do not fabricate a companion payload.
         return None
-    try:
-        lengths = list(lengths)
-    except TypeError:
-        # ``eval_linked_lengths`` accepts any iterable; materialize once so
-        # the empty check and the longest-length lookups see the same sweep.
-        lengths = []
+    lengths = _positive_lengths(lengths)
     if not lengths:
         rec["linked_length_extension"] = None
         rec["linked_accuracy_by_length"] = {}
@@ -4929,8 +4929,15 @@ def _counterfactual_companion(out_dir, tag, by_arm, lengths=None,
     def arm_label(label):
         if isinstance(label, str):
             return label
+        try:
+            iterator = iter(label)
+        except TypeError:
+            # An arm label is display metadata; a scalar label (e.g. an
+            # integer gate id) is still printable instead of aborting the
+            # whole companion.
+            return str(label)
         parts = []
-        for part in label:
+        for part in iterator:
             if part is None:
                 parts.append("off")
             elif isinstance(part, float):
@@ -4940,7 +4947,11 @@ def _counterfactual_companion(out_dir, tag, by_arm, lengths=None,
         return "|".join(parts)
 
     if lengths is not None:
-        lengths = _materialize_runs(lengths)
+        lengths = _positive_lengths(lengths)
+    if not isinstance(by_arm, Mapping):
+        # A malformed arm container names no cells; report an empty
+        # companion instead of failing with an AttributeError.
+        by_arm = {}
 
     def value(run, metric, length):
         if length is None:
@@ -10121,7 +10132,7 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
                                  experiment: str, cells, lengths,
                                  reference=None) -> dict:
     """Measure how cost grows with the E2 sweep length for every arm."""
-    lengths = [int(length) for length in _materialize_runs(lengths)]
+    lengths = _positive_lengths(lengths)
     if not lengths:
         payload = {
             "experiment": experiment,
@@ -15606,7 +15617,7 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
     are exploratory: they do not enter the FDR family and cannot change
     the pre-registered endpoint decision.
     """
-    lengths = _materialize_runs(lengths)
+    lengths = _positive_lengths(lengths)
     if not lengths:
         payload = {
             "lengths": [],
@@ -15629,13 +15640,14 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
                "note": ("exploratory per-length companion; endpoint rows "
                         "above remain the pre-registered decision and the "
                         "FDR family is unchanged")}
+    by_variant = (by_variant if isinstance(by_variant, Mapping) else {})
     for rule, a_label, b_label in (
         ("calib - none", "calib", "none"),
         ("calib - query", "calib", "query"),
         ("calib - calib_raw_ent", "calib", _CALIB_RAW_ENT_CELL),
     ):
-        runs_a = by_variant[a_label]
-        runs_b = by_variant[b_label]
+        runs_a = _mapping_runs(by_variant.get(a_label, []))
+        runs_b = _mapping_runs(by_variant.get(b_label, []))
         rule_rows = []
         for length in lengths:
             def _at_length(r):
@@ -15804,7 +15816,7 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
     if not settings.per_variant_tuning:
         return {"available": False,
                 "reason": "disabled by Settings.per_variant_tuning"}
-    lengths = _materialize_runs(lengths)
+    lengths = _positive_lengths(lengths)
     if not lengths:
         return {"available": False,
                 "reason": ("empty length sweep: no endpoint at which to "
@@ -17194,7 +17206,7 @@ def _e2_difficulty_companions(by_variant: dict, lengths: list) -> dict:
     the raw readouts - but a sign reversal here means the raw endpoint
     should not be attributed to length calibration.
     """
-    lengths = _materialize_runs(lengths)
+    lengths = _positive_lengths(lengths)
     if not lengths:
         # Reporting an empty sweep has no endpoint to standardize; abstain
         # instead of indexing an empty list (the same rule the per-record
@@ -17207,8 +17219,9 @@ def _e2_difficulty_companions(by_variant: dict, lengths: list) -> dict:
             "note": ("empty length sweep: no endpoint to standardize; "
                      "companion abstained"),
         }
-    by_variant = {label: _mapping_runs(runs)
-                  for label, runs in by_variant.items()}
+    by_variant = ({label: _mapping_runs(by_variant.get(label, []))
+                   for label, *_ in _E2_VARIANTS}
+                  if isinstance(by_variant, Mapping) else {})
     base_length = int(lengths[0])
     endpoint = int(lengths[-1])
 
@@ -17365,12 +17378,13 @@ def _e2_endpoint_class_companions(by_variant: dict,
     accuracy gain that reverses on macro-F1 is visible without adding a new
     pre-registered decision.
     """
-    lengths = _materialize_runs(lengths)
+    lengths = _positive_lengths(lengths)
     if not lengths:
         return _class_frequency_companions(
             [], "e2 (empty length sweep; no endpoint)")
-    by_variant = {label: _mapping_runs(runs)
-                  for label, runs in by_variant.items()}
+    by_variant = ({label: _mapping_runs(by_variant.get(label, []))
+                   for label, *_ in _E2_VARIANTS}
+                  if isinstance(by_variant, Mapping) else {})
     endpoint = int(lengths[-1])
 
     def tagged(runs):
