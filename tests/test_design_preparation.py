@@ -43,6 +43,7 @@ from cage.experiments import (
     _required_seeds,
     _run_order_audit,
     _seed_order,
+    _selection_reliability,
     _verdict_seed_floor,
     _write_run_order,
 )
@@ -314,6 +315,24 @@ class ControlledAuditProvenanceTest(unittest.TestCase):
         self.assertFalse(audit["controlled"])
         self.assertTrue(any("non-string" in msg
                             for msg in audit["mismatches"]))
+
+
+class SelectionReliabilityInputTest(unittest.TestCase):
+    def test_malformed_selection_fields_do_not_look_reliable(self):
+        rows = [
+            {"val_accuracy_mean": 0.9, "val_accuracy_std": -0.1,
+             "n_seeds": 2, "diverged_runs": 0.5},
+            {"val_accuracy_mean": 0.8, "val_accuracy_std": 0.01,
+             "n_seeds": 2, "diverged_runs": 0},
+        ]
+        out = _selection_reliability(rows)
+        self.assertIsNot(out["reliable"], True)
+        self.assertIsNone(out["diverged_runs_best"])
+        for grid, keys in ((5, None), (None, 5), (object(), object())):
+            with self.subTest(grid=grid, keys=keys):
+                out = _selection_reliability(rows, grid=grid,
+                                             grid_keys=keys)
+                self.assertIsNone(out["best_at_grid_boundary"])
 
 
 class PilotSdTest(unittest.TestCase):

@@ -5830,9 +5830,10 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
         # estimate; reading it as 0 resolution would be exactly the
         # overconfidence this audit exists to catch.
         std = row.get(std_key)
-        n = row.get(n_key)
-        if _finite(std) and _finite(n) and float(n) >= 2.0:
-            return (max(float(std), 0.0) ** 2) / float(n)
+        n = _positive_integer(row.get(n_key))
+        if (_finite(std) and float(std) >= 0.0
+                and n is not None and n >= 2):
+            return (float(std) ** 2) / float(n)
         return float("nan")
 
     var_best, var_second = _se(r_best), _se(r_second)
@@ -5854,9 +5855,7 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
     if isinstance(verdicts, (list, tuple)):
         curve_invalid_best = sum(1 for v in verdicts
                                  if v in CURVE_INVALID_VERDICTS)
-    diverged_best = None
-    if _finite(r_best.get(diverged_key)):
-        diverged_best = int(r_best[diverged_key])
+    diverged_best = _difficulty_count(r_best.get(diverged_key))
     boundary = None
     boundary_rows = (rows if full_rows is None
                      else _materialize_runs(full_rows))
@@ -9956,7 +9955,11 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
     difference against that cell; cost ratios and the accuracy difference
     are read together, never as a new decision rule.
     """
-    cells = [(label, _mapping_runs(runs)) for label, runs in cells]
+    clean_cells = []
+    for item in _materialize_runs(cells):
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            clean_cells.append((item[0], _mapping_runs(item[1])))
+    cells = clean_cells
     seq_len = _efficiency_seq_len(settings)
     measured = {}
     entries = {}
@@ -10113,7 +10116,9 @@ def _complexity_cost_companion(settings: Settings, out_dir: pathlib.Path,
     shallow = verdict.get("shallow_none") or {}
     matched = verdict.get("matched_shallow") or {}
     cells = {}
-    deep_runs = by_gate.get("none", [])
+    if not isinstance(by_gate, Mapping):
+        by_gate = {}
+    deep_runs = _materialize_runs(by_gate.get("none", []))
     if isinstance(deep_cost, dict) and deep_cost.get("available", True):
         deep = dict(deep_cost)
         valid_deep = _curve_valid_runs(deep_runs)
@@ -10277,7 +10282,11 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
         print(f"[{experiment}] inference cost scaling: empty sweep; no "
               f"base/longest point to measure")
         return payload
-    cells = [(label, _mapping_runs(runs)) for label, runs in cells]
+    clean_cells = []
+    for item in _materialize_runs(cells):
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            clean_cells.append((item[0], _mapping_runs(item[1])))
+    cells = clean_cells
     runs_by_label = {str(label): runs for label, runs in cells}
     ref_runs = (runs_by_label.get(str(reference))
                 if reference is not None else None)
