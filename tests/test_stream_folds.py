@@ -64,6 +64,11 @@ class CurveHistoryInputTest(unittest.TestCase):
                 self.assertIn("curve_verdict", rec)
                 self.assertGreaterEqual(rec["steps_run"], 0)
                 self.assertEqual(rec["seeding"], {})
+        hist = [{"step": 0, "train_loss": 1.0}]
+        for bad in (True, 1.9, -1, "5", None):
+            with self.subTest(steps_run=bad):
+                rec = _curve_record(hist, {"steps_run": bad})
+                self.assertEqual(rec["steps_run"], 1)
 
 
 class EvaluationFoldAuditTest(unittest.TestCase):

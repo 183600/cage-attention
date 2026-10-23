@@ -342,6 +342,15 @@ class SelectionReliabilityInputTest(unittest.TestCase):
         curve_out = _selection_reliability(curve_bad)
         self.assertIs(curve_out["reliable"], False)
         self.assertTrue(curve_out["curve_verdicts_unknown"])
+        nested = [
+            {"val_accuracy_mean": 0.9, "val_accuracy_std": 0.01,
+             "n_seeds": 5, "curve_verdicts": [["plateau"]]},
+            {"val_accuracy_mean": 0.8, "val_accuracy_std": 0.01,
+             "n_seeds": 5, "curve_verdicts": ["ok"]},
+        ]
+        nested_out = _selection_reliability(nested)
+        self.assertIs(nested_out["reliable"], False)
+        self.assertTrue(nested_out["curve_verdicts_unknown"])
         for grid, keys in ((5, None), (None, 5), (object(), object())):
             with self.subTest(grid=grid, keys=keys):
                 out = _selection_reliability(rows, grid=grid,
