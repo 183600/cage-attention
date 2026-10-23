@@ -4315,10 +4315,12 @@ def _paired_diff(runs_a, runs_b, metric):
         side_a = _mean_std([])
         base = _mean_std([])
     ci["arms"] = {"a": side_a, "b": base}
-    ci["arms_all"] = {
-        "a": _mean_std([r[metric] for r in runs_a if metric in r]),
-        "b": _mean_std([r[metric] for r in runs_b if metric in r]),
-    }
+
+    def all_levels(runs):
+        return _mean_std([r[metric] for r in runs
+                          if isinstance(r, Mapping) and metric in r])
+
+    ci["arms_all"] = {"a": all_levels(runs_a), "b": all_levels(runs_b)}
     ci["arms_note"] = "paired seeds used by the effect"
     ci["baseline_mean"] = base["mean"]
     # The shared finite evaluation stream is a second source of noise on

@@ -255,7 +255,8 @@ class PairedStreamDigestTest(unittest.TestCase):
         self.assertFalse(crossed["decision_agrees"])
 
     def test_paired_diff_abstains_on_malformed_training_seeds(self):
-        for bad in ("not-a-record", {"seed": [0], "accuracy": 1.0},
+        for bad in ("not-a-record", None, 3, object(),
+                    {"seed": [0], "accuracy": 1.0},
                     {"seed": True, "accuracy": 1.0},
                     {"seed": 0.5, "accuracy": 1.0}):
             with self.subTest(record=bad):
