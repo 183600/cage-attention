@@ -161,6 +161,24 @@ class E2DifficultyCompanionTest(unittest.TestCase):
                          "REVERSED")
         self.assertFalse(reversed_contrast["raw_and_standardized_agree"])
 
+    def test_companions_accept_length_generators(self):
+        from cage.experiments import (
+            _E2_VARIANTS,
+            _e2_difficulty_companions,
+            _e2_endpoint_class_companions,
+        )
+
+        by_variant = {label: [self._run(gate)]
+                      for label, gate, *_ in _E2_VARIANTS}
+        with contextlib.redirect_stdout(io.StringIO()):
+            difficulty = _e2_difficulty_companions(
+                by_variant, (length for length in (3, 6)))
+            classes = _e2_endpoint_class_companions(
+                by_variant, (length for length in (3, 6)))
+        self.assertEqual(difficulty["reference_length"], 3)
+        self.assertEqual(difficulty["endpoint_length"], 6)
+        self.assertIn("endpoint L=6", classes["title"])
+
 
 
 class DifficultyStrataTest(unittest.TestCase):

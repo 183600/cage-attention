@@ -347,6 +347,47 @@ class CounterfactualEvalIntegrationTest(unittest.TestCase):
         self.assertAlmostEqual(
             payload["contrasts"]["calib - none"]["6"]["mean"], 0.3)
 
+    def test_length_sweep_accepts_generators_and_empty_containers(self):
+        def run(seed, gate, follow):
+            return {
+                "seed": seed, "gate": gate, "accuracy": 0.5,
+                "cf_value_follow_rate": follow,
+                "cf_distractor_unchanged_rate": 1.0,
+                "cf_relocation_unchanged_rate": 1.0,
+                "metrics_by_length": {
+                    3: {"cf_value_follow_rate": follow,
+                        "cf_value_accuracy": follow,
+                        "cf_distractor_unchanged_rate": 1.0,
+                        "cf_relocation_unchanged_rate": 1.0},
+                    6: {"cf_value_follow_rate": follow * 0.5,
+                        "cf_value_accuracy": follow * 0.5,
+                        "cf_distractor_unchanged_rate": 1.0,
+                        "cf_relocation_unchanged_rate": 1.0},
+                },
+                "model_cfg": {"gate": gate},
+                "training_recipe": {}, "config": {},
+            }
+
+        by_arm = {"none": [run(0, "none", 0.2)],
+                  "calib": [run(0, "calib", 0.8)]}
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _counterfactual_companion(
+                    pathlib.Path(tmp), "e2", by_arm,
+                    lengths=(length for length in (3, 6)), reference="none")
+        self.assertEqual(payload["lengths"], [3, 6])
+        self.assertAlmostEqual(
+            payload["arms"]["calib"]["by_length"]["6"]
+            ["cf_value_follow_rate"]["mean"], 0.4)
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _counterfactual_companion(
+                    pathlib.Path(tmp), "e2", by_arm, lengths=object(),
+                    reference="none")
+        self.assertEqual(payload["lengths"], [])
+        self.assertNotIn(
+            "3", payload["contrasts"].get("calib - none", {}))
+
     def test_callable_reference_keeps_the_comparison_within_cell(self):
         def run(seed, gate, follow):
             return {

@@ -4870,6 +4870,9 @@ def _counterfactual_companion(out_dir, tag, by_arm, lengths=None,
                 parts.append(str(part))
         return "|".join(parts)
 
+    if lengths is not None:
+        lengths = _materialize_runs(lengths)
+
     def value(run, metric, length):
         if length is None:
             return run.get(metric)
@@ -10041,7 +10044,7 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
                                  experiment: str, cells, lengths,
                                  reference=None) -> dict:
     """Measure how cost grows with the E2 sweep length for every arm."""
-    lengths = [int(length) for length in lengths]
+    lengths = [int(length) for length in _materialize_runs(lengths)]
     if not lengths:
         payload = {
             "experiment": experiment,
@@ -15526,6 +15529,7 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
     are exploratory: they do not enter the FDR family and cannot change
     the pre-registered endpoint decision.
     """
+    lengths = _materialize_runs(lengths)
     if not lengths:
         payload = {
             "lengths": [],
@@ -15723,6 +15727,7 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
     if not settings.per_variant_tuning:
         return {"available": False,
                 "reason": "disabled by Settings.per_variant_tuning"}
+    lengths = _materialize_runs(lengths)
     if not lengths:
         return {"available": False,
                 "reason": ("empty length sweep: no endpoint at which to "
@@ -17112,6 +17117,7 @@ def _e2_difficulty_companions(by_variant: dict, lengths: list) -> dict:
     the raw readouts - but a sign reversal here means the raw endpoint
     should not be attributed to length calibration.
     """
+    lengths = _materialize_runs(lengths)
     if not lengths:
         # Reporting an empty sweep has no endpoint to standardize; abstain
         # instead of indexing an empty list (the same rule the per-record
@@ -17282,6 +17288,7 @@ def _e2_endpoint_class_companions(by_variant: dict,
     accuracy gain that reverses on macro-F1 is visible without adding a new
     pre-registered decision.
     """
+    lengths = _materialize_runs(lengths)
     if not lengths:
         return _class_frequency_companions(
             [], "e2 (empty length sweep; no endpoint)")
