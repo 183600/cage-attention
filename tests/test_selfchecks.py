@@ -241,6 +241,19 @@ class MetricInputValidationTest(unittest.TestCase):
                 self.assertTrue(out["reason"])
 
 
+class PositiveIntegerValidationTest(unittest.TestCase):
+    def test_large_counts_are_exact_or_rejected_not_truncated(self):
+        from cage.metrics import _positive_integer
+
+        exact = 2 ** 53 + 1
+        self.assertEqual(_positive_integer(exact), exact)
+        self.assertEqual(_positive_integer(str(exact)), exact)
+        self.assertIsNone(_positive_integer(10 ** 400))
+        self.assertIsNone(_positive_integer(True))
+        self.assertIsNone(_positive_integer(2.5))
+        self.assertEqual(_positive_integer("10.0"), 10)
+
+
 class TrainingFlagValidationTest(unittest.TestCase):
     def test_truthy_non_boolean_training_flags_are_rejected(self):
         from cage.train import train_model

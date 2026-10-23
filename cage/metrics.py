@@ -219,6 +219,28 @@ def _binary_labels(values, device=None):
 def _positive_integer(value):
     if isinstance(value, bool):
         return None
+    # Preserve exact integers instead of routing them through float: a
+    # Python/NumPy integer above 2**53 would otherwise be silently rounded
+    # to a *different* count (e.g. 2**53 + 1 -> 2**53).  Keep the historical
+    # fail-closed behavior for integers too large to be represented as a
+    # finite float, so a JSON value such as 10**400 cannot size a loop.
+    try:
+        exact = operator.index(value)
+    except TypeError:
+        exact = None
+    if exact is None and isinstance(value, str):
+        try:
+            exact = int(value.strip(), 10)
+        except (TypeError, ValueError):
+            exact = None
+    if exact is not None:
+        if exact < 1:
+            return None
+        try:
+            float(exact)
+        except (OverflowError, ValueError):
+            return None
+        return int(exact)
     try:
         number = float(value)
     except (TypeError, ValueError, OverflowError):
