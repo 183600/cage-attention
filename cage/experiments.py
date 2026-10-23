@@ -1626,8 +1626,21 @@ def _run_order_audit(order, cells, seeds, randomized=True):
     the run records so the realised order can be checked without rerunning
     the grid.
     """
-    cells = list(cells)
-    seeds = list(seeds)
+    container_errors = []
+    try:
+        cells = list(cells)
+    except TypeError:
+        cells = []
+        container_errors.append({
+            "cell": None, "block": None, "position": None,
+            "reason": "declared cells are not iterable"})
+    try:
+        seeds = list(seeds)
+    except TypeError:
+        seeds = []
+        container_errors.append({
+            "cell": None, "block": None, "position": None,
+            "reason": "declared seeds are not iterable"})
     try:
         order = list(order)
     except TypeError:
@@ -1642,7 +1655,7 @@ def _run_order_audit(order, cells, seeds, randomized=True):
     unexpected = []
     seed_mismatches = []
     unexpected_seeds = []
-    invalid_indices = []
+    invalid_indices = list(container_errors)
 
     def _order_index(value):
         if isinstance(value, bool):
@@ -1851,8 +1864,36 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
     as an incomplete run, not silently ignored: the caller decides whether
     that is a hard failure or just a partial grid.
     """
-    cells = list(cells)
-    seeds = list(seeds)
+    invalid_order = []
+    invalid = []
+    try:
+        cells = list(cells)
+    except TypeError:
+        cells = []
+        invalid_order.append({
+            "order_index": None,
+            "reason": "declared cells are not iterable"})
+    try:
+        seeds = list(seeds)
+    except TypeError:
+        seeds = []
+        invalid_order.append({
+            "order_index": None,
+            "reason": "declared seeds are not iterable"})
+    try:
+        order = list(order)
+    except TypeError:
+        order = []
+        invalid_order.append({
+            "order_index": None,
+            "reason": "run-order schedule is not iterable"})
+    try:
+        runs = list(runs)
+    except TypeError:
+        runs = []
+        invalid.append({
+            "run_index": None,
+            "reason": "realised run records are not iterable"})
 
     def _integer(value):
         if isinstance(value, bool):
@@ -1865,7 +1906,6 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
     declared_cells = {_coverage_cell_key(cell) for cell in cells}
     declared_seeds = {_integer(seed) for seed in seeds}
     expected = []
-    invalid_order = []
     seen_order = {}
     duplicate_order = []
     for index, row in enumerate(order):
@@ -1910,7 +1950,6 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
     expected_set = set(expected)
 
     observed = []
-    invalid = []
     for index, run in enumerate(runs):
         if not isinstance(run, Mapping):
             invalid.append({"run_index": index,

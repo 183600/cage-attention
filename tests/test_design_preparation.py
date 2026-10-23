@@ -138,6 +138,13 @@ class BlockedRunOrderTest(unittest.TestCase):
         self.assertFalse(audit["complete"])
         self.assertTrue(audit["invalid_indices"])
 
+    def test_non_iterable_declarations_are_not_certified(self):
+        for cells, seeds in ((None, (0,)), (("none",), None)):
+            with self.subTest(cells=cells, seeds=seeds):
+                audit = _run_order_audit([], cells, seeds)
+                self.assertFalse(audit["complete"])
+                self.assertTrue(audit["invalid_indices"])
+
     def test_malformed_schedule_rows_are_reported_not_raised(self):
         complete = _blocked_run_order(self.CELLS, self.SEEDS, 11)
         for broken in (list(complete) + [("none", 0, 0)],
@@ -856,6 +863,20 @@ class RealizedRunOrderAuditTest(unittest.TestCase):
             lambda run: run["cell"])
         self.assertIs(audit["matches_schedule"], False)
         self.assertEqual(len(audit["invalid"]), 2)
+
+    def test_non_iterable_containers_are_not_certified(self):
+        for runs, order, cells, seeds in (
+                (None, None, None, None),
+                (None, [], [], [0]),
+                ([], None, ["none"], [0]),
+                ([], [], None, [0]),
+                ([], [], ["none"], None)):
+            with self.subTest(runs=runs, order=order, cells=cells,
+                              seeds=seeds):
+                audit = _realized_order_audit(
+                    runs, order, cells, seeds, lambda run: run["cell"])
+                self.assertFalse(audit["matches_schedule"])
+                self.assertTrue(audit["invalid"] or audit["invalid_order"])
 
     def test_malformed_schedule_rows_are_not_certified(self):
         order = _blocked_run_order(self.CELLS, self.SEEDS, 7,
