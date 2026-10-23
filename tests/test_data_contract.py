@@ -202,6 +202,18 @@ class SplitContainerInputTest(unittest.TestCase):
                     assert_time_ordered([0, 1], bad)
 
 
+class SplitIndexShapeTest(unittest.TestCase):
+    def test_two_dimensional_boolean_masks_are_rejected(self):
+        from cage.data import assert_split_partition
+
+        # Every row is True, so flattening this matrix would assign all four
+        # samples and pass the partition audit even though the caller
+        # supplied a matrix rather than one flag per sample.
+        mask = torch.ones((2, 2), dtype=torch.bool)
+        with self.assertRaises(ValueError):
+            assert_split_partition(4, {"train": mask})
+
+
 class LengthSweepBoundsTest(unittest.TestCase):
     def test_huge_sweep_request_stops_at_the_first_unfitted_length(self):
         from cage.data import length_sweep_lengths

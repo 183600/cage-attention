@@ -475,6 +475,11 @@ def _as_indices(index, n: int) -> torch.Tensor:
                 f"split indices must be integers or a boolean mask, got "
                 f"{type(index).__name__}") from exc
         if t.dtype == torch.bool:
+            if t.dim() != 1:
+                raise ValueError(
+                    "boolean split masks must be one-dimensional (one flag "
+                    f"per sample), got shape {tuple(t.shape)}; flattening a "
+                    f"matrix would select the wrong samples")
             m = t.reshape(-1)
             if int(m.numel()) != n:
                 raise ValueError(
