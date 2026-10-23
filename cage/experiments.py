@@ -10152,8 +10152,11 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
         valid_runs = _curve_valid_runs(runs)
         acc = _mean_std([r.get("accuracy") for r in runs])
         valid_acc = _mean_std([r.get("accuracy") for r in valid_runs])
-        recorded = sorted({int(r["params"]) for r in runs
-                           if _finite(r.get("params"))})
+        raw_params = [_positive_integer(r.get("params"))
+                      for r in runs if "params" in r]
+        malformed_params = any(value is None for value in raw_params)
+        recorded = sorted({value for value in raw_params
+                           if value is not None})
         key = json.dumps(cfg, sort_keys=True)
         try:
             if key not in measured:
@@ -10192,8 +10195,12 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
                 sum(all_deltas) / len(all_deltas)
                 if all_deltas else float("nan")),
             "accuracy_delta_n_all": len(all_deltas),
-            "recorded_params": recorded[0] if len(recorded) == 1 else None,
-            "params_match_run": (len(recorded) == 1
+            "recorded_params": (recorded[0]
+                                if len(recorded) == 1
+                                and not malformed_params else None),
+            "recorded_params_malformed": bool(malformed_params),
+            "params_match_run": (not malformed_params
+                                 and len(recorded) == 1
                                  and recorded[0] == rec["params"]),
         })
         entries[label] = rec
