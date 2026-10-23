@@ -355,10 +355,17 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
     if not lr_grid:
         raise ValueError("lr_grid must contain at least one learning rate")
     lr_grid = tuple(_validated_lr(lr) for lr in lr_grid)
-    if steps_grid:
-        raw_steps = _sequence(steps_grid, "steps_grid")
-    else:
+    if steps_grid is None:
         raw_steps = (steps,)
+    else:
+        # An explicitly supplied grid must be an iterable even when it is
+        # empty/falsy.  The old truthiness check silently treated scalar
+        # ``0``/``False``/``""`` as "no grid" and fell back to ``steps``,
+        # which is a different experiment than the caller named; only an
+        # empty *iterable* keeps the documented legacy fallback.
+        raw_steps = _sequence(steps_grid, "steps_grid")
+        if not raw_steps:
+            raw_steps = (steps,)
     step_values = tuple(_positive_integer(s) for s in raw_steps)
     if not step_values or any(s is None for s in step_values):
         raise ValueError(f"steps_grid must contain positive ints, got "
