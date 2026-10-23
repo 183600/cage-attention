@@ -320,6 +320,61 @@ class ControlledAuditProvenanceTest(unittest.TestCase):
         self.assertTrue(any("non-string" in msg
                             for msg in audit["mismatches"]))
 
+    def test_legacy_cell_label_must_expand_to_one_factor(self):
+        # A ``calib_variant`` label names a whole cell, not one factor.
+        # Known cells expand into their flag vector (so the ordinary
+        # one-term ablation still certifies), but an unknown/empty label
+        # cannot be audited and must not pass as a single opaque factor.
+        def legacy(variant):
+            run = self._run()
+            run.pop("model_cfg")
+            run["calib_variant"] = variant
+            return run
+
+        single = _controlled_audit(
+            [legacy("full")], [legacy("calib_len_only")])
+        self.assertTrue(single["controlled"], single["mismatches"])
+        self.assertTrue(single["single_factor"])
+        self.assertEqual(single["n_varying_factors"], 1)
+        for label in ("mystery", "", None):
+            with self.subTest(label=label):
+                audit = _controlled_audit([legacy("full")], [legacy(label)])
+                self.assertFalse(audit["controlled"])
+                self.assertFalse(audit["single_factor"])
+                self.assertTrue(any("calib_variant" in msg
+                                    for msg in audit["mismatches"]))
+        both_terms = _controlled_audit(
+            [legacy("full")], [legacy("calib_no_terms")])
+        self.assertFalse(both_terms["controlled"])
+        self.assertFalse(both_terms["single_factor"])
+        self.assertEqual(both_terms["n_varying_factors"], 2)
+        mixed_side = _controlled_audit(
+            [legacy("full"), legacy("calib_len_only")], [legacy("full")])
+        self.assertFalse(mixed_side["controlled"])
+        self.assertTrue(any("pools different conditions" in msg
+                            for msg in mixed_side["mismatches"]))
+
+    def test_mixed_provenance_still_checks_the_one_resolved_config(self):
+        # A new record can be paired with a legacy one (no model_cfg).  The
+        # cross-side config diff cannot be computed, but the new side's
+        # declared label must still match the flags it actually trained;
+        # otherwise a mislabelled new run could hide a two-term ablation
+        # behind a one-factor label.
+        legacy_query = self._run()
+        legacy_query.pop("model_cfg")
+        legacy_query.pop("calib_variant")
+        legacy_query["gate"] = "query"
+        good = self._run()
+        audit = _controlled_audit([good], [legacy_query])
+        self.assertTrue(audit["controlled"], audit["mismatches"])
+
+        bad = self._run(calib_use_len=False, calib_use_ent=False)
+        bad["calib_variant"] = "full"
+        audit = _controlled_audit([bad], [legacy_query])
+        self.assertFalse(audit["controlled"])
+        self.assertTrue(any("does not match the trained flags" in msg
+                            for msg in audit["mismatches"]))
+
 
 class SelectionReliabilityInputTest(unittest.TestCase):
     def test_malformed_selection_fields_do_not_look_reliable(self):

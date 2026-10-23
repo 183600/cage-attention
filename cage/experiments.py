@@ -3791,7 +3791,9 @@ def _controlled_audit(runs_a, runs_b):
        manipulations, and it belongs in a registered factorial main effect
        or interaction rather than in a single-factor decision row.  Records
        that predate the resolved ``model_cfg`` stamp fall back to the
-       declared factor labels;
+       declared factor labels; a legacy ``calib_variant`` cell label is only
+       counted after it expands to a known flag vector, so an unknown/empty
+       label is refused instead of being treated as one opaque factor;
     5. **Trained-model ground truth**: when both sides carry the resolved
        ``model_cfg``, every non-factor config key must match across the
        sides (an undeclared architectural difference is a confound even
@@ -3907,6 +3909,22 @@ def _controlled_audit(runs_a, runs_b):
                 f"repeated seed (including a 32-bit stream alias such as "
                 f"0 vs 2**32) is one run counted twice, so the paired n "
                 f"would be inflated and the difference is not independent")
+    # A controlled side must be one fixed condition, not a pooled mix of
+    # cells.  The resolved ``model_cfg`` gets this check below; legacy
+    # records that carry only declared labels need it too, otherwise a side
+    # holding two different cell labels can still pass the cross-side
+    # single-factor count (e.g. a={full, len_only} vs b={full} varies only
+    # the concentration flag as a *set*, although side a is not one arm).
+    for side, runs in (("a", runs_a), ("b", runs_b)):
+        for key in _AUDIT_FACTOR_KEYS:
+            values = sorted({
+                str(r.get(key)) for r in runs
+                if key in r and r.get(key) is not None and r.get(key) != ""})
+            if len(values) > 1:
+                audit["mismatches"].append(
+                    f"side {side} carries multiple {key} labels {values}: "
+                    f"the side pools different conditions, so it is not one "
+                    f"fixed contrast arm")
     # Capacity: the parameter count each side actually trained (recorded for
     # every contrast; the placebo-specific enforcement happens below, where
     # the resolved model configs have been compared).
@@ -3994,6 +4012,44 @@ def _controlled_audit(runs_a, runs_b):
                 f"malformed model_cfg object(s) (expected mappings): "
                 f"{len(malformed_cfgs)} run(s) cannot be checked against the "
                 f"trained configuration")
+        # The top-level design labels are what a reader sees in the table;
+        # they must name the model that actually trained.  Check this for
+        # *every* run that carries a resolved config, not only when both
+        # sides do: a mixed-provenance pair (new record versus a legacy one)
+        # would otherwise let a mislabelled new run hide a multi-factor
+        # manipulation behind its declared label.  Checking only
+        # ``calib_variant`` would let a run labelled gate="none" carry a
+        # query/calib config, making an identical-config or mislabelled
+        # contrast look controlled.
+        for side, side_runs in (("a", runs_a), ("b", runs_b)):
+            for r in side_runs:
+                cfg = r.get("model_cfg")
+                if not isinstance(cfg, Mapping):
+                    continue
+                for key in ("gate", "norm", "layer_scale"):
+                    if key not in r:
+                        continue
+                    label = r.get(key)
+                    trained = cfg.get(key)
+                    if label != trained:
+                        audit["mismatches"].append(
+                            f"side {side}: {key} label {label!r} does "
+                            f"not match the trained model_cfg "
+                            f"({trained!r})")
+                label = r.get("calib_variant")
+                if not label:
+                    continue
+                if cfg.get("gate") != "calib":
+                    audit["mismatches"].append(
+                        f"side {side}: calib_variant={label!r} on a "
+                        f"gate={cfg.get('gate')!r} run")
+                    continue
+                cell = _calib_cell(r)
+                if label != cell:
+                    audit["mismatches"].append(
+                        f"side {side}: calib_variant label {label!r} "
+                        f"does not match the trained flags "
+                        f"(cell {cell!r})")
         if all(isinstance(c, Mapping) for c in cfgs_a + cfgs_b):
             for side, cfgs in (("a", cfgs_a), ("b", cfgs_b)):
                 for j, other in enumerate(cfgs[1:], start=1):
@@ -4012,39 +4068,6 @@ def _controlled_audit(runs_a, runs_b):
                         f"undeclared model-config difference across sides: "
                         f"{key}={va!r} vs {vb!r}")
             audit["model_cfg"] = {"a": cfgs_a[0], "b": cfgs_b[0]}
-            for side, side_runs in (("a", runs_a), ("b", runs_b)):
-                for r in side_runs:
-                    cfg = r.get("model_cfg") or {}
-                    # The top-level design labels are what a reader sees in
-                    # the table; they must name the model that actually
-                    # trained.  Checking only ``calib_variant`` would let a
-                    # run labelled gate="none" carry a query/calib config,
-                    # making an identical-config or mislabelled contrast
-                    # look controlled.
-                    for key in ("gate", "norm", "layer_scale"):
-                        if key not in r:
-                            continue
-                        label = r.get(key)
-                        trained = cfg.get(key)
-                        if label != trained:
-                            audit["mismatches"].append(
-                                f"side {side}: {key} label {label!r} does "
-                                f"not match the trained model_cfg "
-                                f"({trained!r})")
-                    label = r.get("calib_variant")
-                    if not label:
-                        continue
-                    if cfg.get("gate") != "calib":
-                        audit["mismatches"].append(
-                            f"side {side}: calib_variant={label!r} on a "
-                            f"gate={cfg.get('gate')!r} run")
-                        continue
-                    cell = _calib_cell(r)
-                    if label != cell:
-                        audit["mismatches"].append(
-                            f"side {side}: calib_variant label {label!r} "
-                            f"does not match the trained flags "
-                            f"(cell {cell!r})")
             labels_a = {r.get("calib_variant") for r in runs_a
                         if isinstance(r.get("calib_variant"), str)
                         and r.get("calib_variant")}
@@ -4090,6 +4113,7 @@ def _controlled_audit(runs_a, runs_b):
         # resolved flags would make an ordinary one-flag ablation look like
         # a two-factor contrast, so only the resolved diffs are counted when
         # the model config is present.
+        unresolved_cell = False
         if audit.get("model_cfg") is not None:
             factor_keys = set(audit["model_factor_diffs"])
         else:
@@ -4124,8 +4148,29 @@ def _controlled_audit(runs_a, runs_b):
                             factor_keys.add(key)
                             audit["varying_factors"][key] = {
                                 "a": sorted(va), "b": sorted(vb)}
+                else:
+                    # A ``calib_variant`` label names a *cell* (a whole
+                    # flag vector), not one independent factor.  When at
+                    # least one side's label is unknown/empty/non-string,
+                    # the vector cannot be recovered, so counting the
+                    # label as a single factor would certify a contrast
+                    # whose manipulation is actually unverified.  Fail
+                    # closed instead: a legacy record may only pass as
+                    # single-factor when its cell can be expanded.
+                    unresolved_cell = True
+                    labels = sorted({
+                        str(r.get("calib_variant"))
+                        for r in runs_a + runs_b
+                        if r.get("calib_variant") is not None})
+                    audit["mismatches"].append(
+                        "single-factor contract: legacy calib_variant "
+                        f"label(s) {labels} do not all name a known "
+                        "calibration cell, so the manipulated flag(s) "
+                        "cannot be identified; a cell label is not one "
+                        "independent factor and the contrast is not "
+                        "certified as single-factor")
         audit["n_varying_factors"] = len(factor_keys)
-        audit["single_factor"] = len(factor_keys) == 1
+        audit["single_factor"] = len(factor_keys) == 1 and not unresolved_cell
         if not factor_keys:
             if audit.get("model_cfg") is not None:
                 # A stale declared label difference does not make an
@@ -6352,6 +6397,15 @@ class ContrastLog:
             "bca_agrees": ci.get("bca_agrees"),
             "baseline_mean": ci.get("baseline_mean"),
             "controlled": None if audit is None else audit["controlled"],
+            # Expose the single-factor verdict next to the boolean so a
+            # persisted contrast row answers "was this contrast allowed to
+            # vary exactly one factor?" without re-running the audit.  None
+            # for benchmarks and for aggregate factorial/interaction rows,
+            # which are not single-factor pairwise contrasts by design.
+            "single_factor": (None if audit is None
+                              else audit.get("single_factor")),
+            "n_varying_factors": (None if audit is None
+                                  else audit.get("n_varying_factors")),
             "varying_factors": ({} if audit is None
                                 else audit.get("varying_factors")),
             "control_mismatches": ([] if audit is None
