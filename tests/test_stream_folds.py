@@ -36,7 +36,11 @@ from cage.metrics import (
 )
 from cage.model import build
 from cage.repro import seed_everything
-from cage.train import encode_correct_mask, eval_metrics
+from cage.train import (
+    encode_correct_mask,
+    eval_metrics,
+    training_curve_verdict,
+)
 
 
 class CurveHistoryInputTest(unittest.TestCase):
@@ -69,6 +73,28 @@ class CurveHistoryInputTest(unittest.TestCase):
             with self.subTest(steps_run=bad):
                 rec = _curve_record(hist, {"steps_run": bad})
                 self.assertEqual(rec["steps_run"], 1)
+
+    def test_malformed_optional_curve_fields_abstain(self):
+        # A curve restored from JSON can carry a hand-edited/malformed
+        # optional field.  That point must abstain (None in the series /
+        # NaN in the verdict), not raise out of the run-record writer.
+        series = {
+            "val_loss": "curve_val_loss",
+            "val_loss_se": "curve_val_loss_se",
+            "val_acc": "curve_val_acc",
+            "grad_norm": "curve_grad_norm",
+            "lr": "curve_lr",
+            "train_loss_window": "curve_train_loss_window",
+        }
+        for field, series_key in series.items():
+            with self.subTest(field=field):
+                hist = [{"step": 0, "train_loss": 1.0, field: "bad"}]
+                rec = _curve_record(hist)
+                self.assertIsNone(rec[series_key][0])
+                verdict = training_curve_verdict(hist)
+                self.assertTrue(math.isfinite(verdict["n_points"]))
+        self.assertEqual(
+            _curve_record([{"step": 0, "train_loss": 1.0}])["steps_run"], 1)
 
 
 class EvaluationFoldAuditTest(unittest.TestCase):

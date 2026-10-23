@@ -62,6 +62,20 @@ _GRAD_CLIP_MAX_NORM = 1.0
 _ETA_MIN_FACTOR = 0.1
 
 
+def _finite_float(value) -> float:
+    """Best-effort float for a persisted curve field.
+
+    Curve histories are reconstructed from JSON artifacts, so an optional
+    numeric field can be missing, null, a numeric string, or malformed.  A
+    malformed value must abstain (NaN) rather than abort the curve report:
+    the non-finite verdict is what tells the reader the history is unusable.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return float("nan")
+
+
 def _validated_lr(value):
     """Validate a learning rate before it reaches an optimizer.
 
@@ -215,7 +229,23 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
     # Work on copies so the caller's history keeps the raw single-batch
     # losses; the smoothed window value only changes the verdict input when
     # the raw value is finite, so a non-finite batch loss is never hidden.
-    hist = [dict(h) for h in hist]
+    # A history restored from JSON can carry malformed optional fields; each
+    # numeric field is normalised once (malformed -> NaN) so the verdict
+    # abstains instead of raising from ``float("bad")`` halfway through.
+    try:
+        raw_hist = list(hist)
+    except TypeError:
+        raw_hist = []
+    hist = []
+    for row in raw_hist:
+        if not isinstance(row, Mapping):
+            continue
+        h = dict(row)
+        for key in ("train_loss", "train_loss_window", "val_loss",
+                    "val_loss_se", "val_acc", "grad_norm", "lr"):
+            if key in h and h[key] is not None:
+                h[key] = _finite_float(h[key])
+        hist.append(h)
     for h in hist:
         raw = h.get("train_loss")
         window = h.get("train_loss_window")
@@ -226,7 +256,7 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
               if math.isfinite(float(h.get("train_loss", float("nan"))))]
 
     def _bad(v):
-        return v is not None and not math.isfinite(float(v))
+        return v is not None and not math.isfinite(_finite_float(v))
 
     unstable = len(finite) < len(hist) or any(
         _bad(h.get("val_loss")) or _bad(h.get("grad_norm")) for h in hist)

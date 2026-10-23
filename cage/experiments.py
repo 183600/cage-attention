@@ -11105,6 +11105,22 @@ def _steps_run_from_hist(hist):
     return max(0, max(step for step, _ in rows) + 1 - skipped)
 
 
+def _curve_optional_float(value):
+    """Optional numeric curve field: None stays None, malformed -> None.
+
+    A stored curve is JSON provenance, so a hand-edited/corrupted optional
+    field must make that series point abstain rather than abort the whole
+    run record.  ``None`` is the existing sentinel for "not recorded" in the
+    curve series, so a malformed value uses the same representation.
+    """
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _curve_record(hist, early_stop_info=None, seeding=None):
     """Per-run learning-curve summary (monitor the curve, not just the end).
 
@@ -11198,18 +11214,17 @@ def _curve_record(hist, early_stop_info=None, seeding=None):
         "curve_steps": [int(h["step"]) for h in train],
         "curve_train_loss": [float(h["train_loss"]) for h in train],
         "curve_train_loss_window": [
-            None if h.get("train_loss_window") is None
-            else float(h["train_loss_window"]) for h in train],
-        "curve_val_loss": [None if h.get("val_loss") is None
-                           else float(h["val_loss"]) for h in train],
-        "curve_val_loss_se": [None if h.get("val_loss_se") is None
-                              else float(h["val_loss_se"]) for h in train],
-        "curve_val_acc": [None if h.get("val_acc") is None
-                          else float(h["val_acc"]) for h in train],
-        "curve_grad_norm": [None if h.get("grad_norm") is None
-                            else float(h["grad_norm"]) for h in train],
-        "curve_lr": [None if h.get("lr") is None else float(h["lr"])
-                     for h in train],
+            _curve_optional_float(h.get("train_loss_window"))
+            for h in train],
+        "curve_val_loss": [_curve_optional_float(h.get("val_loss"))
+                           for h in train],
+        "curve_val_loss_se": [_curve_optional_float(h.get("val_loss_se"))
+                              for h in train],
+        "curve_val_acc": [_curve_optional_float(h.get("val_acc"))
+                          for h in train],
+        "curve_grad_norm": [_curve_optional_float(h.get("grad_norm"))
+                            for h in train],
+        "curve_lr": [_curve_optional_float(h.get("lr")) for h in train],
         "curve_verdict": verdict["verdict"],
         "curve_recommendation": verdict["recommendation"],
         "steps_run": int(
