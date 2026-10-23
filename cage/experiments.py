@@ -2159,6 +2159,11 @@ def _linear_slope(xs, ys):
     dropped; fewer than two points or a constant x returns NaN rather than
     an arbitrary number.
     """
+    try:
+        xs = list(xs)
+        ys = list(ys)
+    except TypeError:
+        return float("nan")
     pairs = [(float(x), float(y)) for x, y in zip(xs, ys)
              if _finite(x) and _finite(y)]
     if len(pairs) < 2:
@@ -4665,6 +4670,34 @@ def _one_sample_contrast(runs, metric, bound=None):
     ci["seeds_unpaired"] = [None] * len(missing)
     ci["seeds_undefined"] = dropped
     ci["curve_invalid_seeds"] = _curve_invalid_seeds_for(used, (by_seed,))
+
+    def _stream_key(seed):
+        if isinstance(seed, str):
+            return ("raw", seed)
+        try:
+            return ("stream", stream_seed_key(seed))
+        except (TypeError, ValueError, OverflowError):
+            return ("raw", str(seed))
+
+    counts = {}
+    for seed in by_seed:
+        key = _stream_key(seed)
+        counts[key] = counts.get(key, 0) + 1
+    aliases = sorted(
+        {seed for seed in by_seed if counts[_stream_key(seed)] > 1},
+        key=_seed_order)
+    if aliases:
+        # A one-sample claim has one unit per independent stream.  Two raw
+        # seeds that alias the same 32-bit stream (0 vs 2**32) are one run
+        # counted twice, exactly as the paired audit treats them.
+        ci["seed_aliases"] = aliases
+        ci["controlled"] = {
+            "controlled": False,
+            "mismatches": [
+                f"one-sample contrast repeats training stream(s) "
+                f"{aliases}: aliased seeds are not independent units"],
+            "varying_factors": {},
+        }
     return ci
 
 
@@ -4683,6 +4716,8 @@ def _interaction_manipulation(audit: dict) -> dict:
     Prefer the resolved diffs; fall back to the labels only for records
     that predate ``model_cfg``.
     """
+    if not isinstance(audit, Mapping):
+        return {}
     resolved = audit.get("model_factor_diffs") or {}
     if resolved:
         return {key: value for key, value in resolved.items()}
@@ -4729,6 +4764,7 @@ def _class_frequency_companions(rules, title):
             # bad record cannot abort the rest of the report.
             continue
         label, runs_a, runs_b, hypothesis = item
+        label = str(label)
         # Reuse one materialized sample for the accuracy row and all three
         # macro companions: a generator would otherwise be exhausted by the
         # first contrast and the remaining rows would silently read n=0.
@@ -5875,8 +5911,11 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
     if curve_key in r_best:
         verdicts = r_best.get(curve_key)
         if isinstance(verdicts, (list, tuple)):
-            curve_invalid_best = sum(1 for v in verdicts
-                                     if v in CURVE_INVALID_VERDICTS)
+            if any(not isinstance(v, str) for v in verdicts):
+                curve_invalid_unknown = True
+            curve_invalid_best = sum(
+                1 for v in verdicts
+                if isinstance(v, str) and v in CURVE_INVALID_VERDICTS)
         else:
             curve_invalid_unknown = True
     diverged_best = None
@@ -11120,8 +11159,8 @@ def _curve_record(hist, early_stop_info=None, seeding=None):
         "curve_verdict": verdict["verdict"],
         "curve_recommendation": verdict["recommendation"],
         "steps_run": int(
-            early_stop_info.get("steps_run")
-            if early_stop_info.get("steps_run") is not None
+            _difficulty_count(early_stop_info.get("steps_run"))
+            if _difficulty_count(early_stop_info.get("steps_run")) is not None
             else _steps_run_from_hist(hist)),
         "early_stop_enabled": bool(
             early_stop_info.get("enabled", False)),

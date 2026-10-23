@@ -30,6 +30,7 @@ from cage.experiments import (
     _design_plan_fingerprint,
     _design_plan_outcomes_exist,
     _design_sensitivity_plan,
+    _linear_slope,
     _mean_std,
     _pilot_accuracy_level,
     _pilot_accuracy_sd,
@@ -1007,6 +1008,7 @@ class CoverageMalformedRunTest(unittest.TestCase):
         mixed = _mean_std([-1e308, 1e308])
         self.assertEqual(mixed["mean"], 0.0)
         self.assertTrue(math.isfinite(mixed["std"]))
+        self.assertTrue(math.isnan(_linear_slope(None, None)))
 
     def test_malformed_or_empty_coverage_declarations_fail_closed(self):
         good = {"seed": 0, "calib_variant": "full",

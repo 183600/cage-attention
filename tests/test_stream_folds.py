@@ -308,6 +308,17 @@ class PairedStreamDigestTest(unittest.TestCase):
                 self.assertEqual(ci["n"], 0)
                 self.assertTrue(ci["seeds_dropped"])
 
+    def test_one_sample_contrast_flags_aliased_training_streams(self):
+        runs = [
+            {"seed": 0, "accuracy": 0.5},
+            {"seed": 1, "accuracy": 0.6},
+            {"seed": 2 ** 32, "accuracy": 0.7},
+        ]
+        ci = _one_sample_contrast(runs, "accuracy")
+        self.assertEqual(ci["n"], 3)
+        self.assertEqual(ci["seed_aliases"], [0, 2 ** 32])
+        self.assertFalse(ci["controlled"]["controlled"])
+
     def test_paired_did_drops_malformed_runs(self):
         good = {"seed": 0, "accuracy": 1.0}
         for bad in ("not-a-record", {"seed": [0], "accuracy": 1.0},
