@@ -146,6 +146,17 @@ class TimeOrderInputTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     assert_time_ordered(bad, {"train": [0]})
 
+    def test_python_float_timestamps_keep_float64_precision(self):
+        from cage.data import assert_time_ordered
+
+        # float32 would collapse these distinct instants and let a newer
+        # training row pass as older than validation data.
+        times = [16777216.0, 16777217.0]
+        with self.assertRaises(ValueError):
+            assert_time_ordered(times, {"train": [1], "val": [0],
+                                        "test": []})
+        assert_time_ordered(times, {"train": [0], "val": [1], "test": []})
+
 
 class SplitContainerInputTest(unittest.TestCase):
     def test_non_mapping_split_containers_raise_value_error(self):

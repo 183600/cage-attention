@@ -597,6 +597,24 @@ def assert_time_ordered(times, splits) -> None:
         raise ValueError(
             f"time values must be real numeric timestamps, got dtype "
             f"{raw.dtype}")
+    if raw.is_floating_point() and not torch.is_tensor(times):
+        # ``torch.as_tensor`` captures a Python float list as float32 by
+        # default.  That rounds e.g. 16777216.0 and 16777217.0 to the same
+        # value, silently accepting a chronological violation.  Rebuild the
+        # original container directly at float64; integer containers stay in
+        # their exact integer dtype.
+        try:
+            raw = torch.as_tensor(times, dtype=torch.float64)
+        except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+            raise ValueError(
+                "time values must be numeric timestamps, got a container "
+                "that cannot be widened to float64") from exc
+        if raw.dim() != 1:
+            raise ValueError(
+                "time values must be one-dimensional (one timestamp per "
+                f"sample), got shape {tuple(raw.shape)}; flattening a matrix "
+                f"would audit the wrong samples")
+        raw = raw.reshape(-1)
     # Keep integer timestamps in their integer dtype: nanosecond Unix
     # timestamps exceed 2**53, so casting int64 to float64 collapses
     # distinct instants and can silently accept a chronological violation.
