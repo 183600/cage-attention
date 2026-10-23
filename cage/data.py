@@ -2782,8 +2782,18 @@ def length_sweep_lengths(base: int = 16, factor: int = 2, n: int = 4,
         raise ValueError(f"n must be >= 1, got {n}")
     if max_len < 1:
         raise ValueError(f"max_len must be >= 1, got {max_len}")
-    lengths = [base * (factor ** i) for i in range(n)]
-    fits = [L for L in lengths if 2 * L + 2 <= max_len]
+    lengths = []
+    current = base
+    # The sweep is strictly increasing, so once one length no longer fits it
+    # and every later length are dropped.  Stop there instead of computing
+    # ``factor ** i`` for a huge ``n`` (a Python big integer can grow without
+    # bound and turn a configuration error into a long stall).
+    for _ in range(n):
+        if 2 * current + 2 > max_len:
+            break
+        lengths.append(current)
+        current *= factor
+    fits = lengths
     if len(fits) < 2:
         raise ValueError(
             f"length sweep needs at least two fitted lengths, got {fits} "

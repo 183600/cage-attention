@@ -144,6 +144,19 @@ class SplitContainerInputTest(unittest.TestCase):
                     assert_time_ordered([0, 1], bad)
 
 
+class LengthSweepBoundsTest(unittest.TestCase):
+    def test_huge_sweep_request_stops_at_the_first_unfitted_length(self):
+        from cage.data import length_sweep_lengths
+
+        self.assertEqual(
+            length_sweep_lengths(base=1, factor=2, n=10 ** 9, max_len=16),
+            [1, 2, 4])
+        # A huge factor/n must fail fast, not build an unbounded big integer.
+        with self.assertRaises(ValueError):
+            length_sweep_lengths(base=2, factor=10 ** 6, n=10 ** 9,
+                                 max_len=1000)
+
+
 class SplitContractTest(unittest.TestCase):
     def test_reserved_training_seed_is_refused(self):
         for seed in RESERVED_EVAL_SEEDS:
