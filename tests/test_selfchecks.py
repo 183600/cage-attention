@@ -57,6 +57,25 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertTrue(math.isnan(out["accuracy"]))
         self.assertTrue(math.isnan(out["nll"]))
 
+    def test_multiclass_abstention_keeps_the_scored_key_schema(self):
+        import torch
+
+        scored = metrics.multiclass_metrics(
+            torch.tensor([[0.0, 1.0], [1.0, 0.0]]), [1, 0])
+        abstained = metrics.multiclass_metrics(None, [0, 1])
+        # The top-k key is named after the clamped class count in the scored
+        # panel and after the requested k when there is no class count; every
+        # other metric key is still part of the fixed schema.
+        scored_keys = {key for key in scored if not key.endswith("_accuracy")
+                       or key == "accuracy"}
+        abstained_keys = {key for key in abstained
+                          if not key.endswith("_accuracy")
+                          or key == "accuracy"}
+        self.assertEqual(scored_keys, abstained_keys)
+        for key in ("f1_macro_all_labels", "precision_macro_all_labels",
+                    "recall_macro_all_labels"):
+            self.assertTrue(math.isnan(abstained[key]))
+
     def test_malformed_multiclass_containers_abstain(self):
         import torch
 

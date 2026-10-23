@@ -669,9 +669,13 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
         raise ValueError(
             f"topk must be a positive integer, got {raw_topk!r}")
     keys = ["accuracy", "f1_micro", "f1_macro", "f1_weighted",
-            "precision_macro", "recall_macro",
-            "f1_macro_all_labels", "precision_macro_all_labels",
-            "recall_macro_all_labels"]
+            "precision_macro", "recall_macro"]
+    # Keep the abstention payload schema identical to the scored payload:
+    # callers read the label-union macro companions unconditionally, so a
+    # malformed panel must expose them as NaN rather than omit the keys.
+    companion_keys = ["f1_macro_all_labels", "precision_macro_all_labels",
+                      "recall_macro_all_labels"]
+    keys.extend(companion_keys)
 
     def _abstain(k=None):
         out = {"n": 0, "n_classes_present": 0, "nll": float("nan")}
