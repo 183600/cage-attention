@@ -233,6 +233,16 @@ class ReportMalformedRunTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(
                 _class_frequency_companions(None, "test")["rows"], [])
+        # Rule-level generators are consumed once, not once per companion
+        # metric (which would silently leave only the accuracy row measured).
+        full_good = dict(good, recall_macro=1.0, f1_macro=1.0,
+                         f1_weighted=1.0)
+        gen_rule = ("arm", (r for r in [full_good]),
+                    (r for r in [full_good]), "H1a")
+        with contextlib.redirect_stdout(io.StringIO()):
+            gen_out = _class_frequency_companions([gen_rule], "test")
+        self.assertEqual(len(gen_out["rows"]), 3)
+        self.assertTrue(all(row["n"] == 1 for row in gen_out["rows"]))
 
     def test_error_tables_skip_non_mapping_rows(self):
         conf = {"err_conf_by_error_type": {"retrieval_miss": 0.9}}

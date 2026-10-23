@@ -278,6 +278,18 @@ class ControlledAuditProvenanceTest(unittest.TestCase):
                 self.assertTrue(any("non-mapping" in msg
                                     for msg in audit["mismatches"]))
 
+    def test_generator_sides_are_materialized_once(self):
+        good = self._run()
+        audit = _controlled_audit((r for r in [good]),
+                                  (r for r in [good]))
+        self.assertEqual(audit["n_a"], 1)
+        self.assertEqual(audit["n_b"], 1)
+        self.assertEqual(audit["seeds_a"], [0])
+        self.assertEqual(audit["seeds_b"], [0])
+        self.assertFalse(any("has no runs" in msg
+                             for msg in audit["mismatches"]))
+        self.assertTrue(_controlled_audit(None, None)["controlled"] is False)
+
 
 class PilotSdTest(unittest.TestCase):
     def test_largest_rung_sd_is_used(self):

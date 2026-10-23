@@ -3810,6 +3810,8 @@ def _controlled_audit(runs_a, runs_b):
     def _audit_row(run):
         return run if isinstance(run, Mapping) else {}
 
+    runs_a = _materialize_runs(runs_a)
+    runs_b = _materialize_runs(runs_b)
     malformed_a = sum(1 for r in runs_a if not isinstance(r, Mapping))
     malformed_b = sum(1 for r in runs_b if not isinstance(r, Mapping))
     runs_a = [_audit_row(r) for r in runs_a]
@@ -4688,6 +4690,11 @@ def _class_frequency_companions(rules, title):
             # bad record cannot abort the rest of the report.
             continue
         label, runs_a, runs_b, hypothesis = item
+        # Reuse one materialized sample for the accuracy row and all three
+        # macro companions: a generator would otherwise be exhausted by the
+        # first contrast and the remaining rows would silently read n=0.
+        runs_a = _mapping_runs(runs_a)
+        runs_b = _mapping_runs(runs_b)
         acc = _paired_diff(runs_a, runs_b, "accuracy")
         for metric, convention in _CLASS_METRIC_COMPANIONS:
             ci = _paired_diff(runs_a, runs_b, metric)
