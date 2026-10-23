@@ -218,6 +218,13 @@ class LinkedLengthEvalTest(unittest.TestCase):
         self.assertAlmostEqual(
             rec2["linked_composition_effect_at_longest"], 0.5)
 
+    def test_run_record_stamp_abstains_without_a_mapping(self):
+        from cage.experiments import Settings, _stamp_linked_length_extension
+
+        settings = Settings.quick()
+        self.assertIsNone(_stamp_linked_length_extension(
+            None, self.rule, settings, [], 123))
+
     def test_run_record_stamp_abstains_on_an_empty_sweep(self):
         settings = Settings.quick()
         rec = {}

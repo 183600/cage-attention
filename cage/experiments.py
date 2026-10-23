@@ -2217,6 +2217,9 @@ def _stamp_difficulty_standardization(rec, base_length, lengths):
     The fields are exploratory companions: the pre-registered H2 decisions
     keep reading the raw ``accuracy_*`` / ``accuracy_drop`` values.
     """
+    if not isinstance(rec, Mapping):
+        # Not a run record at all; there is nothing to stamp.
+        return rec
     # A legacy/malformed record may lack the per-length table (or carry a
     # non-dict placeholder).  The companion then abstains with NaN fields
     # instead of raising in the middle of the E2 loop.
@@ -2312,6 +2315,9 @@ def _stamp_linked_length_extension(rec, model, settings, lengths, eval_seed):
     The companion is exploratory: the pre-registered H2 decision still
     reads the raw ``accuracy_*`` fields.
     """
+    if not isinstance(rec, Mapping):
+        # No run record to stamp; do not fabricate a companion payload.
+        return None
     if not lengths:
         rec["linked_length_extension"] = None
         rec["linked_accuracy_by_length"] = {}

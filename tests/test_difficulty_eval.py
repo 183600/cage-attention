@@ -352,6 +352,13 @@ class StandardizedProportionTest(unittest.TestCase):
 
 
 class MissingDifficultyRecordTest(unittest.TestCase):
+    def test_stamp_does_not_require_a_mapping(self):
+        from cage.experiments import _stamp_difficulty_standardization
+
+        self.assertIsNone(_stamp_difficulty_standardization(None, 3, [3, 6]))
+        self.assertEqual(
+            _stamp_difficulty_standardization([], 3, [3, 6]), [])
+
     def test_stamp_abstains_without_metrics_by_length(self):
         from cage.experiments import _stamp_difficulty_standardization
 
