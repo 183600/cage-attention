@@ -2793,9 +2793,25 @@ def _counterfactual_summary(counts) -> dict:
             # the swapped prediction with the swapped answer), so the
             # follow count can never exceed the overall correct count.
             and parsed["n_value_follow"] <= parsed["n_value_correct"]
+            # A follow row changes the prediction (the swapped answer is
+            # guaranteed to differ from the clean answer), so follow rows
+            # are flipped rows and cannot outnumber them.
+            and parsed["n_value_follow"] <= parsed["n_value_flip"]
+            # A stubborn row keeps the clean prediction, so it is disjoint
+            # from the flipped rows.
+            and parsed["n_value_stubborn"] + parsed["n_value_flip"] <= n
             and parsed["n_value_stubborn"] <= n_correct
+            # Follow and stubborn both require a clean-correct row and are
+            # mutually exclusive (new swapped answer vs original answer),
+            # so together they fit inside the clean-correct count.
+            and (parsed["n_value_follow"] + parsed["n_value_stubborn"]
+                 <= n_correct)
             and parsed["n_value_flip"] <= n
             and parsed["n_value_correct"] <= n
+            # Inclusion-exclusion: the clean-correct and value-swap-correct
+            # sets intersect exactly on the follow rows.
+            and (n_correct + parsed["n_value_correct"]
+                 - parsed["n_value_follow"] <= n)
             and parsed["n_distractor"] <= n
             and parsed["n_distractor_unchanged"] <= parsed["n_distractor"]
             and parsed["n_distractor_correct"] <= parsed["n_distractor"]

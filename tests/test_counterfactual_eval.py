@@ -233,6 +233,21 @@ class CounterfactualCountsTest(unittest.TestCase):
             # clean-correct and total bounds are satisfied.
             {"n": 2, "n_original_correct": 2, "n_value_follow": 2,
              "n_value_correct": 1},
+            # A follow row changes the prediction, so it is also a flip.
+            {"n": 2, "n_original_correct": 2, "n_value_follow": 2,
+             "n_value_flip": 1, "n_value_correct": 2},
+            # Stubborn rows keep the clean prediction and cannot overlap
+            # with the flipped rows.
+            {"n": 2, "n_original_correct": 2, "n_value_stubborn": 2,
+             "n_value_flip": 1},
+            # Follow and stubborn are disjoint clean-correct subsets.
+            {"n": 4, "n_original_correct": 1, "n_value_follow": 1,
+             "n_value_stubborn": 1, "n_value_flip": 2,
+             "n_value_correct": 1},
+            # Overlapping clean-correct and value-swap-correct sets beyond
+            # the follow intersection cannot fit in the evaluated rows.
+            {"n": 2, "n_original_correct": 2, "n_value_stubborn": 1,
+             "n_value_flip": 1, "n_value_correct": 2},
             {"n": 1, "n_value_stubborn": 2},
             {"n": 1, "n_value_flip": 2},
             {"n": 1, "n_value_correct": 2},
