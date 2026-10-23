@@ -2748,6 +2748,12 @@ def _power_at_effect(mode: str, effect, sd, n: int, alpha: float,
     if not (all(needed) and float(sd) > 0.0
             and 0.0 < float(alpha) < 1.0):
         return float("nan")
+    if mode in ("equivalence", "noninferior") and float(bound) <= 0.0:
+        # A null-prediction power calculation is defined only for a
+        # positive equivalence/non-inferiority bound.  A zero or negative
+        # bound would make the "CI inside the bound" event impossible (or
+        # invert it) while still returning an apparently usable number.
+        return float("nan")
     se = float(sd) / math.sqrt(n)
     if se <= 0.0:
         return float("nan")

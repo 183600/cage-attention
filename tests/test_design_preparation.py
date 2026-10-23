@@ -846,6 +846,13 @@ class PowerArgumentValidationTest(unittest.TestCase):
                 self.assertTrue(math.isnan(_power_at_effect(
                     "superiority", 0.01, 0.01, bad_n, 0.05)))
 
+    def test_non_positive_null_bound_is_not_power_planned(self):
+        for mode in ("equivalence", "noninferior"):
+            for bound in (0.0, -0.1):
+                with self.subTest(mode=mode, bound=bound):
+                    self.assertTrue(math.isnan(_power_at_effect(
+                        mode, 0.0, 0.01, 10, 0.05, bound=bound)))
+
     def test_unknown_mode_or_probability_abstains(self):
         self.assertTrue(math.isnan(_power_z("bogus", 0.05, 0.8)))
         self.assertTrue(math.isnan(_power_z("superiority", True, 0.8)))
