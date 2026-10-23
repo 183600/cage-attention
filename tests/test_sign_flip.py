@@ -67,6 +67,18 @@ class ExactSignFlipTest(unittest.TestCase):
         self.assertTrue(0.0 < first["p_value"] <= 1.0)
         self.assertGreater(first["min_attainable_p"], 0.0)
 
+    def test_integer_like_seed_names_the_same_stream(self):
+        class IndexSeed:
+            def __index__(self):
+                return 7
+
+        values = [float(i) for i in range(1, 21)]
+        plain = sign_flip_test(values, n_random=500, max_exact=10, seed=7)
+        wrapped = sign_flip_test(values, n_random=500, max_exact=10,
+                                 seed=IndexSeed())
+        self.assertTrue(wrapped["valid"], wrapped["reason"])
+        self.assertEqual(wrapped["p_value"], plain["p_value"])
+
     def test_malformed_inputs_abstain(self):
         cases = [
             ([], {}),

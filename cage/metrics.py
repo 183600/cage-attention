@@ -2849,10 +2849,17 @@ def sign_flip_test(diffs, alternative: str = "two-sided",
         # so a caller asking for more gets the 20-unit cap (and the
         # Monte-Carlo fallback above it) instead of an abstention.
         max_exact_int = 20
-    if isinstance(seed, bool) or not isinstance(seed, int):
-        out["reason"] = "seed must be a plain integer"
+    if isinstance(seed, bool):
+        out["reason"] = "seed must be an integer, not bool"
         return out
-    seed_int = seed
+    try:
+        # Match the other resampling entry points: an integer-like object
+        # with ``__index__`` names the same exact stream, while floats and
+        # strings stay invalid instead of being truncated or parsed.
+        seed_int = int(operator.index(seed))
+    except TypeError:
+        out["reason"] = "seed must be an integer"
+        return out
 
     obs = float(d.mean())
     if not math.isfinite(obs):
