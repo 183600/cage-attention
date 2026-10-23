@@ -643,6 +643,12 @@ class DesignPlanFreezeTest(unittest.TestCase):
             self.assertEqual([e["event"] for e in events],
                              ["created", "amended"])
 
+    def test_unreadable_outcome_path_is_treated_as_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            (out / "e1_runs.jsonl").mkdir()
+            self.assertTrue(_design_plan_outcomes_exist(out, "e1"))
+
     def test_after_outcomes_a_changed_design_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = pathlib.Path(tmp)

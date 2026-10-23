@@ -2851,7 +2851,16 @@ def _design_plan_outcomes_exist(out_dir: pathlib.Path, tag: str) -> bool:
     for suffix in ("_runs.jsonl", "_contrasts.json"):
         path = pathlib.Path(out_dir) / f"{tag}{suffix}"
         try:
-            if path.is_file() and path.stat().st_size > 0:
+            if not path.exists() and not path.is_symlink():
+                continue
+            if not path.is_file():
+                # The outcome path exists but is not a readable regular
+                # file (e.g. a directory or a broken link).  Treat that as
+                # evidence we cannot audit rather than silently planning
+                # over it; publishing a "prospective" plan next to an
+                # unreadable outcome path would be post-hoc by construction.
+                return True
+            if path.stat().st_size > 0:
                 return True
         except OSError:
             # A path we cannot inspect may be evidence; fail closed.
