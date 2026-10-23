@@ -10921,12 +10921,18 @@ def _enforce_reproducibility(settings: Settings, out_dir: pathlib.Path,
 
 def _steps_run_from_hist(hist):
     """Best-effort optimizer-step count when ``early_stop_info`` is absent."""
-    if not hist:
+    rows = []
+    for row in _mapping_runs(hist):
+        step = _difficulty_count(row.get("step"))
+        if step is not None:
+            rows.append((step, row))
+    if not rows:
         return 0
-    skipped = sum(1 for h in hist
-                  if isinstance(h.get("diagnosis"), dict)
-                  or not _finite(h.get("train_loss")))
-    return max(0, max(int(h["step"]) for h in hist) + 1 - skipped)
+    skipped = sum(
+        1 for _, row in rows
+        if isinstance(row.get("diagnosis"), dict)
+        or not _finite(row.get("train_loss")))
+    return max(0, max(step for step, _ in rows) + 1 - skipped)
 
 
 def _curve_record(hist, early_stop_info=None, seeding=None):
@@ -10959,6 +10965,14 @@ def _curve_record(hist, early_stop_info=None, seeding=None):
     the curve so a record proves which RNGs this run actually pinned
     instead of only citing the static policy.
     """
+    # Materialize once and drop rows that cannot carry a curve point: a
+    # generator would be consumed by the verdict and then look empty to the
+    # step count, while a scalar row used to raise AttributeError/KeyError.
+    hist = [row for row in _mapping_runs(hist)
+            if _difficulty_count(row.get("step")) is not None]
+    early_stop_info = (early_stop_info
+                       if isinstance(early_stop_info, Mapping) else {})
+    seeding = seeding if isinstance(seeding, Mapping) else {}
     verdict = training_curve_verdict(hist)
     train = [h for h in hist if _finite(h.get("train_loss"))]
     val = [h for h in hist if h.get("val_loss") is not None
@@ -11029,16 +11043,16 @@ def _curve_record(hist, early_stop_info=None, seeding=None):
         "curve_verdict": verdict["verdict"],
         "curve_recommendation": verdict["recommendation"],
         "steps_run": int(
-            (early_stop_info or {}).get("steps_run")
-            if (early_stop_info or {}).get("steps_run") is not None
+            early_stop_info.get("steps_run")
+            if early_stop_info.get("steps_run") is not None
             else _steps_run_from_hist(hist)),
         "early_stop_enabled": bool(
-            (early_stop_info or {}).get("enabled", False)),
+            early_stop_info.get("enabled", False)),
         "stopped_early": bool(
-            (early_stop_info or {}).get("stopped_early", False)),
+            early_stop_info.get("stopped_early", False)),
         "restored_best": bool(
-            (early_stop_info or {}).get("restored_best", False)),
-        "seeding": dict(seeding or {}),
+            early_stop_info.get("restored_best", False)),
+        "seeding": dict(seeding),
     }
 
 

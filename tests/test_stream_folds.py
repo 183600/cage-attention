@@ -27,6 +27,8 @@ from cage.experiments import (
     _factorial_main_effect,
     _grid_level_main_effect,
     _one_sample_contrast,
+    _curve_record,
+    _steps_run_from_hist,
 )
 from cage.metrics import (
     crossed_cluster_bootstrap_ci,
@@ -35,6 +37,33 @@ from cage.metrics import (
 from cage.model import build
 from cage.repro import seed_everything
 from cage.train import encode_correct_mask, eval_metrics
+
+
+class CurveHistoryInputTest(unittest.TestCase):
+    def test_best_effort_step_count_handles_generators_and_bad_rows(self):
+        rows = [
+            {"step": 0, "train_loss": 1.0},
+            {"step": 1, "train_loss": 0.9},
+            {"step": 2, "train_loss": 0.8},
+        ]
+        self.assertEqual(_steps_run_from_hist(rows), 3)
+        self.assertEqual(_steps_run_from_hist((r for r in rows)), 3)
+        self.assertEqual(_steps_run_from_hist(None), 0)
+        self.assertEqual(_steps_run_from_hist([None, 3, "x"]), 0)
+        self.assertEqual(
+            _steps_run_from_hist([{"train_loss": 1.0}]), 0)
+        skipped = rows + [{"step": 3, "train_loss": float("nan")}]
+        self.assertEqual(_steps_run_from_hist(skipped), 3)
+
+    def test_curve_record_does_not_require_a_well_formed_history(self):
+        for hist in (None, [None], [{"train_loss": 1.0}],
+                     (r for r in [{"step": 0, "train_loss": 1.0}])):
+            with self.subTest(hist=hist):
+                rec = _curve_record(hist, early_stop_info="bad",
+                                    seeding="bad")
+                self.assertIn("curve_verdict", rec)
+                self.assertGreaterEqual(rec["steps_run"], 0)
+                self.assertEqual(rec["seeding"], {})
 
 
 class EvaluationFoldAuditTest(unittest.TestCase):
