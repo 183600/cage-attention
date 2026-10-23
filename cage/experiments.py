@@ -2929,10 +2929,9 @@ def _pilot_accuracy_sd(verdict) -> tuple[float, str | None]:
             continue
         values = _pilot_seed_accuracies(row)
         if len(values) >= 2:
-            mean = sum(values) / len(values)
-            sd = math.sqrt(sum((v - mean) ** 2 for v in values)
-                           / (len(values) - 1))
-            candidates.append((sd, f"depth_ladder.d{depth}"))
+            sd = _mean_std(values)["std"]
+            if _finite(sd) and float(sd) >= 0.0:
+                candidates.append((float(sd), f"depth_ladder.d{depth}"))
             continue
         sd = row.get("accuracy_std")
         if _finite(sd) and float(sd) >= 0.0:
@@ -2940,10 +2939,9 @@ def _pilot_accuracy_sd(verdict) -> tuple[float, str | None]:
     shallow = _pilot_mapping(verdict.get("shallow_none"))
     shallow_values = _pilot_seed_accuracies(shallow)
     if len(shallow_values) >= 2:
-        mean = sum(shallow_values) / len(shallow_values)
-        sd = math.sqrt(sum((v - mean) ** 2 for v in shallow_values)
-                       / (len(shallow_values) - 1))
-        candidates.append((sd, "shallow_none"))
+        sd = _mean_std(shallow_values)["std"]
+        if _finite(sd) and float(sd) >= 0.0:
+            candidates.append((float(sd), "shallow_none"))
     elif _finite(shallow.get("accuracy_std")) \
             and float(shallow["accuracy_std"]) >= 0.0:
         candidates.append((float(shallow["accuracy_std"]),
@@ -2985,8 +2983,10 @@ def _pilot_accuracy_level(verdict) -> tuple[float, str | None]:
         values.append(float(shallow["accuracy_mean"]))
     if not values:
         return float("nan"), None
-    return (sum(values) / len(values),
-            f"pooled {len(values)} pilot seed accuracies")
+    mean = _mean_std(values)["mean"]
+    if not _finite(mean):
+        return float("nan"), None
+    return float(mean), f"pooled {len(values)} pilot seed accuracies"
 
 
 def _pilot_paired_accuracy_sd(verdict) -> tuple[float, str | None, list]:

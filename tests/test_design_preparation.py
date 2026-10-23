@@ -330,6 +330,14 @@ class PilotSdTest(unittest.TestCase):
         self.assertAlmostEqual(sd, 0.028284271247461902, places=12)
         self.assertEqual(source, "depth_ladder.d2")
 
+    def test_large_finite_pilot_values_do_not_become_inf(self):
+        verdict = {"shallow_none": {
+            "accuracy_by_seed": {"0": 1e308, "1": 1e308}}}
+        sd, _source = _pilot_accuracy_sd(verdict)
+        self.assertTrue(math.isfinite(sd))
+        level, _ = _pilot_accuracy_level(verdict)
+        self.assertTrue(math.isfinite(level))
+
     def test_missing_or_unmeasured_pilot_abstains(self):
         self.assertTrue(math.isnan(_pilot_accuracy_sd({})[0]))
         self.assertTrue(math.isnan(_pilot_accuracy_sd(None)[0]))
