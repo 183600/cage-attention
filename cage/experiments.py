@@ -4081,6 +4081,14 @@ def _controlled_audit(runs_a, runs_b):
         if audit.get("model_cfg") is not None:
             factor_keys = set(audit["model_factor_diffs"])
         else:
+            malformed_labels = [
+                r for r in runs_a + runs_b
+                if r.get("calib_variant") is not None
+                and not isinstance(r.get("calib_variant"), str)]
+            if malformed_labels:
+                audit["mismatches"].append(
+                    "legacy record(s) carry a non-string calib_variant "
+                    "label; the ablation cannot be identified")
             factor_keys = set(audit["varying_factors"])
             # Expand a label-only ``calib_variant`` difference into the
             # factor vector it names, so a legacy record cannot pass a
@@ -15732,7 +15740,9 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
                "note": ("exploratory per-length companion; endpoint rows "
                         "above remain the pre-registered decision and the "
                         "FDR family is unchanged")}
-    by_variant = (by_variant if isinstance(by_variant, Mapping) else {})
+    by_variant = ({label: _mapping_runs(runs)
+                   for label, runs in by_variant.items()}
+                  if isinstance(by_variant, Mapping) else {})
     for rule, a_label, b_label in (
         ("calib - none", "calib", "none"),
         ("calib - query", "calib", "query"),
@@ -15805,7 +15815,8 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
             return abs(xf - yf) <= 1e-12
 
         endpoint_matches = bool(
-            _same_number(endpoint["mean"], recompute["mean"])
+            (endpoint.get("n") or 0) > 0
+            and _same_number(endpoint["mean"], recompute["mean"])
             and _same_number(endpoint["lo"], recompute["lo"])
             and _same_number(endpoint["hi"], recompute["hi"])
             and endpoint["n"] == recompute["n"]

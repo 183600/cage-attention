@@ -305,6 +305,15 @@ class ControlledAuditProvenanceTest(unittest.TestCase):
         audit = _controlled_audit([a], [b])
         self.assertEqual(audit["params"], {"a": [], "b": []})
         self.assertNotIn("capacity", audit)
+        legacy_a = self._run()
+        legacy_b = self._run()
+        legacy_a.pop("model_cfg")
+        legacy_b.pop("model_cfg")
+        legacy_a["calib_variant"] = 3.5
+        audit = _controlled_audit([legacy_a], [legacy_b])
+        self.assertFalse(audit["controlled"])
+        self.assertTrue(any("non-string" in msg
+                            for msg in audit["mismatches"]))
 
 
 class PilotSdTest(unittest.TestCase):

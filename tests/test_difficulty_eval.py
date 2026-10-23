@@ -293,6 +293,32 @@ class EmptySweepCompanionTest(unittest.TestCase):
             for contrast in per_length["contrasts"].values()
             for row in contrast["rows"]))
 
+    def test_per_length_contrasts_materialize_variant_generators(self):
+        from cage.experiments import Settings, _e2_per_length_contrasts
+
+        def run(seed, accuracy):
+            return {
+                "seed": seed, "gate": "calib",
+                "accuracy_by_length": {3: accuracy, 6: accuracy - 0.1},
+                "metrics_by_length": {
+                    3: {"accuracy": accuracy},
+                    6: {"accuracy": accuracy - 0.1}},
+                "eval_n_by_length": {3: 10, 6: 10},
+            }
+
+        labels = ("none", "query", "calib", "calib_raw_ent")
+        by_variant = {
+            label: (r for r in [run(0, 0.5), run(1, 0.6)])
+            for label in labels}
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _e2_per_length_contrasts(
+                    Settings.quick(), pathlib.Path(tmp), by_variant, [3, 6])
+        for rule in ("calib - none", "calib - query",
+                     "calib - calib_raw_ent"):
+            for row in payload["contrasts"][rule]["rows"]:
+                self.assertEqual(row["n"], 2, (rule, row))
+
     def test_invalid_length_entries_abstain_instead_of_raising(self):
         from cage.experiments import (
             _counterfactual_companion,
