@@ -3893,16 +3893,37 @@ def _controlled_audit(runs_a, runs_b):
             audit["mismatches"].append(
                 f"side {side} has {missing} run(s) without a training seed: "
                 f"the contrast cannot be paired")
+        malformed_seeds = [
+            s for s in seeds
+            if s is not None and (
+                isinstance(s, bool)
+                or not isinstance(s, (int, str))
+                or (isinstance(s, str) and not s))]
+        if malformed_seeds:
+            audit["mismatches"].append(
+                f"side {side} has malformed training seed(s) "
+                f"{[repr(s) for s in malformed_seeds]}: the contrast cannot "
+                f"pair runs by an independent seed")
         stream_counts = {}
         for s in seeds:
             if s is None:
                 continue
             key = _stream_key(s)
             stream_counts[key] = stream_counts.get(key, 0) + 1
-        repeats = sorted({s for s in seeds
-                          if s is not None
-                          and stream_counts[_stream_key(s)] > 1},
-                         key=_seed_key)
+        repeat_keys = {key for key, count in stream_counts.items()
+                       if count > 1}
+        # Deduplicate by the canonical stream key, not by the raw seed:
+        # a malformed/unhashable seed (e.g. a list) would make the raw set
+        # comprehension raise instead of being reported as a repeat.
+        repeats, seen_repeats = [], set()
+        for s in seeds:
+            if s is None:
+                continue
+            key = _stream_key(s)
+            if key in repeat_keys and key not in seen_repeats:
+                seen_repeats.add(key)
+                repeats.append(s)
+        repeats = sorted(repeats, key=_seed_key)
         if repeats:
             audit["mismatches"].append(
                 f"side {side} repeats training seed/stream(s) {repeats}: a "

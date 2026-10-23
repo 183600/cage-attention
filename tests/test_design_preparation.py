@@ -354,6 +354,25 @@ class ControlledAuditProvenanceTest(unittest.TestCase):
         self.assertTrue(any("pools different conditions" in msg
                             for msg in mixed_side["mismatches"]))
 
+    def test_unhashable_or_malformed_seeds_fail_closed(self):
+        good = self._run()
+        for bad_seed in ([1], {"seed": 1}, True, 1.5, ""):
+            with self.subTest(bad_seed=bad_seed):
+                bad = self._run()
+                bad["seed"] = bad_seed
+                audit = _controlled_audit([bad], [bad])
+                self.assertFalse(audit["controlled"])
+                self.assertTrue(any("malformed training seed" in msg
+                                    for msg in audit["mismatches"]))
+        # A repeated unhashable seed is one run twice, not a crash.
+        first = self._run()
+        second = self._run()
+        first["seed"] = second["seed"] = [1]
+        audit = _controlled_audit([first, second], [first, second])
+        self.assertFalse(audit["controlled"])
+        self.assertTrue(any("repeats training seed" in msg
+                            for msg in audit["mismatches"]))
+
     def test_labelled_and_unset_runs_are_not_one_fixed_side(self):
         # ``calib_variant`` is absent from the other side entirely, so the
         # cross-side varying-factor map never sees it.  The side itself
