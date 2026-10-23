@@ -764,6 +764,25 @@ class DesignPlanFreezeTest(unittest.TestCase):
             self.assertEqual(stored["design_sha256"],
                              payload["design_sha256"])
 
+    def test_fingerprint_rejects_empty_or_partial_plans(self):
+        for bad in ({}, {"experiment": "e1"},
+                    {"experiment": "e1", "planned_seeds": [0, 1]}):
+            with self.subTest(plan=bad):
+                self.assertIsNone(_design_plan_fingerprint(bad))
+
+    def test_plan_path_that_is_not_a_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            (out / "e1_design_plan.json").mkdir()
+            with self.assertRaises(DesignPlanError):
+                experiments._publish_design_plan(
+                    Settings.quick(), out, "e1",
+                    {"experiment": "e1", "planned_n": 2,
+                     "planned_seeds": [0, 1], "alpha": 0.05,
+                     "power_target": 0.8, "min_seeds_for_claim": 3,
+                     "planned_eval_items": 128,
+                     "hypotheses_sha256": "abc", "rows": []})
+
     def test_fingerprint_ignores_invocation_provenance(self):
         base = {"experiment": "e1", "planned_n": 2,
                 "planned_seeds": [0, 1], "alpha": 0.05,

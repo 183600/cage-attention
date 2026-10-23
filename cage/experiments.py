@@ -2949,6 +2949,13 @@ def _design_plan_fingerprint(payload) -> str | None:
     """
     if not isinstance(payload, Mapping):
         return None
+    # A partial or empty object is not a registered design: hashing the
+    # handful of fields it happens to contain would let a malformed plan
+    # (or the empty dict) masquerade as a valid pre-registration.
+    missing = [key for key in _DESIGN_PLAN_FINGERPRINT_KEYS
+               if key not in payload]
+    if missing or not payload:
+        return None
     raw_rows = payload.get("rows")
     if raw_rows is None:
         raw_rows = []
@@ -3059,6 +3066,15 @@ def _publish_design_plan(settings: Settings, out_dir: pathlib.Path,
             f"{tag}: refusing to publish a design plan with no readable "
             f"design fingerprint")
     payload["design_sha256"] = new_hash
+    if path.exists() and not path.is_file():
+        # A directory/socket/FIFO at the plan path cannot be a registered
+        # plan and cannot be atomically replaced with ``os.replace`` either.
+        # Fail closed instead of leaking IsADirectoryError/OSError after the
+        # design id has been attached to Settings.
+        raise DesignPlanError(
+            f"{tag}: the existing design-plan path {path} is not a regular "
+            f"file, so it cannot be verified or replaced; restore the "
+            f"registered plan or use a fresh --out directory")
     old = None
     if path.exists():
         try:
