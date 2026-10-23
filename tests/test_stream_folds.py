@@ -89,12 +89,14 @@ class CurveHistoryInputTest(unittest.TestCase):
             "train_loss_window": "curve_train_loss_window",
         }
         for field, series_key in series.items():
-            with self.subTest(field=field):
-                hist = [{"step": 0, "train_loss": 1.0, field: "bad"}]
-                rec = _curve_record(hist)
-                self.assertIsNone(rec[series_key][0])
-                verdict = training_curve_verdict(hist)
-                self.assertTrue(math.isfinite(verdict["n_points"]))
+            for bad in ("bad", True, False, float("nan"), float("inf"),
+                        float("-inf"), "nan"):
+                with self.subTest(field=field, bad=bad):
+                    hist = [{"step": 0, "train_loss": 1.0, field: bad}]
+                    rec = _curve_record(hist)
+                    self.assertIsNone(rec[series_key][0])
+                    verdict = training_curve_verdict(hist)
+                    self.assertTrue(math.isfinite(verdict["n_points"]))
         self.assertEqual(
             _curve_record([{"step": 0, "train_loss": 1.0}])["steps_run"], 1)
         # A point without a usable step is not a curve point.

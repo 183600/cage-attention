@@ -11155,14 +11155,17 @@ def _curve_optional_float(value):
     A stored curve is JSON provenance, so a hand-edited/corrupted optional
     field must make that series point abstain rather than abort the whole
     run record.  ``None`` is the existing sentinel for "not recorded" in the
-    curve series, so a malformed value uses the same representation.
+    curve series, so a malformed value uses the same representation.  A
+    boolean is a flag rather than a measurement, and a non-finite value
+    cannot be plotted or summarized as a curve point; both abstain.
     """
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError, OverflowError):
         return None
+    return number if math.isfinite(number) else None
 
 
 def _curve_record(hist, early_stop_info=None, seeding=None):
