@@ -184,6 +184,25 @@ def _flatten_float(x) -> torch.Tensor:
             f"{type(x).__name__}") from exc
 
 
+def _exact_numeric_tensor(values) -> torch.Tensor:
+    """A numeric tensor without the default float32 capture.
+
+    Python float containers become float32 through a bare ``as_tensor``;
+    that rounds e.g. ``1.0000000001`` to a valid-looking 0/1 label and large
+    integral counts to a different value.  Integer containers keep their
+    exact integer dtype; floating containers are rebuilt at float64.
+    """
+    if torch.is_tensor(values):
+        return values.detach()
+    try:
+        probe = torch.as_tensor(values)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        return torch.as_tensor(values, dtype=torch.float64)
+    if probe.is_floating_point():
+        return torch.as_tensor(values, dtype=torch.float64)
+    return probe
+
+
 def _binary_labels(values, device=None):
     """Flatten boolean/0-1 labels, or return ``None`` for anything else.
 
@@ -203,7 +222,14 @@ def _binary_labels(values, device=None):
         out = raw.detach().reshape(-1)
     else:
         try:
-            numeric = raw.detach().reshape(-1).to(torch.float64)
+            if torch.is_tensor(values):
+                numeric = raw.detach().reshape(-1).to(torch.float64)
+            else:
+                # A Python float list is captured as float32 by default;
+                # 0.9999999999 would then round to 1.0 and be accepted as a
+                # binary label.  Rebuild the original container at float64.
+                numeric = torch.as_tensor(
+                    values, dtype=torch.float64).detach().reshape(-1)
         except (TypeError, ValueError, RuntimeError, OverflowError):
             return None
         if not bool(torch.isfinite(numeric).all()):
@@ -2420,18 +2446,15 @@ def crossed_cluster_bootstrap_ci(correct_a, correct_b, n_boot: int = 4000,
 
     def _binary_matrix(values, label):
         try:
-            raw = torch.as_tensor(values)
+            raw = _exact_numeric_tensor(values)
         except (TypeError, ValueError, RuntimeError, OverflowError):
             return None, f"{label} must be numeric"
         if raw.is_complex():
             return None, f"{label} must be real-valued"
-        if raw.dtype == torch.bool:
+        try:
             raw = raw.to(torch.float64)
-        else:
-            try:
-                raw = raw.to(torch.float64)
-            except (TypeError, ValueError, RuntimeError, OverflowError):
-                return None, f"{label} must be numeric"
+        except (TypeError, ValueError, RuntimeError, OverflowError):
+            return None, f"{label} must be numeric"
         if raw.dim() == 1:
             raw = raw.reshape(1, -1)
         if raw.dim() != 2:
@@ -2584,8 +2607,8 @@ def evaluation_fold_audit(correct_a, correct_b, n_folds=8) -> dict:
         "fragile": False,
     }
     try:
-        a = torch.as_tensor(correct_a)
-        b = torch.as_tensor(correct_b)
+        a = _exact_numeric_tensor(correct_a)
+        b = _exact_numeric_tensor(correct_b)
     except (TypeError, ValueError, RuntimeError, OverflowError):
         out["reason"] = "correctness inputs must be numeric arrays"
         return out

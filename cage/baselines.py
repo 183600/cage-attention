@@ -540,7 +540,16 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     # must abstain, not escape as a TypeError from a report companion.
     # ``torch.as_tensor`` also flattens a nested/tensor input consistently.
     try:
-        raw_acc = torch.as_tensor(accuracies).detach().reshape(-1)
+        if torch.is_tensor(accuracies):
+            raw_acc = accuracies.detach().reshape(-1)
+        else:
+            raw_acc = torch.as_tensor(accuracies).detach().reshape(-1)
+            if raw_acc.is_floating_point():
+                # Keep the caller's Python float precision instead of the
+                # default float32 capture; the boundary decision is a small
+                # margin against chance.
+                raw_acc = torch.as_tensor(
+                    accuracies, dtype=torch.float64).detach().reshape(-1)
         if raw_acc.is_complex():
             raise ValueError("accuracies must be real-valued")
         raw_acc = raw_acc.to(torch.float64)

@@ -26,6 +26,18 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertTrue(math.isnan(metrics.brier_score([0.5], [0.5])))
         self.assertTrue(math.isnan(metrics.brier_score([0.5], [-1.0])))
 
+    def test_near_binary_labels_do_not_round_through_float32(self):
+        # 0.9999999999999999 and 1.0000000001 are not exactly 0/1; the
+        # default float32 capture would round both to an accepted label.
+        for bad in ([0.9999999999999999], [1.0000000001]):
+            with self.subTest(bad=bad):
+                self.assertIsNone(metrics._binary_labels(bad))
+                self.assertFalse(metrics.evaluation_fold_audit(
+                    bad * 8, [0.0] * 8)["valid"])
+                self.assertFalse(metrics.crossed_cluster_bootstrap_ci(
+                    [bad * 8, bad * 8], [[0.0] * 8, [0.0] * 8],
+                    n_boot=10)["valid"])
+
     def test_fractional_multiclass_targets_abstain(self):
         import torch
 
@@ -506,8 +518,9 @@ class CorrectMaskInputTest(unittest.TestCase):
     def test_malformed_mask_input_raises_value_error(self):
         from cage.train import encode_correct_mask
 
-        for bad in (None, "x", object()):
-            with self.subTest(bad=type(bad).__name__):
+        for bad in (None, "x", object(),
+                    [0.9999999999999999], [1.0000000001]):
+            with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     encode_correct_mask(bad)
 

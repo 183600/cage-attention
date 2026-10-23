@@ -199,8 +199,10 @@ class CounterfactualCountsTest(unittest.TestCase):
         valid = torch.tensor([5, 5, 5, 7])
         for bad in (torch.tensor([5.5, 5.0, 5.0, 7.0]),
                     torch.tensor([True, False, True, False]),
-                    torch.tensor([5 + 1j, 5, 5, 7])):
-            with self.subTest(dtype=bad.dtype):
+                    torch.tensor([5 + 1j, 5, 5, 7]),
+                    # float32 would round this to the valid token 5.
+                    [5.0, 5.0, 5.0, 5.0000000001]):
+            with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     _counterfactual_counts(
                         bad, valid, valid, valid, valid, valid)

@@ -2379,7 +2379,15 @@ def encode_correct_mask(correct: torch.Tensor) -> str:
     mask the model never produced.
     """
     try:
-        raw = torch.as_tensor(correct).detach().reshape(-1)
+        if torch.is_tensor(correct):
+            raw = correct.detach().reshape(-1)
+        else:
+            raw = torch.as_tensor(correct).detach().reshape(-1)
+            if raw.is_floating_point():
+                # Avoid the default float32 capture: a fractional value
+                # such as 0.9999999999 must not round to an encodable 1.
+                raw = torch.as_tensor(
+                    correct, dtype=torch.float64).detach().reshape(-1)
     except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
         raise ValueError(
             "correctness values must be real booleans/0-1, got "
@@ -2630,7 +2638,14 @@ def _counterfactual_counts(original_pred, answer, value_swap_pred,
         # the imaginary part, fabricating a token the caller never supplied;
         # integral JSON-style floats (2.0) remain accepted.
         try:
-            t = torch.as_tensor(value).detach()
+            if torch.is_tensor(value):
+                t = value.detach()
+            else:
+                t = torch.as_tensor(value).detach()
+                if t.is_floating_point():
+                    # Do not let float32 round a fractional token id into
+                    # an integer the caller never supplied.
+                    t = torch.as_tensor(value, dtype=torch.float64).detach()
         except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
             raise ValueError(
                 f"{name} must be an integer token tensor, got "
