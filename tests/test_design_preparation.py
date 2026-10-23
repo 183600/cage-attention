@@ -354,6 +354,29 @@ class ControlledAuditProvenanceTest(unittest.TestCase):
         self.assertTrue(any("pools different conditions" in msg
                             for msg in mixed_side["mismatches"]))
 
+    def test_labelled_and_unset_runs_are_not_one_fixed_side(self):
+        # ``calib_variant`` is absent from the other side entirely, so the
+        # cross-side varying-factor map never sees it.  The side itself
+        # still mixes a labelled cell with an unlabelled run; that is not
+        # one fixed condition and must fail closed.
+        full = self._run()
+        full.pop("model_cfg")
+        unset = self._run()
+        unset["seed"] = 1
+        unset.pop("model_cfg")
+        unset.pop("calib_variant")
+        query_a = self._run()
+        query_a["gate"] = "query"
+        query_a.pop("model_cfg")
+        query_a.pop("calib_variant")
+        query_b = dict(query_a)
+        query_b["seed"] = 1
+        audit = _controlled_audit([full, unset], [query_a, query_b])
+        self.assertFalse(audit["controlled"])
+        self.assertTrue(any("pools different conditions" in msg
+                            for msg in audit["mismatches"]))
+        self.assertFalse(audit["single_factor"])
+
     def test_mixed_provenance_still_checks_the_one_resolved_config(self):
         # A new record can be paired with a legacy one (no model_cfg).  The
         # cross-side config diff cannot be computed, but the new side's

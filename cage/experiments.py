@@ -3915,12 +3915,27 @@ def _controlled_audit(runs_a, runs_b):
     # holding two different cell labels can still pass the cross-side
     # single-factor count (e.g. a={full, len_only} vs b={full} varies only
     # the concentration flag as a *set*, although side a is not one arm).
+    def _label_value(run, key):
+        # Missing/null/empty labels all mean "not declared".  They must
+        # still be one of the side's values: a side that contains both a
+        # labelled run and an unlabelled run has no single declared
+        # condition, even when the other side has only one label (so the
+        # key never enters the cross-side ``varying_factors`` map).
+        if key not in run:
+            return "<unset>"
+        value = run.get(key)
+        if value is None:
+            return "<unset>"
+        if isinstance(value, str):
+            return "<unset>" if not value else value
+        return str(value)
+
+    side_pooled = False
     for side, runs in (("a", runs_a), ("b", runs_b)):
         for key in _AUDIT_FACTOR_KEYS:
-            values = sorted({
-                str(r.get(key)) for r in runs
-                if key in r and r.get(key) is not None and r.get(key) != ""})
+            values = sorted({_label_value(r, key) for r in runs})
             if len(values) > 1:
+                side_pooled = True
                 audit["mismatches"].append(
                     f"side {side} carries multiple {key} labels {values}: "
                     f"the side pools different conditions, so it is not one "
@@ -4170,7 +4185,8 @@ def _controlled_audit(runs_a, runs_b):
                         "independent factor and the contrast is not "
                         "certified as single-factor")
         audit["n_varying_factors"] = len(factor_keys)
-        audit["single_factor"] = len(factor_keys) == 1 and not unresolved_cell
+        audit["single_factor"] = (len(factor_keys) == 1
+                                  and not unresolved_cell and not side_pooled)
         if not factor_keys:
             if audit.get("model_cfg") is not None:
                 # A stale declared label difference does not make an
