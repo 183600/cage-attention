@@ -2304,6 +2304,11 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     if n_boot_int is None:
         empty["reason"] = "n_boot must be a positive integer"
         return empty
+    if not (bool(torch.isfinite(s.sum())) and bool(torch.isfinite(n.sum()))):
+        # Each count is finite but their pooled totals can still overflow
+        # float64; the integer readout below would then raise on ``inf``.
+        empty["reason"] = "pooled success/total counts overflow"
+        return empty
     p = s / n
     units = int(s.numel())
     mean_acc = float(p.mean())

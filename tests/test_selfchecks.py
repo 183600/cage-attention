@@ -512,6 +512,10 @@ class BootstrapOverflowTest(unittest.TestCase):
                 self.assertTrue(math.isnan(sf["p_value"]))
         self.assertFalse(
             paired_bootstrap_ci(huge, n_boot=10)["sign_flip_valid"])
+        cluster = metrics.clustered_proportion_ci(
+            [1.5e308, 1.5e308], [1.5e308, 1.5e308], n_boot=3)
+        self.assertFalse(cluster["valid"])
+        self.assertIn("overflow", cluster["reason"])
 
 
 class BaselineArgumentValidationTest(unittest.TestCase):
