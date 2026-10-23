@@ -2736,6 +2736,11 @@ def _counterfactual_summary(counts) -> dict:
     a memorising model).
     """
 
+    if not isinstance(counts, Mapping):
+        # A malformed accumulator names no probe counts; report the same
+        # empty/NaN payload as a zero-row probe rather than raising.
+        counts = {}
+
     def rate(num, den):
         return float(num) / float(den) if den else float("nan")
 
@@ -2871,6 +2876,9 @@ def _association_exposure_accumulate(totals, idx, meta, vocab, reference,
 
 def _association_exposure_summary(totals) -> dict:
     """Rates and flat record fields for the exposure-stratified readout."""
+    if not isinstance(totals, Mapping):
+        totals = {}
+
     def rate(num, den):
         return float(num) / float(den) if den else float("nan")
 

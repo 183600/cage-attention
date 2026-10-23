@@ -208,13 +208,16 @@ class CounterfactualCountsTest(unittest.TestCase):
                         bad, valid, valid, valid, valid, valid)
 
     def test_empty_counts_abstain(self):
-        out = _counterfactual_summary({})
-        self.assertEqual(out["value_swap"]["n"], 0)
-        self.assertTrue(math.isnan(out["value_swap"]["follow_rate"]))
-        self.assertTrue(math.isnan(
-            out["distractor_swap"]["unchanged_rate"]))
-        self.assertTrue(math.isnan(
-            out["pair_relocation"]["unchanged_rate"]))
+        for counts in ({}, None, [], "bad", object()):
+            with self.subTest(counts=type(counts).__name__):
+                out = _counterfactual_summary(counts)
+                self.assertEqual(out["value_swap"]["n"], 0)
+                self.assertTrue(math.isnan(
+                    out["value_swap"]["follow_rate"]))
+                self.assertTrue(math.isnan(
+                    out["distractor_swap"]["unchanged_rate"]))
+                self.assertTrue(math.isnan(
+                    out["pair_relocation"]["unchanged_rate"]))
 
 
 class _OracleRetrieval(nn.Module):
