@@ -221,6 +221,23 @@ class ReportMalformedRunTest(unittest.TestCase):
         self.assertFalse(out["passed"])
         self.assertEqual(out["arms"]["arm"]["n"], 0)
 
+    def test_competence_does_not_truncate_fractional_counts(self):
+        good = {"accuracy": 1.0, "n": 100}
+        bad = {"accuracy": 1.0, "n": 100, "fractional": True}
+
+        def count(run):
+            if run.get("fractional"):
+                return (1.9, 2.9)
+            return (100, 100)
+
+        out = _competence_check([("arm", [bad, good])], count, 0.2)
+        self.assertTrue(out["passed"])
+        self.assertEqual(out["arms"]["arm"]["correct"], 100)
+        self.assertEqual(out["arms"]["arm"]["n"], 100)
+        only_bad = _competence_check([("arm", [bad])], count, 0.2)
+        self.assertFalse(only_bad["passed"])
+        self.assertEqual(only_bad["arms"]["arm"]["n"], 0)
+
     def test_class_frequency_companion_skips_malformed_rules(self):
         good = {"seed": 0, "accuracy": 1.0}
         rules = [None, 3, ("bad",), "not-a-rule",

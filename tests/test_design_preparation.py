@@ -290,6 +290,22 @@ class ControlledAuditProvenanceTest(unittest.TestCase):
                              for msg in audit["mismatches"]))
         self.assertTrue(_controlled_audit(None, None)["controlled"] is False)
 
+    def test_unhashable_labels_and_fractional_params_fail_closed(self):
+        good = self._run()
+        for label in (["bad"], {"x": 1}, 3.5):
+            with self.subTest(label=label):
+                bad = self._run()
+                bad["calib_variant"] = label
+                audit = _controlled_audit([good], [bad])
+                self.assertFalse(audit["controlled"])
+                self.assertTrue(audit["mismatches"])
+        a = self._run()
+        b = self._run()
+        a["params"], b["params"] = 10.2, 10.8
+        audit = _controlled_audit([a], [b])
+        self.assertEqual(audit["params"], {"a": [], "b": []})
+        self.assertNotIn("capacity", audit)
+
 
 class PilotSdTest(unittest.TestCase):
     def test_largest_rung_sd_is_used(self):

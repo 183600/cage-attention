@@ -2657,7 +2657,14 @@ def _calib_cell(run):
             return "calib_shuf_ent_undeclared"
         return cell
     label = run.get("calib_variant")
-    return label or None
+    if label is None or label == "":
+        return None
+    if not isinstance(label, str):
+        # Labels are consumed as set/dict keys by the coverage and audit
+        # helpers; a list/dict label would raise TypeError and abort the
+        # whole contrast instead of failing closed.
+        return "calib_variant_malformed"
+    return label
 
 
 def _coverage_cell_key(cell) -> str:
@@ -3892,10 +3899,12 @@ def _controlled_audit(runs_a, runs_b):
     # Capacity: the parameter count each side actually trained (recorded for
     # every contrast; the placebo-specific enforcement happens below, where
     # the resolved model configs have been compared).
-    params_a = sorted({int(r["params"]) for r in runs_a
-                       if _finite(r.get("params"))})
-    params_b = sorted({int(r["params"]) for r in runs_b
-                       if _finite(r.get("params"))})
+    params_a = sorted({value for value in
+                       (_positive_integer(r.get("params")) for r in runs_a)
+                       if value is not None})
+    params_b = sorted({value for value in
+                       (_positive_integer(r.get("params")) for r in runs_b)
+                       if value is not None})
     audit["params"] = {"a": params_a, "b": params_b}
     for side, counts in (("a", params_a), ("b", params_b)):
         if len(counts) > 1:
@@ -4019,9 +4028,11 @@ def _controlled_audit(runs_a, runs_b):
                             f"does not match the trained flags "
                             f"(cell {cell!r})")
             labels_a = {r.get("calib_variant") for r in runs_a
-                        if r.get("calib_variant")}
+                        if isinstance(r.get("calib_variant"), str)
+                        and r.get("calib_variant")}
             labels_b = {r.get("calib_variant") for r in runs_b
-                        if r.get("calib_variant")}
+                        if isinstance(r.get("calib_variant"), str)
+                        and r.get("calib_variant")}
             cells_a = {c for c in (_calib_cell(r) for r in runs_a) if c}
             cells_b = {c for c in (_calib_cell(r) for r in runs_b) if c}
             if (labels_a or labels_b) and labels_a != labels_b \
@@ -4071,8 +4082,10 @@ def _controlled_audit(runs_a, runs_b):
             # factor merely because only the cell label was stamped.
             if "calib_variant" in factor_keys:
                 fa = [_CALIB_CELL_FACTORS.get(r.get("calib_variant"))
+                      if isinstance(r.get("calib_variant"), str) else None
                       for r in runs_a]
                 fb = [_CALIB_CELL_FACTORS.get(r.get("calib_variant"))
+                      if isinstance(r.get("calib_variant"), str) else None
                       for r in runs_b]
                 if all(x is not None for x in fa + fb):
                     factor_keys.discard("calib_variant")
@@ -9814,11 +9827,16 @@ def _competence_check(named_runs, correct_and_n, chance, what="arm"):
                 if pair is None:
                     continue
                 n_correct, n_total = pair
+                n_correct = _difficulty_count(n_correct)
+                n_total = _difficulty_count(n_total)
                 if (n_correct is None or n_total is None
-                        or not int(n_total)):
+                        or n_total <= 0 or n_correct > n_total):
+                    # Fractional/bool/negative counts are not a measured
+                    # binomial arm; truncating them would fabricate a
+                    # clustered CI.
                     continue
-                counts.append(int(n_correct))
-                sizes.append(int(n_total))
+                counts.append(n_correct)
+                sizes.append(n_total)
             except Exception:  # noqa: BLE001 - malformed rows are not evidence
                 continue
         raw.append((str(name), counts, sizes, sum(sizes)))
