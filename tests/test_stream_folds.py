@@ -288,18 +288,21 @@ class PairedStreamDigestTest(unittest.TestCase):
 
     def test_factorial_and_grid_effects_drop_malformed_runs(self):
         good = {"seed": 0, "accuracy": 1.0}
-        bad = {"seed": [0], "accuracy": 1.0}
-        cells = {cell: [good] for cell in
-                 ("full", "calib_len_only", "calib_ent_only",
-                  "calib_no_terms")}
-        cells["full"] = [bad]
-        ci = _factorial_main_effect(cells, "accuracy", "length")
-        self.assertEqual(ci["n"], 0)
-        self.assertFalse(ci["controlled"]["controlled"])
+        for bad in ("not-a-record", None, 3, object(),
+                    {"seed": [0], "accuracy": 1.0}):
+            with self.subTest(record=bad):
+                cells = {cell: [good] for cell in
+                         ("full", "calib_len_only", "calib_ent_only",
+                          "calib_no_terms")}
+                cells["full"] = [bad]
+                ci = _factorial_main_effect(cells, "accuracy", "length")
+                self.assertEqual(ci["n"], 0)
+                self.assertFalse(ci["controlled"]["controlled"])
 
-        grid = _grid_level_main_effect("accuracy", [[bad]], [[good]])
-        self.assertEqual(grid["n"], 0)
-        self.assertFalse(grid["controlled"]["controlled"])
+                grid = _grid_level_main_effect(
+                    "accuracy", [[bad]], [[good]])
+                self.assertEqual(grid["n"], 0)
+                self.assertFalse(grid["controlled"]["controlled"])
 
     def test_digest_mismatch_refuses_item_pairing(self):
         a = [[1] * 16]

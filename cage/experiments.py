@@ -5067,7 +5067,8 @@ def _factorial_main_effect(cells, metric, factor):
             + ", ".join(f"{c}={sorted(s, key=_seed_order)}"
                         for c, s in seed_sets.items()))
     views = [(c, j, _recipe_view(r))
-             for c in required for j, r in enumerate(cells[c])]
+             for c in required for j, r in enumerate(cells[c])
+             if isinstance(r, Mapping)]
     if views:
         first = views[0][2]
         for cell, j, view in views[1:]:
@@ -5205,7 +5206,7 @@ def _grid_level_main_effect(metric, level_cells, baseline_cells):
         mismatches.append("grid cells do not share one seed set")
     views = [(i, j, _recipe_view(r))
              for i, rs in enumerate(level_cells + baseline_cells)
-             for j, r in enumerate(rs)]
+             for j, r in enumerate(rs) if isinstance(r, Mapping)]
     if views:
         first = views[0][2]
         for cell, j, view in views[1:]:
