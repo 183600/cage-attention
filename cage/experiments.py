@@ -4406,7 +4406,8 @@ def _paired_benchmark(runs_a, runs_b, metric, sesoi, reference,
     excluded = {}
     for side, runs in (("a", runs_a), ("b", runs_b)):
         bad = [r.get("seed") for r in runs
-               if r.get("curve_verdict") in CURVE_INVALID_VERDICTS]
+               if isinstance(r, Mapping)
+               and r.get("curve_verdict") in CURVE_INVALID_VERDICTS]
         if bad:
             excluded[side] = sorted(bad, key=_seed_order)
     ci = _paired_diff(_curve_valid_runs(runs_a), _curve_valid_runs(runs_b),
@@ -5448,7 +5449,8 @@ CURVE_INVALID_VERDICTS = (
 
 def _curve_valid_runs(runs):
     return [r for r in runs
-            if r.get("curve_verdict") not in CURVE_INVALID_VERDICTS]
+            if isinstance(r, Mapping)
+            and r.get("curve_verdict") not in CURVE_INVALID_VERDICTS]
 
 
 def _curve_invalid_seeds_for(used, run_maps):
@@ -5484,6 +5486,8 @@ def _curve_health(runs):
     """
     counts = {}
     for r in runs:
+        if not isinstance(r, Mapping):
+            continue
         verdict = r.get("curve_verdict")
         counts[verdict] = counts.get(verdict, 0) + 1
     bad = sum(counts.get(v, 0) for v in CURVE_INVALID_VERDICTS)

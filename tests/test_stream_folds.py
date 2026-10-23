@@ -20,6 +20,10 @@ from cage.experiments import (
     _paired_diff,
     _paired_did,
     _paired_stream_test,
+    _paired_benchmark,
+    _curve_health,
+    _curve_valid_runs,
+    _curve_warn,
     _factorial_main_effect,
     _grid_level_main_effect,
     _one_sample_contrast,
@@ -303,6 +307,17 @@ class PairedStreamDigestTest(unittest.TestCase):
                     "accuracy", [[bad]], [[good]])
                 self.assertEqual(grid["n"], 0)
                 self.assertFalse(grid["controlled"]["controlled"])
+
+    def test_curve_helpers_skip_non_mapping_runs(self):
+        good = {"seed": 0, "accuracy": 1.0, "curve_verdict": "ok"}
+        for bad in ("not-a-record", None, 3, object()):
+            with self.subTest(record=bad):
+                ci = _paired_benchmark([bad], [good], "accuracy", 0.01,
+                                       "baseline")
+                self.assertEqual(ci["n"], 0)
+                self.assertEqual(_curve_valid_runs([bad, good]), [good])
+                self.assertEqual(_curve_health([bad, good]), ({"ok": 1}, 0))
+                self.assertEqual(_curve_warn(("a", [bad])), "")
 
     def test_digest_mismatch_refuses_item_pairing(self):
         a = [[1] * 16]
