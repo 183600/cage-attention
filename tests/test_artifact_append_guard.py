@@ -110,6 +110,32 @@ class ArtifactAppendGuardTest(unittest.TestCase):
         experiments._write_result(path, self._record(2))
         self.assertEqual(path.read_text(encoding="utf-8").count("\n"), 2)
 
+    def test_torn_tail_without_newline_is_refused(self):
+        path = self.root / "runs.jsonl"
+        path.write_text('{"partial": ', encoding="utf-8")
+        with self.assertRaises(experiments.TrackingError) as ctx:
+            experiments._write_result(path, self._record(2))
+        self.assertIn("newline", str(ctx.exception))
+        self.assertEqual(path.read_text(encoding="utf-8"), '{"partial": ')
+
+    def test_complete_line_without_trailing_newline_is_refused(self):
+        path = self.root / "runs.jsonl"
+        path.write_text('{"complete": true}', encoding="utf-8")
+        with self.assertRaises(experiments.TrackingError) as ctx:
+            experiments._write_result(path, self._record(2))
+        self.assertIn("newline", str(ctx.exception))
+        self.assertEqual(path.read_text(encoding="utf-8"),
+                         '{"complete": true}')
+
+    def test_trailing_blank_lines_are_compatible(self):
+        path = self.root / "runs.jsonl"
+        path.write_text('{"complete": true}\n\n', encoding="utf-8")
+        experiments._write_result(path, self._record(2))
+        text = path.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith('{"complete": true}\n\n{'))
+        self.assertTrue(text.endswith("\n"))
+        self.assertEqual(text.count('"run_id": "test-run"'), 1)
+
     def test_nested_artifact_uses_nearest_index(self):
         path = self.root / "nested" / "runs.jsonl"
         experiments._write_result(path, self._record(1))

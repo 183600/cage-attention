@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import pathlib
@@ -155,6 +156,85 @@ class ArtifactIndexTest(unittest.TestCase):
 
     def test_no_index_returns_two(self):
         self.assertEqual(self._verify(), 2)
+
+
+class StartupIntegrityGateTest(unittest.TestCase):
+    """A run must not extend a results directory that already fails its index."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _main(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = experiments.main(
+                ["--only", "sanity", "--quick", "--out", str(self.root)])
+        return code, out.getvalue()
+
+    def _index(self, artifacts):
+        (self.root / "artifact_index.json").write_text(
+            json.dumps({"artifacts": artifacts}), encoding="utf-8")
+
+    def test_missing_certified_artifact_aborts_before_writing(self):
+        self._index([{
+            "file": "missing.jsonl",
+            "bytes": 10,
+            "sha256": "0" * 64,
+            "records": 1,
+        }])
+        index_path = self.root / "artifact_index.json"
+        before = index_path.read_bytes()
+        code, text = self._main()
+        self.assertEqual(code, experiments.ARTIFACT_INTEGRITY_EXIT_CODE, text)
+        self.assertIn("broken chain of custody", text)
+        self.assertEqual(index_path.read_bytes(), before)
+        self.assertFalse((self.root / "environment.json").exists())
+        self.assertFalse((self.root / "environment_history.jsonl").exists())
+        self.assertFalse((self.root / "run_index.jsonl").exists())
+
+    def test_tampered_certified_artifact_aborts_before_writing(self):
+        path = self.root / "old.jsonl"
+        path.write_text("edited\n", encoding="utf-8")
+        self._index([{
+            "file": "old.jsonl",
+            "bytes": 7,
+            "sha256": hashlib.sha256(b"original\n").hexdigest(),
+            "records": 1,
+        }])
+        code, text = self._main()
+        self.assertEqual(code, experiments.ARTIFACT_INTEGRITY_EXIT_CODE, text)
+        self.assertIn("old.jsonl", text)
+        self.assertFalse((self.root / "environment.json").exists())
+
+    def test_malformed_index_aborts_before_writing(self):
+        (self.root / "artifact_index.json").write_text(
+            "{not json", encoding="utf-8")
+        code, text = self._main()
+        self.assertEqual(code, experiments.ARTIFACT_INTEGRITY_EXIT_CODE, text)
+        self.assertIn("artifact_index.json", text)
+        self.assertFalse((self.root / "environment.json").exists())
+
+    def test_valid_index_still_starts_the_run(self):
+        data = b'{"ok": true}\n'
+        (self.root / "old.jsonl").write_bytes(data)
+        self._index([{
+            "file": "old.jsonl",
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "records": 1,
+        }])
+        with mock.patch.object(experiments, "run_sanity"):
+            code, text = self._main()
+        self.assertEqual(code, 0, text)
+        self.assertTrue((self.root / "environment.json").exists())
+        entries = json.loads((self.root / "artifact_index.json").read_text(
+            encoding="utf-8"))["artifacts"]
+        names = [entry["file"] for entry in entries]
+        self.assertIn("old.jsonl", names)
+        self.assertIn("environment.json", names)
 
 
 if __name__ == "__main__":

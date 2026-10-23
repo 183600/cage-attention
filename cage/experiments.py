@@ -7576,6 +7576,7 @@ def _write_result(path: pathlib.Path, record: dict) -> None:
                       time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     path.parent.mkdir(parents=True, exist_ok=True)
     _assert_append_target_intact(path)
+    existed = path.exists()
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         fh.flush()
@@ -7583,7 +7584,35 @@ def _write_result(path: pathlib.Path, record: dict) -> None:
             os.fsync(fh.fileno())
         except OSError:  # noqa: PERF203 - durability is best-effort
             pass
+    if not existed:
+        # A durable file is not durable until its directory entry is too:
+        # otherwise a crash right after the first append can lose the file
+        # even though the row itself was fsynced.
+        _fsync_directory(path.parent)
     _register_artifact(path)
+
+
+def _fsync_directory(path: pathlib.Path) -> None:
+    """Best-effort fsync of a directory entry (POSIX; no-op elsewhere).
+
+    ``os.replace`` and the first append update a directory entry, and the
+    file-level ``fsync`` does not flush that entry on every filesystem.
+    Failing to do this is not fatal for a run (the evidence may still be
+    present), so every error is swallowed after the probe.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:  # pragma: no cover - some filesystems reject dir fsync
+        pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:  # pragma: no cover - nothing useful to retry
+            pass
 
 
 def _atomic_write_text(path: pathlib.Path, text: str) -> None:
@@ -7592,7 +7621,9 @@ def _atomic_write_text(path: pathlib.Path, text: str) -> None:
     Result and index files are evidence: a crash or full disk in the middle
     of a plain ``write_text`` leaves a truncated JSON document that looks
     like a corrupted run.  Writing a sibling temporary file and renaming it
-    over the target makes each artifact appear atomically.
+    over the target makes each artifact appear atomically.  The containing
+    directory is fsynced after the rename, because a rename is only durable
+    once its directory entry is.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
@@ -7605,6 +7636,7 @@ def _atomic_write_text(path: pathlib.Path, text: str) -> None:
             except OSError:  # noqa: PERF203 - durability is best-effort
                 pass
         os.replace(tmp, path)
+        _fsync_directory(path.parent)
     finally:
         with contextlib.suppress(FileNotFoundError):
             tmp.unlink()
@@ -7659,6 +7691,10 @@ _SOURCE_TREE_SHA: str | None = None
 _RUN_ID: str | None = None
 _RUN_STARTED_UTC: str | None = None
 _RECORD_SCHEMA = 1
+# Dedicated exit code for "the existing results directory already failed its
+# artifact certificate"; distinct from the lock conflict (4) and the
+# pre-grid scientific gates (3) so a caller can tell the failure modes apart.
+ARTIFACT_INTEGRITY_EXIT_CODE = 5
 _RUN_ARTIFACTS: set[pathlib.Path] = set()
 
 
@@ -7756,6 +7792,34 @@ def _find_artifact_root(path: pathlib.Path) -> pathlib.Path | None:
     return None
 
 
+def _jsonl_tail_problem(path: pathlib.Path) -> str | None:
+    """Describe a torn append boundary, or return ``None``.
+
+    Every record this runner appends is one JSON serialisation followed by
+    ``\\n``.  A crash between the data write and the newline can therefore
+    leave a file whose final line is a fragment.  Appending after that
+    fragment would splice the next record onto it, producing a permanently
+    unparseable JSONL file that still ends in a newline.  Checking the last
+    byte is sufficient for this writer (a JSON string escapes embedded
+    newlines), cheap for large logs, and does not reject legacy JSONL files
+    whose older records are not JSON objects.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        return f"cannot stat it ({type(exc).__name__}: {exc})"
+    if size == 0:
+        return None
+    try:
+        with path.open("rb") as fh:
+            fh.seek(size - 1)
+            if fh.read(1) != b"\n":
+                return "it does not end with a newline"
+    except OSError as exc:
+        return f"cannot read it ({type(exc).__name__}: {exc})"
+    return None
+
+
 def _assert_append_target_intact(path) -> None:
     """Refuse to append to a previously certified but changed file.
 
@@ -7766,6 +7830,10 @@ def _assert_append_target_intact(path) -> None:
     check is intentionally limited to files that appear in an existing
     index; a brand-new or legacy untracked file is allowed through and will
     be covered by the index written at the end of the invocation.
+
+    Independently of the certificate, the current tail must be a complete
+    JSONL record.  A crash can leave a torn final line *before* any index
+    is written, so an untracked file is not implicitly safe to append to.
     """
     path = pathlib.Path(path)
     if path.resolve() in _RUN_ARTIFACTS:
@@ -7773,6 +7841,14 @@ def _assert_append_target_intact(path) -> None:
         # current state); re-hashing a growing JSONL before every row would
         # make long grids quadratic.
         return
+    if path.suffix == ".jsonl" and path.exists():
+        problem = _jsonl_tail_problem(path)
+        if problem is not None:
+            raise TrackingError(
+                f"refusing to append to {path}: {problem}; the previous "
+                f"writer may have crashed mid-record, and appending would "
+                f"splice a new row onto a torn line. Restore the file or "
+                f"rebuild the results directory deliberately")
     root = _find_artifact_root(path)
     if root is None:
         return
@@ -18087,6 +18163,22 @@ def main(argv=None) -> int:
               "this platform; concurrent writers are not prevented")
     _RUN_ARTIFACTS.clear()
     started = time.monotonic()
+    # Fail closed before writing new evidence: appending fresh rows to a
+    # directory whose earlier rows no longer match the cumulative
+    # certificate would mix trustworthy and untrustworthy data under one
+    # index.  The end-of-run index writer must never be the first place a
+    # tampered history is noticed.
+    index_path = out_dir / "artifact_index.json"
+    if index_path.exists():
+        verified = _verify_artifacts(out_dir)
+        if verified != 0:
+            print(f"[runner] ABORTED: existing results in {out_dir} do not "
+                  f"match their artifact_index.json; refusing to append new "
+                  f"evidence to a broken chain of custody. Re-run "
+                  f"--verify-artifacts, restore the certified files, or "
+                  f"choose a fresh --out directory")
+            lock.release()
+            return ARTIFACT_INTEGRITY_EXIT_CODE
     status = "failed"
     try:
         # Read the previous environment before writing the new one, then
