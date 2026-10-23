@@ -339,6 +339,20 @@ class BootstrapReplicateCountTest(unittest.TestCase):
         out = metrics.paired_bootstrap_ci(
             [0.1, 0.2, 0.3], n_boot=10 ** 400)
         self.assertTrue(math.isnan(out["lo"]))
+        # The independent two-sample companion has the same contract.
+        from cage.train import _two_sample_bootstrap_ci
+
+        shapes = []
+
+        def fake_randint(low, high, size, generator=None, device=None):
+            shapes.append(tuple(size))
+            return torch.zeros((2, size[1]), dtype=torch.long)
+
+        with mock.patch("cage.train.torch.randint",
+                        side_effect=fake_randint):
+            _two_sample_bootstrap_ci(
+                [1.0, 2.0, 3.0], [0.0, 1.0, 2.0], n_boot=exact)
+        self.assertEqual(shapes, [(exact, 3), (exact, 3)])
 
 
 class TinyAlphaQuantileTest(unittest.TestCase):
