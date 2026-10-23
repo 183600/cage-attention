@@ -326,8 +326,18 @@ class SelectionReliabilityInputTest(unittest.TestCase):
              "n_seeds": 2, "diverged_runs": 0},
         ]
         out = _selection_reliability(rows)
-        self.assertIsNot(out["reliable"], True)
+        self.assertIs(out["reliable"], False)
         self.assertIsNone(out["diverged_runs_best"])
+        self.assertTrue(out["diverged_runs_unknown"])
+        curve_bad = [
+            {"val_accuracy_mean": 0.9, "val_accuracy_std": 0.01,
+             "n_seeds": 5, "curve_verdicts": "bad"},
+            {"val_accuracy_mean": 0.8, "val_accuracy_std": 0.01,
+             "n_seeds": 5, "curve_verdicts": []},
+        ]
+        curve_out = _selection_reliability(curve_bad)
+        self.assertIs(curve_out["reliable"], False)
+        self.assertTrue(curve_out["curve_verdicts_unknown"])
         for grid, keys in ((5, None), (None, 5), (object(), object())):
             with self.subTest(grid=grid, keys=keys):
                 out = _selection_reliability(rows, grid=grid,

@@ -4679,6 +4679,10 @@ def _interaction_manipulation(audit: dict) -> dict:
     resolved = audit.get("model_factor_diffs") or {}
     if resolved:
         return {key: value for key, value in resolved.items()}
+    if "model_cfg" in audit:
+        # The resolved configs are available and say no factor differs;
+        # stale declared labels must not resurrect a manipulation.
+        return {}
     return dict(audit.get("varying_factors") or {})
 
 
@@ -5851,11 +5855,19 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
         within_noise = bool(margin < margin_se)
 
     curve_invalid_best = None
-    verdicts = r_best.get(curve_key)
-    if isinstance(verdicts, (list, tuple)):
-        curve_invalid_best = sum(1 for v in verdicts
-                                 if v in CURVE_INVALID_VERDICTS)
-    diverged_best = _difficulty_count(r_best.get(diverged_key))
+    curve_invalid_unknown = False
+    if curve_key in r_best:
+        verdicts = r_best.get(curve_key)
+        if isinstance(verdicts, (list, tuple)):
+            curve_invalid_best = sum(1 for v in verdicts
+                                     if v in CURVE_INVALID_VERDICTS)
+        else:
+            curve_invalid_unknown = True
+    diverged_best = None
+    diverged_unknown = False
+    if diverged_key in r_best:
+        diverged_best = _difficulty_count(r_best.get(diverged_key))
+        diverged_unknown = diverged_best is None
     boundary = None
     boundary_rows = (rows if full_rows is None
                      else _materialize_runs(full_rows))
@@ -5885,6 +5897,8 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
             reliable = reliable and curve_invalid_best == 0
         if diverged_best is not None:
             reliable = reliable and diverged_best == 0
+        if diverged_unknown or curve_invalid_unknown:
+            reliable = False
     elif boundary or curve_invalid_best or diverged_best:
         # The noise-based decision can be unavailable (e.g. a one-seed
         # winner), but a grid-boundary winner, or a winning row that
@@ -5892,12 +5906,16 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
         # resolved measurement - it must not be left as the neutral ``None``
         # state that callers read as "open".
         reliable = False
+    if diverged_unknown or curve_invalid_unknown:
+        reliable = False
     out.update({"best_index": int(i_best), "second_index": int(i_second),
                 "best": float(r_best[metric]),
                 "runner_up": float(r_second[metric]), "margin": margin,
                 "margin_se": margin_se, "within_noise": within_noise,
                 "curve_invalid_best": curve_invalid_best,
                 "diverged_runs_best": diverged_best,
+                "diverged_runs_unknown": bool(diverged_unknown),
+                "curve_verdicts_unknown": bool(curve_invalid_unknown),
                 "best_at_grid_boundary": boundary,
                 "axis_boundaries": axis_boundaries or None,
                 "reliable": reliable})
