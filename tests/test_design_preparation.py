@@ -463,6 +463,16 @@ class DesignPlanTest(unittest.TestCase):
         self.assertIs(audit["within_noise"], True)
         self.assertIs(audit["reliable"], False)
 
+    def test_plan_rejects_malformed_planning_probabilities(self):
+        for field in ("design_alpha", "power_target"):
+            settings = Settings.quick()
+            setattr(settings, field, object())
+            with tempfile.TemporaryDirectory() as tmp:
+                with self.subTest(field=field):
+                    with self.assertRaises(ValueError):
+                        _design_sensitivity_plan(
+                            settings, {}, pathlib.Path(tmp), "e1")
+
     def test_settings_reject_invalid_design_fields(self):
         with self.assertRaises(ValueError):
             Settings(design_alpha=0.0)

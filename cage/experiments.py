@@ -3008,8 +3008,14 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
             f"min_seeds_for_claim must be a positive integer, got "
             f"{settings.min_seeds_for_claim!r}")
     meets_floor = n >= floor
-    alpha = float(settings.design_alpha)
-    target = float(settings.power_target)
+    try:
+        alpha = float(settings.design_alpha)
+        target = float(settings.power_target)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            "design_alpha and power_target must be finite numbers strictly "
+            f"between 0 and 1, got {settings.design_alpha!r} and "
+            f"{settings.power_target!r}") from exc
     for name, value in (("design_alpha", alpha),
                         ("power_target", target)):
         if not (_finite(value) and 0.0 < value < 1.0):
