@@ -510,6 +510,13 @@ class DesignPlanTest(unittest.TestCase):
                     Settings(**{field: b"\x01\x02"})
         self.assertEqual(Settings(lr_grid=[1e-3]).lr_grid, (1e-3,))
 
+    def test_settings_reject_unrepresentable_calib_temperature(self):
+        # ``calib_tau_grid`` is fed to Cfg.calib_tau_init, whose
+        # log(expm1(x)) initialisation must stay finite; 1e300 is a finite
+        # positive float but cannot be realised as a temperature.
+        with self.assertRaises(ValueError):
+            Settings(calib_tau_grid=(1e300,))
+
     def test_settings_reject_depth_multiplier_step_overflow(self):
         # A finite multiplier can still overflow steps * multiplier; that
         # product is the actual step budget the depth ladder would search.

@@ -1487,6 +1487,20 @@ class Settings:
                     raise ValueError(
                         f"{name} must be a non-empty tuple of finite positive "
                         f"numbers, got {values!r}")
+                if name == "calib_tau_grid":
+                    # These values are passed to ``Cfg.calib_tau_init``,
+                    # whose softplus-inverse initialisation is
+                    # ``log(expm1(x))``.  A finite-but-huge value overflows
+                    # that expression, so the per-variant tuning pass would
+                    # fail only after the baseline and main grids had run.
+                    # Reject it at the configuration boundary instead.
+                    try:
+                        math.log(math.expm1(number))
+                    except (OverflowError, ValueError) as exc:
+                        raise ValueError(
+                            f"{name} entries must keep "
+                            f"log(expm1(calib_tau_init)) finite, got "
+                            f"{value!r}") from exc
                 checked.append(value)
             # Canonicalise so a caller's list cannot be mutated after
             # validation and silently change the grid used downstream.
