@@ -20,6 +20,7 @@ from cage.experiments import (
     _E1_ABLATION_LABELS,
     _blocked_run_order,
     _competence_check,
+    _class_frequency_companions,
     _e1_cell_of,
     _e1_cell_plan,
     _model_cfg,
@@ -219,6 +220,19 @@ class ReportMalformedRunTest(unittest.TestCase):
             [("arm", None)], lambda r: (0, 1), 0.2)
         self.assertFalse(out["passed"])
         self.assertEqual(out["arms"]["arm"]["n"], 0)
+
+    def test_class_frequency_companion_skips_malformed_rules(self):
+        good = {"seed": 0, "accuracy": 1.0}
+        rules = [None, 3, ("bad",), "not-a-rule",
+                 ("arm", [good], [good], "H1a")]
+        with contextlib.redirect_stdout(io.StringIO()):
+            out = _class_frequency_companions(rules, "test")
+        self.assertEqual(len(out["rows"]), 3)
+        self.assertTrue(all(row["contrast"] == "arm"
+                            for row in out["rows"]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                _class_frequency_companions(None, "test")["rows"], [])
 
     def test_error_tables_skip_non_mapping_rows(self):
         conf = {"err_conf_by_error_type": {"retrieval_miss": 0.9}}

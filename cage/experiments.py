@@ -4682,7 +4682,12 @@ def _class_frequency_companions(rules, title):
           f"(exploratory, outside the FDR family; seed-paired a - b):")
     print(f"  {'contrast':<34} {'metric':<15} {'effect [95% CI]':>29} "
           f"{'n':>3}  {'vs accuracy':>18}")
-    for label, runs_a, runs_b, hypothesis in rules:
+    for item in _materialize_runs(rules):
+        if not isinstance(item, (tuple, list)) or len(item) != 4:
+            # A malformed companion rule is not a contrast; skip it so one
+            # bad record cannot abort the rest of the report.
+            continue
+        label, runs_a, runs_b, hypothesis = item
         acc = _paired_diff(runs_a, runs_b, "accuracy")
         for metric, convention in _CLASS_METRIC_COMPANIONS:
             ci = _paired_diff(runs_a, runs_b, metric)
