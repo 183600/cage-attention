@@ -250,6 +250,17 @@ class PairedStreamDigestTest(unittest.TestCase):
         self.assertTrue(crossed["stream_limited"])
         self.assertFalse(crossed["decision_agrees"])
 
+    def test_paired_diff_abstains_on_malformed_training_seeds(self):
+        for bad in ("not-a-record", {"seed": [0], "accuracy": 1.0},
+                    {"seed": True, "accuracy": 1.0},
+                    {"seed": 0.5, "accuracy": 1.0}):
+            with self.subTest(record=bad):
+                paired = _paired_diff(
+                    [bad], [{"seed": 0, "accuracy": 0.0}], "accuracy")
+                self.assertEqual(paired["n"], 0)
+                self.assertFalse(paired["controlled"]["controlled"])
+                self.assertGreaterEqual(len(paired["seeds_unpaired"]), 1)
+
     def test_digest_mismatch_refuses_item_pairing(self):
         a = [[1] * 16]
         b = [[0] * 16]

@@ -4142,6 +4142,29 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
     return out
 
 
+def _paired_seed(run):
+    """The usable training seed of a stored run record, or ``None``.
+
+    A pooled/legacy row may be malformed (not a mapping, a bool, a
+    fractional value, or an unhashable container).  ``_paired_diff`` used
+    these values directly as dict keys, so a list seed raised
+    ``TypeError: unhashable type`` and a non-mapping row raised
+    ``AttributeError`` before the contrast could abstain.  Only plain
+    integers (the contract produced by ``Settings``) and legacy string
+    labels are usable pairing keys; everything else is an unpaired row.
+    """
+    if not isinstance(run, Mapping):
+        return None
+    seed = run.get("seed")
+    if isinstance(seed, bool):
+        return None
+    if isinstance(seed, int):
+        return int(seed)
+    if isinstance(seed, str) and seed:
+        return seed
+    return None
+
+
 def _paired_diff(runs_a, runs_b, metric):
     """Paired contrast ``a - b`` plus both arms' levels.
 
@@ -4172,10 +4195,18 @@ def _paired_diff(runs_a, runs_b, metric):
     false-concentration cases), so a shrunken sample is never silently
     read as if it were the full seed set.
     """
-    missing_a = [r for r in runs_a if r.get("seed") is None]
-    missing_b = [r for r in runs_b if r.get("seed") is None]
-    by_a = {r["seed"]: r for r in runs_a if r.get("seed") is not None}
-    by_seed = {r["seed"]: r for r in runs_b if r.get("seed") is not None}
+    missing_a = [r for r in runs_a if _paired_seed(r) is None]
+    missing_b = [r for r in runs_b if _paired_seed(r) is None]
+    by_a = {}
+    for r in runs_a:
+        seed = _paired_seed(r)
+        if seed is not None:
+            by_a[seed] = r
+    by_seed = {}
+    for r in runs_b:
+        seed = _paired_seed(r)
+        if seed is not None:
+            by_seed[seed] = r
     diffs = []
     used, dropped, unpaired, undefined = [], [], [], []
     # Iterate the *union* of the two seed sets: a seed present only on one
@@ -4267,7 +4298,15 @@ def _paired_diff(runs_a, runs_b, metric):
     ci["seeds_dropped"] = sorted(dropped, key=_seed_order)
     ci["seeds_unpaired"] = sorted(unpaired, key=_seed_order)
     ci["seeds_undefined"] = sorted(undefined, key=_seed_order)
-    ci["controlled"] = _controlled_audit(runs_a, runs_b)
+    audit_a = [r for r in runs_a if _paired_seed(r) is not None]
+    audit_b = [r for r in runs_b if _paired_seed(r) is not None]
+    audit = _controlled_audit(audit_a, audit_b)
+    if missing_a or missing_b:
+        audit["mismatches"].append(
+            f"{len(missing_a) + len(missing_b)} run(s) lack a usable "
+            f"(hashable, non-boolean) training seed and cannot be paired")
+        audit["controlled"] = False
+    ci["controlled"] = audit
     return ci
 
 
