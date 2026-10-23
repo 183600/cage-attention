@@ -1339,6 +1339,22 @@ class Settings:
                 raise ValueError(
                     "depth_step_multipliers entries must be finite "
                     f"positive numbers, got {value!r}")
+            # The multiplier is applied to ``steps`` to build the depth
+            # ladder's step grid.  A finite multiplier can still overflow
+            # that product (1e308 * 1500 -> inf), which used to surface as
+            # an incidental OverflowError from ``round`` during the audit,
+            # after the baselines runner had already started.  Reject the
+            # unrepresentable combination at the configuration boundary.
+            try:
+                scaled = number * float(self.steps)
+            except (OverflowError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "depth_step_multipliers must keep steps * multiplier "
+                    f"finite, got {value!r} at steps={self.steps}") from exc
+            if not math.isfinite(scaled):
+                raise ValueError(
+                    "depth_step_multipliers must keep steps * multiplier "
+                    f"finite, got {value!r} at steps={self.steps}")
             checked_multipliers.append(number)
         self.depth_step_multipliers = tuple(checked_multipliers)
         for name in ("dropout", "negative_control_tol"):
@@ -1522,7 +1538,17 @@ def _depth_step_candidates(settings: Settings) -> tuple:
             raise ValueError(
                 f"depth_step_multipliers must be finite positive numbers, "
                 f"got {multiplier!r}")
-        steps.add(max(1, int(round(base_steps * float(multiplier)))))
+        try:
+            scaled = base_steps * float(multiplier)
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"depth_step_multipliers must keep steps * multiplier "
+                f"finite, got {multiplier!r} at steps={base_steps}") from exc
+        if not math.isfinite(scaled):
+            raise ValueError(
+                f"depth_step_multipliers must keep steps * multiplier "
+                f"finite, got {multiplier!r} at steps={base_steps}")
+        steps.add(max(1, int(round(scaled))))
     return tuple(sorted(steps))
 
 

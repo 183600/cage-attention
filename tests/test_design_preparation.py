@@ -510,6 +510,14 @@ class DesignPlanTest(unittest.TestCase):
                     Settings(**{field: b"\x01\x02"})
         self.assertEqual(Settings(lr_grid=[1e-3]).lr_grid, (1e-3,))
 
+    def test_settings_reject_depth_multiplier_step_overflow(self):
+        # A finite multiplier can still overflow steps * multiplier; that
+        # product is the actual step budget the depth ladder would search.
+        with self.assertRaises(ValueError):
+            Settings(depth_step_multipliers=(1e308,))
+        with self.assertRaises(ValueError):
+            Settings(depth_step_multipliers=(1e306,), steps=1500)
+
     def test_settings_reject_overflowing_grid_values(self):
         for field in ("lr_grid", "probe_lr_grid", "calib_tau_grid"):
             with self.subTest(field=field):
