@@ -42,6 +42,7 @@ which any depth-based motivation must be read.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 
 import torch
 import torch.nn.functional as F
@@ -331,8 +332,13 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
     be attributed to an under-tuned strawman.
     """
     def _sequence(value, name):
-        """Normalise a grid/seed iterable, rejecting scalars and bytes."""
-        if isinstance(value, (str, bytes)):
+        """Normalise a grid/seed iterable, rejecting scalars and bytes.
+
+        A mapping is iterable but names its *keys*, not the grid values;
+        treating it as a grid silently changes which learning rates/seeds
+        the probe runs.  Reject it like the Settings grid validators do.
+        """
+        if isinstance(value, (str, bytes)) or isinstance(value, Mapping):
             raise ValueError(
                 f"{name} must be an iterable, got {type(value).__name__}")
         try:

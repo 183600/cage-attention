@@ -465,11 +465,13 @@ class BaselineArgumentValidationTest(unittest.TestCase):
         from cage.baselines import tune_linear_probe
 
         for kwargs in ({"lr_grid": 5}, {"lr_grid": b"\x01"},
-                       {"lr_grid": []}, {"seeds": 5},
-                       {"seeds": b"\x00"}, {"seeds": []},
+                       {"lr_grid": []}, {"lr_grid": {"1e-3": 1}},
+                       {"seeds": 5}, {"seeds": b"\x00"},
+                       {"seeds": []}, {"seeds": {"0": 1}},
                        {"steps_grid": 5}, {"steps_grid": b"\x01"},
                        {"steps_grid": 0}, {"steps_grid": False},
-                       {"steps_grid": ""}):
+                       {"steps_grid": ""},
+                       {"steps_grid": {"10": 1}}):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(ValueError):
                     tune_linear_probe(3, 16, **kwargs)
