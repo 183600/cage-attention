@@ -369,6 +369,14 @@ class PairedStreamDigestTest(unittest.TestCase):
                 self.assertEqual(_curve_health([bad, good]), ({"ok": 1}, 0))
                 self.assertEqual(_curve_warn(("a", [bad])), "")
 
+    def test_curve_helpers_treat_non_string_verdicts_as_malformed(self):
+        good = {"seed": 0, "curve_verdict": "ok"}
+        bad = {"seed": 1, "curve_verdict": ["plateau"]}
+        self.assertEqual(_curve_valid_runs([bad, good]), [good])
+        self.assertEqual(_curve_health([bad, good]),
+                         ({"malformed": 1, "ok": 1}, 1))
+        self.assertIn("malformed", _curve_warn(("a", [bad])))
+
     def test_curve_helpers_treat_non_iterable_runs_as_empty(self):
         self.assertEqual(_curve_valid_runs(None), [])
         self.assertEqual(_curve_health(None), ({}, 0))

@@ -5752,8 +5752,11 @@ def _curve_warn(*labeled_runs) -> str:
         counts, bad = _curve_health(runs)
         if not bad:
             continue
-        detail = ",".join(f"{v}*{counts[v]}" for v in CURVE_INVALID_VERDICTS
-                          if counts.get(v))
+        detail_parts = [f"{v}*{counts[v]}"
+                        for v in CURVE_INVALID_VERDICTS if counts.get(v)]
+        if counts.get("malformed"):
+            detail_parts.append(f"malformed*{counts['malformed']}")
+        detail = ",".join(detail_parts)
         parts.append(f"{label}: {bad}/{len(runs)} curve-invalid ({detail})")
     return "WARN " + "; ".join(parts) if parts else ""
 
