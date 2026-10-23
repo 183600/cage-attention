@@ -22,6 +22,7 @@ import torch.nn as nn
 from cage.data import make_batch
 from cage.experiments import _counterfactual_companion
 from cage.train import (
+    _association_exposure_accumulate,
     _association_exposure_summary,
     _blank_exposure_cohort,
     _counterfactual_counts,
@@ -256,6 +257,53 @@ class CounterfactualCountsTest(unittest.TestCase):
         self.assertEqual(out["value_swap"]["n"], 4)
         self.assertEqual(out["value_swap"]["n_correct_after_edit"], 3)
         self.assertAlmostEqual(out["value_swap"]["follow_rate"], 2 / 3)
+
+
+class AssociationExposureAccumulateTest(unittest.TestCase):
+    def setUp(self):
+        self.vocab = 17
+        self.idx, _, self.meta = make_batch(
+            6, 4, self.vocab, "cpu",
+            gen=torch.Generator().manual_seed(11))
+        self.n = self.idx.size(0)
+        self.pred = torch.zeros(self.n, dtype=torch.long)
+        self.answer = self.meta["answer"]
+
+    def _accumulate(self, **kwargs):
+        totals = {}
+        _association_exposure_accumulate(
+            totals, self.idx, self.meta, self.vocab, frozenset(), **kwargs)
+        return totals
+
+    def test_flattenable_shapes_cannot_broadcast_correctness(self):
+        totals = self._accumulate(pred=self.pred.unsqueeze(1),
+                                  answer=self.answer)
+        cohort = totals["unseen"]
+        self.assertEqual(cohort["n"], self.n)
+        self.assertEqual(cohort["n_correct"],
+                         int(self.pred.eq(self.answer).sum()))
+
+    def test_mismatched_probe_shapes_raise_value_error(self):
+        short = torch.zeros(self.n - 1, dtype=torch.long)
+        long = torch.zeros(self.n + 1, dtype=torch.long)
+        cases = (
+            {"pred": self.pred, "answer": self.answer[:-1]},
+            {"pred": self.pred, "answer": self.answer,
+             "swap_pred": short, "swap_answer": short},
+            {"pred": self.pred, "answer": self.answer,
+             "swap_pred": long, "swap_answer": long},
+            {"pred": self.pred, "answer": self.answer,
+             "swap_pred": self.pred,
+             "swap_answer": self.answer[:-1]},
+            {"pred": self.pred, "answer": self.answer,
+             "distractor_pred": short},
+            {"pred": self.pred, "answer": self.answer,
+             "relocation_pred": long},
+        )
+        for kwargs in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    self._accumulate(**kwargs)
 
 
 class AssociationExposureSummaryTest(unittest.TestCase):

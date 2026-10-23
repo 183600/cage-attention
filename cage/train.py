@@ -2897,15 +2897,55 @@ def _association_exposure_accumulate(totals, idx, meta, vocab, reference,
     for seen and unseen pairs; no rate is formed until every batch has been
     added, so a zero-row cohort abstains instead of contributing 0.
     """
+    try:
+        pred = (pred.detach() if torch.is_tensor(pred)
+                else torch.as_tensor(pred).detach())
+        pred = pred.reshape(-1)
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+        raise ValueError(
+            "pred must be a tensor-like sequence of predictions, got "
+            f"{type(pred).__name__}") from exc
+    n = int(pred.numel())
+
+    def _per_item(value, name):
+        # Flatten before comparing: a correctly sized [n, 1] panel must
+        # not broadcast against an [n] answer into an [n, n] correctness
+        # matrix, and a mismatched length must fail closed instead of
+        # indexing/counting only a prefix (or raising a raw torch error).
+        try:
+            tensor = (value.detach() if torch.is_tensor(value)
+                      else torch.as_tensor(value).detach())
+            tensor = tensor.reshape(-1)
+        except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+            raise ValueError(
+                f"{name} must be a tensor-like sequence of predictions, "
+                f"got {type(value).__name__}") from exc
+        if tensor.numel() != n:
+            raise ValueError(
+                f"{name} has {int(tensor.numel())} entries for "
+                f"{n} predictions")
+        return tensor.to(device=pred.device)
+
+    answer = _per_item(answer, "answer")
+    if swap_pred is not None:
+        if swap_answer is None:
+            raise ValueError(
+                "swap_answer is required when swap_pred is provided")
+        swap_pred = _per_item(swap_pred, "swap_pred")
+        swap_answer = _per_item(swap_answer, "swap_answer")
+    if distractor_pred is not None:
+        distractor_pred = _per_item(distractor_pred, "distractor_pred")
+    if relocation_pred is not None:
+        relocation_pred = _per_item(relocation_pred, "relocation_pred")
     codes = association_codes(idx, meta, vocab)["code"].tolist()
     if not isinstance(reference, frozenset):
         reference = association_reference_codes(reference)
     seen = torch.tensor([int(code) in reference for code in codes],
                         dtype=torch.bool, device=pred.device)
-    if seen.numel() != pred.numel():
+    if seen.numel() != n:
         raise ValueError(
             "association exposure has "
-            f"{int(seen.numel())} entries for {int(pred.numel())} rows")
+            f"{int(seen.numel())} entries for {n} rows")
     correct = pred.eq(answer)
     for name, mask in (("seen", seen), ("unseen", ~seen)):
         n = int(mask.sum())
