@@ -888,6 +888,47 @@ class CoverageMalformedRunTest(unittest.TestCase):
             self.assertFalse(payload["complete"])
             self.assertFalse(payload["seed_balanced"])
 
+    def test_non_iterable_runs_fail_closed(self):
+        # A missing run container is not evidence of coverage: every audit
+        # must report the cells as missing rather than raising mid-report.
+        balance, unbalanced = _cell_seed_balance(
+            None, lambda run: run.get("cell"), ("none",), (0,))
+        self.assertEqual(balance["none"]["seeds"], [])
+        self.assertEqual(unbalanced, ["none"])
+        self.assertEqual(_aggregate_runs(None), {})
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _report_ablation_coverage(
+                    pathlib.Path(tmp), "e1", None, cells=("full",),
+                    planned_seeds=(0,))
+            self.assertEqual(payload["present_cells"], [])
+            self.assertFalse(payload["complete"])
+            self.assertFalse(payload["seed_balanced"])
+            self.assertEqual(payload["n_runs"], 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _report_design_coverage(
+                    pathlib.Path(tmp), "e1", None, "gate",
+                    lambda run: run.get("gate"), ("none",),
+                    planned_seeds=(0,))
+            self.assertEqual(payload["present_cells"], [])
+            self.assertFalse(payload["complete"])
+            self.assertFalse(payload["seed_balanced"])
+            self.assertEqual(payload["n_runs"], 0)
+
+    def test_generator_runs_are_materialized_once(self):
+        runs = ({"gate": "none", "seed": 0} for _ in range(1))
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _report_design_coverage(
+                    pathlib.Path(tmp), "e1", runs, "gate",
+                    lambda run: run.get("gate"), ("none",),
+                    planned_seeds=(0,))
+        self.assertEqual(payload["present_cells"], ["none"])
+        self.assertTrue(payload["complete"])
+        self.assertTrue(payload["seed_balanced"])
+        self.assertEqual(payload["n_runs"], 1)
+
 
 class RealizedRunOrderAuditTest(unittest.TestCase):
     CELLS = ("none", "query")

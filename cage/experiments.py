@@ -2397,9 +2397,17 @@ def _stamp_linked_length_extension(rec, model, settings, lengths, eval_seed):
     return linked
 
 
+def _materialize_runs(runs):
+    """Materialize a run container; a non-iterable one has no records."""
+    try:
+        return list(runs)
+    except TypeError:
+        return []
+
+
 def _aggregate_runs(runs, skip=("seed", "lr", "params", "eval_seed",
                                 "stats_seed")):
-    records = [r for r in runs if isinstance(r, Mapping)]
+    records = [r for r in _materialize_runs(runs) if isinstance(r, Mapping)]
     keys = sorted({k for r in records for k, v in r.items()
                    if _finite(v) and k not in skip})
     return {k: _mean_std([r[k] for r in records if k in r]) for k in keys}
@@ -2583,7 +2591,7 @@ def _cell_seed_balance(runs, cell_of, expected, planned_seeds):
         # crashing the coverage report.
         planned = []
     seen: dict[str, set] = {}
-    for run in runs:
+    for run in _materialize_runs(runs):
         # Coverage is evidence about real runs: a non-mapping row, a cell
         # extractor that raises, or a malformed seed cannot certify that a
         # planned cell/seed was trained.  Skip it so the missing seed stays
@@ -2624,6 +2632,7 @@ def _report_ablation_coverage(out_dir, tag, runs, cells=_CALIB_FACTORIAL_CELLS,
     missing or unbalanced cells, and stores
     ``<tag>_ablation_coverage.json`` next to the run records.
     """
+    runs = _materialize_runs(runs)
     present = sorted({c for c in (_calib_cell(r) for r in runs) if c in cells})
     missing = [c for c in cells if c not in present]
     balance, unbalanced = _cell_seed_balance(runs, _calib_cell, cells,
@@ -2672,6 +2681,7 @@ def _report_design_coverage(out_dir, tag, runs, design, extract, expected,
     trained only part of the planned seed set are printed as warnings and
     stored in ``<tag>_<design>_coverage.json``.
     """
+    runs = _materialize_runs(runs)
     observed = set()
     for run in runs:
         if not isinstance(run, Mapping):
@@ -4227,11 +4237,8 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
 
 def _mapping_runs(runs):
     """Materialize run records, dropping rows that are not mappings."""
-    try:
-        records = list(runs)
-    except TypeError:
-        return []
-    return [run for run in records if isinstance(run, Mapping)]
+    return [run for run in _materialize_runs(runs)
+            if isinstance(run, Mapping)]
 
 
 def _paired_seed(run):
