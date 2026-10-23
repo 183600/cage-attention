@@ -89,6 +89,17 @@ class AuditCountInputTest(unittest.TestCase):
                     answer_uniformity_test(
                         torch.tensor([10, 10]), n_sim=10, seed=seed)
 
+    def test_overflowing_shift_count_sums_abstain(self):
+        from cage.data import _distribution_shift_p
+
+        huge = [1e308, 1e308]
+        for observed, reference in ((huge, [1, 1]), ([1, 1], huge)):
+            with self.subTest(observed=observed):
+                p, chi2 = _distribution_shift_p(
+                    observed, reference, n_sim=2)
+                self.assertTrue(p != p)
+                self.assertTrue(chi2 != chi2)
+
     def test_malformed_shift_count_containers_raise_value_error(self):
         from cage.data import _distribution_shift_p
 

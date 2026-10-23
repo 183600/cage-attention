@@ -2300,6 +2300,10 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
             raise ValueError(f"{name} counts must be integers")
     n_ref = float(ref.sum())
     n_h = float(obs.sum())
+    if not (math.isfinite(n_ref) and math.isfinite(n_h)):
+        # Individually finite counts can overflow their sum; no expected
+        # count (and therefore no test) is representable in that case.
+        return float("nan"), float("nan")
     if n_ref <= 0.0 or n_h <= 0.0:
         return float("nan"), float("nan")
     if isinstance(n_sim, bool):
@@ -2314,18 +2318,25 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
     probs = (ref + _AUDIT_SMOOTH) / (n_ref + _AUDIT_SMOOTH * k)
     expected = n_h * probs
     chi2 = float((((obs - expected) ** 2) / expected).sum())
+    if not math.isfinite(chi2):
+        return float("nan"), float("nan")
 
     gen = torch.Generator().manual_seed(_audit_seed(seed))
-    ref_sim = torch.poisson((n_ref * probs).expand(n_sim, k).contiguous(),
-                            generator=gen)
-    h_sim = torch.poisson((n_h * probs).expand(n_sim, k).contiguous(),
-                          generator=gen)
-    probs_sim = (ref_sim + _AUDIT_SMOOTH) / (
-        ref_sim.sum(1, keepdim=True) + _AUDIT_SMOOTH * k)
-    expected_sim = h_sim.sum(1, keepdim=True) * probs_sim
-    chi2_sim = (((h_sim - expected_sim) ** 2) / expected_sim).sum(1)
-    p_value = float((1.0 + (chi2_sim >= chi2).to(torch.float64).sum())
-                    / (n_sim + 1.0))
+    try:
+        ref_sim = torch.poisson(
+            (n_ref * probs).expand(n_sim, k).contiguous(), generator=gen)
+        h_sim = torch.poisson(
+            (n_h * probs).expand(n_sim, k).contiguous(), generator=gen)
+        probs_sim = (ref_sim + _AUDIT_SMOOTH) / (
+            ref_sim.sum(1, keepdim=True) + _AUDIT_SMOOTH * k)
+        expected_sim = h_sim.sum(1, keepdim=True) * probs_sim
+        chi2_sim = (((h_sim - expected_sim) ** 2) / expected_sim).sum(1)
+        p_value = float((1.0 + (chi2_sim >= chi2).to(torch.float64).sum())
+                        / (n_sim + 1.0))
+    except (RuntimeError, ValueError, OverflowError):
+        # The audit is a reporting companion; a count magnitude the Poisson
+        # sampler cannot represent must abstain, not abort the report.
+        return float("nan"), float("nan")
     return p_value, chi2
 
 
