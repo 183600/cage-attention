@@ -810,6 +810,12 @@ def association_codes(idx, meta, vocab) -> dict:
     if batch and (bool((key < 2).any()) or bool((key >= vocab).any())):
         raise ValueError(
             f"the paired key must be a selectable id in [2, {vocab})")
+    # Token ids may be any integer dtype, but the association code ranges
+    # over [0, vocab*vocab); arithmetic in int16/int32 would wrap and feed
+    # a negative/colliding code to the exposure audit.  The returned code is
+    # the documented exact integer, so widen before multiplying.
+    key = key.to(torch.long)
+    value = value.to(torch.long)
     code = key.mul(vocab).add(value)
     return {"key": key, "value": value, "code": code}
 
@@ -983,6 +989,10 @@ def make_length_linked_batch(idx, meta, n_pairs, target_pairs, vocab,
         raise ValueError(
             f"idx must be a (batch, 2*n_pairs + 2) integer tensor, got "
             f"{type(idx)}")
+    # The model and target contract use long token ids.  Accepting another
+    # integer dtype but then assigning long draws/targets into it would
+    # either raise a dtype mismatch or silently wrap a wider vocabulary.
+    idx = idx.to(torch.long)
     batch, width = idx.shape
     if width != 2 * n_pairs + 2:
         raise ValueError(

@@ -2477,6 +2477,10 @@ def _counterfactual_edits(idx, meta, n_pairs, vocab):
         # ``torch.long`` would silently truncate or reinterpret them.
         raise ValueError(
             f"idx must be an integer token tensor, got dtype {idx.dtype}")
+    # Edits and metadata are long token ids.  Normalise a narrower integer
+    # input once instead of assigning long alternatives into it (which
+    # raises a destination/source dtype RuntimeError).
+    idx = idx.to(torch.long)
     if int(idx.size(1)) != 2 * int(n_pairs) + 2:
         raise ValueError(
             f"idx width {int(idx.size(1))} does not match the "

@@ -90,6 +90,23 @@ class LinkedBatchTest(unittest.TestCase):
         self.assertTrue(torch.equal(meta["key_pos"], self.meta["key_pos"]))
         self.assertTrue(torch.equal(meta["answer"], self.meta["answer"]))
 
+    def test_narrow_integer_ids_are_widened_not_wrapped(self):
+        vocab = 300
+        idx, _tgt, meta = make_batch(
+            2, 3, vocab, "cpu", gen=torch.Generator().manual_seed(1))
+        expected = association_codes(idx, meta, vocab)["code"]
+        narrow = association_codes(idx.to(torch.int16), meta, vocab)["code"]
+        self.assertEqual(narrow.dtype, torch.long)
+        self.assertTrue(torch.equal(narrow, expected))
+        out, tgt, out_meta = make_length_linked_batch(
+            idx.to(torch.int32), meta, 3, 5, vocab,
+            gen=torch.Generator().manual_seed(2))
+        self.assertEqual(out.dtype, torch.long)
+        self.assertEqual(tgt.dtype, torch.long)
+        validate_batch(out, tgt, out_meta, vocab)
+        self.assertTrue(torch.equal(
+            association_codes(out, out_meta, vocab)["code"], expected))
+
     def test_nested_extension_keeps_the_shorter_prefix(self):
         mid_idx, mid_tgt, mid_meta = self._extend(
             self.idx, self.meta, self.base_pairs, 8)

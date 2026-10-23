@@ -145,6 +145,16 @@ class CounterfactualEditTest(unittest.TestCase):
         for key in ("value_swap", "distractor_swap", "relocation"):
             self.assertTrue(torch.equal(self.edits[key], again[key]))
 
+    def test_narrow_integer_batch_is_widened_for_edits(self):
+        edits = _counterfactual_edits(
+            self.idx.to(torch.int32), self.meta, self.n_pairs, self.vocab)
+        for key in ("value_swap", "distractor_swap", "relocation"):
+            self.assertEqual(edits[key].dtype, torch.long)
+        self.assertTrue(torch.equal(
+            edits["value_swap"], self.edits["value_swap"]))
+        # The input is not mutated in place.
+        self.assertEqual(self.idx.dtype, torch.long)
+
 
 class CounterfactualCountsTest(unittest.TestCase):
     def _counts(self):
