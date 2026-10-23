@@ -306,6 +306,9 @@ class ControlledAuditProvenanceTest(unittest.TestCase):
         audit = _controlled_audit([a], [b])
         self.assertEqual(audit["params"], {"a": [], "b": []})
         self.assertNotIn("capacity", audit)
+        self.assertFalse(audit["controlled"])
+        self.assertTrue(any("parameter count" in msg
+                            for msg in audit["mismatches"]))
         legacy_a = self._run()
         legacy_b = self._run()
         legacy_a.pop("model_cfg")

@@ -3905,6 +3905,13 @@ def _controlled_audit(runs_a, runs_b):
     # Capacity: the parameter count each side actually trained (recorded for
     # every contrast; the placebo-specific enforcement happens below, where
     # the resolved model configs have been compared).
+    malformed_params = [
+        r for r in runs_a + runs_b
+        if "params" in r and _positive_integer(r.get("params")) is None]
+    if malformed_params:
+        audit["mismatches"].append(
+            f"{len(malformed_params)} run(s) carry a malformed parameter "
+            f"count; capacity cannot be verified")
     params_a = sorted({value for value in
                        (_positive_integer(r.get("params")) for r in runs_a)
                        if value is not None})
