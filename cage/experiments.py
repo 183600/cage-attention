@@ -4185,6 +4185,7 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
     if metric != "accuracy":
         out["reason"] = "only accuracy stores per-item correctness"
         return out
+    used = _materialize_runs(used)
     if not isinstance(by_a, Mapping) or not isinstance(by_b, Mapping):
         out["reason"] = (
             "paired run records must be mappings keyed by training seed")
@@ -5679,7 +5680,9 @@ CURVE_INVALID_VERDICTS = (
 def _curve_valid_runs(runs):
     return [r for r in _materialize_runs(runs)
             if isinstance(r, Mapping)
-            and r.get("curve_verdict") not in CURVE_INVALID_VERDICTS]
+            and (r.get("curve_verdict") is None
+                 or (isinstance(r.get("curve_verdict"), str)
+                     and r["curve_verdict"] not in CURVE_INVALID_VERDICTS))]
 
 
 def _curve_invalid_seeds_for(used, run_maps):
@@ -5694,8 +5697,13 @@ def _curve_invalid_seeds_for(used, run_maps):
     for seed in used:
         for runs in run_maps:
             run = runs.get(seed)
-            if run is not None and run.get("curve_verdict") in \
-                    CURVE_INVALID_VERDICTS:
+            verdict = (run.get("curve_verdict")
+                       if isinstance(run, Mapping) else None)
+            if run is not None and (
+                    (isinstance(verdict, str)
+                     and verdict in CURVE_INVALID_VERDICTS)
+                    or (verdict is not None
+                        and not isinstance(verdict, str))):
                 bad.add(seed)
                 break
     return sorted(bad, key=_seed_order)
@@ -5718,8 +5726,11 @@ def _curve_health(runs):
         if not isinstance(r, Mapping):
             continue
         verdict = r.get("curve_verdict")
+        if verdict is not None and not isinstance(verdict, str):
+            verdict = "malformed"
         counts[verdict] = counts.get(verdict, 0) + 1
-    bad = sum(counts.get(v, 0) for v in CURVE_INVALID_VERDICTS)
+    bad = (sum(counts.get(v, 0) for v in CURVE_INVALID_VERDICTS)
+           + counts.get("malformed", 0))
     return counts, bad
 
 
@@ -5798,6 +5809,10 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
     missing statistic can never be read as 0.0.
     """
     rows = _materialize_runs(rows)
+    if grid is not None:
+        grid = _materialize_runs(grid)
+    if grid_keys is not None:
+        grid_keys = _materialize_runs(grid_keys)
     metric_rows = [(i, r) for i, r in enumerate(rows)
                    if isinstance(r, Mapping) and _finite(r.get(metric))]
     out = {"metric": metric, "margin": float("nan"),
@@ -7599,14 +7614,21 @@ def _print_conf_by_error_type(named_runs, title="[e1]"):
           f"where the bucket is empty:")
     width = max(16, max(len(t) for t in _ERROR_TYPES) + 1)
     print(f"{'arm':>{width}}" + "".join(f"{t:>{width}}" for t in _ERROR_TYPES))
-    for label, rs in named_runs:
+    for item in _materialize_runs(named_runs):
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            continue
+        label, rs = item
         rs = _mapping_runs(rs)
         cells = []
         for etype in _ERROR_TYPES:
-            vals = [
-                float((r.get("err_conf_by_error_type") or {}).get(etype))
-                for r in rs
-                if _finite((r.get("err_conf_by_error_type") or {}).get(etype))]
+            vals = []
+            for r in rs:
+                bucket = r.get("err_conf_by_error_type")
+                if not isinstance(bucket, Mapping):
+                    continue
+                value = bucket.get(etype)
+                if _finite(value):
+                    vals.append(float(value))
             cells.append(f"{sum(vals) / len(vals):.3f}"
                          if vals else "n/a")
         print(f"{label:>{width}}" + "".join(f"{c:>{width}}" for c in cells))
@@ -7626,7 +7648,10 @@ def _print_structural_decomposition(named_runs, title="[e1]"):
           f"bucket):")
     print(f"{'arm':>23} {'naive_only':>12} {'repeat_only':>12} "
           f"{'both':>12}")
-    for label, rs in named_runs:
+    for item in _materialize_runs(named_runs):
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            continue
+        label, rs = item
         rs = _mapping_runs(rs)
         cells = []
         for key in ("naive_only", "repeat_only", "both"):
@@ -9832,7 +9857,10 @@ def _competence_check(named_runs, correct_and_n, chance, what="arm"):
     marks every contrast ``claim_eligible=False`` when it fails.
     """
     raw = []
-    for name, runs in named_runs:
+    for item in _materialize_runs(named_runs):
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            continue
+        name, runs = item
         counts = []
         sizes = []
         for run in _mapping_runs(runs):

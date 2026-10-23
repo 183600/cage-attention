@@ -270,6 +270,20 @@ class ReportMalformedRunTest(unittest.TestCase):
         self.assertIn("arm", buf.getvalue())
         self.assertIn("arm", buf.getvalue())
 
+    def test_report_tables_skip_malformed_nested_containers(self):
+        bad_conf = {"err_conf_by_error_type": "not-a-mapping"}
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            _print_conf_by_error_type(
+                [("arm", [bad_conf]), None, "x", ("short",)])
+            _print_structural_decomposition(None)
+        self.assertIn("arm", buf.getvalue())
+        out = _competence_check(None, lambda r: (1, 2), 0.2)
+        self.assertFalse(out["passed"])
+        out = _competence_check(
+            [("arm", [{"accuracy": 1.0}], "extra")],
+            lambda r: (1, 2), 0.2)
+        self.assertFalse(out["passed"])
+
 
 if __name__ == "__main__":
     unittest.main()
