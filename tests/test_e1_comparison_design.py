@@ -23,6 +23,7 @@ from cage.experiments import (
     _class_frequency_companions,
     _e1_cell_of,
     _e1_cell_plan,
+    _interaction_manipulation,
     _model_cfg,
     _paired_benchmark,
     _paired_did,
@@ -184,6 +185,21 @@ class E1FactorialInteractionTest(unittest.TestCase):
             "accuracy")
         self.assertFalse(ci["controlled"]["controlled"])
         self.assertTrue(ci["controlled"]["mismatches"])
+
+
+class InteractionManipulationTest(unittest.TestCase):
+    def test_resolved_config_is_ground_truth_for_the_varying_factor(self):
+        self.assertEqual(_interaction_manipulation({
+            "model_cfg": {"a": 1}, "model_factor_diffs": {},
+            "varying_factors": {"gate": {"a": ["x"], "b": ["y"]}},
+        }), {})
+        self.assertEqual(_interaction_manipulation({
+            "model_factor_diffs": {"norm": {"a": ["pre"], "b": ["post"]}},
+            "varying_factors": {"gate": {"a": ["x"], "b": ["y"]}},
+        }), {"norm": {"a": ["pre"], "b": ["post"]}})
+        self.assertEqual(_interaction_manipulation({
+            "varying_factors": {"gate": {"a": ["x"], "b": ["y"]}},
+        }), {"gate": {"a": ["x"], "b": ["y"]}})
 
 
 class ReportMalformedRunTest(unittest.TestCase):
