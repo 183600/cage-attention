@@ -308,6 +308,27 @@ class PairedStreamDigestTest(unittest.TestCase):
                 self.assertEqual(grid["n"], 0)
                 self.assertFalse(grid["controlled"]["controlled"])
 
+    def test_factorial_and_grid_materialize_generator_cells_once(self):
+        good = {"seed": 0, "accuracy": 1.0}
+        cells = {cell: (r for r in [good]) for cell in
+                 ("full", "calib_len_only", "calib_ent_only",
+                  "calib_no_terms")}
+        ci = _factorial_main_effect(cells, "accuracy", "length")
+        self.assertEqual(ci["n"], 1)
+        self.assertAlmostEqual(ci["mean"], 0.0)
+        grid = _grid_level_main_effect(
+            "accuracy", ((r for r in [good]),),
+            ((r for r in [good]),))
+        self.assertEqual(grid["n"], 1)
+        self.assertAlmostEqual(grid["mean"], 0.0)
+        with self.assertRaises(ValueError):
+            _factorial_main_effect(None, "accuracy", "length")
+        fresh = {cell: [good] for cell in
+                 ("full", "calib_len_only", "calib_ent_only",
+                  "calib_no_terms")}
+        with self.assertRaises(ValueError):
+            _factorial_main_effect(fresh, "accuracy", "unknown")
+
     def test_curve_helpers_skip_non_mapping_runs(self):
         good = {"seed": 0, "accuracy": 1.0, "curve_verdict": "ok"}
         for bad in ("not-a-record", None, 3, object()):

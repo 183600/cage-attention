@@ -5107,8 +5107,20 @@ def _factorial_main_effect(cells, metric, factor):
     main effect averaged over a cell with a different optimizer or epoch
     step count would not be a factorial effect.
     """
+    if factor not in _FACTORIAL_MAIN_EFFECTS:
+        raise ValueError(
+            f"unknown factorial factor {factor!r}; expected one of "
+            f"{sorted(_FACTORIAL_MAIN_EFFECTS)}")
     spec = _FACTORIAL_MAIN_EFFECTS[factor]
     required = _CALIB_FACTORIAL_CELLS
+    if not isinstance(cells, Mapping):
+        raise ValueError(
+            "factorial main effect needs a mapping of cell name to runs, "
+            f"got {type(cells).__name__}")
+    # Materialise each cell exactly once: a generator cell must not be
+    # consumed by the missing-run scan and then look empty to the pairing
+    # logic.
+    cells = {c: _materialize_runs(cells.get(c)) for c in required}
     missing = [c for c in required if not cells.get(c)]
     if missing:
         raise ValueError(
@@ -5239,6 +5251,20 @@ def _grid_level_main_effect(metric, level_cells, baseline_cells):
     averaged over a cell with a different optimizer or with a non-norm
     config difference would not be a factorial effect.
     """
+    try:
+        level_cells = list(level_cells)
+    except TypeError as exc:
+        raise ValueError(
+            "grid-level main effect needs an iterable of level cell run "
+            f"lists, got {type(level_cells).__name__}") from exc
+    try:
+        baseline_cells = list(baseline_cells)
+    except TypeError as exc:
+        raise ValueError(
+            "grid-level main effect needs an iterable of baseline cell run "
+            f"lists, got {type(baseline_cells).__name__}") from exc
+    level_cells = [_materialize_runs(rs) for rs in level_cells]
+    baseline_cells = [_materialize_runs(rs) for rs in baseline_cells]
     n = len(level_cells)
     if n == 0 or n != len(baseline_cells):
         raise ValueError(
