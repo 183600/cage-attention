@@ -118,6 +118,18 @@ class SourceCheckTest(unittest.TestCase):
         self.assertEqual(code, 1, text)
         self.assertIn("run-in-array", text)
 
+    def test_records_nested_under_mapping_keys_are_checked(self):
+        stale = self._record(
+            source_tree_sha256="4" * 16, run_id="run-nested-key")
+        self._write_json("tuning.json", {
+            "runs": [self._record(), stale],
+        })
+        code, text = self._check()
+        self.assertEqual(code, 1, text)
+        self.assertIn("tuning.json", text)
+        self.assertIn("run-nested-key", text)
+        self.assertIn("2 distinct source version(s)", text)
+
     def test_missing_hash_on_run_record_fails(self):
         record = self._record()
         del record["source_tree_sha256"]

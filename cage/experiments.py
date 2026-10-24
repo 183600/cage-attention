@@ -9462,15 +9462,18 @@ def _iter_archived_source_record_mappings(document):
     """Yield every record mapping in a parsed JSON artifact.
 
     Most artifacts are objects, but pooled manifests may be top-level
-    arrays (a JSONL line can likewise hold one).  A hash stored on those
-    records must still be checked; treating the array itself as the only
-    record would silently skip the whole file.
+    arrays (a JSONL line can likewise hold one), and tuning/analysis
+    companions may nest per-run records under a mapping key (for example
+    ``{"runs": [...]}``).  A hash stored on those records must still be
+    checked; descending only through arrays would silently skip every
+    record nested one level below an object.
     """
     pending = [document]
     while pending:
         item = pending.pop()
         if isinstance(item, Mapping):
             yield item
+            pending.extend(reversed(list(item.values())))
         elif isinstance(item, (list, tuple)):
             pending.extend(reversed(item))
 
