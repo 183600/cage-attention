@@ -9443,6 +9443,21 @@ def _source_hash_of(record):
     return value
 
 
+def _declares_code_provenance(record) -> bool:
+    """Whether a record claims provenance that should carry a code hash.
+
+    Analysis companions put the stamp under ``_provenance``, so the
+    declaration may live one level below the record itself.
+    """
+    if not isinstance(record, Mapping):
+        return False
+    if "run_id" in record or "setup_sha256" in record:
+        return True
+    provenance = record.get("_provenance")
+    return (isinstance(provenance, Mapping)
+            and ("run_id" in provenance or "setup_sha256" in provenance))
+
+
 def _iter_archived_source_record_mappings(document):
     """Yield every record mapping in a parsed JSON artifact.
 
@@ -9535,7 +9550,7 @@ def _check_source(out_dir) -> int:
         for record in _iter_archived_source_record_mappings(document):
             value = _source_hash_of(record)
             if value is None:
-                if "run_id" in record or "setup_sha256" in record:
+                if _declares_code_provenance(record):
                     checked += 1
                     problems.append(
                         f"{where}: code-provenance record has no "

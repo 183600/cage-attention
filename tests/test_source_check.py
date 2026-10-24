@@ -126,6 +126,17 @@ class SourceCheckTest(unittest.TestCase):
         self.assertEqual(code, 1, text)
         self.assertIn("no source_tree_sha256", text)
 
+    def test_missing_hash_in_nested_provenance_fails(self):
+        self._write_json("efficiency.json", {
+            "_provenance": {
+                "run_id": "run-nested",
+                "setup_sha256": "3" * 16,
+            },
+        })
+        code, text = self._check()
+        self.assertEqual(code, 1, text)
+        self.assertIn("no source_tree_sha256", text)
+
     def test_malformed_hash_fails(self):
         self._write_jsonl("e1_runs.jsonl", [
             self._record(source_tree_sha256="not-a-hash"),
