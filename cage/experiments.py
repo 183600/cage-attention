@@ -9443,6 +9443,23 @@ def _source_hash_of(record):
     return value
 
 
+def _iter_archived_source_record_mappings(document):
+    """Yield every record mapping in a parsed JSON artifact.
+
+    Most artifacts are objects, but pooled manifests may be top-level
+    arrays (a JSONL line can likewise hold one).  A hash stored on those
+    records must still be checked; treating the array itself as the only
+    record would silently skip the whole file.
+    """
+    pending = [document]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, Mapping):
+            yield item
+        elif isinstance(item, (list, tuple)):
+            pending.extend(reversed(item))
+
+
 def _iter_archived_source_records(root: pathlib.Path):
     """Yield ``(relative, line, record, error)`` for archived JSON documents.
 
@@ -9509,33 +9526,33 @@ def _check_source(out_dir) -> int:
     checked = 0
     problems = []
     versions: dict[str, list[str]] = {}
-    for relative, line_number, record, error in _iter_archived_source_records(
-            root):
+    for relative, line_number, document, error in (
+            _iter_archived_source_records(root)):
         where = relative if line_number is None else f"{relative}:{line_number}"
         if error is not None:
             problems.append(f"{where}: {error}")
             continue
-        value = _source_hash_of(record)
-        if value is None:
-            if isinstance(record, Mapping) and (
-                    "run_id" in record or "setup_sha256" in record):
-                checked += 1
+        for record in _iter_archived_source_record_mappings(document):
+            value = _source_hash_of(record)
+            if value is None:
+                if "run_id" in record or "setup_sha256" in record:
+                    checked += 1
+                    problems.append(
+                        f"{where}: code-provenance record has no "
+                        f"source_tree_sha256")
+                continue
+            checked += 1
+            if not _is_short_sha(value):
                 problems.append(
-                    f"{where}: code-provenance record has no "
-                    f"source_tree_sha256")
-            continue
-        checked += 1
-        if not _is_short_sha(value):
-            problems.append(
-                f"{where}: source_tree_sha256 is malformed ({value!r})")
-            continue
-        versions.setdefault(value, []).append(where)
-        if value != current:
-            run_id = (record.get("run_id")
-                      if isinstance(record, Mapping) else None)
-            problems.append(
-                f"{where}: source_tree_sha256 {value} != current {current}"
-                + (f" (run {run_id})" if run_id else ""))
+                    f"{where}: source_tree_sha256 is malformed ({value!r})")
+                continue
+            versions.setdefault(value, []).append(where)
+            if value != current:
+                run_id = record.get("run_id")
+                problems.append(
+                    f"{where}: source_tree_sha256 {value} != "
+                    f"current {current}"
+                    + (f" (run {run_id})" if run_id else ""))
     print(f"[source-check] current source_tree_sha256={current} "
           f"git_sha={git_sha} dirty={git_dirty}")
     if not checked and not problems:

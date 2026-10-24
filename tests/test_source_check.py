@@ -102,6 +102,22 @@ class SourceCheckTest(unittest.TestCase):
         self.assertIn("(current)", text)
         self.assertIn("(other)", text)
 
+    def test_records_inside_top_level_arrays_are_checked(self):
+        stale = self._record(
+            source_tree_sha256="2" * 16, run_id="run-in-array")
+        self._write_json("pooled.json", [self._record(), stale])
+        code, text = self._check()
+        self.assertEqual(code, 1, text)
+        self.assertIn("pooled.json", text)
+        self.assertIn("run-in-array", text)
+        self.assertIn("2 distinct source version(s)", text)
+
+        (self.root / "pooled.json").unlink()
+        self._write_jsonl("e1_runs.jsonl", [[self._record(), stale]])
+        code, text = self._check()
+        self.assertEqual(code, 1, text)
+        self.assertIn("run-in-array", text)
+
     def test_missing_hash_on_run_record_fails(self):
         record = self._record()
         del record["source_tree_sha256"]
