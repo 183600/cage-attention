@@ -653,12 +653,21 @@ class BaselineArgumentValidationTest(unittest.TestCase):
         from cage.baselines import probe_vs_chance_test
 
         for accuracies in (None, "not-a-sample", object(),
-                           [0.1 + 0.1j, 0.2 + 0j]):
+                           [0.1 + 0.1j, 0.2 + 0j],
+                           [1.5, 1.6], [-0.5, 0.1], [0.1, 1.2]):
             with self.subTest(accuracies=accuracies):
                 out = probe_vs_chance_test(accuracies, 0.01)
                 self.assertEqual(out["n"], 0)
                 self.assertEqual(out["hb2_state"], "untestable")
                 self.assertFalse(out["hb2_supported"])
+                # The shared-stream scoring draw must not clamp an
+                # impossible accuracy into a fabricated interval.
+                out = probe_vs_chance_test(
+                    accuracies, 0.01, n_per_seed=100)
+                self.assertEqual(out["n"], 0)
+                self.assertEqual(out["hb2_state"], "untestable")
+                self.assertFalse(out["hb2_supported"])
+                self.assertTrue(math.isnan(out["lo"]))
 
 
     def test_malformed_probe_grids_and_seeds_raise_value_error(self):
