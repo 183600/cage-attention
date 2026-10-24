@@ -9473,7 +9473,9 @@ def _iter_archived_source_record_mappings(document):
         item = pending.pop()
         if isinstance(item, Mapping):
             yield item
-            pending.extend(reversed(list(item.values())))
+            pending.extend(reversed([
+                value for key, value in item.items()
+                if key != "_provenance"]))
         elif isinstance(item, (list, tuple)):
             pending.extend(reversed(item))
 

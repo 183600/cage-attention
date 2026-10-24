@@ -130,6 +130,15 @@ class SourceCheckTest(unittest.TestCase):
         self.assertIn("run-nested-key", text)
         self.assertIn("2 distinct source version(s)", text)
 
+    def test_nested_provenance_is_counted_once(self):
+        self._write_json("efficiency.json", {
+            "_provenance": self._record(),
+        })
+        code, text = self._check()
+        self.assertEqual(code, 0, text)
+        self.assertIn("scanned 1 code-provenance record(s)", text)
+        self.assertIn("1 record(s)", text)
+
     def test_missing_hash_on_run_record_fails(self):
         record = self._record()
         del record["source_tree_sha256"]
