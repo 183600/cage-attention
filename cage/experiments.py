@@ -9424,6 +9424,139 @@ def _check_environment(out_dir) -> int:
     return 1
 
 
+def _source_hash_of(record):
+    """Code-content hash carried by one archived record, if any.
+
+    Full run records and manifests carry ``source_tree_sha256`` at the top
+    level; analysis companions nest the same stamp under ``_provenance``.
+    Documents without either are ignored here; :func:`_check_source` still
+    fails closed when a record declares a ``run_id`` or ``setup_sha256``
+    without a source hash.
+    """
+    if not isinstance(record, Mapping):
+        return None
+    value = record.get("source_tree_sha256")
+    if value is None:
+        provenance = record.get("_provenance")
+        if isinstance(provenance, Mapping):
+            value = provenance.get("source_tree_sha256")
+    return value
+
+
+def _iter_archived_source_records(root: pathlib.Path):
+    """Yield ``(relative, line, record, error)`` for archived JSON documents.
+
+    Every ``*.json`` / ``*.jsonl`` artifact under the results directory is
+    scanned, so a code hash is checked wherever an experiment chose to store
+    it.  A malformed document is yielded with ``record=None`` and an error
+    string instead of being skipped: an unreadable provenance file cannot
+    certify the code that produced it.
+    """
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix not in (".json", ".jsonl"):
+            continue
+        if path.name.startswith("."):
+            continue
+        relative = str(path.relative_to(root))
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            yield relative, None, None, f"{type(exc).__name__}: {exc}"
+            continue
+        if path.suffix == ".jsonl":
+            for line_number, line in enumerate(text.splitlines(), 1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except (TypeError, ValueError) as exc:
+                    yield (relative, line_number, None,
+                           f"invalid JSON: {exc}")
+                    continue
+                yield relative, line_number, record, None
+            continue
+        try:
+            record = json.loads(text)
+        except (TypeError, ValueError) as exc:
+            yield relative, None, None, f"invalid JSON: {exc}"
+            continue
+        yield relative, None, record, None
+
+
+def _check_source(out_dir) -> int:
+    """Compare archived code-content hashes with this checkout.
+
+    ``--verify-artifacts`` proves the bytes did not change and
+    ``--verify-provenance`` proves each row is internally consistent, but
+    neither says whether the *current* package source is the code that
+    produced the stored numbers.  A result directory is routinely reused
+    after a code edit; appending to it or pooling its rows without checking
+    the code version silently mixes protocols.  This read-only audit reads
+    every archived ``source_tree_sha256`` and compares it with the hash of
+    the current ``cage/*.py`` tree.
+
+    Exit codes: 0 = every archived code hash matches this checkout, 1 = a
+    mismatched or malformed hash (or an unreadable document), 2 = no
+    archived code-provenance records.  Nothing is written.
+    """
+    root = pathlib.Path(out_dir)
+    if not root.is_dir():
+        print(f"[source-check] no results directory at {root}")
+        return 2
+    current = _source_tree_sha256()
+    git_sha = _git_sha()
+    git_dirty = _git_dirty()
+    checked = 0
+    problems = []
+    versions: dict[str, list[str]] = {}
+    for relative, line_number, record, error in _iter_archived_source_records(
+            root):
+        where = relative if line_number is None else f"{relative}:{line_number}"
+        if error is not None:
+            problems.append(f"{where}: {error}")
+            continue
+        value = _source_hash_of(record)
+        if value is None:
+            if isinstance(record, Mapping) and (
+                    "run_id" in record or "setup_sha256" in record):
+                checked += 1
+                problems.append(
+                    f"{where}: code-provenance record has no "
+                    f"source_tree_sha256")
+            continue
+        checked += 1
+        if not _is_short_sha(value):
+            problems.append(
+                f"{where}: source_tree_sha256 is malformed ({value!r})")
+            continue
+        versions.setdefault(value, []).append(where)
+        if value != current:
+            run_id = (record.get("run_id")
+                      if isinstance(record, Mapping) else None)
+            problems.append(
+                f"{where}: source_tree_sha256 {value} != current {current}"
+                + (f" (run {run_id})" if run_id else ""))
+    print(f"[source-check] current source_tree_sha256={current} "
+          f"git_sha={git_sha} dirty={git_dirty}")
+    if not checked and not problems:
+        print(f"[source-check] no archived code-provenance records under "
+              f"{root}")
+        return 2
+    print(f"[source-check] scanned {checked} code-provenance record(s) "
+          f"across {len(versions)} distinct source version(s)")
+    for value in sorted(versions):
+        label = "current" if value == current else "other"
+        print(f"    {value} ({label}): {len(versions[value])} record(s)")
+    if problems:
+        print(f"[source-check] FAIL: {len(problems)} issue(s):")
+        for problem in problems:
+            print(f"    {problem}")
+        return 1
+    print("[source-check] PASS: every archived result was produced by the "
+          "current package source")
+    return 0
+
+
 _SEEDING_POLICY = {
     "every_training_run": (
         "cage.repro.seed_everything(seed): python random + numpy (when "
@@ -18549,6 +18682,11 @@ def main(argv=None) -> int:
                         help="compare --out's recorded environment with this "
                              "process and exit (0-compatible, 1-drift, "
                              "2-no usable record); writes nothing")
+    parser.add_argument("--check-source", action="store_true",
+                        help="compare every archived code hash in --out with "
+                             "this checkout and exit (0-match, 1-mismatch or "
+                             "malformed, 2-no code-provenance records); "
+                             "writes nothing")
     parser.add_argument("--verify-provenance", action="store_true",
                         help="recompute every result row's setup/environment "
                              "hashes and check that one run_id never names "
@@ -18568,6 +18706,8 @@ def main(argv=None) -> int:
         return _verify_artifacts(args.out)
     if args.check_environment:
         return _check_environment(args.out)
+    if args.check_source:
+        return _check_source(args.out)
     if args.verify_provenance:
         return _audit_provenance(
             args.out, require_homogeneous=bool(args.require_homogeneous))

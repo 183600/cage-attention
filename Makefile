@@ -1,17 +1,18 @@
 PYTHON ?= python3
 OUT ?= results
 
-.PHONY: help gate test check sanity verify verify-env verify-artifacts verify-provenance
+.PHONY: help gate test check sanity verify verify-env verify-artifacts verify-provenance verify-source
 
 help:
 	@echo "make gate             - design pins + smoke gate (python3 ci_gate.py)"
 	@echo "make test             - standard-library test suite (no extra dependencies)"
 	@echo "make check            - gate + tests"
 	@echo "make sanity           - quick reproducibility/split/overfit pre-flight"
-	@echo "make verify           - env + artifact + provenance checks on $(OUT)"
+	@echo "make verify           - env + artifact + provenance + source checks on $(OUT)"
 	@echo "make verify-env       - compare $(OUT)/environment.json with this process"
 	@echo "make verify-artifacts - verify $(OUT) against artifact_index.json"
 	@echo "make verify-provenance- recompute each record's setup/environment ids"
+	@echo "make verify-source    - compare archived code hashes with this checkout"
 
 gate:
 	$(PYTHON) ci_gate.py
@@ -24,7 +25,7 @@ check: gate test
 sanity:
 	$(PYTHON) -m cage.experiments --only sanity --quick --out results_quick
 
-verify: verify-env verify-artifacts verify-provenance
+verify: verify-env verify-artifacts verify-provenance verify-source
 
 verify-env:
 	$(PYTHON) -m cage.experiments --check-environment --out $(OUT)
@@ -34,3 +35,6 @@ verify-artifacts:
 
 verify-provenance:
 	$(PYTHON) -m cage.experiments --verify-provenance --out $(OUT)
+
+verify-source:
+	$(PYTHON) -m cage.experiments --check-source --out $(OUT)

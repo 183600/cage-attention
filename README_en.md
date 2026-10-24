@@ -71,3 +71,7 @@ cage/
   invocations, and
   `python3 -m cage.experiments --verify-artifacts --out <dir>` checks that
   historical result files have not been truncated or edited.
+  `--check-environment` compares the recorded software/numerical
+  environment, while `--check-source` compares every archived
+  `source_tree_sha256` with the current `cage/*.py` tree; `make verify`
+  runs the environment, artifact, provenance and source checks in sequence.

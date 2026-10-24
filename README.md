@@ -57,4 +57,6 @@ cage/
 - 每次实验的结果记录附带代码版本/源码哈希、完整配置、数据流指纹、
   线程与确定性开关等环境快照；`artifact_index.json` 是跨多次调用的累积
   清单，`python3 -m cage.experiments --verify-artifacts --out <dir>` 可校验
-  历史结果文件是否被截断或篡改。
+  历史结果文件是否被截断或篡改。`--check-environment` 对照当前软件/数值
+  环境，`--check-source` 对照当前 `cage/*.py` 源码哈希；`make verify`
+  依次执行环境、制品、来源与源码检查。
