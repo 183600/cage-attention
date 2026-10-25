@@ -3521,6 +3521,47 @@ def gate_stat_correlations(stats):
     return r
 
 
+def _false_concentration_vectors(stats):
+    """Per-sample max-prob and correctness vectors, or ``None`` if malformed.
+
+    The false-concentration readouts need the *same* sample axis on both
+    vectors.  A boolean/integer ``maxprob`` has no real maximum score (and
+    negating it raises), a 1-D tensor has no layer axis, and a row-count
+    mismatch would silently pair confidence scores with another stream's
+    correctness flags.  All of those must abstain rather than escape as an
+    ``IndexError``/``NotImplementedError`` from the reporting companion.
+    """
+    if not isinstance(stats, Mapping):
+        return None
+    mp = stats.get("maxprob")
+    corr = stats.get("correct")
+    if (not torch.is_tensor(mp) or mp.dim() != 2 or mp.size(1) < 1
+            or not mp.is_floating_point()
+            or not torch.is_tensor(corr) or corr.dim() != 1
+            or corr.size(0) != mp.size(0)):
+        return None
+    return mp.max(dim=1)[0], corr.bool()
+
+
+def _per_sample_layer_mean(stats, key, n_rows):
+    """Mean over layers of a per-sample statistic matrix, or ``None``.
+
+    ``collect_stats_and_errors`` stores gate/null-mass as real floating
+    ``(samples, layers)`` tensors.  Treat anything else as absent: boolean
+    and integer tensors have no real mean (``Tensor.mean`` raises), a 1-D
+    tensor has no layer axis, and a matrix with a different sample axis
+    would misalign rows with the correctness vector.
+    """
+    if not isinstance(stats, Mapping):
+        return None
+    value = stats.get(key)
+    if (not torch.is_tensor(value) or value.dim() != 2
+            or value.size(0) != n_rows or value.size(1) < 1
+            or not value.is_floating_point()):
+        return None
+    return value.mean(dim=1)
+
+
 def _false_concentration_at(mp, corr, gm, maxprob_thresh):
     """Threshold-specific readout over precomputed per-sample vectors.
 
@@ -3562,10 +3603,11 @@ def false_concentration_analysis(stats, maxprob_thresh=0.5):
     correct samples - a good calibrated gate should close (lower value)
     when concentration is false.
     """
-    mp = stats["maxprob"].max(dim=1)[0]
-    corr = stats["correct"].bool()
-    g = stats.get("gate")
-    gm = g.mean(1) if g is not None else None
+    vectors = _false_concentration_vectors(stats)
+    if vectors is None:
+        return {}
+    mp, corr = vectors
+    gm = _per_sample_layer_mean(stats, "gate", mp.size(0))
     return _false_concentration_at(mp, corr, gm, maxprob_thresh)
 
 
@@ -3582,10 +3624,11 @@ def false_concentration_sweep(stats, thresholds=(0.3, 0.5, 0.7, 0.9)) -> dict:
 
     Returns ``{threshold: false_concentration_analysis(stats, thr)}``.
     """
-    mp = stats["maxprob"].max(dim=1)[0]
-    corr = stats["correct"].bool()
-    g = stats.get("gate")
-    gm = g.mean(1) if g is not None else None
+    vectors = _false_concentration_vectors(stats)
+    if vectors is None:
+        return {}
+    mp, corr = vectors
+    gm = _per_sample_layer_mean(stats, "gate", mp.size(0))
     return {float(thr): _false_concentration_at(mp, corr, gm, thr)
             for thr in thresholds}
 
@@ -3616,13 +3659,27 @@ def false_concentration_by_layer(stats, maxprob_thresh=0.5):
     layer has no false-concentrated or no confident-correct row (a within-
     stream sample-size limit, not a model effect).
     """
+    if not isinstance(stats, Mapping):
+        return []
     mp = stats.get("maxprob")
     corr = stats.get("correct")
-    if mp is None or corr is None or mp.dim() < 2:
+    if (not torch.is_tensor(mp) or mp.dim() != 2 or mp.size(1) < 1
+            or not mp.is_floating_point()
+            or not torch.is_tensor(corr) or corr.dim() != 1
+            or corr.size(0) != mp.size(0)):
         return []
     corr = corr.bool()
-    gate = stats.get("gate")
-    null = stats.get("null_mass")
+
+    def _optional_matrix(key):
+        value = stats.get(key)
+        if (not torch.is_tensor(value) or value.dim() != 2
+                or value.size(0) != mp.size(0) or value.size(1) < 1
+                or not value.is_floating_point()):
+            return None
+        return value
+
+    gate = _optional_matrix("gate")
+    null = _optional_matrix("null_mass")
     threshold = float(maxprob_thresh)
     n_layers = int(mp.size(1))
     rows = []
@@ -3784,12 +3841,16 @@ def false_concentration_gate_test(stats, maxprob_thresh=0.5,
     means use an independent two-sample bootstrap (their sizes need not,
     and generally do not, match).
     """
-    mp = stats["maxprob"].max(dim=1)[0]
-    corr = stats["correct"].bool()
-    g = stats.get("gate")
-    if g is None:
-        return {"applicable": False}
-    gm = g.mean(1)
+    vectors = _false_concentration_vectors(stats)
+    if vectors is None:
+        return {"applicable": False,
+                "reason": "malformed maxprob/correct stats"}
+    mp, corr = vectors
+    if stats.get("gate") is None:
+        return {"applicable": False, "reason": "no gate in stats"}
+    gm = _per_sample_layer_mean(stats, "gate", mp.size(0))
+    if gm is None:
+        return {"applicable": False, "reason": "malformed gate stats"}
     high = mp > maxprob_thresh
     fc = high & ~corr
     cc = high & corr
@@ -3826,17 +3887,31 @@ def null_mass_gate_test(stats, maxprob_thresh=None, n_boot: int = 10000,
     group, otherwise the bootstrap dict plus the contrast label and group
     sizes.
     """
+    if not isinstance(stats, Mapping):
+        return {"applicable": False, "reason": "malformed stats"}
     nm = stats.get("null_mass")
     if nm is None:
         return {"applicable": False, "reason": "no null_mass in stats"}
-    mass = nm.mean(dim=1)
-    corr = stats["correct"].bool()
+    corr = stats.get("correct")
+    if not torch.is_tensor(corr) or corr.dim() != 1:
+        return {"applicable": False, "reason": "malformed correct stats"}
+    mass = _per_sample_layer_mean(stats, "null_mass", corr.size(0))
+    if mass is None:
+        return {"applicable": False,
+                "reason": "malformed null_mass stats"}
+    corr = corr.bool()
     if maxprob_thresh is None:
         err_group, correct_group = mass[~corr], mass[corr]
         group = "all"
     else:
         threshold = float(maxprob_thresh)
-        high = stats["maxprob"].max(dim=1)[0] > threshold
+        mp = stats.get("maxprob")
+        if (not torch.is_tensor(mp) or mp.dim() != 2 or mp.size(1) < 1
+                or mp.size(0) != mass.size(0)
+                or not mp.is_floating_point()):
+            return {"applicable": False,
+                    "reason": "malformed maxprob stats"}
+        high = mp.max(dim=1)[0] > threshold
         err_group = mass[high & ~corr]
         correct_group = mass[high & corr]
         group = f"maxprob>{threshold:g}"

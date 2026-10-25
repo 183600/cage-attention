@@ -541,6 +541,87 @@ class TwoSampleBootstrapValidationTest(unittest.TestCase):
                 self.assertTrue(math.isnan(out["p_value"]))
 
 
+class FalseConcentrationValidationTest(unittest.TestCase):
+    @staticmethod
+    def _stats(**overrides):
+        import torch
+
+        stats = {
+            "maxprob": torch.tensor([[0.9, 0.8], [0.9, 0.8],
+                                     [0.2, 0.1], [0.2, 0.1]]),
+            "correct": torch.tensor([False, True, False, True]),
+            "gate": torch.tensor([[0.1, 0.2], [0.3, 0.4],
+                                  [0.5, 0.6], [0.7, 0.8]]),
+            "null_mass": torch.tensor([[0.1, 0.2], [0.1, 0.2],
+                                       [0.3, 0.4], [0.3, 0.4]]),
+        }
+        stats.update(overrides)
+        return stats
+
+    def test_malformed_optional_matrices_abstain(self):
+        import torch
+
+        from cage.train import (
+            false_concentration_analysis,
+            false_concentration_gate_test,
+            null_mass_gate_test,
+        )
+
+        for bad in (torch.tensor([True, False, True, False]),
+                    torch.tensor([[True, False]] * 4),
+                    torch.tensor([[1, 0]] * 4),
+                    torch.tensor([0.1, 0.2, 0.3, 0.4]),
+                    torch.tensor([[0.1, 0.2]] * 3),
+                    "not-a-matrix"):
+            with self.subTest(bad=type(bad).__name__):
+                stats = self._stats(gate=bad)
+                self.assertFalse(
+                    false_concentration_gate_test(stats)["applicable"])
+                # A broken gate must only drop the gate columns, not the
+                # max-prob false-concentration readout.
+                analysis = false_concentration_analysis(stats)
+                self.assertEqual(analysis["n_high_maxprob"], 2)
+                self.assertNotIn("gate_on_correct", analysis)
+                stats = self._stats(null_mass=bad)
+                self.assertFalse(
+                    null_mass_gate_test(stats)["applicable"])
+                self.assertFalse(
+                    null_mass_gate_test(stats, 0.5)["applicable"])
+
+    def test_malformed_required_vectors_abstain(self):
+        import torch
+
+        from cage.train import (
+            false_concentration_analysis,
+            false_concentration_by_layer,
+            false_concentration_gate_test,
+            false_concentration_sweep,
+            null_mass_gate_test,
+        )
+
+        for bad_mp in (torch.tensor([[True, False]] * 4),
+                       torch.tensor([0.9, 0.8, 0.2, 0.1]),
+                       torch.tensor([[0.9, 0.8]] * 3),
+                       "not-a-matrix"):
+            with self.subTest(maxprob=type(bad_mp).__name__):
+                stats = self._stats(maxprob=bad_mp)
+                self.assertEqual(false_concentration_analysis(stats), {})
+                self.assertEqual(false_concentration_sweep(stats), {})
+                self.assertFalse(
+                    false_concentration_gate_test(stats)["applicable"])
+                self.assertEqual(false_concentration_by_layer(stats), [])
+                self.assertFalse(
+                    null_mass_gate_test(stats, 0.5)["applicable"])
+        for bad_corr in (torch.tensor([False, True, False]),
+                         torch.tensor([[False, True]] * 4)):
+            with self.subTest(correct=tuple(bad_corr.shape)):
+                stats = self._stats(correct=bad_corr)
+                self.assertEqual(false_concentration_analysis(stats), {})
+                self.assertFalse(
+                    false_concentration_gate_test(stats)["applicable"])
+                self.assertEqual(false_concentration_by_layer(stats), [])
+
+
 class CorrelationInputValidationTest(unittest.TestCase):
     def test_complex_correlations_abstain(self):
         import torch
