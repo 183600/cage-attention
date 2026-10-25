@@ -196,6 +196,8 @@ class MetricInputValidationTest(unittest.TestCase):
                 self.assertTrue(out["reason"])
 
     def test_wilson_and_bh_arguments_are_validated(self):
+        import torch
+
         # A boolean is a flag, not a success count or a z quantile; a NaN
         # z would silently collapse the interval to its point estimate.
         for kwargs in ({"successes": True, "total": 2},
@@ -203,7 +205,8 @@ class MetricInputValidationTest(unittest.TestCase):
             out = metrics.wilson_ci(**kwargs)
             self.assertTrue(math.isnan(out["lo"]))
             self.assertTrue(math.isnan(out["hi"]))
-        for z in (float("nan"), 0.0, -1.0, True, 1 + 0j):
+        for z in (float("nan"), 0.0, -1.0, True, 1 + 0j,
+                  torch.tensor(1.0 + 1.0j)):
             out = metrics.wilson_ci(1, 2, z=z)
             self.assertTrue(math.isnan(out["p"]))
             self.assertTrue(math.isnan(out["lo"]))
@@ -231,6 +234,19 @@ class MetricInputValidationTest(unittest.TestCase):
             with self.subTest(p_values=bad):
                 with self.assertRaises(ValueError):
                     metrics.benjamini_hochberg(bad)
+
+    def test_complex_scalar_arguments_abstain(self):
+        import torch
+
+        bad = torch.tensor(0.05 + 0.1j)
+        self.assertTrue(math.isnan(metrics._float_or_nan(bad)))
+        self.assertIsNone(metrics._positive_integer(bad))
+        self.assertEqual(metrics.seeds_for_power(bad, 0.5), float("inf"))
+        out = metrics.paired_bootstrap_ci([0.1, 0.2, 0.3], alpha=bad)
+        self.assertTrue(math.isnan(out["lo"]))
+        self.assertFalse(any(
+            row["reject"] for row in metrics.benjamini_hochberg(
+                [0.01, 0.2], q=bad)))
 
     def test_out_of_range_selection_fraction_abstains(self):
         for frac in (-0.1, 1.5, float("inf")):

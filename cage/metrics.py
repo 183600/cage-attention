@@ -269,7 +269,7 @@ def _positive_integer(value):
         return int(exact)
     try:
         number = float(value)
-    except (TypeError, ValueError, OverflowError):
+    except (TypeError, ValueError, RuntimeError, OverflowError):
         return None
     if not (math.isfinite(number) and number >= 1.0
             and number == int(number)):
@@ -312,7 +312,7 @@ def _float_or_nan(value) -> float:
         return float("nan")
     try:
         return float(value)
-    except (TypeError, ValueError, OverflowError):
+    except (TypeError, ValueError, RuntimeError, OverflowError):
         return float("nan")
 
 
@@ -1879,7 +1879,7 @@ def seeds_for_power(sd, effect, alpha: float = 0.05,
         effect = float(effect)
         alpha = float(alpha)
         power = float(power)
-    except (TypeError, ValueError, OverflowError):
+    except (TypeError, ValueError, RuntimeError, OverflowError):
         return float("inf")
     if not (math.isfinite(sd) and math.isfinite(effect)
             and math.isfinite(alpha) and math.isfinite(power)) \
@@ -2065,7 +2065,7 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
     try:
         successes = float(successes)
         total = float(total)
-    except (TypeError, ValueError, OverflowError):
+    except (TypeError, ValueError, RuntimeError, OverflowError):
         return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
                 "n": 0}
     if not (math.isfinite(successes) and math.isfinite(total)) or total <= 0:

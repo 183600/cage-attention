@@ -75,7 +75,7 @@ def _finite_float(value) -> float:
         return float("nan")
     try:
         return float(value)
-    except (TypeError, ValueError, OverflowError):
+    except (TypeError, ValueError, RuntimeError, OverflowError):
         return float("nan")
 
 
@@ -94,7 +94,7 @@ def _validated_lr(value):
             f"learning rate must be a finite positive number, got {raw!r}")
     try:
         lr = float(raw)
-    except (TypeError, ValueError, OverflowError) as exc:
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
         raise ValueError(
             f"learning rate must be a finite positive number, got "
             f"{raw!r}") from exc
