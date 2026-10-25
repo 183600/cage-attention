@@ -213,6 +213,13 @@ class SplitIndexShapeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             assert_split_partition(4, {"train": mask})
 
+    def test_two_dimensional_integer_indices_are_rejected(self):
+        from cage.data import assert_split_partition
+
+        indices = torch.tensor([[0, 1], [2, 3]], dtype=torch.long)
+        with self.assertRaises(ValueError):
+            assert_split_partition(4, {"train": indices})
+
 
 class LengthSweepBoundsTest(unittest.TestCase):
     def test_huge_sweep_request_stops_at_the_first_unfitted_length(self):
