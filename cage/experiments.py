@@ -8523,10 +8523,13 @@ def _provenance_record_errors(record) -> list[str]:
     setup = record.get("setup_sha256")
     if not _is_short_sha(setup):
         problems.append("setup_sha256 must be a 16-character lowercase hex id")
-    for key in ("git_sha", "source_tree_sha256"):
-        value = record.get(key)
-        if not isinstance(value, str) or not value:
-            problems.append(f"{key} must be a non-empty string")
+    git_sha = record.get("git_sha")
+    if not isinstance(git_sha, str) or not git_sha:
+        problems.append("git_sha must be a non-empty string")
+    source = record.get("source_tree_sha256")
+    if not _is_short_sha(source):
+        problems.append(
+            "source_tree_sha256 must be a 16-character lowercase hex id")
     present = [key for key in ("hypotheses_sha256", "config",
                                "data_fingerprints") if key in record]
     if present and len(present) != 3:

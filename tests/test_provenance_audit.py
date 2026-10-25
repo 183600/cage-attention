@@ -129,6 +129,13 @@ class ProvenanceAuditTest(unittest.TestCase):
         self.assertEqual(code, 1, text)
         self.assertIn("invalid JSON", text)
 
+    def test_malformed_source_hash_is_rejected(self):
+        record = self._record(source_tree_sha256="not-a-hash")
+        self._write_jsonl("e1_runs.jsonl", [record])
+        code, text = self._audit()
+        self.assertEqual(code, 1, text)
+        self.assertIn("source_tree_sha256 must be a 16-character", text)
+
     def test_malformed_full_context_types_are_rejected(self):
         for key, value, expected in (
                 ("config", [], "config must be a JSON object"),
