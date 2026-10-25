@@ -3612,6 +3612,34 @@ def _per_sample_layer_mean(stats, key, n_rows):
     return value.mean(dim=1)
 
 
+def _validated_maxprob_thresh(value):
+    """Coerce a confidence threshold to a finite probability in ``[0, 1]``.
+
+    The false-concentration companions compare ``maxprob`` against this
+    value, so a malformed threshold would otherwise escape as an incidental
+    ``TypeError``/``NotImplementedError`` from the comparison.  Booleans are
+    flags rather than probabilities, complex values have no real threshold,
+    and a non-finite or out-of-range number cannot cut a probability axis;
+    all of those abstain via ``None``.
+    """
+    if isinstance(value, bool):
+        return None
+    if torch.is_tensor(value):
+        if value.is_complex() or value.dtype == torch.bool \
+                or value.numel() != 1:
+            return None
+        raw = value.detach().reshape(-1)[0]
+    else:
+        raw = value
+    try:
+        threshold = float(raw)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        return None
+    if not (math.isfinite(threshold) and 0.0 <= threshold <= 1.0):
+        return None
+    return threshold
+
+
 def _false_concentration_at(mp, corr, gm, maxprob_thresh):
     """Threshold-specific readout over precomputed per-sample vectors.
 
@@ -3656,9 +3684,12 @@ def false_concentration_analysis(stats, maxprob_thresh=0.5):
     vectors = _false_concentration_vectors(stats)
     if vectors is None:
         return {}
+    threshold = _validated_maxprob_thresh(maxprob_thresh)
+    if threshold is None:
+        return {}
     mp, corr = vectors
     gm = _per_sample_layer_mean(stats, "gate", mp.size(0))
-    return _false_concentration_at(mp, corr, gm, maxprob_thresh)
+    return _false_concentration_at(mp, corr, gm, threshold)
 
 
 def false_concentration_sweep(stats, thresholds=(0.3, 0.5, 0.7, 0.9)) -> dict:
@@ -3677,10 +3708,21 @@ def false_concentration_sweep(stats, thresholds=(0.3, 0.5, 0.7, 0.9)) -> dict:
     vectors = _false_concentration_vectors(stats)
     if vectors is None:
         return {}
+    if isinstance(thresholds, (str, bytes, Mapping)):
+        return {}
+    try:
+        candidates = list(thresholds)
+    except TypeError:
+        return {}
     mp, corr = vectors
     gm = _per_sample_layer_mean(stats, "gate", mp.size(0))
-    return {float(thr): _false_concentration_at(mp, corr, gm, thr)
-            for thr in thresholds}
+    out = {}
+    for candidate in candidates:
+        threshold = _validated_maxprob_thresh(candidate)
+        if threshold is None:
+            continue
+        out[threshold] = _false_concentration_at(mp, corr, gm, threshold)
+    return out
 
 
 def false_concentration_by_layer(stats, maxprob_thresh=0.5):
@@ -3721,7 +3763,9 @@ def false_concentration_by_layer(stats, maxprob_thresh=0.5):
 
     gate = _optional_matrix("gate")
     null = _optional_matrix("null_mass")
-    threshold = float(maxprob_thresh)
+    threshold = _validated_maxprob_thresh(maxprob_thresh)
+    if threshold is None:
+        return []
     n_layers = int(mp.size(1))
     rows = []
     for layer in range(n_layers):
@@ -3887,12 +3931,16 @@ def false_concentration_gate_test(stats, maxprob_thresh=0.5,
         return {"applicable": False,
                 "reason": "malformed maxprob/correct stats"}
     mp, corr = vectors
+    threshold = _validated_maxprob_thresh(maxprob_thresh)
+    if threshold is None:
+        return {"applicable": False,
+                "reason": "malformed maxprob_thresh"}
     if stats.get("gate") is None:
         return {"applicable": False, "reason": "no gate in stats"}
     gm = _per_sample_layer_mean(stats, "gate", mp.size(0))
     if gm is None:
         return {"applicable": False, "reason": "malformed gate stats"}
-    high = mp > maxprob_thresh
+    high = mp > threshold
     fc = high & ~corr
     cc = high & corr
     if not bool(fc.any()) or not bool(cc.any()):
@@ -3944,7 +3992,10 @@ def null_mass_gate_test(stats, maxprob_thresh=None, n_boot: int = 10000,
         err_group, correct_group = mass[~corr], mass[corr]
         group = "all"
     else:
-        threshold = float(maxprob_thresh)
+        threshold = _validated_maxprob_thresh(maxprob_thresh)
+        if threshold is None:
+            return {"applicable": False,
+                    "reason": "malformed maxprob_thresh"}
         mp = _stats_layer_matrix(stats, "maxprob", mass.size(0))
         if mp is None:
             return {"applicable": False,

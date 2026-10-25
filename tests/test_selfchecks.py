@@ -645,6 +645,50 @@ class FalseConcentrationValidationTest(unittest.TestCase):
                     false_concentration_gate_test(stats)["applicable"])
                 self.assertEqual(false_concentration_by_layer(stats), [])
 
+    def test_malformed_threshold_abstains(self):
+        import torch
+
+        from cage.train import (
+            false_concentration_analysis,
+            false_concentration_by_layer,
+            false_concentration_gate_test,
+            null_mass_gate_test,
+        )
+
+        bads = (None, "not-a-probability", [None, 0.5], {"a": 0.5},
+                torch.tensor(1.0 + 1.0j), torch.tensor(True),
+                torch.tensor([0.5, 0.6]), float("nan"), float("inf"),
+                -0.1, 1.1)
+        stats = self._stats()
+        for bad in bads:
+            with self.subTest(bad=repr(bad)):
+                self.assertEqual(
+                    false_concentration_analysis(stats, bad), {})
+                self.assertEqual(
+                    false_concentration_by_layer(stats, bad), [])
+                self.assertFalse(
+                    false_concentration_gate_test(stats, bad)["applicable"])
+                if bad is not None:
+                    self.assertFalse(
+                        null_mass_gate_test(stats, bad)["applicable"])
+        # ``None`` is the documented "all rows" option for the null arm.
+        self.assertIn("group", null_mass_gate_test(stats, None))
+        self.assertEqual(
+            false_concentration_analysis(stats, torch.tensor(0.5)),
+            false_concentration_analysis(stats, 0.5))
+
+    def test_malformed_sweep_thresholds_abstain(self):
+        from cage.train import false_concentration_sweep
+
+        stats = self._stats()
+        for bad in (None, "abc", {"a": 0.5}, True, 0.5,
+                    object(), float("nan")):
+            with self.subTest(bad=repr(bad)):
+                self.assertEqual(false_concentration_sweep(stats, bad), {})
+        sweep = false_concentration_sweep(
+            stats, [0.5, None, "x", -0.1, 1.1, True, float("nan")])
+        self.assertEqual(list(sweep), [0.5])
+
 
 class DiagnosticStatsValidationTest(unittest.TestCase):
     @staticmethod
