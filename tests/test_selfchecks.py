@@ -99,6 +99,19 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertTrue(math.isnan(out["accuracy"]))
         self.assertTrue(math.isnan(out["nll"]))
 
+    def test_nonfinite_multiclass_logits_abstain(self):
+        import torch
+
+        # ``argmax`` over NaN logits still returns a class, so scoring them
+        # would report an accuracy the model never produced.
+        for value in (float("nan"), float("inf"), float("-inf")):
+            logits = torch.tensor([[value, 0.0], [0.0, 2.0]])
+            with self.subTest(value=value):
+                out = metrics.multiclass_metrics(logits, [0, 1])
+                self.assertEqual(out["n"], 0)
+                self.assertTrue(math.isnan(out["accuracy"]))
+                self.assertTrue(math.isnan(out["nll"]))
+
     def test_multiclass_abstention_keeps_the_scored_key_schema(self):
         import torch
 

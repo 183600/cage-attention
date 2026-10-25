@@ -778,6 +778,13 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     if logits.dim() != 2:
         return _abstain()
     n, k = logits.shape
+    # A non-finite logit has no ordering or likelihood: ``argmax`` would
+    # still emit a class and can report perfect accuracy from an all-NaN
+    # panel, while the NLL is NaN.  Abstain rather than publish an accuracy
+    # the model never produced.
+    if logits.is_floating_point() \
+            and not bool(torch.isfinite(logits).all()):
+        return _abstain(k)
     # A target is a class *index*, so it must already be an integer.  A
     # float/ complex value cast with ``.long()`` would silently truncate
     # (1.9 -> 1, -0.5 -> 0), fabricating a label the caller never named;
