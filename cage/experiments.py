@@ -9443,6 +9443,25 @@ def _source_hash_of(record):
     return value
 
 
+def _source_hash_values(record) -> list:
+    """Every code hash carried by one archived record.
+
+    A record can carry the stamp at the top level, under ``_provenance``,
+    or both.  Both copies are returned so a stale nested companion cannot
+    hide behind a current top-level stamp.
+    """
+    if not isinstance(record, Mapping):
+        return []
+    values = []
+    if "source_tree_sha256" in record:
+        values.append(record.get("source_tree_sha256"))
+    provenance = record.get("_provenance")
+    if isinstance(provenance, Mapping) \
+            and "source_tree_sha256" in provenance:
+        values.append(provenance.get("source_tree_sha256"))
+    return values
+
+
 def _declares_code_provenance(record) -> bool:
     """Whether a record claims provenance that should carry a code hash.
 
@@ -9553,8 +9572,13 @@ def _check_source(out_dir) -> int:
             problems.append(f"{where}: {error}")
             continue
         for record in _iter_archived_source_record_mappings(document):
-            value = _source_hash_of(record)
-            if value is None:
+            values = _source_hash_values(record)
+            provenance = record.get("_provenance")
+            nested_declares = (
+                isinstance(provenance, Mapping)
+                and ("run_id" in provenance
+                     or "setup_sha256" in provenance))
+            if not values:
                 if _declares_code_provenance(record):
                     checked += 1
                     problems.append(
@@ -9562,17 +9586,32 @@ def _check_source(out_dir) -> int:
                         f"source_tree_sha256")
                 continue
             checked += 1
-            if not _is_short_sha(value):
+            if nested_declares and "source_tree_sha256" not in provenance:
                 problems.append(
-                    f"{where}: source_tree_sha256 is malformed ({value!r})")
-                continue
-            versions.setdefault(value, []).append(where)
-            if value != current:
-                run_id = record.get("run_id")
+                    f"{where}: nested provenance has no "
+                    f"source_tree_sha256")
+            valid = []
+            for value in values:
+                if not _is_short_sha(value):
+                    problems.append(
+                        f"{where}: source_tree_sha256 is malformed "
+                        f"({value!r})")
+                    continue
+                if value not in valid:
+                    valid.append(value)
+                    versions.setdefault(value, []).append(where)
+                if value != current:
+                    run_id = record.get("run_id")
+                    if not run_id and isinstance(provenance, Mapping):
+                        run_id = provenance.get("run_id")
+                    problems.append(
+                        f"{where}: source_tree_sha256 {value} != "
+                        f"current {current}"
+                        + (f" (run {run_id})" if run_id else ""))
+            if len(valid) > 1:
                 problems.append(
-                    f"{where}: source_tree_sha256 {value} != "
-                    f"current {current}"
-                    + (f" (run {run_id})" if run_id else ""))
+                    f"{where}: conflicting source_tree_sha256 values "
+                    f"{sorted(valid)}")
     print(f"[source-check] current source_tree_sha256={current} "
           f"git_sha={git_sha} dirty={git_dirty}")
     if not checked and not problems:

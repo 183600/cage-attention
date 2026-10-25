@@ -139,6 +139,29 @@ class SourceCheckTest(unittest.TestCase):
         self.assertIn("scanned 1 code-provenance record(s)", text)
         self.assertIn("1 record(s)", text)
 
+    def test_stale_nested_provenance_cannot_hide_behind_current_top_level(self):
+        record = self._record()
+        record["_provenance"] = {
+            "source_tree_sha256": "5" * 16,
+            "run_id": "run-stale-nested",
+        }
+        self._write_jsonl("e1_runs.jsonl", [record])
+        code, text = self._check()
+        self.assertEqual(code, 1, text)
+        self.assertIn("5" * 16, text)
+        self.assertIn("conflicting source_tree_sha256", text)
+
+    def test_missing_nested_hash_fails_even_with_top_level_stamp(self):
+        record = self._record()
+        record["_provenance"] = {
+            "run_id": "run-nested-no-hash",
+            "setup_sha256": "6" * 16,
+        }
+        self._write_jsonl("e1_runs.jsonl", [record])
+        code, text = self._check()
+        self.assertEqual(code, 1, text)
+        self.assertIn("nested provenance has no source_tree_sha256", text)
+
     def test_missing_hash_on_run_record_fails(self):
         record = self._record()
         del record["source_tree_sha256"]
