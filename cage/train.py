@@ -3687,9 +3687,13 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
         # Non-numeric/malformed containers must likewise abstain instead of
         # escaping as a TypeError from ``as_tensor``: this is a reporting
         # companion, and one bad group must not abort the whole report.
-        if torch.is_tensor(x) and x.is_complex():
+        if torch.is_tensor(x) and (x.is_complex()
+                                   or x.dtype == torch.bool):
             return torch.empty(0, dtype=torch.float64)
         try:
+            probe = torch.as_tensor(x)
+            if probe.is_complex() or probe.dtype == torch.bool:
+                return torch.empty(0, dtype=torch.float64)
             t = torch.as_tensor(x, dtype=torch.float64).detach().reshape(-1)
         except (TypeError, ValueError, RuntimeError, OverflowError):
             return torch.empty(0, dtype=torch.float64)

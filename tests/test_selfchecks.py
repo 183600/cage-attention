@@ -527,6 +527,7 @@ class TwoSampleBootstrapValidationTest(unittest.TestCase):
 
         for left, right in (
                 ([1.0 + 1.0j, 2.0], [0.0, 1.0]),
+                ([True, False, True], [False, True, False]),
                 (None, [0.0, 1.0]),
                 ("not-a-sample", [0.0, 1.0]),
                 ([0.0, 1.0], object())):
