@@ -254,6 +254,8 @@ from .repro import configure_determinism, seed_everything, stream_generator
 from .runlock import LOCK_EXIT_CODE, ResultsLock, ResultsLockError
 from .train import (
     _ERROR_TYPES,
+    _stats_correct_vector,
+    _stats_layer_matrix,
     decode_correct_mask,
     collect_stats,
     collect_stats_and_errors,
@@ -16045,11 +16047,18 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
 
 
 def _null_mass_margin(stats):
-    nm = stats.get("null_mass")
+    """Error-minus-correct null-slot mass, or NaN when it is undefined.
+
+    The run record may be assembled from a restored or hand-edited stats
+    payload, so a missing/mismatched/non-finite matrix or malformed
+    correctness flags must abstain instead of escaping as an incidental
+    ``AttributeError`` / ``IndexError`` from the reporting layer.
+    """
+    nm = _stats_layer_matrix(stats, "null_mass")
     if nm is None:
         return float("nan")
-    corr = stats["correct"].bool()
-    if bool(corr.all()) or bool((~corr).all()):
+    corr = _stats_correct_vector(stats, nm.size(0))
+    if corr is None or bool(corr.all()) or bool((~corr).all()):
         return float("nan")
     mass = nm.mean(dim=1)
     return float(mass[~corr].mean() - mass[corr].mean())

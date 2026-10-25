@@ -740,6 +740,48 @@ class DiagnosticStatsValidationTest(unittest.TestCase):
                 self.assertTrue(math.isnan(out["rocauc_gate_to_error"]))
 
 
+class NullMassMarginValidationTest(unittest.TestCase):
+    @staticmethod
+    def _stats(**overrides):
+        import torch
+
+        stats = {
+            "null_mass": torch.tensor([[0.1], [0.3], [0.5], [0.7]]),
+            "correct": torch.tensor([False, True, False, True]),
+        }
+        stats.update(overrides)
+        return stats
+
+    def test_null_mass_margin_abstains_on_malformed_stats(self):
+        import torch
+
+        from cage.experiments import _null_mass_margin
+
+        self.assertAlmostEqual(_null_mass_margin(self._stats()), -0.2)
+        for bad in (None, [], object(), "not-a-mapping", {},
+                    self._stats(correct=torch.tensor([True] * 4)),
+                    self._stats(correct=torch.tensor([False] * 4)),
+                    self._stats(correct=torch.tensor([True, False])),
+                    self._stats(correct=torch.tensor(
+                        [[True], [False], [True], [False]])),
+                    self._stats(correct=torch.tensor(
+                        [0.5, 1.0, 0.0, 1.0])),
+                    self._stats(correct=torch.tensor(
+                        [float("nan"), 1.0, 0.0, 1.0])),
+                    self._stats(null_mass=torch.tensor(
+                        [0.1, 0.3, 0.5, 0.7])),
+                    self._stats(null_mass=torch.tensor(
+                        [[0.1], [0.3], [0.5]])),
+                    self._stats(null_mass=torch.tensor(
+                        [[0.1], [float("inf")], [0.5], [0.7]])),
+                    self._stats(null_mass=torch.tensor(
+                        [[True], [False], [True], [False]])),
+                    self._stats(null_mass=torch.tensor(
+                        [[1], [0], [1], [0]]))):
+            with self.subTest(bad=type(bad).__name__):
+                self.assertTrue(math.isnan(_null_mass_margin(bad)))
+
+
 class CorrelationInputValidationTest(unittest.TestCase):
     def test_complex_correlations_abstain(self):
         import torch
