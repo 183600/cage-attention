@@ -3697,7 +3697,9 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
             t = torch.as_tensor(x, dtype=torch.float64).detach().reshape(-1)
         except (TypeError, ValueError, RuntimeError, OverflowError):
             return torch.empty(0, dtype=torch.float64)
-        return t[torch.isfinite(t)]
+        if not bool(torch.isfinite(t).all()):
+            return torch.empty(0, dtype=torch.float64)
+        return t
 
     alpha = _float_or_nan(alpha)
     a = _flat(a)

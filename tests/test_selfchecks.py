@@ -530,7 +530,10 @@ class TwoSampleBootstrapValidationTest(unittest.TestCase):
                 ([True, False, True], [False, True, False]),
                 (None, [0.0, 1.0]),
                 ("not-a-sample", [0.0, 1.0]),
-                ([0.0, 1.0], object())):
+                ([0.0, 1.0], object()),
+                ([0.0, float("nan"), 1.0], [0.0, 1.0]),
+                ([0.0, float("inf"), 1.0], [0.0, 1.0]),
+                ([0.0, 1.0], [0.0, float("-inf"), 1.0])):
             with self.subTest(left=left, right=right):
                 out = _two_sample_bootstrap_ci(left, right, n_boot=50)
                 self.assertTrue(math.isnan(out["mean"]))
