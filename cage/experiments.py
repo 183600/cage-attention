@@ -17817,14 +17817,9 @@ def _e2_difficulty_companions(by_variant: dict, lengths: list) -> dict:
                     "difficulty_standardized_accuracy_at_longest"),
                 "difficulty_standardized_accuracy_drop": run.get(
                     "difficulty_standardized_accuracy_drop"),
-                "correct_bitmask": metrics.get(
-                    "correct_bitmask", run.get("correct_bitmask")),
-                "stream_digest": metrics.get(
-                    "stream_digest", run.get("stream_digest")),
-                "n": (_length_entry(run.get("eval_n_by_length"), endpoint)
-                      if _length_entry(run.get("eval_n_by_length"),
-                                       endpoint) is not None
-                      else run.get("n", run.get("eval_n"))),
+                "correct_bitmask": metrics.get("correct_bitmask"),
+                "stream_digest": metrics.get("stream_digest"),
+                "n": _length_entry(run.get("eval_n_by_length"), endpoint),
             })
         return rows
 
