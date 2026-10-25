@@ -613,13 +613,131 @@ class FalseConcentrationValidationTest(unittest.TestCase):
                 self.assertFalse(
                     null_mass_gate_test(stats, 0.5)["applicable"])
         for bad_corr in (torch.tensor([False, True, False]),
-                         torch.tensor([[False, True]] * 4)):
+                         torch.tensor([[False, True]] * 4),
+                         torch.tensor([0.5, 1.0, 0.0, 1.0]),
+                         torch.tensor([float("nan"), 1.0, 0.0, 1.0])):
             with self.subTest(correct=tuple(bad_corr.shape)):
                 stats = self._stats(correct=bad_corr)
                 self.assertEqual(false_concentration_analysis(stats), {})
                 self.assertFalse(
                     false_concentration_gate_test(stats)["applicable"])
                 self.assertEqual(false_concentration_by_layer(stats), [])
+        for bad_mp in (torch.tensor([[0.9, float("nan")]] * 4),
+                       torch.tensor([[0.9, float("inf")]] * 4)):
+            with self.subTest(maxprob="non-finite"):
+                stats = self._stats(maxprob=bad_mp)
+                self.assertEqual(false_concentration_analysis(stats), {})
+                self.assertEqual(false_concentration_sweep(stats), {})
+                self.assertFalse(
+                    false_concentration_gate_test(stats)["applicable"])
+                self.assertEqual(false_concentration_by_layer(stats), [])
+
+
+class DiagnosticStatsValidationTest(unittest.TestCase):
+    @staticmethod
+    def _stats(**overrides):
+        import torch
+
+        stats = {
+            "gate": torch.tensor([[0.1, 0.2, 0.3], [0.2, 0.4, 0.5],
+                                  [0.3, 0.6, 0.7], [0.4, 0.8, 0.9]]),
+            "entropy": torch.tensor([[0.5, 0.4, 0.3], [0.4, 0.3, 0.2],
+                                     [0.3, 0.2, 0.1], [0.2, 0.1, 0.05]]),
+            "maxprob": torch.tensor([[0.9, 0.8, 0.7], [0.8, 0.7, 0.6],
+                                     [0.7, 0.6, 0.5], [0.6, 0.5, 0.4]]),
+            "correct": torch.tensor([False, True, False, True]),
+            "null_mass": torch.tensor([[0.1, 0.2, 0.3], [0.2, 0.3, 0.4],
+                                       [0.3, 0.4, 0.5], [0.4, 0.5, 0.6]]),
+        }
+        stats.update(overrides)
+        return stats
+
+    def test_gate_depth_ratio_malformed_stats_abstain(self):
+        import torch
+
+        from cage.train import gate_depth_ratio
+
+        good = self._stats(
+            gate=torch.tensor([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]))
+        self.assertAlmostEqual(gate_depth_ratio(good), 2.0)
+        for bad in (None, [], object(), "not-a-mapping", {},
+                    self._stats(gate=torch.tensor([[True, False, True]])),
+                    self._stats(gate=torch.tensor([[1, 2, 3]])),
+                    self._stats(gate=torch.tensor([0.1, 0.2, 0.3])),
+                    self._stats(gate=torch.tensor(
+                        [[0.1, float("nan"), 0.3]]))):
+            with self.subTest(bad=type(bad).__name__):
+                self.assertTrue(math.isnan(gate_depth_ratio(bad)))
+        for n_early in (True, 0, -1, 1.5, None):
+            with self.subTest(n_early=n_early):
+                self.assertTrue(math.isnan(gate_depth_ratio(good, n_early)))
+
+    def test_gate_correlations_malformed_stats_abstain(self):
+        import torch
+
+        from cage.train import gate_stat_correlations
+
+        self.assertTrue(gate_stat_correlations(self._stats()))
+        bads = (
+            None, [], object(), "not-a-mapping", {},
+            self._stats(gate=torch.tensor([[True, False, True]])),
+            self._stats(gate=torch.tensor([0.1, 0.2, 0.3])),
+            self._stats(gate=torch.tensor([[0.1, float("inf"), 0.3]])),
+            self._stats(gate=torch.tensor([[0.1, 0.2, 0.3]])),
+            {k: v for k, v in self._stats().items() if k != "entropy"},
+            self._stats(entropy=torch.tensor([[0.1, 0.2, 0.3]])),
+            self._stats(entropy=torch.tensor([[True, False, True]])),
+            self._stats(maxprob=torch.tensor([[0.9, 0.8, 0.7]])),
+            self._stats(maxprob=torch.tensor([0.9, 0.8, 0.7])),
+            self._stats(correct=torch.tensor([True, False])),
+            self._stats(correct=torch.tensor([0.5, 1.0, 0.0, 1.0])),
+            self._stats(correct=torch.tensor(
+                [float("nan"), 1.0, 0.0, 1.0])),
+        )
+        for bad in bads:
+            with self.subTest(bad=type(bad).__name__):
+                self.assertEqual(gate_stat_correlations(bad), {})
+
+    def test_error_detection_malformed_required_stats_abstain(self):
+        import torch
+
+        from cage.train import error_detection_aucs
+
+        out = error_detection_aucs(self._stats())
+        self.assertEqual(out["n"], 4)
+        for bad in (None, [], object(), "not-a-mapping", {},
+                    {k: v for k, v in self._stats().items()
+                     if k != "entropy"},
+                    self._stats(maxprob=torch.tensor(
+                        [[True, False, True]])),
+                    self._stats(maxprob=torch.tensor([0.9, 0.8, 0.7])),
+                    self._stats(maxprob=torch.tensor(
+                        [[0.9, float("nan"), 0.7]])),
+                    self._stats(entropy=torch.tensor(
+                        [[0.1, 0.2, 0.3]])),
+                    self._stats(correct=torch.tensor([True, False])),
+                    self._stats(correct=torch.tensor(
+                        [0.5, 1.0, 0.0, 1.0])),
+                    self._stats(correct=torch.tensor(
+                        [float("inf"), 1.0, 0.0, 1.0]))):
+            with self.subTest(bad=type(bad).__name__):
+                self.assertEqual(error_detection_aucs(bad), {})
+
+    def test_error_detection_malformed_gate_drops_only_gate_scores(self):
+        import torch
+
+        from cage.train import error_detection_aucs
+
+        for bad_gate in (torch.tensor([True, False, True, False]),
+                         torch.tensor([0.1, 0.2, 0.3, 0.4]),
+                         torch.tensor([[0.1, 0.2, 0.3]]),
+                         torch.tensor([[0.1, float("nan"), 0.3]])):
+            with self.subTest(gate=tuple(bad_gate.shape)):
+                out = error_detection_aucs(self._stats(gate=bad_gate))
+                self.assertEqual(out["n"], 4)
+                self.assertTrue(math.isfinite(out["prauc_maxprob_to_error"]))
+                self.assertTrue(math.isnan(out["prauc_gate_to_error"]))
+                self.assertTrue(math.isnan(out["rocauc_gate_to_error"]))
 
 
 class CorrelationInputValidationTest(unittest.TestCase):

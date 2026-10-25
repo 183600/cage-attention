@@ -3371,6 +3371,50 @@ def collect_stats(model, n_pairs, vocab, device, batch=128, batches=4,
     return stats
 
 
+def _stats_layer_matrix(stats, key, n_rows=None):
+    """A finite real ``(samples, layers)`` statistic matrix, or ``None``.
+
+    Diagnostic reports are often built from a stats payload that may have
+    been restored from JSON or assembled by hand.  A missing key, a boolean
+    or integer matrix (which has no real mean), a 1-D tensor without a layer
+    axis, a sample-axis mismatch, or a non-finite value must make the
+    companion abstain instead of escaping as an ``AttributeError`` /
+    ``IndexError`` / scalar fabrication from the reporting layer.
+    """
+    if not isinstance(stats, Mapping):
+        return None
+    value = stats.get(key)
+    if (not torch.is_tensor(value) or value.dim() != 2
+            or value.size(1) < 1 or not value.is_floating_point()
+            or (n_rows is not None and value.size(0) != n_rows)
+            or not bool(torch.isfinite(value).all())):
+        return None
+    return value
+
+
+def _stats_correct_vector(stats, n_rows=None):
+    """The per-sample 0/1 correctness flags, or ``None`` if malformed.
+
+    Correctness is a binary flag, not an arbitrary numeric score: a complex
+    or fractional/non-finite value would be silently reinterpreted by
+    ``.bool()`` and fabricate which rows were answered correctly.
+    """
+    if not isinstance(stats, Mapping):
+        return None
+    value = stats.get("correct")
+    if (not torch.is_tensor(value) or value.dim() != 1
+            or value.is_complex()
+            or (n_rows is not None and value.size(0) != n_rows)):
+        return None
+    if value.dtype != torch.bool:
+        if value.is_floating_point() \
+                and not bool(torch.isfinite(value).all()):
+            return None
+        if not bool(value.eq(0).logical_or(value.eq(1)).all()):
+            return None
+    return value.bool()
+
+
 def gate_depth_ratio(stats, n_early=2):
     """Deep/early gate ratio: mean gate of the deepest layer over the mean of
     the shallowest ``n_early`` layers (E3).
@@ -3379,8 +3423,16 @@ def gate_depth_ratio(stats, n_early=2):
     willing to write into the residual stream, i.e. it worked against the
     "deep layers contribute too little" symptom of Pre-LN.
     """
-    g = stats.get("gate")
-    if g is None or g.size(1) <= n_early:
+    g = _stats_layer_matrix(stats, "gate")
+    if g is None:
+        return float("nan")
+    if isinstance(n_early, bool):
+        return float("nan")
+    try:
+        n_early = operator.index(n_early)
+    except TypeError:
+        return float("nan")
+    if n_early < 1 or g.size(1) <= n_early:
         return float("nan")
     early = g[:, :n_early].mean()
     deep = g[:, -1].mean()
@@ -3477,10 +3529,15 @@ def gate_stat_correlations(stats):
     z-transform, is the quantity the gate hypothesis is about.
     """
     r = {}
-    g = stats.get("gate")
+    g = _stats_layer_matrix(stats, "gate")
     if g is None:
         return r
-    ent, mp, corr = stats["entropy"], stats["maxprob"], stats["correct"]
+    ent = _stats_layer_matrix(stats, "entropy", g.size(0))
+    mp = _stats_layer_matrix(stats, "maxprob", g.size(0))
+    corr = _stats_correct_vector(stats, g.size(0))
+    if (ent is None or mp is None or corr is None
+            or ent.shape != g.shape or mp.shape != g.shape):
+        return r
     cols = range(g.size(1))
     r_list = [pearson(g[:, i], ent[:, i]).item() for i in cols]
     s_list = [spearman(g[:, i], ent[:, i]).item() for i in cols]
@@ -3531,16 +3588,13 @@ def _false_concentration_vectors(stats):
     correctness flags.  All of those must abstain rather than escape as an
     ``IndexError``/``NotImplementedError`` from the reporting companion.
     """
-    if not isinstance(stats, Mapping):
+    mp = _stats_layer_matrix(stats, "maxprob")
+    if mp is None:
         return None
-    mp = stats.get("maxprob")
-    corr = stats.get("correct")
-    if (not torch.is_tensor(mp) or mp.dim() != 2 or mp.size(1) < 1
-            or not mp.is_floating_point()
-            or not torch.is_tensor(corr) or corr.dim() != 1
-            or corr.size(0) != mp.size(0)):
+    corr = _stats_correct_vector(stats, mp.size(0))
+    if corr is None:
         return None
-    return mp.max(dim=1)[0], corr.bool()
+    return mp.max(dim=1)[0], corr
 
 
 def _per_sample_layer_mean(stats, key, n_rows):
@@ -3552,12 +3606,8 @@ def _per_sample_layer_mean(stats, key, n_rows):
     tensor has no layer axis, and a matrix with a different sample axis
     would misalign rows with the correctness vector.
     """
-    if not isinstance(stats, Mapping):
-        return None
-    value = stats.get(key)
-    if (not torch.is_tensor(value) or value.dim() != 2
-            or value.size(0) != n_rows or value.size(1) < 1
-            or not value.is_floating_point()):
+    value = _stats_layer_matrix(stats, key, n_rows)
+    if value is None:
         return None
     return value.mean(dim=1)
 
@@ -3659,24 +3709,15 @@ def false_concentration_by_layer(stats, maxprob_thresh=0.5):
     layer has no false-concentrated or no confident-correct row (a within-
     stream sample-size limit, not a model effect).
     """
-    if not isinstance(stats, Mapping):
+    mp = _stats_layer_matrix(stats, "maxprob")
+    if mp is None:
         return []
-    mp = stats.get("maxprob")
-    corr = stats.get("correct")
-    if (not torch.is_tensor(mp) or mp.dim() != 2 or mp.size(1) < 1
-            or not mp.is_floating_point()
-            or not torch.is_tensor(corr) or corr.dim() != 1
-            or corr.size(0) != mp.size(0)):
+    corr = _stats_correct_vector(stats, mp.size(0))
+    if corr is None:
         return []
-    corr = corr.bool()
 
     def _optional_matrix(key):
-        value = stats.get(key)
-        if (not torch.is_tensor(value) or value.dim() != 2
-                or value.size(0) != mp.size(0) or value.size(1) < 1
-                or not value.is_floating_point()):
-            return None
-        return value
+        return _stats_layer_matrix(stats, key, mp.size(0))
 
     gate = _optional_matrix("gate")
     null = _optional_matrix("null_mass")
@@ -3892,23 +3933,20 @@ def null_mass_gate_test(stats, maxprob_thresh=None, n_boot: int = 10000,
     nm = stats.get("null_mass")
     if nm is None:
         return {"applicable": False, "reason": "no null_mass in stats"}
-    corr = stats.get("correct")
-    if not torch.is_tensor(corr) or corr.dim() != 1:
+    corr = _stats_correct_vector(stats)
+    if corr is None:
         return {"applicable": False, "reason": "malformed correct stats"}
     mass = _per_sample_layer_mean(stats, "null_mass", corr.size(0))
     if mass is None:
         return {"applicable": False,
                 "reason": "malformed null_mass stats"}
-    corr = corr.bool()
     if maxprob_thresh is None:
         err_group, correct_group = mass[~corr], mass[corr]
         group = "all"
     else:
         threshold = float(maxprob_thresh)
-        mp = stats.get("maxprob")
-        if (not torch.is_tensor(mp) or mp.dim() != 2 or mp.size(1) < 1
-                or mp.size(0) != mass.size(0)
-                or not mp.is_floating_point()):
+        mp = _stats_layer_matrix(stats, "maxprob", mass.size(0))
+        if mp is None:
             return {"applicable": False,
                     "reason": "malformed maxprob stats"}
         high = mp.max(dim=1)[0] > threshold
@@ -3966,7 +4004,14 @@ def error_detection_aucs(stats):
     PR-AUC alone is hard to interpret (see
     ``cage.metrics.selection_at_fraction``).
     """
-    corr = stats["correct"].bool()
+    mp = _stats_layer_matrix(stats, "maxprob")
+    if mp is None:
+        return {}
+    ent = _stats_layer_matrix(stats, "entropy", mp.size(0))
+    corr = _stats_correct_vector(stats, mp.size(0))
+    if ent is None or corr is None or ent.shape != mp.shape:
+        return {}
+    gate = _stats_layer_matrix(stats, "gate", mp.size(0))
     err = ~corr
     n = int(corr.numel())
     n_err = int(err.sum())
@@ -3992,11 +4037,11 @@ def error_detection_aucs(stats):
            "prevalence": prevalence, "imbalance_ratio": ratio,
            "metric_regime": regime, "flag_fraction": 0.1}
     scores = {
-        "maxprob": -stats["maxprob"].max(dim=1)[0],
-        "entropy": stats["entropy"].mean(dim=1),
+        "maxprob": -mp.max(dim=1)[0],
+        "entropy": ent.mean(dim=1),
     }
-    if stats.get("gate") is not None:
-        scores["gate"] = -stats["gate"].mean(dim=1)
+    if gate is not None:
+        scores["gate"] = -gate.mean(dim=1)
     praucs = {}
     for name in ("maxprob", "entropy", "gate"):
         score = scores.get(name)
