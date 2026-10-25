@@ -73,6 +73,12 @@ def _finite_float(value) -> float:
     """
     if isinstance(value, bool):
         return float("nan")
+    if torch.is_tensor(value) and (value.is_complex()
+                                   or value.dtype == torch.bool):
+        # A complex/count-flag tensor is not a real measurement; converting
+        # it through ``float`` would drop the imaginary part or read a flag
+        # as 0/1.  Both are malformed curve fields.
+        return float("nan")
     try:
         return float(value)
     except (TypeError, ValueError, RuntimeError, OverflowError):

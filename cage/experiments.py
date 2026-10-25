@@ -11375,9 +11375,15 @@ def _curve_optional_float(value):
     """
     if value is None or isinstance(value, bool):
         return None
+    if torch.is_tensor(value) and (value.is_complex()
+                                   or value.dtype == torch.bool):
+        # ``float`` on a complex tensor either drops the imaginary part or
+        # raises RuntimeError when it is non-zero; neither is a curve
+        # measurement.  A boolean tensor is a flag, not a value.
+        return None
     try:
         number = float(value)
-    except (TypeError, ValueError, OverflowError):
+    except (TypeError, ValueError, RuntimeError, OverflowError):
         return None
     return number if math.isfinite(number) else None
 

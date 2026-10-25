@@ -90,7 +90,8 @@ class CurveHistoryInputTest(unittest.TestCase):
         }
         for field, series_key in series.items():
             for bad in ("bad", True, False, float("nan"), float("inf"),
-                        float("-inf"), "nan"):
+                        float("-inf"), "nan", torch.tensor(1.0 + 1.0j),
+                        torch.tensor(1.0 + 0.0j), torch.tensor(True)):
                 with self.subTest(field=field, bad=bad):
                     hist = [{"step": 0, "train_loss": 1.0, field: bad}]
                     rec = _curve_record(hist)
@@ -113,7 +114,7 @@ class CurveHistoryInputTest(unittest.TestCase):
                                  "numerical_instability")
         # A boolean mandatory loss/step is a flag, not a measurement: it
         # must abstain instead of being read as 0/1 on the curve.
-        for bad in (True, False):
+        for bad in (True, False, torch.tensor(True)):
             with self.subTest(field="train_loss", bad=bad):
                 out = training_curve_verdict(
                     [{"step": 0, "train_loss": bad}])
@@ -123,6 +124,11 @@ class CurveHistoryInputTest(unittest.TestCase):
                 out = training_curve_verdict(
                     [{"step": bad, "train_loss": 1.0}])
                 self.assertEqual(out["n_points"], 0)
+            with self.subTest(field="train_loss", dtype="complex"):
+                out = training_curve_verdict(
+                    [{"step": 0, "train_loss": torch.tensor(1.0 + 1.0j)}])
+                self.assertEqual(out["n_points"], 0)
+                self.assertEqual(out["verdict"], "numerical_instability")
 
 
 class EvaluationFoldAuditTest(unittest.TestCase):
