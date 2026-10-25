@@ -656,7 +656,9 @@ class BaselineArgumentValidationTest(unittest.TestCase):
         for accuracies in (None, "not-a-sample", object(),
                            [True, False], [True] * 5,
                            [0.1 + 0.1j, 0.2 + 0j],
-                           [1.5, 1.6], [-0.5, 0.1], [0.1, 1.2]):
+                           [1.5, 1.6], [-0.5, 0.1], [0.1, 1.2],
+                           [0.01, float("nan")], [0.01, float("inf")],
+                           [0.01, float("-inf")]):
             with self.subTest(accuracies=accuracies):
                 out = probe_vs_chance_test(accuracies, 0.01)
                 self.assertEqual(out["n"], 0)

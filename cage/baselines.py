@@ -558,12 +558,13 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
         raw_acc = raw_acc.to(torch.float64)
     except (TypeError, ValueError, RuntimeError, OverflowError):
         raw_acc = torch.empty(0, dtype=torch.float64)
-    accs = [float(a) for a in raw_acc if math.isfinite(float(a))]
-    # A finite accuracy outside [0, 1] is not a measurement: clamping it
-    # below would let an impossible sample fabricate a tight CI and an
-    # HB2 state.  Fail closed for the whole sample (as with the other
-    # malformed containers) instead of silently dropping only that seed.
-    if any(not 0.0 <= a <= 1.0 for a in accs):
+    accs = [float(a) for a in raw_acc]
+    # A non-finite or out-of-range accuracy is not a measurement: dropping
+    # the bad seed or clamping it below would let an impossible sample
+    # fabricate a tight CI and an HB2 state.  Fail closed for the whole
+    # sample (as with the other malformed containers) instead of silently
+    # dropping only that seed.
+    if any(not (math.isfinite(a) and 0.0 <= a <= 1.0) for a in accs):
         accs = []
     margins = [a - chance for a in accs]
     # ``paired_bootstrap_ci``/``bootstrap_upper_p`` degrade to NaN readouts
