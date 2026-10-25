@@ -653,6 +653,7 @@ class BaselineArgumentValidationTest(unittest.TestCase):
         from cage.baselines import probe_vs_chance_test
 
         for accuracies in (None, "not-a-sample", object(),
+                           [True, False], [True] * 5,
                            [0.1 + 0.1j, 0.2 + 0j],
                            [1.5, 1.6], [-0.5, 0.1], [0.1, 1.2]):
             with self.subTest(accuracies=accuracies):

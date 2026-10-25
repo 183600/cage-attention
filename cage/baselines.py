@@ -550,6 +550,9 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
                 # margin against chance.
                 raw_acc = torch.as_tensor(
                     accuracies, dtype=torch.float64).detach().reshape(-1)
+        if raw_acc.dtype == torch.bool:
+            raise ValueError(
+                "accuracies must be real-valued probabilities, not booleans")
         if raw_acc.is_complex():
             raise ValueError("accuracies must be real-valued")
         raw_acc = raw_acc.to(torch.float64)
