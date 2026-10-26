@@ -154,6 +154,17 @@ class BlockedRunOrderTest(unittest.TestCase):
         audit = _run_order_audit(fractional, self.CELLS, self.SEEDS)
         self.assertFalse(audit["complete"])
         self.assertTrue(audit["invalid_indices"])
+        # ``True == 1`` and ``1.0 == 1`` must not let a non-integer seed
+        # label certify the planned integer seed of its block.
+        for alias in (True, 1.0):
+            aliased_order = [(cell, alias if block == 1 else seed,
+                              block, position)
+                             for cell, seed, block, position in complete]
+            with self.subTest(alias=alias):
+                audit = _run_order_audit(
+                    aliased_order, self.CELLS, self.SEEDS)
+                self.assertFalse(audit["complete"])
+                self.assertTrue(audit["invalid_indices"])
 
     def test_non_iterable_declarations_are_not_certified(self):
         for cells, seeds in ((None, (0,)), (("none",), None)):

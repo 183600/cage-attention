@@ -1764,6 +1764,20 @@ def _run_order_audit(order, cells, seeds, randomized=True):
                 "position": repr(raw_position),
                 "reason": "block and position must be integers"})
             continue
+        # The seed is an identity, not a numeric value: ``True == 1`` and
+        # ``1.0 == 1`` would otherwise certify a schedule labelled with a
+        # non-integer seed as the planned integer block.  Normalise through
+        # the same strict check used for the declared seeds.
+        exact_seed = _declared_seed(order_seed)
+        if exact_seed is None:
+            invalid_indices.append({
+                "order_index": index, "cell": key,
+                "seed": repr(order_seed),
+                "block": repr(raw_block),
+                "position": repr(raw_position),
+                "reason": "schedule seed must be an integer"})
+            continue
+        order_seed = exact_seed
         per_block.setdefault(block, {}).setdefault(key, 0)
         per_block[block][key] += 1
         per_block_positions.setdefault(block, []).append(position)
