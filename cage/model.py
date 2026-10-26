@@ -665,9 +665,8 @@ class _CalibAttn(torch.autograd.Function):
         mask = _causal_mask(T, q.device, q.dtype)
         kt = k.transpose(1, 2)
         dv = v.size(-1)
-        rows0 = blocks[0][1] - blocks[0][0]
-        max_rows = rows0
-        max_i1 = T
+        max_rows = max(i1 - i0 for i0, i1 in blocks)
+        max_i1 = max(i1 for _, i1 in blocks)
         grad_needed = any(ctx.needs_input_grad)
         s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
         if ybt is not None:
@@ -752,9 +751,8 @@ class _CalibAttn(torch.autograd.Function):
         mask = _causal_mask(T, q.device, q.dtype)
         kt = k.transpose(1, 2)
         vt = v.transpose(1, 2)
-        rows0 = blocks[0][1] - blocks[0][0]
         if len(blocks) == 1:
-            s = _get_scratch(("calib_s",), q.device, q.dtype, bh * rows0 * T)
+            s = _get_scratch(("calib_s",), q.device, q.dtype, bh * T * T)
             p = _softmax_inplace(torch.baddbmm(
                 mask, q, kt, beta=1.0, alpha=scale,
                 out=s[:bh * T * T].view(bh, T, T)))
@@ -776,14 +774,16 @@ class _CalibAttn(torch.autograd.Function):
         d_q = d_qkv[0].view_as(q)
         d_k = d_qkv[1].view_as(k)
         d_v = d_qkv[2].view_as(v)
-        max_rows = rows0
-        max_i1 = T
+        max_rows = max(i1 - i0 for i0, i1 in blocks)
+        max_i1 = max(i1 for _, i1 in blocks)
         s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
         dpb = _get_scratch(("calib_dp",), q.device, q.dtype, bh * max_rows * max_i1)
         dk = q.size(-1)
-        stg_i1 = blocks[-2][1]
-        # Work buffer for the entropy log-term and block staging.
-        work_numel = bh * stg_i1 * dk
+        stg_i1 = max(i1 for _, i1 in blocks[:-1])
+        # Work buffer for the entropy log-term and block staging.  The
+        # first processed block also stages its (possibly largest) dq slice,
+        # so the row extent must cover ``max_rows`` as well as the prefix.
+        work_numel = bh * max(stg_i1, max_rows) * dk
         if grad_ent is not None:
             work_numel = max(work_numel, bh * max_rows * max_i1)
         work = _get_scratch(("calib_bwd_work",), q.device, q.dtype,
@@ -911,9 +911,8 @@ class _NullAttn(torch.autograd.Function):
         mask = _causal_mask(T, q.device, q.dtype)
         kt = k.transpose(1, 2)
         dv = v.size(-1)
-        rows0 = blocks[0][1] - blocks[0][0]
-        max_rows = rows0
-        max_i1 = T
+        max_rows = max(i1 - i0 for i0, i1 in blocks)
+        max_i1 = max(i1 for _, i1 in blocks)
         if ybt is not None:
             # No-grad eval: write each block (plus its null-slot term)
             # straight into the ``(B, T, h, dv)`` caller buffer.
@@ -992,9 +991,8 @@ class _NullAttn(torch.autograd.Function):
         d_q4 = d_q.view(B, h, T, dk)
         nk4 = null_k.view(1, h, 1, dk)
         nv4t = null_v.view(1, h, dk, 1)
-        rows0 = blocks[0][1] - blocks[0][0]
-        max_rows = rows0
-        max_i1 = T
+        max_rows = max(i1 - i0 for i0, i1 in blocks)
+        max_i1 = max(i1 for _, i1 in blocks)
         sbuf = _get_scratch(("null_s",), q.device, q.dtype, bh * max_rows * max_i1)
         # Work buffer for the block score gradient.
         eb = _get_scratch(("null_bwd_e",), q.device, q.dtype, bh * max_rows * max_i1)
@@ -1004,8 +1002,9 @@ class _NullAttn(torch.autograd.Function):
         acc_v = _get_scratch(("null_bwd_av",), q.device, q.dtype, bh * dk).view(bh, 1, dk)
         # Staging buffer for the ``d_v`` / ``d_k`` contribution.
         if multi:
+            stg_i1 = max(i1 for _, i1 in blocks[:-1])
             stg = _get_scratch(("null_bwd_stg",), q.device, q.dtype,
-                               bh * blocks[-2][1] * dk)
+                               bh * max(stg_i1, max_rows) * dk)
         else:
             stg = None
         zero = _zero_scalar(q.device, q.dtype)
