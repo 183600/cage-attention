@@ -109,6 +109,7 @@ from __future__ import annotations
 
 import math
 import operator
+import sys
 from collections.abc import Mapping
 from statistics import NormalDist, StatisticsError
 
@@ -146,6 +147,8 @@ __all__ = [
     "hedges_g_paired",
     "mcnemar_test",
 ]
+
+_FLOAT_MAX = sys.float_info.max
 
 
 def _flatten_float(x) -> torch.Tensor:
@@ -2306,7 +2309,90 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
         "effective_n": float("nan"), "min_stratum_n": 0,
         "strata": [], "valid": False, "reason": "",
     }
+    def _exact_fallback(s_exact, n_exact, w_exact):
+        weights = list(n_exact if w_exact is None else w_exact)
+        if any(value < 0 for value in s_exact):
+            out["reason"] = "successes must be non-negative"
+            return out
+        if any(value < 0 for value in n_exact):
+            out["reason"] = "totals must be non-negative"
+            return out
+        if any(value > limit for value, limit in zip(s_exact, n_exact)):
+            out["reason"] = "successes must not exceed totals"
+            return out
+        if any(value < 0 for value in weights):
+            out["reason"] = "reference_weights must be non-negative"
+            return out
+        weight_total_exact = sum(weights)
+        if weight_total_exact <= 0:
+            out["reason"] = "reference weights sum to zero"
+            return out
+        usable = [(s_i, n_i, w_i)
+                  for s_i, n_i, w_i in zip(s_exact, n_exact, weights)
+                  if n_i > 0 and w_i > 0]
+        out["n_strata"] = len(s_exact)
+        out["n_used"] = len(usable)
+        if not usable:
+            out["reason"] = (
+                "no stratum is observed in both target and reference")
+            return out
+        weight_sum_used = sum(w_i for _, _, w_i in usable)
+        out["coverage"] = (sum(w_i for _, _, w_i in usable)
+                           / weight_total_exact)
+        normalized = [w_i / weight_sum_used for _, _, w_i in usable]
+        rates = [s_i / n_i for s_i, n_i, _ in usable]
+        rate = (math.fsum(w * p for w, p in zip(normalized, rates))
+                / math.fsum(normalized))
+        variance = math.fsum(
+            (w * w) * p * (1.0 - p) * (1 / n_i)
+            for w, p, (_, n_i, _) in zip(normalized, rates, usable))
+        precision = math.fsum(
+            (w * w) * (1 / n_i)
+            for w, (_, n_i, _) in zip(normalized, usable))
+        try:
+            effective_n = (1.0 / precision if precision > 0.0
+                           else float("inf"))
+        except OverflowError:
+            effective_n = float("inf")
+        se = math.sqrt(max(variance, 0.0))
+        total_success = sum(s_i for s_i, _, _ in usable)
+        total_n = sum(n_i for _, n_i, _ in usable)
+        z = 1.959964
+        out.update({
+            "rate": float(rate), "se": float(se),
+            "lo": max(0.0, rate - z * se),
+            "hi": min(1.0, rate + z * se),
+            "total_success": total_success,
+            "total_n": total_n,
+            "pooled_rate": (total_success / total_n
+                            if total_n > 0 else float("nan")),
+            "effective_n": effective_n,
+            "min_stratum_n": min(n_i for _, n_i, _ in usable),
+            "strata": [
+                {"id": i,
+                 "successes": s_i, "total": n_i,
+                 "rate": (s_i / n_i if n_i > 0 else float("nan")),
+                 "reference_weight": (float(w_i) if w_i <= _FLOAT_MAX
+                                      else float("inf")),
+                 "used": n_i > 0 and w_i > 0}
+                for i, (s_i, n_i, w_i) in enumerate(
+                    zip(s_exact, n_exact, weights))
+            ],
+            "valid": True, "reason": "",
+        })
+        return out
+
     if first_error:
+        if first_error == "counts must be finite":
+            s_exact = _exact_integer_sequence(successes)
+            n_exact = _exact_integer_sequence(totals)
+            w_exact = (None if reference_weights is None
+                       else _exact_integer_sequence(reference_weights))
+            if (s_exact is not None and n_exact is not None
+                    and len(s_exact) == len(n_exact)
+                    and (w_exact is None
+                         or len(w_exact) == len(s_exact))):
+                return _exact_fallback(s_exact, n_exact, w_exact)
         out["reason"] = first_error
         return out
     if n is None or s.numel() != n.numel():
@@ -2341,6 +2427,13 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
     else:
         w, why_w = _as_vector(reference_weights)
         if why_w:
+            if why_w == "counts must be finite" and s_exact is not None \
+                    and n_exact is not None:
+                w_exact = _exact_integer_sequence(reference_weights)
+                if (w_exact is not None
+                        and len(s_exact) == len(n_exact)
+                        and len(w_exact) == len(s_exact)):
+                    return _exact_fallback(s_exact, n_exact, w_exact)
             out["reason"] = f"reference_weights: {why_w}"
             return out
         if w.numel() != s.numel():

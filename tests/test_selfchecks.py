@@ -417,6 +417,40 @@ class PositiveIntegerValidationTest(unittest.TestCase):
         self.assertTrue(math.isnan(bad_z["p"]))
         self.assertEqual(bad_z["n"], exact)
 
+    def test_standardized_proportion_counts_above_float_range_stay_exact(
+            self):
+        exact = 10 ** 400
+        valid = metrics.standardized_proportion([exact], [exact])
+        self.assertTrue(valid["valid"])
+        self.assertEqual(valid["rate"], 1.0)
+        self.assertEqual(valid["pooled_rate"], 1.0)
+        self.assertEqual(valid["total_success"], exact)
+        self.assertEqual(valid["total_n"], exact)
+        self.assertEqual(valid["min_stratum_n"], exact)
+        self.assertEqual(valid["coverage"], 1.0)
+        middle = metrics.standardized_proportion([exact // 2], [exact])
+        self.assertTrue(middle["valid"])
+        self.assertEqual(middle["rate"], 0.5)
+        self.assertEqual(middle["pooled_rate"], 0.5)
+        self.assertEqual(middle["total_n"], exact)
+        weighted = metrics.standardized_proportion(
+            [exact, 0], [exact, exact], [3 * exact, exact])
+        self.assertTrue(weighted["valid"])
+        self.assertEqual(weighted["rate"], 0.75)
+        self.assertEqual(weighted["total_success"], exact)
+        self.assertEqual(weighted["total_n"], 2 * exact)
+        self.assertEqual(weighted["min_stratum_n"], exact)
+        self.assertEqual(weighted["coverage"], 1.0)
+        huge_reference = metrics.standardized_proportion(
+            [1, 0], [1, 1], [exact, exact])
+        self.assertTrue(huge_reference["valid"])
+        self.assertEqual(huge_reference["rate"], 0.5)
+        self.assertEqual(huge_reference["total_success"], 1)
+        self.assertEqual(huge_reference["total_n"], 2)
+        self.assertEqual(huge_reference["coverage"], 1.0)
+        impossible = metrics.standardized_proportion([exact + 1], [exact])
+        self.assertFalse(impossible["valid"])
+
 
 class BootstrapReplicateCountTest(unittest.TestCase):
     def test_large_replicate_counts_are_not_rounded_through_float(self):
