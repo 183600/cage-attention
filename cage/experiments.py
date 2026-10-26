@@ -1981,11 +1981,12 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
     rows already carry ``run_block`` / ``run_position``, so the schedule can
     be verified after the fact without rerunning anything.
 
-    ``matches_schedule`` is true only when every planned
-    (cell, seed, block, position) tuple appears exactly once and no
-    unplanned tuple or malformed index appears.  Missing rows are reported
-    as an incomplete run, not silently ignored: the caller decides whether
-    that is a hard failure or just a partial grid.
+    ``matches_schedule`` is true only when the frozen schedule is itself a
+    complete block design and every planned (cell, seed, block, position)
+    tuple appears exactly once with no unplanned tuple or malformed index.
+    Missing rows are reported as an incomplete run, not silently ignored:
+    the caller decides whether that is a hard failure or just a partial
+    grid.
     """
     invalid_order = []
     invalid = []
@@ -2087,6 +2088,14 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
         seen_order[key] = index
         expected.append(key)
     expected_set = set(expected)
+    # Matching a malformed frozen schedule is not evidence of a valid
+    # complete-block design.  In particular, a schedule that swaps the seeds
+    # attached to two blocks (or repeats a within-block position, omits a
+    # block, or labels a block outside ``range(len(seeds))``) can still have
+    # one unique tuple per declared cell, so the set comparison below would
+    # certify it.  Reuse the schedule audit's structural invariants.
+    schedule_complete = bool(
+        _run_order_audit(order, cells, seeds, randomized=True)["complete"])
 
     observed = []
     for index, run in enumerate(runs):
@@ -2128,7 +2137,8 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
                 "block": key[2], "position": key[3]}
 
     matches = bool(
-        expected and not missing and not unexpected and not duplicates
+        expected and schedule_complete
+        and not missing and not unexpected and not duplicates
         and not invalid and not invalid_order and not duplicate_order
         and not invalid_seeds and not duplicate_seeds)
     return {
@@ -2136,6 +2146,7 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
         "seeds": [s if _integer(s) is not None else repr(s) for s in seeds],
         "n_expected": len(expected),
         "n_observed": len(observed),
+        "schedule_complete": schedule_complete,
         "matches_schedule": matches,
         "missing": [_row(key) for key in missing],
         "unexpected": [_row(key) for key in unexpected],

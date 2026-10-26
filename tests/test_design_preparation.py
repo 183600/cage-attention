@@ -1396,6 +1396,25 @@ class RealizedRunOrderAuditTest(unittest.TestCase):
                 self.assertIs(audit["matches_schedule"], False)
                 self.assertTrue(audit["invalid_order"])
 
+    def test_malformed_frozen_schedule_is_not_certified(self):
+        order = _blocked_run_order(self.CELLS, self.SEEDS, 7,
+                                   shuffle=False)
+        swapped_seeds = [
+            (cell, self.SEEDS[1 - block], block, position)
+            for cell, _seed, block, position in order
+        ]
+        repeated_positions = [
+            (cell, seed, block, 0)
+            for cell, seed, block, _position in order
+        ]
+        for schedule in (swapped_seeds, repeated_positions):
+            with self.subTest(schedule=schedule):
+                audit = _realized_order_audit(
+                    self._records(schedule), schedule, self.CELLS,
+                    self.SEEDS, lambda run: run["cell"])
+                self.assertIs(audit["schedule_complete"], False)
+                self.assertIs(audit["matches_schedule"], False)
+
     def test_report_writes_the_audit_next_to_the_runs(self):
         order = _blocked_run_order(self.CELLS, self.SEEDS, 7,
                                    shuffle=False)
