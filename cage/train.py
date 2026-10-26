@@ -1461,6 +1461,26 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
     if steps is None:
         raise ValueError(
             f"steps must be a positive integer, got {raw_steps!r}")
+    # Validate the pass/fail targets before running any training.  Converting
+    # them only when the curve is scored (after the whole loop has run) means
+    # a malformed target aborts an expensive check with an incidental
+    # TypeError/ValueError, while a boolean would silently become 0/1.
+    target_loss = _validated_curve_threshold(target_loss, "target_loss")
+    raw_target_acc = target_acc
+    if isinstance(raw_target_acc, bool):
+        raise ValueError(
+            f"target_acc must be a finite probability in [0, 1], got "
+            f"{raw_target_acc!r}")
+    try:
+        target_acc = float(raw_target_acc)
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+        raise ValueError(
+            f"target_acc must be a finite probability in [0, 1], got "
+            f"{raw_target_acc!r}") from exc
+    if not (math.isfinite(target_acc) and 0.0 <= target_acc <= 1.0):
+        raise ValueError(
+            f"target_acc must be a finite probability in [0, 1], got "
+            f"{raw_target_acc!r}")
     if seed is not None:
         # Pass the seed through unchanged: ``seed_everything`` rejects a
         # bool/fractional seed instead of truncating it, so the pre-flight

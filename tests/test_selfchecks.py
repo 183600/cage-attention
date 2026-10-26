@@ -1122,6 +1122,24 @@ class ComplexScalarValidationTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     overfit_sanity_check(None, None, None, None, steps=bad)
 
+    def test_overfit_targets_are_validated_before_training(self):
+        import torch
+
+        from cage.train import overfit_sanity_check
+
+        for bad in (True, None, float("nan"), -0.1,
+                    torch.tensor(0.1 + 0.1j)):
+            with self.subTest(target_loss=bad):
+                with self.assertRaises(ValueError):
+                    overfit_sanity_check(None, None, None, None,
+                                         steps=1, target_loss=bad)
+        for bad in (True, None, "x", float("nan"), -0.1, 1.1,
+                    torch.tensor(0.1 + 0.1j)):
+            with self.subTest(target_acc=bad):
+                with self.assertRaises(ValueError):
+                    overfit_sanity_check(None, None, None, None,
+                                         steps=1, target_acc=bad)
+
 
 class ProjectSelfCheckTest(unittest.TestCase):
     def test_metrics_self_check(self):
