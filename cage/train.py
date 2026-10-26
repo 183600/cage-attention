@@ -2891,7 +2891,10 @@ def _counterfactual_summary(counts) -> dict:
     counts = parsed if parsed is not None else {name: 0 for name in fields}
 
     def rate(num, den):
-        return float(num) / float(den) if den else float("nan")
+        # Exact integer counts above 2**53 (or even above the float range)
+        # must not be routed through float separately: Python's int/int
+        # division scales first and still returns the representable ratio.
+        return num / den if den else float("nan")
 
     n = int(counts.get("n", 0))
     n_correct = int(counts.get("n_original_correct", 0))
@@ -3123,7 +3126,10 @@ def _association_exposure_summary(totals) -> dict:
                    for name in ("seen", "unseen")}
 
     def rate(num, den):
-        return float(num) / float(den) if den else float("nan")
+        # Exact integer counts above 2**53 (or even above the float range)
+        # must not be routed through float separately: Python's int/int
+        # division scales first and still returns the representable ratio.
+        return num / den if den else float("nan")
 
     def cohort(name):
         entry = cohorts[name]

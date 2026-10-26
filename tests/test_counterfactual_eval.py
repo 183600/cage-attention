@@ -278,6 +278,20 @@ class CounterfactualCountsTest(unittest.TestCase):
         self.assertEqual(out["value_swap"]["n_correct_after_edit"], 3)
         self.assertAlmostEqual(out["value_swap"]["follow_rate"], 2 / 3)
 
+    def test_counts_above_float_range_keep_their_exact_ratio(self):
+        huge = 10 ** 400
+        counts = {
+            "n": huge,
+            "n_original_correct": huge,
+            "n_value_follow": huge,
+            "n_value_flip": huge,
+            "n_value_correct": huge,
+        }
+        out = _counterfactual_summary(counts)
+        self.assertEqual(out["flat"]["cf_n"], huge)
+        self.assertEqual(out["value_swap"]["follow_rate"], 1.0)
+        self.assertEqual(out["value_swap"]["flip_rate"], 1.0)
+
 
 class AssociationExposureAccumulateTest(unittest.TestCase):
     def setUp(self):
@@ -377,6 +391,22 @@ class AssociationExposureSummaryTest(unittest.TestCase):
         self.assertEqual(out["unseen"]["n"], 0)
         self.assertTrue(math.isnan(out["unseen"]["accuracy"]))
         self.assertTrue(math.isnan(out["accuracy_gap_seen_minus_unseen"]))
+
+    def test_counts_above_float_range_keep_their_exact_ratio(self):
+        huge = 10 ** 400
+        seen = dict(
+            _blank_exposure_cohort(),
+            n=huge,
+            n_correct=huge,
+            n_value_swap=huge,
+            n_value_correct=huge,
+            n_value_follow=huge,
+        )
+        out = _association_exposure_summary({"seen": seen})
+        self.assertEqual(out["n_items"], huge)
+        self.assertEqual(out["seen"]["accuracy"], 1.0)
+        self.assertEqual(out["seen_rate"], 1.0)
+        self.assertEqual(out["seen"]["cf_value_follow_rate"], 1.0)
 
 
 class _OracleRetrieval(nn.Module):
