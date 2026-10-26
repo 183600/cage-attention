@@ -2139,45 +2139,81 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
         exact_total = int(operator.index(total))
     except (TypeError, ValueError, OverflowError):
         exact_total = None
-    try:
-        successes = float(successes)
-        total = float(total)
-    except (TypeError, ValueError, RuntimeError, OverflowError):
-        return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
-                "n": 0}
-    if not (math.isfinite(successes) and math.isfinite(total)) or total <= 0:
-        return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
-                "n": 0}
+    exact_counts = exact_successes is not None and exact_total is not None
+    if exact_counts:
+        # Exact integer counts stay exact (and need no finite check): floats
+        # cannot represent counts above 2**53, and some valid Python ints are
+        # even beyond the float range entirely.
+        if exact_total <= 0:
+            return {"p": float("nan"), "lo": float("nan"),
+                    "hi": float("nan"), "n": 0}
+        n_out = exact_total
+        try:
+            total_f = float(exact_total)
+        except OverflowError:
+            total_f = None
+    else:
+        try:
+            successes_f = float(successes)
+            total_f = float(total)
+        except (TypeError, ValueError, RuntimeError, OverflowError):
+            return {"p": float("nan"), "lo": float("nan"),
+                    "hi": float("nan"), "n": 0}
+        if (not (math.isfinite(successes_f) and math.isfinite(total_f))
+                or total_f <= 0):
+            return {"p": float("nan"), "lo": float("nan"),
+                    "hi": float("nan"), "n": 0}
+        n_out = int(total_f)
     # The multiplier must be a finite positive real; NaN would make the
     # interval silently collapse to the point estimate, and a boolean is
     # a flag rather than a z quantile.
     z = _float_or_nan(z)
     if not (math.isfinite(z) and z > 0.0):
         return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
-                "n": int(total)}
+                "n": n_out}
     # Counts must be whole samples; accepting e.g. 0.5/2 would report a
     # binomial interval for a quantity that is not a proportion of trials.
     # Two exact integers above 2**53 can round to the same float64, so the
     # ordering check must use the integer values when both are available.
-    if exact_successes is not None and exact_total is not None:
+    if exact_counts:
         if exact_successes < 0 or exact_successes > exact_total:
             return {"p": float("nan"), "lo": float("nan"),
                     "hi": float("nan"), "n": exact_total}
         p = exact_successes / exact_total
     else:
-        if successes != round(successes) or total != round(total) \
-                or successes < 0 or successes > total:
+        if successes_f != round(successes_f) or total_f != round(total_f) \
+                or successes_f < 0 or successes_f > total_f:
             return {"p": float("nan"), "lo": float("nan"),
-                    "hi": float("nan"), "n": int(total)}
-        p = successes / total
+                    "hi": float("nan"), "n": n_out}
+        p = successes_f / total_f
     z2 = z * z
-    denom = 1.0 + z2 / total
-    center = (p + z2 / (2.0 * total)) / denom
-    half = z * math.sqrt(p * (1.0 - p) / total + z2 / (4.0 * total * total)) / denom
+    if total_f is not None:
+        denom = 1.0 + z2 / total_f
+        center = (p + z2 / (2.0 * total_f)) / denom
+        half = (z * math.sqrt(p * (1.0 - p) / total_f
+                              + z2 / (4.0 * total_f * total_f)) / denom)
+    else:
+        # ``total_f`` overflowed, so evaluate the interval in a scaled form.
+        # ``sqrt(total)`` is still representable for counts up to roughly
+        # 10**616; beyond that every correction underflows to zero and the
+        # interval collapses to the point estimate, exactly as float64 does.
+        try:
+            sqrt_total = float(math.isqrt(exact_total))
+        except OverflowError:
+            sqrt_total = 0.0
+        if sqrt_total == 0.0 or not math.isfinite(sqrt_total):
+            denom, center, half = 1.0, p, 0.0
+        else:
+            inv = 1.0 / sqrt_total
+            inv2 = inv * inv
+            denom = 1.0 + z2 * inv2
+            center = (p + (z2 / 2.0) * inv2) / denom
+            base = math.sqrt(max(0.0, p * (1.0 - p)))
+            half = z * math.hypot(base * inv,
+                                  (z / 2.0) * inv2) / denom
     lo = min(p, max(0.0, center - half))
     hi = max(p, min(1.0, center + half))
-    return {"p": p, "lo": lo, "hi": hi,
-            "n": int(exact_total) if exact_total is not None else int(total)}
+    return {"p": p, "lo": lo, "hi": hi, "n": n_out}
 
 
 def standardized_proportion(successes, totals, reference_weights=None) -> dict:

@@ -389,6 +389,28 @@ class PositiveIntegerValidationTest(unittest.TestCase):
         self.assertEqual(valid["p"], 1.0)
         self.assertEqual(valid["n"], exact)
 
+    def test_wilson_ci_counts_above_float_range_stay_exact(self):
+        # ``float(10**400)`` overflows, but the counts themselves are valid
+        # Python integers and the interval only needs their ratio.  The
+        # point estimate, total, and ordering check must not be lost.
+        exact = 10 ** 400
+        valid = metrics.wilson_ci(exact, exact)
+        self.assertEqual(valid["p"], 1.0)
+        self.assertEqual(valid["lo"], 1.0)
+        self.assertEqual(valid["hi"], 1.0)
+        self.assertEqual(valid["n"], exact)
+        middle = metrics.wilson_ci(exact // 2, exact)
+        self.assertEqual(middle["p"], 0.5)
+        self.assertLessEqual(middle["lo"], middle["p"])
+        self.assertGreaterEqual(middle["hi"], middle["p"])
+        self.assertEqual(middle["n"], exact)
+        impossible = metrics.wilson_ci(exact + 1, exact)
+        self.assertTrue(math.isnan(impossible["p"]))
+        self.assertEqual(impossible["n"], exact)
+        bad_z = metrics.wilson_ci(exact, exact, z=float("nan"))
+        self.assertTrue(math.isnan(bad_z["p"]))
+        self.assertEqual(bad_z["n"], exact)
+
 
 class BootstrapReplicateCountTest(unittest.TestCase):
     def test_large_replicate_counts_are_not_rounded_through_float(self):
