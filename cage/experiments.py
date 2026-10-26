@@ -1357,7 +1357,7 @@ class Settings:
                     f"got {value!r}")
             try:
                 number = float(value)
-            except (TypeError, ValueError, OverflowError) as exc:
+            except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
                 raise ValueError(
                     "depth_step_multipliers entries must be finite "
                     f"positive numbers, got {value!r}") from exc
@@ -1389,7 +1389,7 @@ class Settings:
                 raise ValueError(f"{name} must be a finite number, got {raw!r}")
             try:
                 number = float(raw)
-            except (TypeError, ValueError, OverflowError) as exc:
+            except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
                 raise ValueError(
                     f"{name} must be a finite number, got {raw!r}") from exc
             if not math.isfinite(number):
@@ -1411,7 +1411,7 @@ class Settings:
                     f"{name} must be a finite positive number, got {raw!r}")
             try:
                 number = float(raw)
-            except (TypeError, ValueError, OverflowError) as exc:
+            except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
                 raise ValueError(
                     f"{name} must be a finite positive number, got "
                     f"{raw!r}") from exc
@@ -1423,7 +1423,7 @@ class Settings:
         raw_q = self.fdr_q
         try:
             q = float(raw_q)
-        except (TypeError, ValueError, OverflowError) as exc:
+        except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
             raise ValueError(
                 f"fdr_q must be a finite number strictly between 0 and 1, "
                 f"got {raw_q!r}") from exc
@@ -1436,7 +1436,7 @@ class Settings:
             raw = getattr(self, name)
             try:
                 value = float(raw)
-            except (TypeError, ValueError, OverflowError) as exc:
+            except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
                 raise ValueError(
                     f"{name} must be a finite number strictly between 0 and "
                     f"1, got {raw!r}") from exc
@@ -1501,7 +1501,7 @@ class Settings:
                         f"numbers, got {values!r}")
                 try:
                     number = float(value)
-                except (TypeError, ValueError, OverflowError) as exc:
+                except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
                     # A JSON integer can be arbitrarily large; converting it
                     # to float raises OverflowError.  That is a malformed
                     # configuration value, not a reason to leak the
@@ -3400,7 +3400,7 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
     try:
         alpha = float(settings.design_alpha)
         target = float(settings.power_target)
-    except (TypeError, ValueError, OverflowError) as exc:
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
         raise ValueError(
             "design_alpha and power_target must be finite numbers strictly "
             f"between 0 and 1, got {settings.design_alpha!r} and "
@@ -10557,7 +10557,7 @@ def _complexity_cost_companion(settings: Settings, out_dir: pathlib.Path,
             for value in matched["accuracy_by_seed"].values():
                 try:
                     value = float(value)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, RuntimeError, OverflowError):
                     continue
                 if _finite(value):
                     matched_acc.append(value)
@@ -10597,7 +10597,7 @@ def _complexity_cost_companion(settings: Settings, out_dir: pathlib.Path,
             try:
                 seed = int(seed)
                 value = float(value)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, RuntimeError, OverflowError):
                 continue
             if _finite(value):
                 ref_by_seed[seed] = value
@@ -10997,7 +10997,8 @@ def _cross_process_replay(settings: Settings, seed: int, cfg: dict,
     try:
         child = json.loads(lines[-1])
         child_losses = [float(v) for v in child["losses"]]
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (KeyError, TypeError, ValueError, RuntimeError, OverflowError,
+            json.JSONDecodeError) as exc:
         base["error"] = f"unparseable child output: {type(exc).__name__}: {exc}"
         return base
     same_length = len(child_losses) == len(losses)
@@ -11551,7 +11552,7 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
             f"{raw_curve_points!r}")
     try:
         curve_points_num = float(raw_curve_points)
-    except (TypeError, ValueError, OverflowError) as exc:
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
         raise ValueError(
             f"curve_points must be a non-negative integer, got "
             f"{raw_curve_points!r}") from exc
@@ -14987,7 +14988,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     for key, value in (shallow.get("accuracy_by_seed") or {}).items():
         try:
             shallow_by_seed[int(key)] = float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RuntimeError, OverflowError):
             continue
     complexity_benchmark = None
     matched_benchmark = None
@@ -16283,7 +16284,7 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
                 return x is None and y is None
             try:
                 xf, yf = float(x), float(y)
-            except (TypeError, ValueError, OverflowError):
+            except (TypeError, ValueError, RuntimeError, OverflowError):
                 return False
             if math.isnan(xf) or math.isnan(yf):
                 return math.isnan(xf) and math.isnan(yf)

@@ -194,7 +194,7 @@ def time_ordered_split(n_samples: int, train_frac: float = 0.7,
     try:
         train_frac = float(train_frac)
         val_frac = float(val_frac)
-    except (TypeError, ValueError, OverflowError) as exc:
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
         raise ValueError(
             f"train_frac and val_frac must be numbers in (0, 1), got "
             f"{train_frac!r} and {val_frac!r}") from exc
@@ -290,7 +290,7 @@ def group_disjoint_split(groups, train_frac: float = 0.7,
     try:
         train_frac = float(train_frac)
         val_frac = float(val_frac)
-    except (TypeError, ValueError, OverflowError) as exc:
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
         raise ValueError(
             f"need 0 < train_frac, 0 < val_frac and train_frac + val_frac "
             f"< 1, got {train_frac!r}, {val_frac!r}") from exc

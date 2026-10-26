@@ -1007,6 +1007,62 @@ class BaselineArgumentValidationTest(unittest.TestCase):
                     tune_linear_probe(3, 16, **kwargs)
 
 
+class ComplexScalarValidationTest(unittest.TestCase):
+    def test_complex_split_fractions_raise_value_error(self):
+        import torch
+
+        bad = torch.tensor(0.1 + 0.1j)
+        with self.assertRaises(ValueError):
+            data.time_ordered_split(10, bad, 0.15)
+        with self.assertRaises(ValueError):
+            data.group_disjoint_split([0, 0, 1, 1, 2, 2], bad, 0.15)
+
+    def test_complex_cfg_numeric_fields_raise_value_error(self):
+        import torch
+
+        from cage.model import Cfg
+
+        bad = torch.tensor(0.1 + 0.1j)
+        for name in ("layer_scale", "dropout", "calib_a", "calib_c",
+                     "calib_scale", "calib_tau_init"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    Cfg(vocab_size=8, d_model=8, n_heads=2, n_layers=1,
+                        max_len=4, gate="none", **{name: bad})
+
+    def test_complex_settings_numeric_fields_raise_value_error(self):
+        import torch
+
+        from cage.experiments import Settings
+
+        bad = torch.tensor(0.1 + 0.1j)
+        for name in ("dropout", "negative_control_tol", "lr",
+                     "overfit_lr", "fdr_q", "design_alpha",
+                     "power_target"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    Settings(**{name: bad})
+        with self.assertRaises(ValueError):
+            Settings(depth_step_multipliers=(bad,))
+
+    def test_complex_train_loop_intervals_raise_value_error(self):
+        import torch
+
+        from cage.train import train_model
+
+        bad = torch.tensor(0.1 + 0.1j)
+        for name in ("log_every", "eval_every"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    train_model(None, steps=1, **{name: bad})
+
+    def test_complex_bootstrap_alpha_abstains(self):
+        import torch
+
+        self.assertFalse(
+            metrics._bootstrap_args_ok(100, torch.tensor(0.05 + 0.1j)))
+
+
 class ProjectSelfCheckTest(unittest.TestCase):
     def test_metrics_self_check(self):
         with contextlib.redirect_stdout(io.StringIO()):

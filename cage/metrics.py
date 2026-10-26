@@ -1113,7 +1113,7 @@ def _bootstrap_args_ok(n_boot, alpha) -> bool:
     """Whether a bootstrap has at least one replicate and a usable alpha."""
     try:
         a = float(alpha)
-    except (TypeError, ValueError, OverflowError):
+    except (TypeError, ValueError, RuntimeError, OverflowError):
         return False
     return (_positive_integer(n_boot) is not None
             and math.isfinite(a) and 0.0 < a < 1.0)

@@ -982,7 +982,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             f"{raw_log_every!r}")
     try:
         log_every_num = float(raw_log_every)
-    except (TypeError, ValueError, OverflowError) as exc:
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
         raise ValueError(
             f"log_every must be a non-negative integer, got "
             f"{raw_log_every!r}") from exc
@@ -1003,7 +1003,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             f"{raw_eval_every!r}")
     try:
         eval_every_num = float(raw_eval_every)
-    except (TypeError, ValueError, OverflowError) as exc:
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
         raise ValueError(
             f"eval_every must be a non-negative integer, got "
             f"{raw_eval_every!r}") from exc

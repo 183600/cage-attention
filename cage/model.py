@@ -184,7 +184,7 @@ class Cfg:
                     "layer_scale must be a finite number or None, not bool")
             try:
                 layer_scale = float(self.layer_scale)
-            except (TypeError, ValueError, OverflowError) as exc:
+            except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
                 raise ValueError(
                     f"layer_scale must be a finite number or None, got "
                     f"{self.layer_scale!r}") from exc
@@ -198,7 +198,7 @@ class Cfg:
                 f"{self.dropout!r}")
         try:
             dropout = float(self.dropout)
-        except (TypeError, ValueError, OverflowError) as exc:
+        except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
             raise ValueError(
                 f"dropout must be a finite number in [0, 1], got "
                 f"{self.dropout!r}") from exc
@@ -213,7 +213,7 @@ class Cfg:
                 raise ValueError(f"{name} must be finite, got {value!r}")
             try:
                 value = float(value)
-            except (TypeError, ValueError, OverflowError) as exc:
+            except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
                 raise ValueError(
                     f"{name} must be finite, got {getattr(self, name)!r}"
                 ) from exc
@@ -227,7 +227,7 @@ class Cfg:
                 f"{raw_tau_init!r}")
         try:
             tau_init = float(raw_tau_init)
-        except (TypeError, ValueError, OverflowError) as exc:
+        except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
             raise ValueError(
                 f"calib_tau_init must be finite and > 0, got "
                 f"{raw_tau_init!r}") from exc
