@@ -2176,12 +2176,17 @@ def _counts(values, n_categories):
     if raw.is_floating_point() and not bool(raw.eq(raw.round()).all()):
         raise ValueError("audit values must be integers")
     flat = raw.to(torch.long).cpu()
-    if flat.numel() and (bool((flat < 0).any())
-                         or bool((flat >= n_categories).any())):
+    if flat.numel():
+        lo, hi = int(flat.min()), int(flat.max())
+        if lo < 0 or hi >= n_categories:
+            raise ValueError(
+                f"audit values must lie in [0, {n_categories}), got range "
+                f"[{lo}, {hi}]")
+    try:
+        return torch.bincount(flat, minlength=n_categories).to(torch.int64)
+    except (MemoryError, OverflowError, RuntimeError) as exc:
         raise ValueError(
-            f"audit values must lie in [0, {n_categories}), got range "
-            f"[{int(flat.min())}, {int(flat.max())}]")
-    return torch.bincount(flat, minlength=n_categories).to(torch.int64)
+            f"n_categories={n_categories} is too large to count") from exc
 
 
 def _distribution_from_counts(counts):
