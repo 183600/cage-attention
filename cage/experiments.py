@@ -1824,10 +1824,16 @@ def _run_order_audit(order, cells, seeds, randomized=True):
         for block, seed in enumerate(seeds)
         if block not in per_block or seed not in block_seeds.get(block, [])
     ]
-    duplicate_seeds = sorted({seed for seed in seeds
-                              if _declared_seed(seed) is not None
-                              and seeds.count(seed) > 1},
-                             key=_seed_order)
+    declared_streams: dict[int, list] = {}
+    for seed in seeds:
+        exact = _declared_seed(seed)
+        if exact is not None:
+            declared_streams.setdefault(stream_seed_key(exact),
+                                        []).append(seed)
+    duplicate_seeds = sorted(
+        {seed for group in declared_streams.values() if len(group) > 1
+         for seed in group},
+        key=_seed_order)
     complete = (bool(cells) and bool(seeds)
                 and set(per_block) == set(range(n_blocks))
                 and not missing and not duplicated and not unexpected

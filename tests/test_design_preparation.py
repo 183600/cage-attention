@@ -137,6 +137,14 @@ class BlockedRunOrderTest(unittest.TestCase):
             self.CELLS, (0, 0), 11)
         self.assertFalse(
             _run_order_audit(duplicate_seed, self.CELLS, (0, 0))["complete"])
+        # Seeds that alias the same 32-bit data stream are one block twice,
+        # even though the raw integer labels compare unequal.
+        aliased_seed = _blocked_run_order(
+            self.CELLS, (0, 2 ** 32), 11)
+        alias_audit = _run_order_audit(
+            aliased_seed, self.CELLS, (0, 2 ** 32))
+        self.assertFalse(alias_audit["complete"])
+        self.assertEqual(alias_audit["duplicate_seeds"], [0, 2 ** 32])
         # A fractional block/position would otherwise be silently truncated
         # to an integer and could still look like a valid complete block.
         fractional = [(cell, seed, float(block), pos)
