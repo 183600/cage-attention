@@ -470,7 +470,7 @@ def _as_indices(index, n: int) -> torch.Tensor:
     else:
         try:
             t = torch.as_tensor(index)
-        except (TypeError, ValueError, RuntimeError) as exc:
+        except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
             raise ValueError(
                 f"split indices must be integers or a boolean mask, got "
                 f"{type(index).__name__}") from exc

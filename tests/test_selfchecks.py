@@ -469,6 +469,19 @@ class PositiveIntegerValidationTest(unittest.TestCase):
         self.assertEqual(weighted["rate"], 0.5)
         self.assertEqual(weighted["coverage"], 1.0)
 
+    def test_mixed_huge_count_vectors_abstain(self):
+        # A container mixing an exact huge integer with a float cannot use
+        # either the exact-integer path or ``torch.as_tensor``; the public
+        # companion must abstain rather than leak OverflowError.
+        for counts in ([10 ** 400, 1.5], [10 ** 400, 2.0]):
+            with self.subTest(counts=counts):
+                out = metrics.standardized_proportion(counts, [2, 2])
+                self.assertFalse(out["valid"])
+                self.assertTrue(out["reason"])
+                cluster = metrics.clustered_proportion_ci(
+                    counts, [2, 2], n_boot=1)
+                self.assertFalse(cluster["valid"])
+
     def test_clustered_proportion_finite_counts_do_not_overflow(self):
         # The per-unit ratios and the exact pooled totals are all valid even
         # when the total number of examples exceeds float64's range.  The

@@ -2274,7 +2274,7 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
             return out, ""
         try:
             raw = torch.as_tensor(values)
-        except (TypeError, ValueError, RuntimeError):
+        except (TypeError, ValueError, RuntimeError, OverflowError):
             return None, "values must be numeric"
         if raw.dtype == torch.bool or raw.is_complex():
             return None, "values must be real numeric counts"
