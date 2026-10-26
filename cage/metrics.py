@@ -2658,16 +2658,13 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
         empty["reason"] = "n_boot must be a positive integer"
         return empty
     if exact_counts:
+        # Individually finite counts can overflow their float64 sum (e.g.
+        # two counts near the float maximum).  The pooled totals and Wilson
+        # companion accept exact Python integers, and the clustered
+        # interval only uses per-unit ratios, so keep them exact instead of
+        # abstaining on an otherwise valid estimation stream.
         total_success = sum(s_exact)
         total_n = sum(n_exact)
-        try:
-            finite_totals = (math.isfinite(float(total_success))
-                             and math.isfinite(float(total_n)))
-        except (OverflowError, ValueError):
-            finite_totals = False
-        if not finite_totals:
-            empty["reason"] = "pooled success/total counts overflow"
-            return empty
     else:
         if not (bool(torch.isfinite(s.sum()))
                 and bool(torch.isfinite(n.sum()))):

@@ -469,6 +469,25 @@ class PositiveIntegerValidationTest(unittest.TestCase):
         self.assertEqual(weighted["rate"], 0.5)
         self.assertEqual(weighted["coverage"], 1.0)
 
+    def test_clustered_proportion_finite_counts_do_not_overflow(self):
+        # The per-unit ratios and the exact pooled totals are all valid even
+        # when the total number of examples exceeds float64's range.  The
+        # exact count path must not abstain from a float-only sum check.
+        exact = 10 ** 308
+        out = metrics.clustered_proportion_ci([exact, exact],
+                                              [exact, exact], n_boot=10)
+        self.assertTrue(out["valid"])
+        self.assertEqual(out["mean"], 1.0)
+        self.assertEqual(out["n_examples"], 2 * exact)
+        self.assertEqual(out["pooled_wilson"]["n"], 2 * exact)
+        self.assertEqual(out["pooled_wilson"]["p"], 1.0)
+        sparse = metrics.clustered_proportion_ci([1, 1], [exact, exact],
+                                                 n_boot=10)
+        self.assertTrue(sparse["valid"])
+        self.assertEqual(sparse["n_examples"], 2 * exact)
+        self.assertEqual(sparse["pooled_wilson"]["n"], 2 * exact)
+        self.assertEqual(sparse["pooled_wilson"]["p"], 1 / exact)
+
 
 class BootstrapReplicateCountTest(unittest.TestCase):
     def test_large_replicate_counts_are_not_rounded_through_float(self):
