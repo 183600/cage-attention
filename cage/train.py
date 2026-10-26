@@ -85,6 +85,31 @@ def _finite_float(value) -> float:
         return float("nan")
 
 
+def _validated_curve_threshold(value, name):
+    """Coerce a curve threshold to a finite non-negative number.
+
+    ``rel_tol`` and ``grad_norm_explode`` are compared against curve
+    measurements, so a string/complex/NaN threshold would otherwise escape
+    as an incidental ``TypeError``/``NotImplementedError`` from the
+    comparison (or silently disable the check).  A boolean is a flag, not
+    a threshold.
+    """
+    raw = value
+    if isinstance(raw, bool):
+        raise ValueError(
+            f"{name} must be a finite non-negative number, got {raw!r}")
+    try:
+        number = float(raw)
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+        raise ValueError(
+            f"{name} must be a finite non-negative number, got "
+            f"{raw!r}") from exc
+    if not (math.isfinite(number) and number >= 0.0):
+        raise ValueError(
+            f"{name} must be a finite non-negative number, got {raw!r}")
+    return number
+
+
 def _validated_lr(value):
     """Validate a learning rate before it reaches an optimizer.
 
@@ -235,6 +260,9 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
     larger than the validation-batch noise, so a noisy flat validation
     curve cannot be sold as overfitting.
     """
+    rel_tol = _validated_curve_threshold(rel_tol, "rel_tol")
+    grad_norm_explode = _validated_curve_threshold(
+        grad_norm_explode, "grad_norm_explode")
     # Work on copies so the caller's history keeps the raw single-batch
     # losses; the smoothed window value only changes the verdict input when
     # the raw value is finite, so a non-finite batch loss is never hidden.
@@ -531,6 +559,8 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     mode and must be diagnosed with ``train_mode=False``, otherwise dropout
     changes the graph and the triage can blame a different stage.
     """
+    grad_norm_explode = _validated_curve_threshold(
+        grad_norm_explode, "grad_norm_explode")
     training_states = {module: module.training for module in model.modules()}
 
     # Inference tensors cannot be saved for backward, so normalise the
@@ -975,6 +1005,8 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         raise ValueError(
             f"batch must be a positive integer, got {raw_batch!r}")
     lr = _validated_lr(lr)
+    grad_norm_explode = _validated_curve_threshold(
+        grad_norm_explode, "grad_norm_explode")
     raw_log_every = log_every
     if isinstance(raw_log_every, bool):
         raise ValueError(
@@ -1419,6 +1451,11 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
     the same code the grids run, so a regression in the real loop cannot
     pass this pre-flight via a divergent copy.
     """
+    raw_steps = steps
+    steps = _positive_integer(raw_steps)
+    if steps is None:
+        raise ValueError(
+            f"steps must be a positive integer, got {raw_steps!r}")
     if seed is not None:
         # Pass the seed through unchanged: ``seed_everything`` rejects a
         # bool/fractional seed instead of truncating it, so the pre-flight

@@ -1062,6 +1062,40 @@ class ComplexScalarValidationTest(unittest.TestCase):
         self.assertFalse(
             metrics._bootstrap_args_ok(100, torch.tensor(0.05 + 0.1j)))
 
+    def test_malformed_curve_thresholds_raise_value_error(self):
+        import torch
+
+        from cage.train import training_curve_verdict
+
+        hist = [{"step": 0, "train_loss": 1.0},
+                {"step": 1, "train_loss": 0.9}]
+        for name in ("rel_tol", "grad_norm_explode"):
+            for bad in (True, -0.1, float("nan"), float("inf"),
+                        torch.tensor(0.1 + 0.1j)):
+                with self.subTest(name=name, bad=bad):
+                    with self.assertRaises(ValueError):
+                        training_curve_verdict(hist, **{name: bad})
+
+    def test_malformed_gradient_threshold_rejected_before_training(self):
+        import torch
+
+        from cage.train import train_model
+
+        with self.assertRaises(ValueError):
+            train_model(None, steps=1,
+                        grad_norm_explode=torch.tensor(0.1 + 0.1j))
+
+    def test_overfit_steps_must_be_a_positive_integer(self):
+        import torch
+
+        from cage.train import overfit_sanity_check
+
+        for bad in (0, -1, True, 1.5,
+                    torch.tensor(0.1 + 0.1j)):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    overfit_sanity_check(None, None, None, None, steps=bad)
+
 
 class ProjectSelfCheckTest(unittest.TestCase):
     def test_metrics_self_check(self):
