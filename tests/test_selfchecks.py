@@ -277,6 +277,25 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertEqual(over["k"], 2)
         self.assertAlmostEqual(over["frac"], 0.4)
 
+    def test_low_precision_selection_fraction_does_not_overcount(self):
+        import torch
+
+        # A float32 0.1 is stored as 0.10000000149..., so a strict
+        # float64 product test would ceil 1.0000000149 to 2 rows.
+        for dtype, frac in ((torch.float32, 0.1),
+                            (torch.float32, 0.3),
+                            (torch.float16, 0.2)):
+            with self.subTest(dtype=dtype, frac=frac):
+                out = metrics.selection_at_fraction(
+                    list(range(10)), [0] * 10,
+                    frac=torch.tensor(frac, dtype=dtype))
+                self.assertEqual(out["k"], round(frac * 10))
+        # A genuine excess above one integer is still not noise.
+        out = metrics.selection_at_fraction(
+            list(range(5)), [0] * 5,
+            frac=torch.tensor(0.20000002, dtype=torch.float32))
+        self.assertEqual(out["k"], 2)
+
     def test_max_exact_is_capped_not_an_abstention(self):
         # The docstring says the threshold is capped at 20; a caller asking
         # for more should still get the exact test for small samples, not a

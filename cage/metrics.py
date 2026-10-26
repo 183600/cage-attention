@@ -415,6 +415,7 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
         return {"frac": float("nan"), "k": 0, "recall": float("nan"),
                 "precision": float("nan"), "lift": float("nan"),
                 "threshold": float("nan")}
+    raw_frac = frac
     frac = _float_or_nan(frac)
     # ``frac`` is a fraction of the evaluated rows.  Clamping an
     # out-of-range value would silently answer a different question (e.g.
@@ -437,6 +438,23 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
     # 1.0000000005 and the documented ``ceil`` must flag two rows.
     tolerance = (4.0 * math.ulp(product)
                  if math.isfinite(product) and product > 0.0 else 0.0)
+    # A float32 ``0.1`` reaches this function as 0.10000000149..., so its
+    # product is a few ulps above 1.0 *in float64* even though the caller
+    # supplied what it regards as exactly one tenth.  The product's error is
+    # bounded by ``n * spacing(frac)``, where the spacing is that of the
+    # *input* dtype (``finfo.eps`` is the spacing at 1.0).  Only widen the
+    # tolerance when the caller actually handed in a low-precision tensor;
+    # a Python float such as 0.2000000001 keeps the strict product test.
+    if (torch.is_tensor(raw_frac) and raw_frac.numel() == 1
+            and raw_frac.is_floating_point()):
+        try:
+            eps = torch.finfo(raw_frac.dtype).eps
+        except (TypeError, ValueError):
+            eps = None
+        if eps is not None and math.isfinite(product) and frac > 0.0:
+            _, exponent = math.frexp(frac)
+            spacing = math.ldexp(eps, exponent - 1)
+            tolerance = max(tolerance, n * spacing)
     if nearest >= 1 and abs(product - nearest) <= tolerance:
         k = int(nearest)
     else:
