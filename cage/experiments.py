@@ -1708,7 +1708,13 @@ def _run_order_audit(order, cells, seeds, randomized=True):
         order = list(order)
     except TypeError:
         order = None
-    expected = {_coverage_cell_key(c) for c in cells}
+    cell_keys = [_coverage_cell_key(c) for c in cells]
+    expected = set(cell_keys)
+    cell_counts: dict[str, int] = {}
+    for key in cell_keys:
+        cell_counts[key] = cell_counts.get(key, 0) + 1
+    duplicate_cells = sorted(
+        key for key, count in cell_counts.items() if count > 1)
     n_cells = len(cells)
     n_blocks = len(seeds)
     invalid_seeds = [
@@ -1849,6 +1855,7 @@ def _run_order_audit(order, cells, seeds, randomized=True):
          for seed in group},
         key=_seed_order)
     complete = (bool(cells) and bool(seeds)
+                and not duplicate_cells
                 and set(per_block) == set(range(n_blocks))
                 and not missing and not duplicated and not unexpected
                 and not invalid_positions and not invalid_indices
@@ -1886,6 +1893,7 @@ def _run_order_audit(order, cells, seeds, randomized=True):
         "invalid_positions": invalid_positions,
         "invalid_indices": invalid_indices,
         "invalid_seeds": invalid_seeds,
+        "duplicate_cells": duplicate_cells,
         "seed_mismatches": seed_mismatches,
         "unexpected_seeds": unexpected_seeds,
         "missing_seeds": missing_seeds,

@@ -166,6 +166,14 @@ class BlockedRunOrderTest(unittest.TestCase):
                 self.assertFalse(audit["complete"])
                 self.assertTrue(audit["invalid_indices"])
 
+    def test_duplicate_declared_cells_are_not_certified(self):
+        # One row cannot satisfy both declarations of "none"; collapsing the
+        # declarations to a set would otherwise certify the missing run.
+        audit = _run_order_audit(
+            [("none", 0, 0, 0)], ("none", "none"), (0,))
+        self.assertFalse(audit["complete"])
+        self.assertEqual(audit["duplicate_cells"], ["none"])
+
     def test_non_iterable_declarations_are_not_certified(self):
         for cells, seeds in ((None, (0,)), (("none",), None)):
             with self.subTest(cells=cells, seeds=seeds):
@@ -1395,6 +1403,16 @@ class RealizedRunOrderAuditTest(unittest.TestCase):
                     self.SEEDS, lambda run: run["cell"])
                 self.assertIs(audit["matches_schedule"], False)
                 self.assertTrue(audit["invalid_order"])
+
+    def test_duplicate_declared_cells_are_not_certified(self):
+        cells = ("none", "none")
+        order = [("none", 0, 0, 0)]
+        records = [{"cell": "none", "seed": 0, "run_block": 0,
+                    "run_position": 0}]
+        audit = _realized_order_audit(
+            records, order, cells, (0,), lambda run: run["cell"])
+        self.assertIs(audit["schedule_complete"], False)
+        self.assertIs(audit["matches_schedule"], False)
 
     def test_malformed_frozen_schedule_is_not_certified(self):
         order = _blocked_run_order(self.CELLS, self.SEEDS, 7,
