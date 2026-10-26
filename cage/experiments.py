@@ -2027,7 +2027,23 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
             return None
 
     declared_cells = {_coverage_cell_key(cell) for cell in cells}
-    declared_seeds = {_integer(seed) for seed in seeds}
+    declared_streams: dict[int, list] = {}
+    invalid_seeds = []
+    for seed in seeds:
+        exact = _integer(seed)
+        if exact is None:
+            invalid_seeds.append({
+                "seed": repr(seed),
+                "reason": "declared training seed is not an integer"})
+            continue
+        declared_streams.setdefault(stream_seed_key(exact),
+                                    []).append(exact)
+    declared_seeds = {seed for group in declared_streams.values()
+                      for seed in group}
+    duplicate_seeds = sorted(
+        {seed for group in declared_streams.values() if len(group) > 1
+         for seed in group},
+        key=_seed_order)
     expected = []
     seen_order = {}
     duplicate_order = []
@@ -2113,7 +2129,8 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
 
     matches = bool(
         expected and not missing and not unexpected and not duplicates
-        and not invalid and not invalid_order and not duplicate_order)
+        and not invalid and not invalid_order and not duplicate_order
+        and not invalid_seeds and not duplicate_seeds)
     return {
         "cells": [_coverage_cell_key(c) for c in cells],
         "seeds": [s if _integer(s) is not None else repr(s) for s in seeds],
@@ -2124,6 +2141,8 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
         "unexpected": [_row(key) for key in unexpected],
         "duplicates": [_row(key) for key in duplicates],
         "duplicate_order": duplicate_order,
+        "invalid_seeds": invalid_seeds,
+        "duplicate_seeds": duplicate_seeds,
         "invalid": invalid,
         "invalid_order": invalid_order,
     }

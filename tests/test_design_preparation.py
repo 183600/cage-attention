@@ -1366,6 +1366,22 @@ class RealizedRunOrderAuditTest(unittest.TestCase):
         self.assertEqual(len(audit["duplicate_order"]), 1)
         self.assertTrue(audit["duplicate_order"][0].get("cell"))
 
+    def test_aliased_or_malformed_declared_seeds_are_not_certified(self):
+        seeds = (0, 2 ** 32)
+        order = _blocked_run_order(self.CELLS, seeds, 7, shuffle=False)
+        audit = _realized_order_audit(
+            self._records(order), order, self.CELLS, seeds,
+            lambda run: run["cell"])
+        self.assertIs(audit["matches_schedule"], False)
+        self.assertEqual(audit["duplicate_seeds"], [0, 2 ** 32])
+        for bad in (True, 1.0, None):
+            with self.subTest(seed=bad):
+                audit = _realized_order_audit(
+                    [], [], self.CELLS, (0, bad),
+                    lambda run: run["cell"])
+                self.assertIs(audit["matches_schedule"], False)
+                self.assertTrue(audit["invalid_seeds"])
+
     def test_schedule_outside_declared_cells_or_seeds_is_not_certified(self):
         order = _blocked_run_order(self.CELLS, self.SEEDS, 7,
                                    shuffle=False)
