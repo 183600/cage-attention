@@ -277,6 +277,10 @@ def _positive_integer(value):
     return int(number)
 
 
+_TORCH_SEED_MIN = -(1 << 63)
+_TORCH_SEED_MAX = (1 << 64) - 1
+
+
 def _bootstrap_seed(seed) -> int:
     """Validate a resampling seed instead of silently truncating it.
 
@@ -285,14 +289,25 @@ def _bootstrap_seed(seed) -> int:
     an incidental ``RuntimeError``.  Bootstrap seeds are part of the
     reproducibility contract, so translate every non-integral value into the
     documented ``ValueError`` before drawing any replicate.
+
+    ``torch.Generator.manual_seed`` stores seeds in a 64-bit field and raises
+    an incidental ``ValueError`` (``Overflow when unpacking long long``) for
+    integers outside it.  Reject those here as well so a JSON seed such as
+    ``10**400`` cannot leak torch's implementation detail from any bootstrap
+    entry point.
     """
     if isinstance(seed, bool):
         raise ValueError(f"bootstrap seed must be an integer, got {seed!r}")
     try:
-        return int(operator.index(seed))
+        seed_int = int(operator.index(seed))
     except TypeError as exc:
         raise ValueError(
             f"bootstrap seed must be an integer, got {seed!r}") from exc
+    if not _TORCH_SEED_MIN <= seed_int <= _TORCH_SEED_MAX:
+        raise ValueError(
+            f"bootstrap seed must fit in torch's 64-bit seed range "
+            f"[{_TORCH_SEED_MIN}, {_TORCH_SEED_MAX}], got {seed!r}")
+    return seed_int
 
 
 def _float_or_nan(value) -> float:
@@ -2884,6 +2899,9 @@ def sign_flip_test(diffs, alternative: str = "two-sided",
         seed_int = int(operator.index(seed))
     except TypeError:
         out["reason"] = "seed must be an integer"
+        return out
+    if not _TORCH_SEED_MIN <= seed_int <= _TORCH_SEED_MAX:
+        out["reason"] = "seed must fit in torch's 64-bit seed range"
         return out
 
     obs = float(d.mean())

@@ -521,6 +521,15 @@ class BootstrapSeedValidationTest(unittest.TestCase):
                 with self.subTest(seed=seed, call=index):
                     with self.assertRaises(ValueError):
                         call(seed)
+        # torch's generator stores seeds in 64 bits.  Out-of-range integers
+        # used to reach ``manual_seed`` and leak its incidental
+        # "Overflow when unpacking long long" ValueError instead of the
+        # documented validation message (and at a different call depth).
+        for seed in (2 ** 64, -(2 ** 63) - 1, 10 ** 400):
+            for index, call in enumerate(calls):
+                with self.subTest(seed=seed, call=index):
+                    with self.assertRaises(ValueError):
+                        call(seed)
 
 
 class NegativeControlPermutationTest(unittest.TestCase):

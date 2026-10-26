@@ -90,6 +90,15 @@ class ExactSignFlipTest(unittest.TestCase):
             ([1.0, 2.0], {"seed": True}),
             ([1.0, 2.0], {"seed": 1.5}),
             ([1.0, 2.0], {"seed": 1.0}),
+            # The Monte-Carlo path feeds the seed to torch's generator;
+            # out-of-range integers must abstain like other bad seeds
+            # rather than leaking torch's 64-bit overflow ValueError.
+            ([1.0] * 20, {"n_random": 100, "max_exact": 10,
+                          "seed": 2 ** 64}),
+            ([1.0] * 20, {"n_random": 100, "max_exact": 10,
+                          "seed": -(2 ** 63) - 1}),
+            ([1.0] * 20, {"n_random": 100, "max_exact": 10,
+                          "seed": 10 ** 400}),
             (["not-a-number"], {}),
             ([object()], {}),
         ]
