@@ -379,6 +379,16 @@ class PositiveIntegerValidationTest(unittest.TestCase):
         self.assertFalse(metrics.clustered_proportion_ci(
             [exact], [exact - 1], n_boot=10)["valid"])
 
+    def test_wilson_ci_exact_counts_reject_impossible_ordering(self):
+        exact = 2 ** 53 + 1
+        out = metrics.wilson_ci(exact, exact - 1)
+        self.assertTrue(math.isnan(out["p"]))
+        self.assertTrue(math.isnan(out["lo"]))
+        self.assertEqual(out["n"], exact - 1)
+        valid = metrics.wilson_ci(exact, exact)
+        self.assertEqual(valid["p"], 1.0)
+        self.assertEqual(valid["n"], exact)
+
 
 class BootstrapReplicateCountTest(unittest.TestCase):
     def test_large_replicate_counts_are_not_rounded_through_float(self):

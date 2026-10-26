@@ -2132,6 +2132,10 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
         return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
                 "n": 0}
     try:
+        exact_successes = int(operator.index(successes))
+    except (TypeError, ValueError, OverflowError):
+        exact_successes = None
+    try:
         exact_total = int(operator.index(total))
     except (TypeError, ValueError, OverflowError):
         exact_total = None
@@ -2153,11 +2157,19 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
                 "n": int(total)}
     # Counts must be whole samples; accepting e.g. 0.5/2 would report a
     # binomial interval for a quantity that is not a proportion of trials.
-    if successes != round(successes) or total != round(total) \
-            or successes < 0 or successes > total:
-        return {"p": float("nan"), "lo": float("nan"), "hi": float("nan"),
-                "n": int(total)}
-    p = successes / total
+    # Two exact integers above 2**53 can round to the same float64, so the
+    # ordering check must use the integer values when both are available.
+    if exact_successes is not None and exact_total is not None:
+        if exact_successes < 0 or exact_successes > exact_total:
+            return {"p": float("nan"), "lo": float("nan"),
+                    "hi": float("nan"), "n": exact_total}
+        p = exact_successes / exact_total
+    else:
+        if successes != round(successes) or total != round(total) \
+                or successes < 0 or successes > total:
+            return {"p": float("nan"), "lo": float("nan"),
+                    "hi": float("nan"), "n": int(total)}
+        p = successes / total
     z2 = z * z
     denom = 1.0 + z2 / total
     center = (p + z2 / (2.0 * total)) / denom
