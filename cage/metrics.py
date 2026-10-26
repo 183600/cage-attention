@@ -2246,11 +2246,17 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
     *within-stream* approximation used for the exploratory companion; the
     seed-level paired bootstrap remains the decision layer.
 
-    Counts must be non-negative integers; malformed input returns a
-    ``valid=False`` payload with NaN fields instead of raising, matching
-    ``wilson_ci``'s contract so a reporting companion can abstain.
+    Counts must be one-dimensional non-negative integers; malformed input
+    returns a ``valid=False`` payload with NaN fields instead of raising,
+    matching ``wilson_ci``'s contract so a reporting companion can abstain.
     """
     def _as_vector(values):
+        if torch.is_tensor(values):
+            if values.dim() > 1:
+                return None, "counts must be one-dimensional"
+        elif isinstance(values, (list, tuple)) and any(
+                isinstance(item, (list, tuple)) for item in values):
+            return None, "counts must be one-dimensional"
         exact = _exact_integer_sequence(values)
         if exact is not None:
             if not exact:

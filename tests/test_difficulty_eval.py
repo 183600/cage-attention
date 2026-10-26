@@ -490,6 +490,10 @@ class StandardizedProportionTest(unittest.TestCase):
                 ([1, 1], [2, 2], [-1, 1]),
                 ([1, 1], [2, 2], [0, 0]),
                 ([1, 1], [2, 2], [1]),
+                ([[1, 1]], [[2, 2]], None),
+                ([1, 1], [[2], [2]], None),
+                ([1, 1], [2, 2], [[1, 1]]),
+                (torch.tensor([[1, 1]]), torch.tensor([[2, 2]]), None),
         ):
             with self.subTest(successes=successes, totals=totals,
                               reference=reference):
