@@ -328,9 +328,15 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertFalse(ci["loo_sign_flip"])
 
     def test_malformed_cluster_inputs_abstain(self):
+        import torch
+
         for successes, totals in ((["not-a-count"], [1]),
                                   ([1], ["not-a-count"]),
-                                  ({"not": "a-count"}, [1])):
+                                  ({"not": "a-count"}, [1]),
+                                  ([[1, 1]], [[2, 2]]),
+                                  ([1, 1], [[2], [2]]),
+                                  (torch.tensor([[1, 1]]),
+                                   torch.tensor([[2, 2]]))):
             with self.subTest(successes=successes, totals=totals):
                 out = metrics.clustered_proportion_ci(successes, totals)
                 self.assertFalse(out["valid"])

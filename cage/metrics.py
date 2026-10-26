@@ -2468,6 +2468,12 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
         # Probe first: casting a complex tensor straight to float64 drops
         # its imaginary part (warning only), and a boolean is a flag rather
         # than a count of successes/examples - both would fabricate data.
+        if torch.is_tensor(values):
+            if values.dim() > 1:
+                raise ValueError("counts must be one-dimensional")
+        elif isinstance(values, (list, tuple)) and any(
+                isinstance(item, (list, tuple)) for item in values):
+            raise ValueError("counts must be one-dimensional")
         exact = _exact_integer_sequence(values)
         if exact is not None:
             if not exact:
