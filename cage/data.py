@@ -2301,6 +2301,11 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
                 except (TypeError, ValueError, RuntimeError,
                         OverflowError) as exc:
                     raise _bad(exc) from exc
+        if raw.dim() > 1:
+            raise ValueError(
+                f"{name} counts must be one-dimensional (one count per "
+                f"category), got shape {tuple(raw.shape)}; flattening a "
+                f"matrix would invent categories and change the sample size")
         if raw.is_complex():
             raise ValueError(f"{name} counts must be real integers")
         if raw.dtype == torch.bool:
@@ -2572,12 +2577,18 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
              "chi2": float("nan"), "df": 0, "p_value": float("nan"),
              "uniform_supported": False}
     try:
-        raw = torch.as_tensor(counts).detach().reshape(-1)
+        raw = torch.as_tensor(counts).detach()
     except (TypeError, ValueError, RuntimeError, OverflowError):
         # A non-numeric container is not a count vector.  Like the other
         # reporting companions, abstain instead of letting ``as_tensor``
         # escape as a TypeError/RuntimeError from an audit readout.
         return empty
+    if raw.dim() > 1:
+        raise ValueError(
+            "answer counts must be one-dimensional (one count per class), "
+            f"got shape {tuple(raw.shape)}; flattening a matrix would invent "
+            "classes and change the sample size")
+    raw = raw.reshape(-1)
     if raw.dtype == torch.bool:
         raise ValueError("answer counts must be integers, not booleans")
     if raw.is_complex():

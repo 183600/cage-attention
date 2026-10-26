@@ -35,6 +35,14 @@ class UniformityInputTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             answer_uniformity_test(torch.tensor([True, False]))
 
+    def test_multidimensional_counts_are_rejected(self):
+        from cage.data import answer_uniformity_test
+
+        for counts in ([[1, 2], [3, 4]], torch.tensor([[1, 2], [3, 4]])):
+            with self.subTest(counts=type(counts).__name__):
+                with self.assertRaises(ValueError):
+                    answer_uniformity_test(counts, n_sim=1)
+
     def test_float_counts_are_not_truncated_through_float32(self):
         from cage.data import answer_uniformity_test
 
@@ -71,9 +79,19 @@ class AuditCountInputTest(unittest.TestCase):
         from cage.data import _counts
 
         for bad in (True, 1.5, object(), None):
-            with self.subTest(bad=bad):
+            with self.subTest(bad=type(bad).__name__):
                 with self.assertRaises(ValueError):
                     _counts([0], bad)
+
+    def test_multidimensional_shift_counts_are_rejected(self):
+        from cage.data import _distribution_shift_p
+
+        for bad in ([[1, 2], [3, 4]], torch.tensor([[1, 2], [3, 4]])):
+            with self.subTest(bad=type(bad).__name__):
+                with self.assertRaises(ValueError):
+                    _distribution_shift_p(bad, torch.tensor([1, 1]))
+                with self.assertRaises(ValueError):
+                    _distribution_shift_p(torch.tensor([1, 1]), bad)
 
     def test_python_float_categories_keep_float64_precision(self):
         from cage.data import _counts
