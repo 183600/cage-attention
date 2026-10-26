@@ -1557,6 +1557,25 @@ def _finite(value) -> bool:
         return False
 
 
+def _validated_reference_lr(value):
+    """Return ``(lr, None)`` or ``(None, reason)`` for a reference rate.
+
+    The sensitivity and per-variant companions accept the frozen reference
+    lr from a caller.  A complex tensor (or a JSON-sized integer) makes
+    ``float()`` raise ``RuntimeError``/``OverflowError``; a companion should
+    abstain with a reason instead of leaking a conversion error.
+    """
+    if isinstance(value, bool):
+        return None, "reference lr must be a number, not a bool"
+    try:
+        number = float(value)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        return None, "reference lr must be a finite positive number"
+    if not math.isfinite(number) or number <= 0.0:
+        return None, "non-positive reference lr"
+    return number, None
+
+
 def _depth_step_candidates(settings: Settings) -> tuple:
     """Step budgets searched by the depth ladder and its capacity control.
 
@@ -13937,12 +13956,11 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
     if not settings.per_variant_tuning:
         return {"available": False,
                 "reason": "disabled by Settings.per_variant_tuning"}
-    if isinstance(reference_lr, bool):
-        return {"available": False,
-                "reason": "reference lr must be a number, not a bool"}
-    reference_lr = float(reference_lr)
-    if not math.isfinite(reference_lr) or reference_lr <= 0.0:
-        return {"available": False, "reason": "non-positive reference lr"}
+    if not isinstance(reference_runs, Mapping):
+        reference_runs = {}
+    reference_lr, reason = _validated_reference_lr(reference_lr)
+    if reason is not None:
+        return {"available": False, "reason": reason}
     tune_seeds = list(settings.seeds[:max(
         1, min(int(settings.per_variant_tune_seeds), len(settings.seeds)))])
     claim_floor = min(int(settings.min_seeds_for_claim), len(settings.seeds))
@@ -14368,12 +14386,11 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
     otherwise be stable at every alternative while reversing at the point
     that actually decides the claim.
     """
-    if isinstance(reference_lr, bool):
-        return {"available": False,
-                "reason": "reference lr must be a number, not a bool"}
-    reference_lr = float(reference_lr)
-    if not math.isfinite(reference_lr) or reference_lr <= 0.0:
-        return {"available": False, "reason": "non-positive reference lr"}
+    if not isinstance(reference_runs, Mapping):
+        reference_runs = {}
+    reference_lr, reason = _validated_reference_lr(reference_lr)
+    if reason is not None:
+        return {"available": False, "reason": reason}
     alternative_lrs = sorted({
         reference_lr * float(factor)
         for factor in _E1_LR_SENSITIVITY_FACTORS
@@ -16394,6 +16411,8 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
     the selected recipe is the frozen one, so a baseline already optimal under
     the controlled point costs no extra final runs.
     """
+    if not isinstance(reference_runs, Mapping):
+        reference_runs = {}
     if not settings.per_variant_tuning:
         return {"available": False,
                 "reason": "disabled by Settings.per_variant_tuning"}
@@ -16402,12 +16421,9 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
         return {"available": False,
                 "reason": ("empty length sweep: no endpoint at which to "
                            "score the tuned recipe")}
-    if isinstance(reference_lr, bool):
-        return {"available": False,
-                "reason": "reference lr must be a number, not a bool"}
-    reference_lr = float(reference_lr)
-    if not math.isfinite(reference_lr) or reference_lr <= 0.0:
-        return {"available": False, "reason": "non-positive reference lr"}
+    reference_lr, reason = _validated_reference_lr(reference_lr)
+    if reason is not None:
+        return {"available": False, "reason": reason}
     primary = ("none", "query", "calib", "null")
     tune_seeds = list(settings.seeds[:max(
         1, min(int(settings.per_variant_tune_seeds), len(settings.seeds)))])

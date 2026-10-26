@@ -553,6 +553,27 @@ class ReferenceLrValidationTest(unittest.TestCase):
             self.assertFalse(payload["available"])
             self.assertIn("bool", payload["reason"])
 
+    def test_malformed_reference_lr_abstains_instead_of_raising(self):
+        import torch
+
+        from cage.experiments import (
+            _e1_lr_sensitivity,
+            _e1_per_variant_tuning,
+            _e2_per_variant_tuning,
+        )
+        settings = Settings.quick()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            for bad in (torch.tensor(0.1 + 0.1j), 10 ** 400, "x", object()):
+                with self.subTest(reference_lr=bad):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        e1 = _e1_per_variant_tuning(settings, out, bad)
+                        e2 = _e2_per_variant_tuning(settings, out, bad, {}, [3])
+                        lr = _e1_lr_sensitivity(settings, out, bad)
+                    for payload in (e1, e2, lr):
+                        self.assertFalse(payload["available"])
+                        self.assertIn("reference lr", payload["reason"])
+
 
 class FiniteScalarTest(unittest.TestCase):
     def test_overflowing_and_boolean_values_are_not_finite_statistics(self):
