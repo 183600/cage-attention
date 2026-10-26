@@ -26,6 +26,7 @@ SEP_ID = 1
 PAD_ID = 0
 _INTEGER_DTYPES = (torch.uint8, torch.int8, torch.int16, torch.int32,
                    torch.int64)
+_MAX_TORCH_INDEX = int(torch.iinfo(torch.long).max)
 
 
 def _is_integer_tensor(x) -> bool:
@@ -191,6 +192,9 @@ def time_ordered_split(n_samples: int, train_frac: float = 0.7,
         raise ValueError(
             f"time_ordered_split needs at least 3 samples for three "
             f"non-empty blocks, got {n_samples!r}")
+    if n > _MAX_TORCH_INDEX:
+        raise ValueError(
+            f"n_samples={n} exceeds torch's signed 64-bit index range")
     try:
         train_frac = float(train_frac)
         val_frac = float(val_frac)
@@ -544,6 +548,9 @@ def assert_split_partition(n_samples: int, splits, require_all: bool = True) -> 
             f"n_samples must be an integer, got {n_samples!r}") from exc
     if n < 1:
         raise ValueError(f"n_samples must be positive, got {n_samples!r}")
+    if n > _MAX_TORCH_INDEX:
+        raise ValueError(
+            f"n_samples={n} exceeds torch's signed 64-bit index range")
     splits = _split_container(splits)
     seen = torch.zeros(n, dtype=torch.bool)
     for name, indices in splits.items():
@@ -713,6 +720,10 @@ def check_data_geometry(n_pairs, vocab, max_len=None) -> None:
     vocab = _geometry_int(vocab, "vocab")
     if n_pairs < 1:
         raise ValueError(f"n_pairs must be >= 1, got {n_pairs}")
+    if n_pairs > _MAX_TORCH_INDEX or vocab > _MAX_TORCH_INDEX:
+        raise ValueError(
+            f"n_pairs={n_pairs} and vocab={vocab} must fit torch's signed "
+            f"64-bit index range")
     if vocab < 4:
         raise ValueError(
             f"vocab must be >= 4 (two reserved ids plus at least two "
@@ -755,6 +766,9 @@ def make_batch(batch: int, n_pairs: int, vocab: int, device, dense_lm: bool = Fa
                              canonical["vocab"])
     if batch < 0:
         raise ValueError(f"batch must be non-negative, got {batch}")
+    if batch > _MAX_TORCH_INDEX:
+        raise ValueError(
+            f"batch={batch} exceeds torch's signed 64-bit index range")
     check_data_geometry(n_pairs, vocab)
     width = 2 * n_pairs
     seq = torch.empty((batch, width + 3), device=device, dtype=torch.long)
@@ -932,6 +946,9 @@ def _batch_vocab_int(vocab) -> int:
         raise ValueError(f"vocab must be an integer, got {vocab!r}") from exc
     if value < 1:
         raise ValueError(f"vocab must be >= 1, got {value}")
+    if value > _MAX_TORCH_INDEX:
+        raise ValueError(
+            f"vocab={value} exceeds torch's signed 64-bit index range")
     return int(value)
 
 

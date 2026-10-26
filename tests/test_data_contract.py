@@ -285,6 +285,35 @@ class SplitIndexShapeTest(unittest.TestCase):
             assert_split_partition(4, {"train": indices})
 
 
+class TorchIndexBoundsTest(unittest.TestCase):
+    def test_unrepresentable_sample_counts_raise_value_error(self):
+        from cage.data import assert_split_partition, time_ordered_split
+
+        for n in (2 ** 63, 10 ** 400):
+            with self.subTest(n=n):
+                with self.assertRaises(ValueError):
+                    time_ordered_split(n)
+                with self.assertRaises(ValueError):
+                    assert_split_partition(n, {"train": []})
+
+    def test_unrepresentable_geometry_raises_value_error(self):
+        from cage.data import (check_data_geometry, make_batch,
+                               stream_fingerprint, validate_batch)
+
+        for vocab in (2 ** 63, 10 ** 400):
+            with self.subTest(vocab=vocab):
+                with self.assertRaises(ValueError):
+                    check_data_geometry(1, vocab)
+                with self.assertRaises(ValueError):
+                    validate_batch(
+                        torch.zeros((1, 4), dtype=torch.long),
+                        torch.zeros(1, dtype=torch.long), {}, vocab)
+                with self.assertRaises(ValueError):
+                    stream_fingerprint(1, vocab, batch=1)
+        with self.assertRaises(ValueError):
+            make_batch(2 ** 63, 1, 4, "cpu")
+
+
 class LengthSweepBoundsTest(unittest.TestCase):
     def test_huge_sweep_request_stops_at_the_first_unfitted_length(self):
         from cage.data import length_sweep_lengths
