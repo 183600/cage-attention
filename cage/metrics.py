@@ -2411,6 +2411,14 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
         if any(value > limit for value, limit in zip(s_exact, n_exact)):
             out["reason"] = "successes must not exceed totals"
             return out
+        # Exact integer inputs must not be routed through float64 merely
+        # because each count fits in a float: counts above 2**53 round to a
+        # different value, and two finite counts near the float maximum
+        # overflow when summed (the default reference weights).  The exact
+        # fallback already existed for counts beyond the float range; use it
+        # for all exact integer inputs, with exact weights when available.
+        if reference_weights is None:
+            return _exact_fallback(s_exact, n_exact, None)
     else:
         for name, values in (("successes", s), ("totals", n)):
             if bool((values < 0).any()):
@@ -2443,6 +2451,14 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
         if bool((w < 0).any()):
             out["reason"] = "reference_weights must be non-negative"
             return out
+        if exact_counts:
+            # The float path above validated the container shape/ordering;
+            # compute with the exact integers instead of their rounded
+            # float64 copies, whose sum can overflow even when each weight is
+            # individually finite.
+            w_exact = _exact_integer_sequence(reference_weights)
+            if w_exact is not None and len(w_exact) == len(s_exact):
+                return _exact_fallback(s_exact, n_exact, w_exact)
     weight_total = float(w.sum())
     if not math.isfinite(weight_total):
         # Normalizing by an infinite total would make every weight zero and

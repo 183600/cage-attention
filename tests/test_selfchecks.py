@@ -451,6 +451,24 @@ class PositiveIntegerValidationTest(unittest.TestCase):
         impossible = metrics.standardized_proportion([exact + 1], [exact])
         self.assertFalse(impossible["valid"])
 
+    def test_standardized_proportion_finite_counts_do_not_overflow(self):
+        # Each count is a finite float64, but their sum is not.  The exact
+        # integer inputs must still produce the pooled rate instead of
+        # abstaining on an artificial float-overflow check.
+        exact = 10 ** 308
+        out = metrics.standardized_proportion([exact, exact],
+                                              [exact, exact])
+        self.assertTrue(out["valid"])
+        self.assertEqual(out["rate"], 1.0)
+        self.assertEqual(out["coverage"], 1.0)
+        self.assertEqual(out["total_success"], 2 * exact)
+        self.assertEqual(out["total_n"], 2 * exact)
+        weighted = metrics.standardized_proportion(
+            [1, 0], [1, 1], [exact, exact])
+        self.assertTrue(weighted["valid"])
+        self.assertEqual(weighted["rate"], 0.5)
+        self.assertEqual(weighted["coverage"], 1.0)
+
 
 class BootstrapReplicateCountTest(unittest.TestCase):
     def test_large_replicate_counts_are_not_rounded_through_float(self):
