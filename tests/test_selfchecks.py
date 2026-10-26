@@ -1085,6 +1085,21 @@ class ComplexScalarValidationTest(unittest.TestCase):
             train_model(None, steps=1,
                         grad_norm_explode=torch.tensor(0.1 + 0.1j))
 
+    def test_training_recipe_rejects_malformed_lr_and_steps(self):
+        import torch
+
+        from cage.train import training_recipe
+
+        for bad in (True, float("nan"), 0.0,
+                    torch.tensor(0.1 + 0.1j)):
+            with self.subTest(lr=bad):
+                with self.assertRaises(ValueError):
+                    training_recipe(bad)
+        for bad in (True, 0, 1.5, torch.tensor(0.1 + 0.1j)):
+            with self.subTest(steps=bad):
+                with self.assertRaises(ValueError):
+                    training_recipe(1e-3, steps=bad)
+
     def test_overfit_steps_must_be_a_positive_integer(self):
         import torch
 

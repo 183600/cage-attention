@@ -185,9 +185,14 @@ def training_recipe(lr, steps=None) -> dict:
         "eta_min_factor": _ETA_MIN_FACTOR,
         "grad_clip_max_norm": _GRAD_CLIP_MAX_NORM,
         "augmentation": "none (synthetic generator; fixed protocol)",
-        "lr": float(lr),
+        "lr": _validated_lr(lr),
     }
     if steps is not None:
+        raw_steps = steps
+        steps = _positive_integer(raw_steps)
+        if steps is None:
+            raise ValueError(
+                f"steps must be a positive integer, got {raw_steps!r}")
         out["steps"] = int(steps)
     return out
 
