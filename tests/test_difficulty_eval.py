@@ -293,6 +293,26 @@ class EmptySweepCompanionTest(unittest.TestCase):
             for contrast in per_length["contrasts"].values()
             for row in contrast["rows"]))
 
+    def test_non_mapping_variants_abstain_instead_of_keyerror(self):
+        from cage.experiments import (
+            _e2_difficulty_companions,
+            _e2_endpoint_class_companions,
+        )
+
+        for by_variant in (None, 1, "calib", object(), [None, {}]):
+            with self.subTest(by_variant=type(by_variant).__name__):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    difficulty = _e2_difficulty_companions(
+                        by_variant, [3, 6])
+                    endpoint = _e2_endpoint_class_companions(
+                        by_variant, [3, 6])
+                self.assertEqual(
+                    difficulty["contrasts"]["calib - none"]
+                    ["raw_accuracy_at_longest"]["n"], 0)
+                self.assertTrue(endpoint["rows"])
+                self.assertTrue(all(row["n"] == 0
+                                    for row in endpoint["rows"]))
+
     def test_per_length_contrasts_materialize_variant_generators(self):
         from cage.experiments import Settings, _e2_per_length_contrasts
 

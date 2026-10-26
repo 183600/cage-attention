@@ -17800,9 +17800,9 @@ def _e2_difficulty_companions(by_variant: dict, lengths: list) -> dict:
             "note": ("empty length sweep: no endpoint to standardize; "
                      "companion abstained"),
         }
-    by_variant = ({label: _mapping_runs(by_variant.get(label, []))
-                   for label, *_ in _E2_VARIANTS}
-                  if isinstance(by_variant, Mapping) else {})
+    source = by_variant if isinstance(by_variant, Mapping) else {}
+    by_variant = {label: _mapping_runs(source.get(label, []))
+                  for label, *_ in _E2_VARIANTS}
     base_length = int(lengths[0])
     endpoint = int(lengths[-1])
 
@@ -17958,9 +17958,9 @@ def _e2_endpoint_class_companions(by_variant: dict,
     if not lengths:
         return _class_frequency_companions(
             [], "e2 (empty length sweep; no endpoint)")
-    by_variant = ({label: _mapping_runs(by_variant.get(label, []))
-                   for label, *_ in _E2_VARIANTS}
-                  if isinstance(by_variant, Mapping) else {})
+    source = by_variant if isinstance(by_variant, Mapping) else {}
+    by_variant = {label: _mapping_runs(source.get(label, []))
+                  for label, *_ in _E2_VARIANTS}
     endpoint = int(lengths[-1])
 
     def tagged(runs):
