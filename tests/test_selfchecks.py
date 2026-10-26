@@ -351,6 +351,34 @@ class PositiveIntegerValidationTest(unittest.TestCase):
         exact = 2 ** 53 + 1
         self.assertEqual(metrics.wilson_ci(exact, exact)["n"], exact)
 
+    def test_large_proportion_counts_are_exact_not_rounded(self):
+        import torch
+
+        exact = 2 ** 53 + 1
+        inputs = (([exact], [exact]),
+                  (torch.tensor([exact], dtype=torch.int64),
+                   torch.tensor([exact], dtype=torch.int64)))
+        for successes, totals in inputs:
+            with self.subTest(successes=successes, totals=totals):
+                out = metrics.standardized_proportion(successes, totals)
+                self.assertTrue(out["valid"])
+                self.assertEqual(out["total_success"], exact)
+                self.assertEqual(out["total_n"], exact)
+                self.assertEqual(out["min_stratum_n"], exact)
+                self.assertEqual(out["strata"][0]["successes"], exact)
+                self.assertEqual(out["strata"][0]["total"], exact)
+                cluster = metrics.clustered_proportion_ci(
+                    successes, totals, n_boot=10)
+                self.assertTrue(cluster["valid"])
+                self.assertEqual(cluster["n_examples"], exact)
+                self.assertEqual(cluster["pooled_wilson"]["n"], exact)
+        # The two counts round to the same float64, so the impossible
+        # successes > totals pair must be rejected exactly.
+        self.assertFalse(
+            metrics.standardized_proportion([exact], [exact - 1])["valid"])
+        self.assertFalse(metrics.clustered_proportion_ci(
+            [exact], [exact - 1], n_boot=10)["valid"])
+
 
 class BootstrapReplicateCountTest(unittest.TestCase):
     def test_large_replicate_counts_are_not_rounded_through_float(self):

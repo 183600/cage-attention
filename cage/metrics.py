@@ -277,6 +277,46 @@ def _positive_integer(value):
     return int(number)
 
 
+def _exact_integer_sequence(values):
+    """Flatten integer input to exact Python ints, or return ``None``.
+
+    Counts above 2**53 cannot round-trip through float64.  Integer tensors
+    and Python integer containers are therefore read exactly here; floating
+    or mixed containers are left to the existing float64 validation path.
+    """
+    if torch.is_tensor(values):
+        if (values.dtype == torch.bool or values.is_complex()
+                or values.is_floating_point()):
+            return None
+        try:
+            flat = values.detach().reshape(-1).cpu().tolist()
+        except (TypeError, ValueError, RuntimeError, OverflowError):
+            return None
+        return flat if isinstance(flat, list) else [flat]
+    if isinstance(values, bool):
+        return None
+    try:
+        return [operator.index(values)]
+    except (TypeError, ValueError, OverflowError):
+        pass
+    if not isinstance(values, (list, tuple)):
+        return None
+    pending = list(reversed(values))
+    exact = []
+    while pending:
+        item = pending.pop()
+        if isinstance(item, (list, tuple)):
+            pending.extend(reversed(item))
+            continue
+        if isinstance(item, bool):
+            return None
+        try:
+            exact.append(operator.index(item))
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return exact
+
+
 _TORCH_SEED_MIN = -(1 << 63)
 _TORCH_SEED_MAX = (1 << 64) - 1
 
@@ -2163,6 +2203,18 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
     ``wilson_ci``'s contract so a reporting companion can abstain.
     """
     def _as_vector(values):
+        exact = _exact_integer_sequence(values)
+        if exact is not None:
+            if not exact:
+                return None, "empty counts"
+            try:
+                out = torch.tensor([float(value) for value in exact],
+                                   dtype=torch.float64)
+            except (TypeError, ValueError, RuntimeError, OverflowError):
+                return None, "counts must be finite"
+            if not bool(torch.isfinite(out).all()):
+                return None, "counts must be finite"
+            return out, ""
         try:
             raw = torch.as_tensor(values)
         except (TypeError, ValueError, RuntimeError):
@@ -2206,16 +2258,30 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
     if n is None or s.numel() != n.numel():
         out["reason"] = "successes and totals must have the same length"
         return out
-    for name, values in (("successes", s), ("totals", n)):
-        if bool((values < 0).any()):
-            out["reason"] = f"{name} must be non-negative"
-            return out
-        if not bool(values.eq(values.round()).all()):
-            out["reason"] = f"{name} must be integers"
-            return out
-        if name == "successes" and not bool((values <= n).all()):
+    s_exact = _exact_integer_sequence(successes)
+    n_exact = _exact_integer_sequence(totals)
+    exact_counts = (s_exact is not None and n_exact is not None
+                    and len(s_exact) == s.numel()
+                    and len(n_exact) == n.numel())
+    if exact_counts:
+        for name, counts in (("successes", s_exact), ("totals", n_exact)):
+            if any(value < 0 for value in counts):
+                out["reason"] = f"{name} must be non-negative"
+                return out
+        if any(value > limit for value, limit in zip(s_exact, n_exact)):
             out["reason"] = "successes must not exceed totals"
             return out
+    else:
+        for name, values in (("successes", s), ("totals", n)):
+            if bool((values < 0).any()):
+                out["reason"] = f"{name} must be non-negative"
+                return out
+            if not bool(values.eq(values.round()).all()):
+                out["reason"] = f"{name} must be integers"
+                return out
+            if name == "successes" and not bool((values <= n).all()):
+                out["reason"] = "successes must not exceed totals"
+                return out
     if reference_weights is None:
         w = n.clone()
     else:
@@ -2271,20 +2337,33 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
             and bool(torch.isfinite(used_total))):
         out["reason"] = "pooled success/total counts overflow"
         return out
+    usable_flags = usable.tolist()
+    if exact_counts:
+        total_success = sum(value for value, used in zip(s_exact,
+                                                         usable_flags) if used)
+        total_n = sum(value for value, used in zip(n_exact,
+                                                   usable_flags) if used)
+        min_stratum_n = min(value for value, used in zip(n_exact,
+                                                         usable_flags) if used)
+    else:
+        total_success = int(used_success.item())
+        total_n = int(used_total.item())
+        min_stratum_n = int(counts_used.min().item())
     rate_f = float(rate)
     lo = max(0.0, rate_f - z * se)
     hi = min(1.0, rate_f + z * se)
     out.update({
         "rate": rate_f, "se": se, "lo": lo, "hi": hi,
-        "total_success": int(used_success.item()),
-        "total_n": int(used_total.item()),
-        "pooled_rate": (float(used_success / used_total)
-                        if float(used_total) > 0.0 else float("nan")),
+        "total_success": total_success,
+        "total_n": total_n,
+        "pooled_rate": (total_success / total_n
+                        if total_n > 0 else float("nan")),
         "effective_n": float(effective_n),
-        "min_stratum_n": int(counts_used.min().item()),
+        "min_stratum_n": min_stratum_n,
         "strata": [
             {"id": i,
-             "successes": int(s[i].item()), "total": int(n[i].item()),
+             "successes": (s_exact[i] if exact_counts else int(s[i].item())),
+             "total": (n_exact[i] if exact_counts else int(n[i].item())),
              "rate": (float(p[i]) if n[i] > 0 else float("nan")),
              "reference_weight": float(w[i]),
              "used": bool(usable[i])}
@@ -2335,6 +2414,15 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
         # Probe first: casting a complex tensor straight to float64 drops
         # its imaginary part (warning only), and a boolean is a flag rather
         # than a count of successes/examples - both would fabricate data.
+        exact = _exact_integer_sequence(values)
+        if exact is not None:
+            if not exact:
+                return torch.empty(0, dtype=torch.float64)
+            try:
+                return torch.tensor(
+                    [float(value) for value in exact], dtype=torch.float64)
+            except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+                raise ValueError("counts must be finite") from exc
         try:
             probe = torch.as_tensor(values)
         except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
@@ -2354,26 +2442,44 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     except (TypeError, ValueError, RuntimeError, OverflowError):
         empty["reason"] = "successes and unit lengths must be numeric counts"
         return empty
+    s_exact = _exact_integer_sequence(successes)
+    n_exact = _exact_integer_sequence(n_per_unit)
     if n.numel() == 1 and s.numel() > 1:
         n = n.expand_as(s).clone()
+        if n_exact is not None and len(n_exact) == 1:
+            n_exact = n_exact * int(s.numel())
     if s.numel() == 1 and n.numel() > 1:
         s = s.expand_as(n).clone()
+        if s_exact is not None and len(s_exact) == 1:
+            s_exact = s_exact * int(n.numel())
     if s.numel() != n.numel() or s.numel() == 0:
         empty["reason"] = "empty or mismatched inputs"
         return empty
-    if not bool((torch.isfinite(s) & torch.isfinite(n) & (n > 0)).all()):
-        empty["reason"] = "non-finite or non-positive-length unit(s)"
-        return empty
-    if not bool(((s >= 0) & (s <= n)).all()):
-        empty["reason"] = "success count outside [0, n]"
-        return empty
-    # These are counts: ``successes[i]`` errors out of ``n_per_unit[i]``
-    # examples.  Fractional values would make the shared binomial draw
-    # meaningless (``torch.binomial`` takes an integer trial count) and
-    # ``wilson_ci`` would silently truncate the pooled totals.
-    if not bool((s.eq(s.round()) & n.eq(n.round())).all()):
-        empty["reason"] = "success counts and unit lengths must be integers"
-        return empty
+    exact_counts = (s_exact is not None and n_exact is not None
+                    and len(s_exact) == s.numel()
+                    and len(n_exact) == n.numel())
+    if exact_counts:
+        if any(value <= 0 for value in n_exact):
+            empty["reason"] = "non-finite or non-positive-length unit(s)"
+            return empty
+        if any(value < 0 or value > limit
+               for value, limit in zip(s_exact, n_exact)):
+            empty["reason"] = "success count outside [0, n]"
+            return empty
+    else:
+        if not bool((torch.isfinite(s) & torch.isfinite(n) & (n > 0)).all()):
+            empty["reason"] = "non-finite or non-positive-length unit(s)"
+            return empty
+        if not bool(((s >= 0) & (s <= n)).all()):
+            empty["reason"] = "success count outside [0, n]"
+            return empty
+        # These are counts: ``successes[i]`` errors out of ``n_per_unit[i]``
+        # examples.  Fractional values would make the shared binomial draw
+        # meaningless (``torch.binomial`` takes an integer trial count) and
+        # ``wilson_ci`` would silently truncate the pooled totals.
+        if not bool((s.eq(s.round()) & n.eq(n.round())).all()):
+            empty["reason"] = "success counts and unit lengths must be integers"
+            return empty
     if not (math.isfinite(lo_q) and math.isfinite(hi_q)
             and 0.0 <= lo_q < hi_q <= 1.0):
         empty["reason"] = "quantile levels must lie in [0, 1]"
@@ -2382,11 +2488,26 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     if n_boot_int is None:
         empty["reason"] = "n_boot must be a positive integer"
         return empty
-    if not (bool(torch.isfinite(s.sum())) and bool(torch.isfinite(n.sum()))):
-        # Each count is finite but their pooled totals can still overflow
-        # float64; the integer readout below would then raise on ``inf``.
-        empty["reason"] = "pooled success/total counts overflow"
-        return empty
+    if exact_counts:
+        total_success = sum(s_exact)
+        total_n = sum(n_exact)
+        try:
+            finite_totals = (math.isfinite(float(total_success))
+                             and math.isfinite(float(total_n)))
+        except (OverflowError, ValueError):
+            finite_totals = False
+        if not finite_totals:
+            empty["reason"] = "pooled success/total counts overflow"
+            return empty
+    else:
+        if not (bool(torch.isfinite(s.sum()))
+                and bool(torch.isfinite(n.sum()))):
+            # Each count is finite but their pooled totals can still overflow
+            # float64; the integer readout below would then raise on ``inf``.
+            empty["reason"] = "pooled success/total counts overflow"
+            return empty
+        total_success = int(round(float(s.sum().item())))
+        total_n = int(round(float(n.sum().item())))
     p = s / n
     units = int(s.numel())
     mean_acc = float(p.mean())
@@ -2422,8 +2543,6 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     ) / n_stream
     lo = float(torch.quantile(stream, lo_q).item())
     hi = float(torch.quantile(stream, hi_q).item())
-    total_success = int(round(float(s.sum().item())))
-    total_n = int(round(float(n.sum().item())))
     return {
         "mean": mean_acc, "lo": lo, "hi": hi,
         "n": units, "n_examples": total_n,
