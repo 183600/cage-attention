@@ -62,6 +62,20 @@ class UniformityInputTest(unittest.TestCase):
                 self.assertFalse(out["uniform_supported"])
                 self.assertTrue(out["p_value"] != out["p_value"])
 
+    def test_poisson_saturation_does_not_fabricate_support(self):
+        from cage.data import _distribution_shift_p, answer_uniformity_test
+
+        # A finite mean above the int64 range saturates inside
+        # ``torch.poisson`` to a negative draw.  That is a failed simulation,
+        # not a balanced sample, so both audits must abstain.
+        huge = [1e20, 1e20]
+        out = answer_uniformity_test(huge, n_sim=2)
+        self.assertFalse(out["uniform_supported"])
+        self.assertTrue(out["p_value"] != out["p_value"])
+        p_value, chi2 = _distribution_shift_p(huge, [1, 1], n_sim=2)
+        self.assertTrue(p_value != p_value)
+        self.assertTrue(chi2 != chi2)
+
 
 class AuditCountInputTest(unittest.TestCase):
     def test_boolean_counts_are_not_silently_cast_to_categories(self):

@@ -2369,6 +2369,15 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
             (n_ref * probs).expand(n_sim, k).contiguous(), generator=gen)
         h_sim = torch.poisson(
             (n_h * probs).expand(n_sim, k).contiguous(), generator=gen)
+        # Large finite means saturate inside ``torch.poisson`` to negative
+        # int64 values instead of raising.  Treat that failed simulation as
+        # an abstention rather than comparing the observed statistic with
+        # fabricated counts.
+        if not (bool(torch.isfinite(ref_sim).all())
+                and bool(torch.isfinite(h_sim).all())
+                and bool((ref_sim >= 0).all())
+                and bool((h_sim >= 0).all())):
+            return float("nan"), float("nan")
         probs_sim = (ref_sim + _AUDIT_SMOOTH) / (
             ref_sim.sum(1, keepdim=True) + _AUDIT_SMOOTH * k)
         expected_sim = h_sim.sum(1, keepdim=True) * probs_sim
@@ -2647,6 +2656,13 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     gen = torch.Generator().manual_seed(_audit_seed(seed))
     try:
         sim = torch.poisson(torch.full((n_sim, k), expected), generator=gen)
+        # ``torch.poisson`` silently saturates a mean above the int64 range
+        # to the minimum integer instead of raising.  A negative draw is a
+        # failed simulation, not evidence for uniformity, so abstain rather
+        # than publishing a p-value computed from fabricated counts.
+        if not bool(torch.isfinite(sim).all()) \
+                or bool((sim < 0).any()):
+            return out
         chi2_sim = (((sim - expected) ** 2) / expected).sum(1)
         p_value = float((1.0 + (chi2_sim >= chi2).to(torch.float64).sum())
                         / (n_sim + 1.0))
