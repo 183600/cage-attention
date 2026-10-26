@@ -48,6 +48,7 @@ import torch
 import torch.nn.functional as F
 
 from .data import (
+    _batch_vocab_int,
     check_eval_seed,
     check_train_seed,
     make_batch,
@@ -224,6 +225,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     the configured seed.
     """
     check_train_seed(seed)
+    vocab = _batch_vocab_int(vocab)
     raw_steps = steps
     raw_batch = batch
     steps = _positive_integer(raw_steps)
@@ -348,6 +350,7 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
                 f"{name} must be an iterable, got {type(value).__name__}"
             ) from exc
 
+    vocab = _batch_vocab_int(vocab)
     check_eval_seed(val_seed, selection=True)
     seeds = _sequence(seeds, "seeds")
     if not seeds:

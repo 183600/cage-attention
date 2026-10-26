@@ -1085,6 +1085,17 @@ class ComplexScalarValidationTest(unittest.TestCase):
             train_model(None, steps=1,
                         grad_norm_explode=torch.tensor(0.1 + 0.1j))
 
+    def test_probe_vocab_rejects_complex_scalar(self):
+        import torch
+
+        from cage.baselines import train_linear_probe, tune_linear_probe
+
+        bad = torch.tensor(0.1 + 0.1j)
+        with self.assertRaises(ValueError):
+            train_linear_probe(3, bad, steps=1)
+        with self.assertRaises(ValueError):
+            tune_linear_probe(3, bad, steps=1)
+
     def test_training_recipe_rejects_malformed_lr_and_steps(self):
         import torch
 
