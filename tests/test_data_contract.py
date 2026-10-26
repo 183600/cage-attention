@@ -93,6 +93,14 @@ class AuditCountInputTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     _distribution_shift_p(torch.tensor([1, 1]), bad)
 
+    def test_multidimensional_audit_values_are_rejected(self):
+        from cage.data import _counts
+
+        for bad in ([[1, 2], [3, 4]], torch.tensor([[1, 2], [3, 4]])):
+            with self.subTest(bad=type(bad).__name__):
+                with self.assertRaises(ValueError):
+                    _counts(bad, 5)
+
     def test_python_float_categories_keep_float64_precision(self):
         from cage.data import _counts
 

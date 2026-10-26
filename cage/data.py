@@ -2158,6 +2158,11 @@ def _counts(values, n_categories):
                 raw = torch.as_tensor(values, dtype=torch.float64)
             except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
                 raise _bad_values(exc) from exc
+    if raw.dim() > 1:
+        raise ValueError(
+            "audit values must be one-dimensional (one category id per "
+            f"sample), got shape {tuple(raw.shape)}; flattening a matrix "
+            "would merge independent audit samples")
     raw = raw.reshape(-1)
     # ``Tensor.to(long)`` silently discards the imaginary part (with only a
     # warning), which would fabricate a count the caller never supplied.
