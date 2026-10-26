@@ -97,6 +97,30 @@ class AuditCountInputTest(unittest.TestCase):
                     answer_uniformity_test(
                         torch.tensor([10, 10]), n_sim=10, seed=seed)
 
+    def test_out_of_range_audit_seeds_are_rejected(self):
+        from cage.data import _distribution_shift_p, answer_uniformity_test
+
+        for seed in (2 ** 64, -(2 ** 63) - 1, 10 ** 400):
+            with self.subTest(seed=seed):
+                with self.assertRaises(ValueError):
+                    _distribution_shift_p(
+                        torch.tensor([10, 10]), torch.tensor([8, 12]),
+                        n_sim=2, seed=seed)
+                with self.assertRaises(ValueError):
+                    answer_uniformity_test(
+                        torch.tensor([10, 10]), n_sim=2, seed=seed)
+
+    def test_overflowing_simulation_count_abstains(self):
+        from cage.data import _distribution_shift_p, answer_uniformity_test
+
+        out = answer_uniformity_test([10, 11, 9], n_sim=10 ** 400)
+        self.assertFalse(out["uniform_supported"])
+        self.assertTrue(out["p_value"] != out["p_value"])
+        p_value, chi2 = _distribution_shift_p(
+            torch.tensor([10, 10]), torch.tensor([8, 12]), n_sim=10 ** 400)
+        self.assertTrue(p_value != p_value)
+        self.assertTrue(chi2 != chi2)
+
     def test_overflowing_shift_count_sums_abstain(self):
         from cage.data import _distribution_shift_p
 

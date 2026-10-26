@@ -1848,10 +1848,18 @@ def _audit_seed(value) -> int:
     if isinstance(value, bool):
         raise ValueError(f"audit seed must be an integer, got {value!r}")
     try:
-        return int(operator.index(value))
+        seed = int(operator.index(value))
     except TypeError as exc:
         raise ValueError(
             f"audit seed must be an integer, got {value!r}") from exc
+    # ``torch.Generator.manual_seed`` accepts the signed/unsigned 64-bit
+    # range and raises an incidental ValueError outside it.  Reject the
+    # out-of-range value here so the audit contract is explicit instead of
+    # depending on the sampler's internal unpacking error.
+    if not (-(1 << 63) <= seed <= (1 << 64) - 1):
+        raise ValueError(
+            f"audit seed must fit in 64 bits, got {value!r}")
+    return seed
 
 
 # Calibration of the distribution-shift check.  ``_AUDIT_SIM`` Monte Carlo
@@ -2352,9 +2360,10 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
         chi2_sim = (((h_sim - expected_sim) ** 2) / expected_sim).sum(1)
         p_value = float((1.0 + (chi2_sim >= chi2).to(torch.float64).sum())
                         / (n_sim + 1.0))
-    except (RuntimeError, ValueError, OverflowError):
+    except (TypeError, RuntimeError, ValueError, OverflowError):
         # The audit is a reporting companion; a count magnitude the Poisson
-        # sampler cannot represent must abstain, not abort the report.
+        # sampler cannot represent (or an n_sim too large for torch's size
+        # unpacking) must abstain, not abort the report.
         return float("nan"), float("nan")
     return p_value, chi2
 
@@ -2620,10 +2629,11 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
         chi2_sim = (((sim - expected) ** 2) / expected).sum(1)
         p_value = float((1.0 + (chi2_sim >= chi2).to(torch.float64).sum())
                         / (n_sim + 1.0))
-    except (RuntimeError, ValueError, OverflowError):
+    except (TypeError, RuntimeError, ValueError, OverflowError):
         # The expected count can be finite but too large for the Poisson
-        # sampler's internal float conversion.  This audit is a reporting
-        # companion; abstain rather than abort the whole report.
+        # sampler's internal float conversion, and an arbitrarily large
+        # n_sim overflows ``torch.full``'s size unpacking.  This audit is a
+        # reporting companion; abstain rather than abort the whole report.
         return out
     out.update({"chi2": chi2, "p_value": p_value,
                 "uniform_supported": bool(p_value > 0.05)})
