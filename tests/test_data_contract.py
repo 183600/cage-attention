@@ -62,6 +62,18 @@ class UniformityInputTest(unittest.TestCase):
                 self.assertFalse(out["uniform_supported"])
                 self.assertTrue(out["p_value"] != out["p_value"])
 
+    def test_exact_integer_counts_above_int64_are_not_malformed(self):
+        from cage.data import answer_uniformity_test
+
+        # The counts fit in float64 even though they do not fit in the
+        # initial int64 probe.  Keep the vector and its sample size, then
+        # abstain because the Poisson simulator saturates.
+        out = answer_uniformity_test([10 ** 30, 10 ** 30], n_sim=2)
+        self.assertEqual(out["n_classes"], 2)
+        self.assertGreater(out["n"], 0)
+        self.assertFalse(out["uniform_supported"])
+        self.assertTrue(out["p_value"] != out["p_value"])
+
     def test_poisson_saturation_does_not_fabricate_support(self):
         from cage.data import _distribution_shift_p, answer_uniformity_test
 

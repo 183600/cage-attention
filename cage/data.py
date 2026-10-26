@@ -2615,10 +2615,17 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     try:
         raw = torch.as_tensor(counts).detach()
     except (TypeError, ValueError, RuntimeError, OverflowError):
-        # A non-numeric container is not a count vector.  Like the other
-        # reporting companions, abstain instead of letting ``as_tensor``
-        # escape as a TypeError/RuntimeError from an audit readout.
-        return empty
+        # Exact Python integers can exceed int64 while still being valid
+        # counts representable in float64.  Retry at float64 before treating
+        # the container as non-numeric; the later sum still rejects values
+        # whose *total* overflows.
+        try:
+            raw = torch.as_tensor(counts, dtype=torch.float64).detach()
+        except (TypeError, ValueError, RuntimeError, OverflowError):
+            # A non-numeric container is not a count vector.  Like the other
+            # reporting companions, abstain instead of letting ``as_tensor``
+            # escape as a TypeError/RuntimeError from an audit readout.
+            return empty
     if raw.dim() > 1:
         raise ValueError(
             "answer counts must be one-dimensional (one count per class), "
