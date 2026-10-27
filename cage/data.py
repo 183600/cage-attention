@@ -2581,7 +2581,7 @@ _UNIFORMITY_SIM = 500
 _UNIFORMITY_SIM_SEED = 8675309
 
 
-def _exact_count_total(values):
+def _exact_count_vector(values):
     if torch.is_tensor(values):
         flat = values.detach().cpu().reshape(-1)
         if flat.dtype == torch.bool or flat.is_complex():
@@ -2594,12 +2594,12 @@ def _exact_count_total(values):
             items = list(values)
         except TypeError:
             return None
-    total = 0
+    exact = []
     for item in items:
         if isinstance(item, bool):
             return None
         try:
-            total += operator.index(item)
+            exact.append(operator.index(item))
             continue
         except TypeError:
             pass
@@ -2609,8 +2609,13 @@ def _exact_count_total(values):
             return None
         if not math.isfinite(number) or not number.is_integer():
             return None
-        total += int(number)
-    return total
+        exact.append(int(number))
+    return exact
+
+
+def _exact_count_total(values):
+    exact = _exact_count_vector(values)
+    return None if exact is None else sum(exact)
 
 
 def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
@@ -2651,6 +2656,24 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     empty = {"n": 0, "n_classes": 0, "expected_per_class": float("nan"),
              "chi2": float("nan"), "df": 0, "p_value": float("nan"),
              "uniform_supported": False}
+
+    def _exact_payload():
+        exact = _exact_count_vector(counts)
+        if exact is None:
+            return None
+        if any(value < 0 for value in exact):
+            raise ValueError("answer counts must be non-negative")
+        total = sum(exact)
+        k = len(exact)
+        try:
+            expected = float(total / k) if k else float("nan")
+        except (OverflowError, ZeroDivisionError):
+            expected = float("nan")
+        return {"n": int(total), "n_classes": int(k),
+                "expected_per_class": expected, "chi2": float("nan"),
+                "df": int(max(k - 1, 0)), "p_value": float("nan"),
+                "uniform_supported": False}
+
     try:
         raw = torch.as_tensor(counts).detach()
     except (TypeError, ValueError, RuntimeError, OverflowError):
@@ -2661,6 +2684,9 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
         try:
             raw = torch.as_tensor(counts, dtype=torch.float64).detach()
         except (TypeError, ValueError, RuntimeError, OverflowError):
+            exact = _exact_payload()
+            if exact is not None:
+                return exact
             # A non-numeric container is not a count vector.  Like the other
             # reporting companions, abstain instead of letting ``as_tensor``
             # escape as a TypeError/RuntimeError from an audit readout.
@@ -2693,15 +2719,14 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
         raise ValueError("answer counts must be integers")
     n = float(c.sum())
     exact_n = _exact_count_total(counts)
-    if not math.isfinite(n):
-        exact_n = None
     total = exact_n if exact_n is not None else n
     k = c.numel()
     out = {"n": (int(total) if exact_n is not None
                  else (int(n) if math.isfinite(n) else 0)),
            "n_classes": int(k),
            "expected_per_class": (float(total / k)
-                                  if k and math.isfinite(n)
+                                  if k and (exact_n is not None
+                                            or math.isfinite(n))
                                   else float("nan")),
            "chi2": float("nan"), "df": int(max(k - 1, 0)),
            "p_value": float("nan"), "uniform_supported": False}

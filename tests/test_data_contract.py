@@ -73,6 +73,19 @@ class UniformityInputTest(unittest.TestCase):
                 self.assertFalse(out["uniform_supported"])
                 self.assertTrue(out["p_value"] != out["p_value"])
 
+    def test_exact_totals_survive_a_float64_sum_overflow(self):
+        from cage.data import answer_uniformity_test
+
+        for counts in ([1e308, 1e308], [10 ** 400, 0],
+                       [10 ** 400, 10 ** 400]):
+            with self.subTest(counts=counts):
+                out = answer_uniformity_test(counts, n_sim=1)
+                self.assertEqual(out["n"],
+                                 sum(int(value) for value in counts))
+                self.assertEqual(out["n_classes"], len(counts))
+                self.assertFalse(out["uniform_supported"])
+                self.assertTrue(out["p_value"] != out["p_value"])
+
     def test_exact_integer_counts_above_int64_are_not_malformed(self):
         from cage.data import answer_uniformity_test
 
