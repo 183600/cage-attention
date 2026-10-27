@@ -449,7 +449,20 @@ class _OracleRetrieval(nn.Module):
         return logits, None, None
 
 
+class _ExtremeDoubleRetrieval(_OracleRetrieval):
+    def forward(self, idx):
+        logits, _, _ = super().forward(idx)
+        return logits.double() * 1e300, None, None
+
+
 class CounterfactualEvalIntegrationTest(unittest.TestCase):
+    def test_float64_logit_panel_is_not_downcast_to_float32(self):
+        out = eval_metrics(_ExtremeDoubleRetrieval(17), 3, 17, "cpu",
+                           batch=8, batches=2, seed=123)
+        self.assertEqual(out["finite_logit_frac"], 1.0)
+        self.assertAlmostEqual(out["accuracy"], 1.0)
+        self.assertTrue(math.isfinite(out["nll"]))
+
     def test_perfect_retrieval_follows_every_probe(self):
         model = _OracleRetrieval(17)
         out = eval_metrics(model, 3, 17, "cpu", batch=8, batches=2,

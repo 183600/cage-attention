@@ -3295,7 +3295,10 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
             # batch.  The tensors are tiny next to the logits panel.
             digest_batches.append((idx, tgt, meta))
             logits, _, _ = model(idx)
-            logits_all.append(logits.squeeze(1).float())
+            panel = logits.squeeze(1)
+            if panel.dtype != torch.float64:
+                panel = panel.float()
+            logits_all.append(panel)
             tgt_all.append(meta["answer"])
             strata_all.append(difficulty_strata(
                 idx, meta["answer"], n_pairs,
