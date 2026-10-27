@@ -236,6 +236,22 @@ class SplitAuditInputTest(unittest.TestCase):
                     split_leakage_audit(3, 17, batch=4, batches=1,
                                         train_seeds=bad)
 
+    def test_unrepresentable_audit_counts_raise_value_error(self):
+        from cage.data import actual_stream_overlap_audit, split_leakage_audit
+
+        for huge in (2 ** 63, 10 ** 400):
+            with self.subTest(huge=huge):
+                with self.assertRaises(ValueError):
+                    split_leakage_audit(3, 17, batch=4, batches=huge,
+                                        train_seeds=(0,))
+                with self.assertRaises(ValueError):
+                    actual_stream_overlap_audit(
+                        3, 17,
+                        train_specs={"t": {"seed": 0, "batch": 4,
+                                           "steps": huge}},
+                        heldout_specs={"h": {"seed": 1, "batch": 4,
+                                             "batches": 1}})
+
     def test_malformed_stream_spec_containers_raise_value_error(self):
         from cage.data import actual_stream_overlap_audit
 

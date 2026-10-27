@@ -1472,6 +1472,9 @@ def _positive_audit_count(value, name):
             f"{name} must be an integer, got {value!r}") from exc
     if value < 1:
         raise ValueError(f"{name} must be >= 1, got {value}")
+    if value > _MAX_TORCH_INDEX:
+        raise ValueError(
+            f"{name}={value} exceeds torch's signed 64-bit index range")
     return value
 
 
