@@ -71,6 +71,23 @@ class EffectSizeIntervalAuditTest(unittest.TestCase):
         self.assertIn("dz=", captured)
         self.assertEqual(payload["n_effect_size_ci_unavailable"], 0)
 
+    def test_equivalence_row_carries_the_same_effect_size_interval(self):
+        # Equivalence/non-inferiority rows are built by a different test
+        # helper than directional rows; their standardized-effect companion
+        # must be computed too, not reported as unavailable merely because
+        # the raw TOST payload did not carry it.
+        diffs = [0.0, 0.001, -0.001, 0.002]
+        log = ContrastLog("e2", hypotheses=("H2c",), min_seeds=3)
+        with contextlib.redirect_stdout(io.StringIO()):
+            log.print_equivalence(
+                "calib - len_only", "H2c",
+                "calib_minus_len_only_accuracy_at_longest", diffs)
+        row = log.rows[0]
+        self.assertTrue(row["effect_size_valid"], row["effect_size_reason"])
+        self.assertIsNone(row["effect_size_reason"])
+        self.assertLessEqual(row["cohens_d_lo"], row["cohens_d"])
+        self.assertLessEqual(row["cohens_d"], row["cohens_d_hi"])
+
 
 class ReplicationIntervalTest(unittest.TestCase):
     def test_t_quantile_and_interval_are_pinned(self):

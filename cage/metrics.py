@@ -1561,6 +1561,7 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         "loo_within_bound": False, "lo_bca": float("nan"),
         "hi_bca": float("nan"), "equivalent_bca": None,
         "bca_agrees": None,
+        **_effect_size_abstention(alpha),
         **signflip,
     }
     if d.numel() < 2 or not bool(torch.isfinite(d).all()) \
@@ -1602,6 +1603,8 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         out["equivalent_bca"] = bool(
             out["lo_bca"] > -bound and out["hi_bca"] < bound)
         out["bca_agrees"] = bool(out["equivalent"] == out["equivalent_bca"])
+    out.update(paired_effect_size_ci(
+        d, n_boot=n_boot, seed=seed, alpha=alpha))
     return out
 
 
@@ -1644,6 +1647,7 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         "loo_above_bound": False, "lo_bca": float("nan"),
         "hi_bca": float("nan"), "noninferior_bca": None,
         "bca_agrees": None,
+        **_effect_size_abstention(alpha),
         **signflip,
     }
     if d.numel() < 2 or not bool(torch.isfinite(d).all()) \
@@ -1679,6 +1683,8 @@ def noninferiority_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
         out["lo_bca"], out["hi_bca"] = bca
         out["noninferior_bca"] = bool(out["lo_bca"] > -bound)
         out["bca_agrees"] = bool(out["noninferior"] == out["noninferior_bca"])
+    out.update(paired_effect_size_ci(
+        d, n_boot=n_boot, seed=seed, alpha=alpha))
     return out
 
 
