@@ -20,7 +20,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["cage"]
+packages = ["cage", "cage.experiments"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
