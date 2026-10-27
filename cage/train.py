@@ -733,7 +733,11 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
 
     # ---- 3. loss / logits ------------------------------------------------
     loss_ok = torch.is_tensor(loss) and bool(torch.isfinite(loss))
-    logits_ok = torch.is_tensor(logits) and bool(torch.isfinite(logits.float()).all())
+    # Check the panel at its native precision.  Casting to float32 first
+    # turns a finite float64 logit (e.g. 1e300) into +inf and falsely
+    # reports "logits contain NaN/Inf"; the fp16-range note below still
+    # flags magnitudes that would overflow under autocast.
+    logits_ok = torch.is_tensor(logits) and bool(torch.isfinite(logits).all())
     if not logits_ok:
         mark("loss", "logits contain NaN/Inf")
     elif logits.numel():
