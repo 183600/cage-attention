@@ -230,7 +230,7 @@ class DifficultyStrataTest(unittest.TestCase):
             difficulty_strata(self.idx, self.answer, 3, n_key_bins=0)
         with self.assertRaises(ValueError):
             difficulty_features(self.idx, self.answer, True)
-        for huge in (2 ** 63, 10 ** 400):
+        for huge in (2 ** 61, 2 ** 62, 2 ** 63, 10 ** 400):
             with self.subTest(huge=huge):
                 with self.assertRaises(ValueError):
                     difficulty_stratum_labels(huge)
@@ -679,6 +679,12 @@ class DifficultyVectorAlignmentTest(unittest.TestCase):
                 {"strata": "not-a-list"},
                 {"strata": [["not", "a", "row"]]},
                 {"n_strata": 1, "strata": [{"id": 2, "n": 1, "correct": 1}]},
+                {"n_strata": 2 ** 61,
+                 "strata": [{"id": 0, "n": 1, "correct": 1}]},
+                {"n_strata": 10 ** 400,
+                 "strata": [{"id": 0, "n": 1, "correct": 1}]},
+                {"strata": [{"id": 2 ** 61, "n": 1, "correct": 1}]},
+                {"strata": [{"id": 10 ** 400, "n": 1, "correct": 1}]},
                 ["not", "a", "block"]):
             with self.subTest(block=block):
                 self.assertEqual(_difficulty_vectors(block), ([], []))

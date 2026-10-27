@@ -219,6 +219,7 @@ from .baselines import (
     tune_linear_probe,
 )
 from .data import (
+    _MAX_DIFFICULTY_STRATA,
     RESERVED_EVAL_SEEDS,
     SANITY_SEED,
     STATS_SEED,
@@ -2369,6 +2370,8 @@ def _difficulty_vectors(difficulty):
             if declared is None or declared < size:
                 return [], []
             size = declared
+        if size > _MAX_DIFFICULTY_STRATA:
+            return [], []
         totals = [0] * size
         correct = [0] * size
         for sid, row in zip(ids, rows):

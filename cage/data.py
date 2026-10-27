@@ -1906,6 +1906,8 @@ _AMBIGUITY_LABELS = ("none", "naive_confusable", "value_repeats", "both")
 # the same *relative* position at every sequence length.
 DEFAULT_DIFFICULTY_KEY_BINS = 3
 
+_MAX_DIFFICULTY_STRATA = 1 << 20
+
 
 def _difficulty_int(value, name):
     """Reject bool/fractional metadata instead of silently truncating it."""
@@ -2042,6 +2044,11 @@ def difficulty_stratum_labels(n_key_bins=DEFAULT_DIFFICULTY_KEY_BINS):
     n_key_bins = _difficulty_int(n_key_bins, "n_key_bins")
     if n_key_bins < 1:
         raise ValueError(f"n_key_bins must be >= 1, got {n_key_bins}")
+    if 4 * n_key_bins > _MAX_DIFFICULTY_STRATA:
+        raise ValueError(
+            f"n_key_bins={n_key_bins} would create {4 * n_key_bins} "
+            f"strata; the maximum supported encoding is "
+            f"{_MAX_DIFFICULTY_STRATA}")
     return [
         {"id": bin_idx * 4 + ambiguity,
          "key_bin": bin_idx,
@@ -2073,6 +2080,11 @@ def difficulty_strata(idx, answer, n_pairs,
     n_key_bins = _difficulty_int(n_key_bins, "n_key_bins")
     if n_key_bins < 1:
         raise ValueError(f"n_key_bins must be >= 1, got {n_key_bins}")
+    if 4 * n_key_bins > _MAX_DIFFICULTY_STRATA:
+        raise ValueError(
+            f"n_key_bins={n_key_bins} would create {4 * n_key_bins} "
+            f"strata; the maximum supported encoding is "
+            f"{_MAX_DIFFICULTY_STRATA}")
     n_pairs = _difficulty_int(n_pairs, "n_pairs")
     if n_pairs < 1:
         raise ValueError(f"n_pairs must be >= 1, got {n_pairs}")
