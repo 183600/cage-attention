@@ -6296,8 +6296,13 @@ class ContrastLog:
     ``finalize`` also groups the rows by hypothesis and reports whether the
     pre-registered *conjunction* is ``supported``, ``partial``,
     ``refuted``, ``inconclusive``, ``undirected`` or ``no_contrast`` - one
-    surviving row is not a confirmed multi-row hypothesis.  Both are
-    reading aids; the pre-registered row rule and FDR family are unchanged.
+    surviving row is not a confirmed multi-row hypothesis.  Every row
+    additionally carries a paired-bootstrap interval for Cohen's dz and
+    Hedges' g (``cage.metrics.paired_effect_size_ci``): the raw CI says how
+    large the effect is in metric units, while the standardized interval
+    shows how well the seed-to-seed scale supporting that magnitude read is
+    itself estimated.  All three are reading aids; the pre-registered row
+    rule and FDR family are unchanged.
     """
 
     def __init__(self, tag: str, hypotheses=(), min_seeds: int = 3,
@@ -6469,6 +6474,19 @@ class ContrastLog:
             "n": ci.get("n"), "p_value": ci.get("p_value"),
             "mde80": ci.get("mde80"), "sd": ci.get("sd"),
             "dz": _std_effect(ci),
+            # Standardized-effect uncertainty from the paired bootstrap.
+            # ``dz`` remains the point readout; these bounds say how well
+            # the seed-to-seed scale itself is estimated, which a raw-unit
+            # CI cannot show.  They are companions, not decision rules.
+            "cohens_d": ci.get("cohens_d"),
+            "cohens_d_lo": ci.get("cohens_d_lo"),
+            "cohens_d_hi": ci.get("cohens_d_hi"),
+            "hedges_g": ci.get("hedges_g"),
+            "hedges_g_lo": ci.get("hedges_g_lo"),
+            "hedges_g_hi": ci.get("hedges_g_hi"),
+            "effect_size_valid": bool(ci.get("effect_size_valid")),
+            "effect_size_n_boot_valid": ci.get("effect_size_n_boot_valid"),
+            "effect_size_reason": ci.get("effect_size_reason"),
             "a_mean": arm_a.get("mean"), "a_std": arm_a.get("std"),
             "a_n": arm_a.get("n"),
             "b_mean": arm_b.get("mean"), "b_std": arm_b.get("std"),
@@ -7167,6 +7185,13 @@ class ContrastLog:
             r for r in supporting if r.get("sesoi_point_estimate_only")]
         replication_uncertain = [
             r for r in supporting if r.get("replication_uncertain")]
+        # Standardized-effect intervals are a magnitude companion: a raw
+        # effect can be supported while its paired-SD scale is too poorly
+        # estimated (or the bootstrap too degenerate) to standardize.  The
+        # pre-registered decision is unchanged; the row is flagged so the
+        # missing effect-size precision is visible.
+        effect_size_unavailable = [
+            r for r in supporting if r.get("effect_size_valid") is False]
         loo_flips = [r for r in testable if r.get("loo_flips_decision")]
         bca_differs = [r for r in testable if r.get("bca_disagrees")]
         sign_flip_supporting = [
@@ -7299,7 +7324,14 @@ class ContrastLog:
                           f"{'the bound' if null_test else 'SESOI'} at 80% "
                           f"power (has {r['n']})")
             dz = r.get("dz", float("nan"))
-            dz_s = f", dz={dz:+.2f}" if math.isfinite(dz) else ""
+            dz_lo = r.get("cohens_d_lo", float("nan"))
+            dz_hi = r.get("cohens_d_hi", float("nan"))
+            if math.isfinite(dz):
+                dz_s = f", dz={dz:+.2f}"
+                if _finite(dz_lo) and _finite(dz_hi):
+                    dz_s += f" [{dz_lo:+.2f}, {dz_hi:+.2f}]"
+            else:
+                dz_s = ""
             loo_lo, loo_hi = r.get("loo_mean_min"), r.get("loo_mean_max")
             loo_s = (f", loo=[{loo_lo:+.4f}, {loo_hi:+.4f}]"
                      if _finite(loo_lo) and _finite(loo_hi) else "")
@@ -7403,6 +7435,16 @@ class ContrastLog:
                   f"is NOT expected to reproduce its sign/bound at 95% - "
                   f"report these as replication-uncertain, not as robust "
                   f"effects")
+        if effect_size_unavailable:
+            names = ", ".join(
+                f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                for r in effect_size_unavailable)
+            print(f"[{self.tag}] note: {len(effect_size_unavailable)}/"
+                  f"{len(supporting)} supported contrast(s) have no "
+                  f"estimable standardized-effect CI (zero/non-finite "
+                  f"paired SD or too few usable bootstrap resamples): "
+                  f"{names}; report their raw-unit effect without a "
+                  f"standardized magnitude")
         print(f"[{self.tag}] hypothesis-level synthesis (companion): "
               f"{len(synth_supported)} fully supported, "
               f"{len(synth_partial)} partial, {len(synth_refuted)} refuted, "
@@ -7711,6 +7753,11 @@ class ContrastLog:
                    "replication_uncertain_contrasts": [
                        f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                        for r in replication_uncertain],
+                   "n_effect_size_ci_unavailable": len(
+                       effect_size_unavailable),
+                   "effect_size_ci_unavailable_contrasts": [
+                       f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                       for r in effect_size_unavailable],
                    "hypothesis_synthesis": synthesis,
                    "n_hypotheses_supported": len(synth_supported),
                    "n_hypotheses_partial": len(synth_partial),

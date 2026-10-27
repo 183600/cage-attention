@@ -343,6 +343,66 @@ class MetricInputValidationTest(unittest.TestCase):
                 self.assertTrue(out["reason"])
 
 
+class PairedEffectSizeCompanionTest(unittest.TestCase):
+    def test_percentile_interval_is_deterministic_and_ordered(self):
+        diffs = [0.02, 0.05, 0.01, 0.04, 0.03]
+        out = metrics.paired_effect_size_ci(
+            diffs, n_boot=500, seed=3)
+        self.assertTrue(out["effect_size_valid"], out["effect_size_reason"])
+        self.assertAlmostEqual(out["cohens_d"],
+                               metrics.cohens_d_paired(diffs), places=12)
+        self.assertAlmostEqual(out["hedges_g"],
+                               metrics.hedges_g_paired(diffs), places=12)
+        self.assertLessEqual(out["cohens_d_lo"], out["cohens_d"])
+        self.assertLessEqual(out["cohens_d"], out["cohens_d_hi"])
+        self.assertLessEqual(out["hedges_g_lo"], out["hedges_g"])
+        self.assertLessEqual(out["hedges_g"], out["hedges_g_hi"])
+        self.assertGreater(out["effect_size_n_boot_valid"], 0)
+        again = metrics.paired_effect_size_ci(
+            diffs, n_boot=500, seed=3)
+        self.assertEqual(out, again)
+
+    def test_bootstrap_result_carries_the_same_standardized_interval(self):
+        diffs = [0.02, 0.05, 0.01, 0.04, 0.03]
+        ci = metrics.paired_bootstrap_ci(diffs, n_boot=500, seed=4)
+        effect = metrics.paired_effect_size_ci(
+            diffs, n_boot=500, seed=4)
+        for key in ("cohens_d", "cohens_d_lo", "cohens_d_hi",
+                    "hedges_g", "hedges_g_lo", "hedges_g_hi",
+                    "effect_size_valid", "effect_size_n_boot_valid",
+                    "effect_size_reason"):
+            self.assertEqual(ci[key], effect[key], key)
+
+    def test_degenerate_or_tiny_samples_abstain(self):
+        for diffs in ([], [0.1], [0.1, 0.2], [0.1] * 5,
+                      [float("nan"), 0.1, 0.2],
+                      [0.1 + 0.1j, 0.2, 0.3]):
+            with self.subTest(diffs=diffs):
+                out = metrics.paired_effect_size_ci(diffs, n_boot=500)
+                self.assertFalse(out["effect_size_valid"])
+                self.assertTrue(out["effect_size_reason"])
+                self.assertIn("n", out)
+                self.assertTrue(math.isnan(out["cohens_d_lo"]))
+                self.assertTrue(math.isnan(out["hedges_g_hi"]))
+
+    def test_discrete_sample_with_unstable_scale_abstains(self):
+        # Four zero differences and one nonzero difference make ~33% of
+        # bootstrap resamples scale-free (all-zero).  Conditioning on the
+        # remaining resamples would report a spuriously tight interval, so
+        # the companion must abstain instead.
+        out = metrics.paired_effect_size_ci(
+            [0.1, 0.0, 0.0, 0.0, 0.0], n_boot=500, seed=0)
+        self.assertFalse(out["effect_size_valid"])
+        self.assertIn("positive paired SD", out["effect_size_reason"])
+
+    def test_too_few_bootstrap_replicates_abstain(self):
+        out = metrics.paired_effect_size_ci(
+            [0.02, 0.05, 0.01, 0.04, 0.03], n_boot=20, seed=0)
+        self.assertFalse(out["effect_size_valid"])
+        self.assertEqual(out["effect_size_n_boot"], 20)
+        self.assertIn("fewer than 100", out["effect_size_reason"])
+
+
 class PositiveIntegerValidationTest(unittest.TestCase):
     def test_large_counts_are_exact_or_rejected_not_truncated(self):
         from cage.metrics import _positive_integer
@@ -632,6 +692,7 @@ class BootstrapSeedValidationTest(unittest.TestCase):
             minimum_effect_test,
             noninferiority_test,
             paired_bootstrap_ci,
+            paired_effect_size_ci,
             pr_auc_ci,
             roc_auc_ci,
         )
@@ -647,6 +708,8 @@ class BootstrapSeedValidationTest(unittest.TestCase):
                 n_boot=10, seed=seed),
             lambda seed: paired_bootstrap_ci([0.1, 0.2, 0.3],
                                              n_boot=10, seed=seed),
+            lambda seed: paired_effect_size_ci([0.1, 0.2, 0.3],
+                                               n_boot=10, seed=seed),
             lambda seed: equivalence_test([0.1, 0.2, 0.3], 0.5,
                                           n_boot=10, seed=seed),
             lambda seed: noninferiority_test([0.1, 0.2, 0.3], 0.5,

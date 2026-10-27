@@ -57,6 +57,21 @@ def _finalize(tag, hypotheses, rows):
     return log, payload, captured.getvalue()
 
 
+class EffectSizeIntervalAuditTest(unittest.TestCase):
+    def test_finalize_exposes_the_standardized_effect_interval(self):
+        diffs = [0.20, 0.19, 0.21, 0.18, 0.22]
+        _log, payload, captured = _finalize(
+            "e1", ("H1a",), [("calib - none", "H1a", "accuracy", diffs)])
+        row = payload["rows"][0]
+        self.assertTrue(row["effect_size_valid"])
+        self.assertLessEqual(row["cohens_d_lo"], row["cohens_d"])
+        self.assertLessEqual(row["cohens_d"], row["cohens_d_hi"])
+        self.assertLessEqual(row["hedges_g_lo"], row["hedges_g"])
+        self.assertLessEqual(row["hedges_g"], row["hedges_g_hi"])
+        self.assertIn("dz=", captured)
+        self.assertEqual(payload["n_effect_size_ci_unavailable"], 0)
+
+
 class ReplicationIntervalTest(unittest.TestCase):
     def test_t_quantile_and_interval_are_pinned(self):
         rep = replication_interval([0.20, 0.19, 0.21, 0.18, 0.22],

@@ -74,6 +74,14 @@ Metric choices (and why)
   practically established only when the whole 95% CI clears the bound in
   the pre-registered direction, not when the point estimate happens to
   exceed it while the interval still spans a negligible effect.
+* Raw-unit intervals do not say how well the *seed-to-seed scale* is
+  estimated.  Every difference contrast therefore also reports a paired
+  bootstrap interval for **Cohen's dz and Hedges' g**
+  (``paired_effect_size_ci``), next to their point estimates.  The
+  standardized interval is descriptive: it can make a magnitude read look
+  precise even when the paired SD rests on only a handful of seeds, and
+  abstains when the bootstrap scale is too often zero or non-finite to
+  support one.
 * For rare positive classes (error detection after convergence), the
   ranking summaries are paired with ``selection_at_fraction``: the
   operational question "if the most doubtful fraction of answers is
@@ -145,6 +153,7 @@ __all__ = [
     "wilson_ci",
     "cohens_d_paired",
     "hedges_g_paired",
+    "paired_effect_size_ci",
     "mcnemar_test",
 ]
 
@@ -701,6 +710,22 @@ def cohens_d_paired(diffs) -> float:
     return float(d.mean()) / sd
 
 
+def _hedges_j(n: int) -> float:
+    """Small-sample correction factor for Hedges' g at ``n`` pairs."""
+    if n < 2:
+        return float("nan")
+    # For df=1 (n=2 paired differences) the exact gamma ratio has a pole
+    # in the denominator, so the limit J=0 is used instead of evaluating
+    # math.gamma(0).  ``lgamma`` keeps the remaining degrees of freedom
+    # finite across the whole range.
+    df = n - 1
+    if df <= 1:
+        return 0.0
+    log_j = (math.lgamma(df / 2.0) - 0.5 * math.log(df / 2.0)
+             - math.lgamma((df - 1.0) / 2.0))
+    return math.exp(log_j)
+
+
 def hedges_g_paired(diffs) -> float:
     """Hedges' g for paired differences (small-sample bias correction)."""
     d = _flatten_float(diffs)
@@ -712,16 +737,147 @@ def hedges_g_paired(diffs) -> float:
     n = d.numel()
     if n < 2:
         return float(d_c)
-    # J correction factor.  For df=1 (n=2 paired differences) the exact
-    # gamma ratio has a pole in the denominator, so the limit J=0 is used
-    # instead of evaluating math.gamma(0).  ``lgamma`` keeps the remaining
-    # degrees of freedom finite across the whole range.
-    df = n - 1
-    if df <= 1:
-        return 0.0
-    log_j = (math.lgamma(df / 2.0) - 0.5 * math.log(df / 2.0)
-             - math.lgamma((df - 1.0) / 2.0))
-    return float(d_c) * math.exp(log_j)
+    return float(d_c) * _hedges_j(n)
+
+
+def _effect_size_abstention(alpha: float = float("nan")) -> dict:
+    """Schema for a standardized-effect readout that has no usable CI."""
+    return {
+        "cohens_d": float("nan"),
+        "hedges_g": float("nan"),
+        "cohens_d_lo": float("nan"),
+        "cohens_d_hi": float("nan"),
+        "hedges_g_lo": float("nan"),
+        "hedges_g_hi": float("nan"),
+        "effect_size_alpha": alpha,
+        "effect_size_n_boot": 0,
+        "effect_size_n_boot_valid": 0,
+        "effect_size_valid": False,
+        "effect_size_reason": None,
+    }
+
+
+def paired_effect_size_ci(diffs, n_boot: int = 10000, seed: int = 0,
+                          alpha: float = 0.05) -> dict:
+    """Percentile bootstrap CI for paired Cohen's d and Hedges' g.
+
+    A contrast's raw mean and its standardized effect answer different
+    questions: the raw CI says how large the gain is in the metric's own
+    units, while ``d = mean / paired SD`` says how large it is relative to
+    the seed-to-seed noise the paired design resolves.  The existing
+    ``cohens_d_paired`` / ``hedges_g_paired`` helpers reported only a point
+    estimate, so a small seed count could make an effect look precise in
+    standardized units even though the scale itself was estimated from the
+    same handful of pairs.
+
+    This companion resamples the paired differences with replacement,
+    recomputes ``d`` on every resample, and returns the percentile interval
+    (``hedges_g_lo``/``hedges_g_hi`` use the fixed-n Hedges correction).
+    It is a *description of effect-size uncertainty*, not a second decision
+    rule: the pre-registered inference remains the raw paired bootstrap.
+    Resamples whose paired SD is zero or non-finite are excluded; if fewer
+    than 90% of resamples are usable (and at least 100 replicates were
+    requested), the interval abstains instead of reporting a distribution
+    conditioned on unusually variable pairs or on too few order statistics.
+
+    Returns NaN bounds and ``effect_size_valid=False`` with a ``reason`` for
+    empty/non-finite input, fewer than three pairs (the Hedges correction
+    is degenerate at n=2), a zero/non-finite paired SD, or an invalid
+    bootstrap configuration.  ``effect_size_n_boot_valid`` records how many
+    resamples entered the interval so a near-degenerate sample is visible.
+    """
+    alpha = _float_or_nan(alpha)
+    out = _effect_size_abstention(alpha)
+    out["n"] = 0
+    try:
+        d = _flatten_float(diffs)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        out["effect_size_reason"] = (
+            "paired differences are not a real numeric sample")
+        return out
+    n = int(d.numel())
+    out["n"] = n
+    if n == 0:
+        out["effect_size_reason"] = "no paired differences supplied"
+        return out
+    if not bool(torch.isfinite(d).all()) or not _finite_moments(d):
+        out["effect_size_reason"] = (
+            "paired differences or their moments are not finite")
+        return out
+    d_point = cohens_d_paired(d)
+    g_point = hedges_g_paired(d)
+    out["cohens_d"] = d_point
+    out["hedges_g"] = g_point
+    if n < 3:
+        out["effect_size_reason"] = (
+            "fewer than 3 paired units: the standardized effect and its "
+            "Hedges correction are not estimable")
+        return out
+    if not (math.isfinite(d_point) and math.isfinite(g_point)):
+        out["effect_size_reason"] = (
+            "paired SD is zero or the standardized effect is not finite")
+        return out
+    if not _bootstrap_args_ok(n_boot, alpha):
+        out["effect_size_reason"] = (
+            "bootstrap needs a positive replicate count and an alpha in "
+            "(0, 1)")
+        return out
+    n_boot = _positive_integer(n_boot)
+    # Validate the reproducibility contract before any size shortcut: an
+    # invalid seed must always be an error, not be masked by an abstention.
+    boot_seed = _bootstrap_seed(seed)
+    out["effect_size_n_boot"] = int(n_boot)
+    if n_boot < 100:
+        out["effect_size_reason"] = (
+            "fewer than 100 bootstrap resamples: a percentile "
+            "standardized-effect interval would be too granular")
+        return out
+    # The eventual resample matrix is ``n_boot x n``.  A caller may request a
+    # huge replicate count to test the count plumbing; this companion must
+    # abstain instead of trying to materialize an impossible matrix.
+    if n_boot * n > 5_000_000:
+        out["effect_size_reason"] = (
+            "bootstrap grid is too large to materialize for the "
+            "standardized-effect companion")
+        return out
+    gen = torch.Generator(device=d.device).manual_seed(boot_seed)
+    idx = torch.randint(0, n, (n_boot, n), generator=gen, device=d.device)
+    samples = d[idx]
+    means = samples.mean(dim=1)
+    sds = samples.std(dim=1, unbiased=True)
+    usable = torch.isfinite(means) & torch.isfinite(sds) & (sds > 0.0)
+    n_valid = int(usable.sum())
+    out["effect_size_n_boot_valid"] = n_valid
+    if n_valid < int(math.ceil(0.9 * n_boot)):
+        out["effect_size_reason"] = (
+            "too few bootstrap resamples have a positive paired SD: the "
+            "standardized-effect interval is not estimable")
+        return out
+    d_boot = means[usable] / sds[usable]
+    if not bool(torch.isfinite(d_boot).all()):
+        out["effect_size_reason"] = (
+            "a bootstrap standardized effect is not finite")
+        return out
+    j = _hedges_j(n)
+    if not (math.isfinite(j) and j > 0.0):
+        out["effect_size_reason"] = (
+            "the Hedges small-sample correction is not positive")
+        return out
+    d_lo = float(torch.quantile(d_boot, alpha / 2.0))
+    d_hi = float(torch.quantile(d_boot, 1.0 - alpha / 2.0))
+    if not (math.isfinite(d_lo) and math.isfinite(d_hi) and d_lo <= d_hi):
+        out["effect_size_reason"] = (
+            "the bootstrap standardized-effect quantiles are not finite")
+        return out
+    out.update({
+        "cohens_d_lo": d_lo,
+        "cohens_d_hi": d_hi,
+        "hedges_g_lo": d_lo * j,
+        "hedges_g_hi": d_hi * j,
+        "effect_size_valid": True,
+        "effect_size_reason": None,
+    })
+    return out
 
 
 def mcnemar_test(correct_a, correct_b) -> dict:
@@ -1217,6 +1373,11 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
       it means the design could not have resolved an effect this small
       even if it were real, so "CI includes 0" must be read as
       *inconclusive*, not as evidence of absence;
+    * ``cohens_d`` / ``hedges_g`` and their ``*_lo``/``*_hi`` bounds - the
+      paired standardized effect and its percentile bootstrap interval
+      (see :func:`paired_effect_size_ci`).  The interval quantifies
+      uncertainty in the seed-to-seed scale, which the raw-unit CI cannot;
+      it is descriptive and does not alter the pre-registered decision;
     * ``sign_consistency`` - fraction of non-zero paired differences that
       share the sign of the mean (robustness to a single seed driving the
       mean);
@@ -1250,8 +1411,8 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
                 "loo_sign_flip": False, "lo_bca": float("nan"),
                 "hi_bca": float("nan"), "bca_agrees": None,
-                "cohens_d": float("nan"), "hedges_g": float("nan"),
                 "bootstrap_below_sign_flip_floor": False,
+                **_effect_size_abstention(alpha),
                 **signflip}
     n = d.numel()
     if not bool(torch.isfinite(d).all()) or not _finite_moments(d):
@@ -1263,8 +1424,8 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
                 "loo_sign_flip": False, "lo_bca": float("nan"),
                 "hi_bca": float("nan"), "bca_agrees": None,
-                "cohens_d": float("nan"), "hedges_g": float("nan"),
                 "bootstrap_below_sign_flip_floor": False,
+                **_effect_size_abstention(alpha),
                 **signflip}
     if not _bootstrap_args_ok(n_boot, alpha):
         return {"mean": float(d.mean()), "lo": float("nan"),
@@ -1277,8 +1438,8 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
                 "loo_sign_flip": False, "lo_bca": float("nan"),
                 "hi_bca": float("nan"), "bca_agrees": None,
-                "cohens_d": float("nan"), "hedges_g": float("nan"),
                 "bootstrap_below_sign_flip_floor": False,
+                **_effect_size_abstention(alpha),
                 **signflip}
     n_boot = _positive_integer(n_boot)
     means = _bootstrap_means(d, n_boot, seed)
@@ -1295,8 +1456,8 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
                 "loo_mean_min": float("nan"), "loo_mean_max": float("nan"),
                 "loo_sign_flip": False, "lo_bca": float("nan"),
                 "hi_bca": float("nan"), "bca_agrees": None,
-                "cohens_d": float("nan"), "hedges_g": float("nan"),
                 "bootstrap_below_sign_flip_floor": False,
+                **_effect_size_abstention(alpha),
                 **signflip}
     out = _bootstrap_summary(d, means, alpha)
     out.update(signflip)
@@ -1336,8 +1497,8 @@ def paired_bootstrap_ci(diffs, n_boot: int = 10000, seed: int = 0,
         percentile_excludes = out["lo"] > 0.0 or out["hi"] < 0.0
         bca_excludes = out["lo_bca"] > 0.0 or out["hi_bca"] < 0.0
         out["bca_agrees"] = bool(percentile_excludes == bca_excludes)
-    out["cohens_d"] = cohens_d_paired(d)
-    out["hedges_g"] = hedges_g_paired(d)
+    out.update(paired_effect_size_ci(
+        d, n_boot=n_boot, seed=seed, alpha=alpha))
     return out
 
 
