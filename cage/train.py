@@ -2615,7 +2615,10 @@ def _counterfactual_edits(idx, meta, n_pairs, vocab):
     # Edits and metadata are long token ids.  Normalise a narrower integer
     # input once instead of assigning long alternatives into it (which
     # raises a destination/source dtype RuntimeError).
-    idx = idx.to(torch.long)
+    idx_long = idx.to(torch.long)
+    if idx.dtype == torch.uint64 and bool((idx_long < 0).any()):
+        raise ValueError("idx token ids must fit in int64")
+    idx = idx_long
     if int(idx.size(1)) != 2 * int(n_pairs) + 2:
         raise ValueError(
             f"idx width {int(idx.size(1))} does not match the "
@@ -2745,10 +2748,13 @@ def _counterfactual_counts(original_pred, answer, value_swap_pred,
                 raise ValueError(
                     f"{name} token ids must fit in int64")
         try:
-            return t.reshape(-1).to(torch.long)
+            converted = t.reshape(-1).to(torch.long)
         except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
             raise ValueError(
                 f"{name} must be an integer token tensor") from exc
+        if t.dtype == torch.uint64 and bool((converted < 0).any()):
+            raise ValueError(f"{name} token ids must fit in int64")
+        return converted
 
     pred = _ids(original_pred, "original_pred")
     ans = _ids(answer, "answer").to(device=pred.device)

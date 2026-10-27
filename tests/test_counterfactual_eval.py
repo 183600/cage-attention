@@ -142,6 +142,14 @@ class CounterfactualEditTest(unittest.TestCase):
             _counterfactual_edits(self.idx, bad_bool, self.n_pairs,
                                   self.vocab)
 
+    def test_integer_token_ids_outside_int64_are_rejected(self):
+        bad = self.idx.to(torch.uint64)
+        pair = int(self.meta["key_pos"][0]) // 2
+        distractor_value = 2 * ((pair + 1) % self.n_pairs) + 1
+        bad[0, distractor_value] = 2 ** 63
+        with self.assertRaises(ValueError):
+            _counterfactual_edits(bad, self.meta, self.n_pairs, self.vocab)
+
     def test_edits_are_deterministic(self):
         again = _counterfactual_edits(
             self.idx.clone(), self.meta, self.n_pairs, self.vocab)
@@ -214,7 +222,8 @@ class CounterfactualCountsTest(unittest.TestCase):
         valid = torch.tensor([5, 5, 5, 7])
         for bad in ([1e30, 5.0, 5.0, 7.0],
                     [-1e30, 5.0, 5.0, 7.0],
-                    [2.0 ** 63, 5.0, 5.0, 7.0]):
+                    [2.0 ** 63, 5.0, 5.0, 7.0],
+                    torch.tensor([2 ** 63, 5, 5, 7], dtype=torch.uint64)):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     _counterfactual_counts(
