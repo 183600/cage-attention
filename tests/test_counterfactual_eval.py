@@ -119,7 +119,7 @@ class CounterfactualEditTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     _counterfactual_edits(self.idx, self.meta, n_pairs,
                                           self.vocab)
-        for vocab in (True, 3.0, 17.5, "17"):
+        for vocab in (True, 3.0, 17.5, "17", 2 ** 63, 10 ** 400):
             with self.subTest(vocab=vocab):
                 with self.assertRaises(ValueError):
                     _counterfactual_edits(self.idx, self.meta, self.n_pairs,

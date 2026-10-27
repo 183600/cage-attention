@@ -2603,6 +2603,10 @@ def _counterfactual_edits(idx, meta, n_pairs, vocab):
                 raise ValueError(
                     f"counterfactual edits need at least two selectable "
                     f"values (vocab >= 4), got vocab={value!r}")
+            if value > int(torch.iinfo(torch.long).max):
+                raise ValueError(
+                    f"vocab={value} exceeds torch's signed 64-bit index "
+                    f"range")
             vocab = int(value)
     if not torch.is_tensor(idx) or idx.dim() != 2:
         raise ValueError(
