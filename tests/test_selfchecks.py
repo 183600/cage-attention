@@ -511,6 +511,18 @@ class PositiveIntegerValidationTest(unittest.TestCase):
         impossible = metrics.standardized_proportion([exact + 1], [exact])
         self.assertFalse(impossible["valid"])
 
+    def test_standardized_proportion_float_weights_survive_float_fallback(
+            self):
+        exact = 10 ** 400
+        out = metrics.standardized_proportion(
+            [exact, 0], [exact, exact], [1.5, 5.5])
+        self.assertTrue(out["valid"])
+        self.assertAlmostEqual(out["rate"], 1.5 / 7.0)
+        self.assertEqual(out["coverage"], 1.0)
+        self.assertEqual(out["n_used"], 2)
+        self.assertFalse(metrics.standardized_proportion(
+            [exact], [exact], [[1, 2], [3, 4]])["valid"])
+
     def test_standardized_proportion_finite_counts_do_not_overflow(self):
         # Each count is a finite float64, but their sum is not.  The exact
         # integer inputs must still produce the pooled rate instead of

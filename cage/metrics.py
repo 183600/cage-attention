@@ -2559,13 +2559,31 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
         if first_error == "counts must be finite":
             s_exact = _exact_integer_sequence(successes)
             n_exact = _exact_integer_sequence(totals)
-            w_exact = (None if reference_weights is None
-                       else _exact_integer_sequence(reference_weights))
             if (s_exact is not None and n_exact is not None
-                    and len(s_exact) == len(n_exact)
-                    and (w_exact is None
-                         or len(w_exact) == len(s_exact))):
-                return _exact_fallback(s_exact, n_exact, w_exact)
+                    and len(s_exact) == len(n_exact)):
+                if reference_weights is None:
+                    return _exact_fallback(s_exact, n_exact, None)
+                w_values, why_w = _as_vector(reference_weights)
+                if not why_w:
+                    if w_values.numel() != len(s_exact):
+                        out["reason"] = (
+                            "reference_weights must have one entry per "
+                            "stratum")
+                        return out
+                    w_exact = _exact_integer_sequence(reference_weights)
+                    if w_exact is not None \
+                            and len(w_exact) == len(s_exact):
+                        return _exact_fallback(s_exact, n_exact, w_exact)
+                    return _exact_fallback(
+                        s_exact, n_exact,
+                        [float(value) for value in w_values.tolist()])
+                if why_w == "counts must be finite":
+                    w_exact = _exact_integer_sequence(reference_weights)
+                    if w_exact is not None \
+                            and len(w_exact) == len(s_exact):
+                        return _exact_fallback(s_exact, n_exact, w_exact)
+                out["reason"] = f"reference_weights: {why_w}"
+                return out
         out["reason"] = first_error
         return out
     if n is None or s.numel() != n.numel():
