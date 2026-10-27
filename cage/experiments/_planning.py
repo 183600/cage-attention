@@ -292,14 +292,26 @@ def _power_z(mode: str, alpha: float, power: float) -> float:
         # not a design: return an unusable multiplier rather than silently
         # falling back to the two-sided superiority formula.
         return float("nan")
-    nd = NormalDist()
     alpha = float(alpha)
     power = float(power)
-    if mode == "equivalence":
-        return nd.inv_cdf(1.0 - alpha) + nd.inv_cdf((1.0 + power) / 2.0)
-    if mode == "noninferior":
-        return nd.inv_cdf(1.0 - alpha) + nd.inv_cdf(power)
-    return nd.inv_cdf(1.0 - alpha / 2.0) + nd.inv_cdf(power)
+    # Use the symmetric normal quantile for the upper-tail probabilities.
+    # ``NormalDist.inv_cdf(1 - alpha)`` rounds to exactly 1 for a valid but
+    # tiny alpha (and raises ``StatisticsError``), so a design with e.g.
+    # alpha=1e-17 would abort the plan instead of reporting its (very
+    # conservative) seed requirement.
+    try:
+        upper_alpha = -_normal_quantile(alpha)
+        upper_power = _normal_quantile(power)
+        if mode == "equivalence":
+            return upper_alpha - _normal_quantile((1.0 - power) / 2.0)
+        if mode == "noninferior":
+            return upper_alpha + upper_power
+        return -_normal_quantile(alpha / 2.0) + upper_power
+    except ValueError:
+        # ``alpha / 2`` can underflow to zero for the smallest valid
+        # positive alpha; the corresponding quantile is not representable,
+        # so report an unusable multiplier instead of raising.
+        return float("nan")
 
 
 def _required_seeds(mode: str, sd, bound, alpha: float, power: float):
@@ -357,7 +369,13 @@ def _power_at_effect(mode: str, effect, sd, n: int, alpha: float,
         return float("nan")
     nd = NormalDist()
     alpha = float(alpha)
-    cutoff = nd.inv_cdf(1.0 - alpha)
+    # Symmetric quantile: ``inv_cdf(1 - alpha)`` rounds to 1 for a tiny but
+    # valid alpha, which would raise instead of reporting the (negligible)
+    # power.
+    try:
+        cutoff = -_normal_quantile(alpha)
+    except ValueError:
+        return float("nan")
     if mode == "equivalence":
         upper = (float(bound) - float(effect)) / se
         lower = (-float(bound) - float(effect)) / se
@@ -365,7 +383,10 @@ def _power_at_effect(mode: str, effect, sd, n: int, alpha: float,
     elif mode == "noninferior":
         power = nd.cdf((float(bound) + float(effect)) / se - cutoff)
     else:
-        cutoff = nd.inv_cdf(1.0 - alpha / 2.0)
+        try:
+            cutoff = -_normal_quantile(alpha / 2.0)
+        except ValueError:
+            return float("nan")
         shifted = float(effect) / se
         power = 1.0 - nd.cdf(cutoff - shifted) + nd.cdf(-cutoff - shifted)
     return min(1.0, max(0.0, float(power)))

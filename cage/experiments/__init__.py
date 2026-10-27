@@ -241,6 +241,7 @@ from ..data import (
 )
 from ..efficiency import measure_config
 from ..metrics import (
+    _normal_quantile,
     _positive_integer,
     benjamini_hochberg,
     benjamini_yekutieli,

@@ -1581,6 +1581,20 @@ class PowerArgumentValidationTest(unittest.TestCase):
         self.assertIsNone(_required_seeds(
             "bogus", 0.1, 0.01, 0.05, 0.8))
 
+    def test_tiny_alpha_uses_a_symmetric_quantile(self):
+        # ``NormalDist.inv_cdf(1 - alpha)`` rounds to 1 for a valid but tiny
+        # alpha; the planning helpers must return the (large) finite
+        # multiplier / power instead of raising StatisticsError.
+        for mode in ("superiority", "noninferior", "equivalence"):
+            with self.subTest(mode=mode):
+                z = _power_z(mode, 1e-17, 0.8)
+                self.assertTrue(math.isfinite(z) and z > 0.0)
+                power = _power_at_effect(
+                    mode, 0.0, 0.01, 50, 1e-17, bound=0.01)
+                self.assertTrue(math.isfinite(power))
+        self.assertTrue(math.isfinite(
+            _required_seeds("superiority", 0.1, 0.01, 1e-17, 0.8)))
+
 
 if __name__ == "__main__":
     unittest.main()
