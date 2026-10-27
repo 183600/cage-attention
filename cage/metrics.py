@@ -2497,6 +2497,10 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
             out["reason"] = "reference_weights must be non-negative"
             return out
         weight_total_exact = sum(weights)
+        if (isinstance(weight_total_exact, float)
+                and not math.isfinite(weight_total_exact)):
+            out["reason"] = "reference weights overflow when summed"
+            return out
         if weight_total_exact <= 0:
             out["reason"] = "reference weights sum to zero"
             return out

@@ -523,6 +523,17 @@ class PositiveIntegerValidationTest(unittest.TestCase):
         self.assertFalse(metrics.standardized_proportion(
             [exact], [exact], [[1, 2], [3, 4]])["valid"])
 
+    def test_standardized_proportion_overflowing_float_weights_abstain_even_in_exact_fallback(
+            self):
+        # The huge counts force the exact-integer fallback; the reference
+        # weights are individually finite but their float64 sum overflows.
+        # Normalising them would divide zero by zero instead of abstaining.
+        exact = 10 ** 400
+        out = metrics.standardized_proportion(
+            [exact, 0], [exact, exact], [1e308, 1e308])
+        self.assertFalse(out["valid"])
+        self.assertIn("overflow", out["reason"])
+
     def test_standardized_proportion_finite_counts_do_not_overflow(self):
         # Each count is a finite float64, but their sum is not.  The exact
         # integer inputs must still produce the pooled rate instead of
