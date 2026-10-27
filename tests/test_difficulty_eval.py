@@ -230,6 +230,13 @@ class DifficultyStrataTest(unittest.TestCase):
             difficulty_strata(self.idx, self.answer, 3, n_key_bins=0)
         with self.assertRaises(ValueError):
             difficulty_features(self.idx, self.answer, True)
+        for huge in (2 ** 63, 10 ** 400):
+            with self.subTest(huge=huge):
+                with self.assertRaises(ValueError):
+                    difficulty_stratum_labels(huge)
+                with self.assertRaises(ValueError):
+                    difficulty_strata(self.idx, self.answer, 3,
+                                      n_key_bins=huge)
 
     def test_missing_or_duplicated_query_key_is_rejected(self):
         # No key matches the final query token: argmax would otherwise

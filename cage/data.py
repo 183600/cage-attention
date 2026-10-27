@@ -1912,10 +1912,14 @@ def _difficulty_int(value, name):
     if isinstance(value, bool):
         raise ValueError(f"{name} must be an integer, not bool")
     try:
-        return int(operator.index(value))
+        value = int(operator.index(value))
     except TypeError as exc:
         raise ValueError(
             f"{name} must be an integer, got {value!r}") from exc
+    if value > _MAX_TORCH_INDEX:
+        raise ValueError(
+            f"{name}={value} exceeds torch's signed 64-bit index range")
+    return value
 
 
 def difficulty_features(idx, answer, n_pairs):
