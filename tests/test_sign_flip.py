@@ -23,6 +23,8 @@ from cage.metrics import (
     equivalence_test,
     noninferiority_test,
     paired_bootstrap_ci,
+    sign_flip_min_units,
+    sign_flip_resolution,
     sign_flip_test,
 )
 
@@ -107,6 +109,44 @@ class ExactSignFlipTest(unittest.TestCase):
                 result = sign_flip_test(values, **kwargs)
                 self.assertFalse(result["valid"])
                 self.assertTrue(math.isnan(result["p_value"]))
+
+
+class ExactResolutionPlanningTest(unittest.TestCase):
+    """The design plan needs the same floor the analysis will report."""
+
+    def test_exact_and_monte_carlo_floors_match_the_test(self):
+        one = sign_flip_resolution(5, "greater")
+        two = sign_flip_resolution(5, "two-sided")
+        self.assertTrue(one["valid"])
+        self.assertEqual(one["method"], "exact")
+        self.assertAlmostEqual(one["min_attainable_p"], 1 / 32)
+        self.assertAlmostEqual(two["min_attainable_p"], 2 / 32)
+        # Above max_exact the companion samples signs, so the floor is the
+        # Monte-Carlo resolution rather than 2**-n.
+        sampled = sign_flip_resolution(17, "two-sided", n_random=999)
+        self.assertEqual(sampled["method"], "monte-carlo")
+        self.assertAlmostEqual(sampled["min_attainable_p"], 1 / 1000)
+
+    def test_minimum_units_depend_on_the_registered_alternative(self):
+        self.assertEqual(sign_flip_min_units("greater", 0.05), 5)
+        self.assertEqual(sign_flip_min_units("two-sided", 0.05), 6)
+        self.assertEqual(sign_flip_min_units("greater", 0.01), 7)
+        self.assertEqual(sign_flip_min_units("two-sided", 0.01), 8)
+        # No seed count can clear a q below the Monte-Carlo fallback floor.
+        self.assertIsNone(sign_flip_min_units("two-sided", 1e-6,
+                                              n_random=1000))
+
+    def test_malformed_resolution_arguments_abstain(self):
+        for n in (0, -1, 1.5, True, None):
+            with self.subTest(n=n):
+                self.assertFalse(sign_flip_resolution(n)["valid"])
+        for alternative in ("up", "", None):
+            with self.subTest(alternative=alternative):
+                self.assertFalse(
+                    sign_flip_resolution(5, alternative)["valid"])
+        for q in (0.0, 1.0, -0.1, float("nan"), float("inf"), True):
+            with self.subTest(q=q):
+                self.assertIsNone(sign_flip_min_units("two-sided", q))
 
 
 class BootstrapCompanionTest(unittest.TestCase):

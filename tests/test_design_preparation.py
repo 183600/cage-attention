@@ -30,6 +30,7 @@ from cage.experiments import (
     _design_plan_fingerprint,
     _design_plan_outcomes_exist,
     _design_sensitivity_plan,
+    _exact_alternatives_for,
     _linear_slope,
     _mean_std,
     _pilot_accuracy_level,
@@ -995,6 +996,81 @@ class ClaimFloorPlanTest(unittest.TestCase):
         self.assertIs(payload["all_accuracy_claims_ready"], True)
 
 
+class ExactResolutionPlanTest(unittest.TestCase):
+    """A powered design can still be unable to pass the exact test."""
+
+    @staticmethod
+    def _verdict(n=5, sd=0.0001):
+        return {"depth_ladder": {"by_depth": {
+            "2": {"accuracy_by_seed": {
+                str(seed): 0.9 + sd * seed for seed in range(n)},
+                 "unmeasured": False},
+        }}}
+
+    def test_two_sided_rows_are_flagged_before_the_grid(self):
+        settings = Settings(seeds=tuple(range(5)))
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                payload = _design_sensitivity_plan(
+                    settings, self._verdict(), pathlib.Path(tmp), "e3")
+        self.assertEqual(payload["fdr_q"], 0.05)
+        self.assertEqual(payload["min_seeds_for_exact_one_sided"], 5)
+        self.assertEqual(payload["min_seeds_for_exact_two_sided"], 6)
+        rows = {row["metric"]: row for row in payload["rows"]}
+        self.assertEqual(rows["accuracy"]["exact_alternatives"],
+                         ["greater"])
+        self.assertIs(rows["accuracy"]["exact_resolution_met"], True)
+        self.assertEqual(rows["accuracy"]["exact_required_seeds"], 5)
+        gate = rows["gate_depth_ratio"]
+        self.assertEqual(gate["exact_alternatives"],
+                         ["greater", "two-sided"])
+        self.assertIs(gate["exact_resolution_met"], False)
+        self.assertEqual(gate["exact_required_seeds"], 6)
+        self.assertEqual(gate["exact_seed_shortfall"], 1)
+        self.assertIn("gate_depth_ratio",
+                      payload["exact_unfalsifiable_metrics"])
+        self.assertIn("H3a", payload["exact_unfalsifiable_hypotheses"])
+        self.assertIs(payload["all_metric_exact_resolutions_met"], False)
+        self.assertIs(payload["all_accuracy_claims_confirmable"], False)
+        self.assertIn("exact sign-flip floor at n=5", printed.getvalue())
+        self.assertIn("cannot reach q=0.05", printed.getvalue())
+
+    def test_companion_directions_are_planned_with_the_main_effect(self):
+        # H2e registers a directional concentration main effect and an
+        # undirected interaction on the same display metric; the row must
+        # clear both floors.  H2c's equivalence row is read one-sided.
+        self.assertEqual(
+            _exact_alternatives_for(
+                "accuracy_at_longest", "superiority", ["H2e"]),
+            ["greater", "two-sided"])
+        self.assertEqual(
+            _exact_alternatives_for(
+                "calib_minus_len_only_accuracy_at_longest", "equivalence",
+                ["H2c"]),
+            ["greater"])
+
+    def test_six_seeds_resolve_every_registered_alternative(self):
+        settings = Settings(seeds=tuple(range(6)))
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                payload = _design_sensitivity_plan(
+                    settings, self._verdict(n=6), pathlib.Path(tmp), "e3")
+        self.assertEqual(payload["exact_unfalsifiable_metrics"], [])
+        self.assertIs(payload["all_metric_exact_resolutions_met"], True)
+        self.assertIs(payload["all_accuracy_exact_resolutions_met"], True)
+        self.assertIs(payload["all_accuracy_claims_confirmable"], True)
+        self.assertNotIn("cannot reach", printed.getvalue())
+
+    def test_malformed_fdr_q_is_refused_before_planning(self):
+        for q in (float("nan"), float("inf"), 0.0, 1.0, True):
+            settings = Settings(seeds=(0, 1, 2, 3, 4))
+            settings.fdr_q = q
+            with self.subTest(q=q), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaises(ValueError):
+                    _design_sensitivity_plan(
+                        settings, self._verdict(), pathlib.Path(tmp), "e3")
+
+
 class DesignPlanFreezeTest(unittest.TestCase):
     """A design may be revised while preparing, never after outcome rows."""
 
@@ -1070,6 +1146,34 @@ class DesignPlanFreezeTest(unittest.TestCase):
                              plan["design_sha256"])
             self.assertNotIn("supersedes_design_sha256", again)
 
+    def test_legacy_plan_without_fdr_q_migrates_after_outcomes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            settings = Settings.quick()
+            with contextlib.redirect_stdout(io.StringIO()):
+                plan = _design_sensitivity_plan(
+                    settings, self._verdict(), out, "e1")
+            path = out / "e1_design_plan.json"
+            legacy = json.loads(path.read_text(encoding="utf-8"))
+            legacy.pop("fdr_q")
+            legacy_hash = _design_plan_fingerprint(
+                legacy, include_fdr_q=False)
+            self.assertRegex(legacy_hash, r"^[0-9a-f]{16}$")
+            legacy["design_sha256"] = legacy_hash
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            (out / "e1_runs.jsonl").write_text("{}\n", encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                again = _design_sensitivity_plan(
+                    settings, self._verdict(), out, "e1")
+            self.assertEqual(again["design_sha256"],
+                             plan["design_sha256"])
+            self.assertIs(again["fdr_q_registered_after_outcomes"], True)
+            self.assertEqual(again["supersedes_design_sha256"],
+                             legacy_hash)
+            self.assertIn("predates fdr_q", printed.getvalue())
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["fdr_q"], 0.05)
+
     def test_after_outcomes_a_malformed_plan_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = pathlib.Path(tmp)
@@ -1135,6 +1239,13 @@ class DesignPlanFreezeTest(unittest.TestCase):
         changed["planned_n"] = 3
         self.assertNotEqual(_design_plan_fingerprint(base),
                             _design_plan_fingerprint(changed))
+        # The multiplicity level changes which exact outcomes can be
+        # confirmed; it is part of the frozen design, not invocation
+        # provenance.  Legacy plans without the field remain hashable.
+        changed = dict(base, fdr_q=0.10)
+        self.assertNotEqual(_design_plan_fingerprint(base),
+                            _design_plan_fingerprint(changed))
+        self.assertIsNotNone(_design_plan_fingerprint(base))
         self.assertIsNone(_design_plan_fingerprint("not a plan"))
 
 

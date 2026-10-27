@@ -97,7 +97,11 @@ Metric choices (and why)
   pre-registered bootstrap rule is unchanged; the exact test is a
   validity companion that exposes when a "significant" bootstrap result
   is below the design's own resolution (e.g. two-sided p < 0.05 is
-  impossible with n <= 5).
+  impossible with n <= 5).  ``sign_flip_resolution`` and
+  ``sign_flip_min_units`` expose the same floor *before* data collection,
+  so the prospective design plan can require enough seeds for the
+  registered alternative instead of discovering an unfalsifiable
+  two-sided claim afterwards.
 * The seed-level interval conditions on the sealed evaluation stream.
   ``crossed_cluster_bootstrap_ci`` resamples training seeds **and**
   evaluation items, reporting the interval that also reflects finite-stream
@@ -139,6 +143,8 @@ __all__ = [
     "brier_score",
     "paired_bootstrap_ci",
     "sign_flip_test",
+    "sign_flip_resolution",
+    "sign_flip_min_units",
     "equivalence_test",
     "noninferiority_test",
     "minimum_effect_test",
@@ -3425,6 +3431,94 @@ def sign_flip_test(diffs, alternative: str = "two-sided",
         "reason": "",
     })
     return out
+
+
+def sign_flip_resolution(n, alternative: str = "two-sided", *,
+                         n_random: int = 10000,
+                         max_exact: int = 16) -> dict:
+    """Smallest p-value the paired sign-flip test can attain at ``n`` units.
+
+    The analysis layer reports this floor next to every contrast, but a
+    design problem is cheaper to catch *before* training.  This helper
+    mirrors :func:`sign_flip_test` exactly: for ``n <= max_exact`` the
+    exact enumeration floor is ``1 / 2**n`` for a one-sided alternative and
+    ``min(1, 2 / 2**n)`` for a two-sided one; above that threshold the
+    Monte-Carlo fallback cannot report a p-value below ``1 / (n_random+1)``
+    regardless of ``n``.  ``max_exact`` is capped at 20 like the test
+    itself.
+
+    Returns a payload with ``min_attainable_p`` and ``method``, or
+    ``valid=False`` (NaN floor) for a non-positive/fractional ``n``, an
+    unknown alternative, or invalid resampling arguments.
+    """
+    alt = str(alternative).strip().lower().replace("_", "-")
+    if alt == "two sided":
+        alt = "two-sided"
+    out = {
+        "n": None,
+        "alternative": alternative,
+        "method": "none",
+        "min_attainable_p": float("nan"),
+        "valid": False,
+        "reason": "",
+    }
+    if alt not in ("two-sided", "greater", "less"):
+        out["reason"] = f"unknown alternative {alternative!r}"
+        return out
+    n_int = _positive_integer(n)
+    if n_int is None:
+        out["reason"] = "n must be a positive integer"
+        return out
+    n_random_int = _positive_integer(n_random)
+    if n_random_int is None:
+        out["reason"] = "n_random must be a positive integer"
+        return out
+    max_exact_int = _positive_integer(max_exact)
+    if max_exact_int is None:
+        out["reason"] = "max_exact must be a positive integer"
+        return out
+    max_exact_int = min(max_exact_int, 20)
+    out["n"] = n_int
+    if n_int <= max_exact_int:
+        total = 1 << n_int
+        floor = (min(1.0, 2.0 / total) if alt == "two-sided"
+                 else 1.0 / total)
+        out["method"] = "exact"
+    else:
+        floor = 1.0 / (n_random_int + 1.0)
+        out["method"] = "monte-carlo"
+    out["min_attainable_p"] = float(floor)
+    out["valid"] = True
+    return out
+
+
+def sign_flip_min_units(alternative: str = "two-sided", q: float = 0.05,
+                        *, n_random: int = 10000,
+                        max_exact: int = 16):
+    """Smallest paired-unit count whose sign-flip floor clears ``q``.
+
+    Returns ``None`` when no attainable count clears the threshold (for
+    example a very small ``q`` below the Monte-Carlo fallback floor), and
+    for malformed arguments.  This is the design-planning counterpart of
+    :func:`sign_flip_resolution`: a two-sided claim at ``q=0.05`` needs six
+    seeds because ``2 / 2**5 = 0.0625``, while a directional claim can be
+    decided with five (``1 / 2**5 = 0.03125``).
+    """
+    q_value = _float_or_nan(q)
+    if not (math.isfinite(q_value) and 0.0 < float(q_value) < 1.0):
+        return None
+    max_exact_int = _positive_integer(max_exact)
+    if max_exact_int is None:
+        return None
+    max_exact_int = min(max_exact_int, 20)
+    for n in range(1, max_exact_int + 2):
+        resolution = sign_flip_resolution(
+            n, alternative, n_random=n_random, max_exact=max_exact_int)
+        if not resolution["valid"]:
+            return None
+        if float(resolution["min_attainable_p"]) <= float(q_value):
+            return n
+    return None
 
 
 def _sign_flip_companions(diffs, n_random: int = 10000,

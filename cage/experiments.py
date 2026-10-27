@@ -139,8 +139,15 @@ Design principles
     n=2 is not a claim licence when the registered floor is 3, and a quick
     pipeline check must not be mistaken for evidence.  The plan is frozen
     once the first outcome row exists (same design may be rechecked;
-    changed seeds/SESOIs/test modes raise ``DesignPlanError``), with every
-    pre-outcome revision kept in ``<tag>_design_plan_history.jsonl``.  The
+    changed seeds/SESOIs/test modes/FDR level raise ``DesignPlanError``),
+    with every pre-outcome revision kept in
+    ``<tag>_design_plan_history.jsonl``.  The plan also translates the
+    registered direction of each metric into the exact paired sign-flip
+    test's attainable floor: a two-sided contrast at five seeds has a
+    minimum exact p of 0.0625, so it cannot be confirmed at q=0.05 however
+    large the effect, and the required seed count is reported before the
+    grid runs instead of being discovered when the bootstrap looks
+    significant.  The
     runs themselves are scheduled as randomised complete blocks (one block
     per training seed, every cell once per block, recorded in
     ``<tag>_run_order.json``), so a slow machine drift cannot be aliased
@@ -246,6 +253,8 @@ from .metrics import (
     noninferiority_test,
     paired_bootstrap_ci,
     replication_interval,
+    sign_flip_min_units,
+    sign_flip_resolution,
     standardized_proportion,
     wilson_ci,
 )
@@ -2931,6 +2940,59 @@ def _report_design_coverage(out_dir, tag, runs, design, extract, expected,
     return payload
 
 
+def _exact_alternatives_for(metric: str, mode: str, hypotheses) -> list:
+    """Registered sign-flip alternatives behind one planned metric.
+
+    A metric row can merge several hypotheses (same metric/bound/test
+    mode), and the hypotheses need not read that metric in the same
+    direction: H2e registers a directional concentration main effect and a
+    two-sided interaction on the same accuracy readout.  Planning only the
+    pooled main-effect sign would therefore miss a registered two-sided
+    companion whose exact-test floor is higher.  For every contributing
+    hypothesis this helper reads its own ``direction`` registry:
+
+    * a null prediction (equivalence/non-inferiority) is read through
+      one-sided boundary tests, so its floor is the one-sided floor;
+    * an explicit ``+``/``-`` direction is one-sided, while an explicit
+      ``None`` (or a metric with no registered direction) is two-sided;
+    * direction keys that name a companion of this display metric
+      (``interaction_accuracy``, ``query_none_accuracy``,
+      ``postmix_norm_...``) contribute their own alternative, so an
+      undirected companion cannot hide behind a directional main effect.
+
+    The union is deliberately conservative: the design must clear the
+    largest floor among the registered readings of that metric.
+    """
+    alternatives = set()
+    for hyp in hypotheses:
+        spec = HYPOTHESES.get(hyp) or {}
+        direction = spec.get("direction") or {}
+        if mode in ("equivalence", "noninferior"):
+            # TOST / non-inferiority use one-sided boundary tests even when
+            # the display metric also carries a directional main effect.
+            alternatives.add("greater")
+        elif metric in direction:
+            value = direction.get(metric)
+            alternatives.add("two-sided" if value is None
+                             else "greater" if value == "+"
+                             else "less" if value == "-"
+                             else "two-sided")
+        else:
+            # The hypothesis registers this metric (it is in the SESOI
+            # table) but no sign for it: the row is an undirected readout.
+            alternatives.add("two-sided")
+        for key, value in direction.items():
+            if not isinstance(key, str) or key == metric:
+                continue
+            if not key.endswith(f"_{metric}"):
+                continue
+            alternatives.add("two-sided" if value is None
+                             else "greater" if value == "+"
+                             else "less" if value == "-"
+                             else "two-sided")
+    return sorted(alternatives)
+
+
 def _registered_sesoi_metrics(experiment: str) -> list:
     """Pre-registered numeric SESOIs for one experiment, de-duplicated.
 
@@ -2941,7 +3003,10 @@ def _registered_sesoi_metrics(experiment: str) -> list:
     ``mode`` records whether the registered prediction is a superiority /
     directional test or a null (equivalence / non-inferiority) claim, since
     the latter needs a different power calculation and must not be read as
-    an underpowered superiority test.
+    an underpowered superiority test.  ``exact_alternatives`` lists every
+    registered sign-flip reading of the metric (see
+    :func:`_exact_alternatives_for`), so the prospective plan can check the
+    exact-test resolution of the directional and two-sided rows together.
     """
     rows: dict[tuple, dict] = {}
     for hyp_id, spec in HYPOTHESES.items():
@@ -2970,6 +3035,8 @@ def _registered_sesoi_metrics(experiment: str) -> list:
     for key in sorted(rows):
         row = rows[key]
         row["hypotheses"] = sorted(row["hypotheses"])
+        row["exact_alternatives"] = _exact_alternatives_for(
+            row["metric"], row["mode"], row["hypotheses"])
         out.append(row)
     return out
 
@@ -3248,27 +3315,40 @@ class DesignPlanError(RuntimeError):
 
 _DESIGN_PLAN_FINGERPRINT_KEYS = (
     "experiment", "planned_n", "planned_seeds", "alpha", "power_target",
-    "min_seeds_for_claim", "planned_eval_items", "hypotheses_sha256",
+    "fdr_q", "min_seeds_for_claim", "planned_eval_items",
+    "hypotheses_sha256",
 )
 
 
-def _design_plan_fingerprint(payload) -> str | None:
+def _design_plan_fingerprint(payload, *,
+                             include_fdr_q: bool = True) -> str | None:
     """Content hash of the *design-relevant* part of a plan.
 
     The plan file also carries invocation provenance (run id, environment,
     timestamps), which legitimately changes on every invocation.  The
-    pre-registration is the planned sample, the registered SESOIs/modes and
-    the claim floor, so only those fields enter this hash.  A missing or
-    malformed plan returns ``None``; callers must treat that as "cannot
-    certify this design", not as "unchanged".
+    pre-registration is the planned sample, the registered SESOIs/modes,
+    the multiplicity level and the claim floor, so only those fields enter
+    this hash.  ``fdr_q`` joins them because the exact sign-flip resolution
+    and the final supported/refuted readout are defined at that q: changing
+    it after outcomes would be an adaptive goalpost move.  Plans written
+    before ``fdr_q`` was stamped remain hashable (the field is treated as
+    absent for them), and ``include_fdr_q=False`` lets the publisher
+    compare such a plan with the current one on its original fields before
+    accepting the migration.  A missing or malformed plan returns
+    ``None``; callers must treat that as "cannot certify this design", not
+    as "unchanged".
     """
     if not isinstance(payload, Mapping):
         return None
     # A partial or empty object is not a registered design: hashing the
     # handful of fields it happens to contain would let a malformed plan
-    # (or the empty dict) masquerade as a valid pre-registration.
-    missing = [key for key in _DESIGN_PLAN_FINGERPRINT_KEYS
-               if key not in payload]
+    # (or the empty dict) masquerade as a valid pre-registration.  fdr_q is
+    # optional for legacy plans (see the docstring), and this view omits it
+    # entirely when comparing such a plan with the current design.
+    keys = tuple(key for key in _DESIGN_PLAN_FINGERPRINT_KEYS
+                 if include_fdr_q or key != "fdr_q")
+    missing = [key for key in keys
+               if key not in payload and key != "fdr_q"]
     if missing or not payload:
         return None
     raw_rows = payload.get("rows")
@@ -3304,8 +3384,11 @@ def _design_plan_fingerprint(payload) -> str | None:
         seeds = list(seeds)
     except TypeError:
         return None
-    design = {key: payload.get(key)
-              for key in _DESIGN_PLAN_FINGERPRINT_KEYS if key != "rows"}
+    design = {
+        key: payload.get(key) for key in keys
+        if key != "rows"
+        and (key != "fdr_q" or "fdr_q" in payload)
+    }
     design["planned_seeds"] = seeds
     design["rows"] = rows
     try:
@@ -3368,10 +3451,13 @@ def _publish_design_plan(settings: Settings, out_dir: pathlib.Path,
     still preparation); the revision is recorded in a history file and the
     superseded hash is stamped on the new plan.  Once a run or contrast file
     for this experiment is non-empty, the design hash is frozen: changing
-    the planned seeds, SESOIs, test modes or claim floor now would be an
-    adaptive redesign, so it raises :class:`DesignPlanError` instead of
-    silently overwriting the artifact that was supposed to pre-register the
-    study.  Re-running an identical design is allowed.
+    the planned seeds, SESOIs, test modes, FDR level or claim floor now
+    would be an adaptive redesign, so it raises :class:`DesignPlanError`
+    instead of silently overwriting the artifact that was supposed to
+    pre-register the study.  Re-running an identical design is allowed.
+    A plan written before ``fdr_q`` entered the fingerprint is accepted if
+    all of its old fields match; the migration adds the current q to the
+    artifact and records that it was registered after outcomes existed.
     """
     payload = dict(payload)
     path = pathlib.Path(out_dir) / f"{tag}_design_plan.json"
@@ -3398,6 +3484,18 @@ def _publish_design_plan(settings: Settings, out_dir: pathlib.Path,
             old = None
     outcomes = _design_plan_outcomes_exist(out_dir, tag)
     old_hash = _design_plan_fingerprint(old) if old is not None else None
+    # Plans written before fdr_q was fingerprintable have no field to
+    # compare against the current q.  Compare the old plan and the current
+    # payload on their original fields; if those match, the only change is
+    # the metadata upgrade, not a redesign, so an already-running study can
+    # be rechecked.  The rewritten plan records the current q explicitly.
+    legacy_hash = None
+    if old is not None and "fdr_q" not in old:
+        old_legacy = _design_plan_fingerprint(old, include_fdr_q=False)
+        new_legacy = _design_plan_fingerprint(
+            payload, include_fdr_q=False)
+        if old_legacy is not None and old_legacy == new_legacy:
+            legacy_hash = old_legacy
     if outcomes and not path.exists():
         raise DesignPlanError(
             f"{tag}: outcome rows already exist but no registered design "
@@ -3410,13 +3508,18 @@ def _publish_design_plan(settings: Settings, out_dir: pathlib.Path,
                 f"{tag}: an unreadable existing design plan cannot be "
                 f"verified after outcome rows were written; restore the "
                 f"registered plan or use a fresh --out directory")
-        if old_hash != new_hash:
+        if old_hash != new_hash and legacy_hash is None:
             raise DesignPlanError(
                 f"{tag}: refusing to revise the registered design "
                 f"{old_hash} -> {new_hash} after outcome rows exist; a "
                 f"changed sample size/SESOI/test mode is a post-hoc "
                 f"redesign, so use a fresh --out directory and report it "
                 f"as a separate study")
+    if legacy_hash is not None and outcomes:
+        print(f"[{tag}] WARNING: the registered design plan predates fdr_q; "
+              f"q={float(settings.fdr_q):g} is being added to the frozen "
+              f"record now, so it was not part of the original "
+              f"pre-registration")
     # Link every subsequent run record (and the manifest) to the accepted
     # pre-registration.  Do this only after the freeze checks pass: a
     # refused revision must not leave a rejected design id on the Settings
@@ -3427,9 +3530,18 @@ def _publish_design_plan(settings: Settings, out_dir: pathlib.Path,
     settings._run_context_cache = None
     settings._run_context_cache_key = None
     if path.exists() and old_hash is not None and old_hash != new_hash:
-        payload["supersedes_design_sha256"] = old_hash
+        # For a legacy plan the recomputed hash uses the new ``fdr_q: None``
+        # sentinel, which never appeared in its history; point the event at
+        # the id that was actually registered instead.
+        superseded = old.get("design_sha256") if legacy_hash is not None \
+            else old_hash
+        if not isinstance(superseded, str):
+            superseded = old_hash
+        payload["supersedes_design_sha256"] = superseded
         _record_design_plan_event(
-            settings, out_dir, tag, "amended", new_hash, old_hash)
+            settings, out_dir, tag, "amended", new_hash, superseded)
+        if legacy_hash is not None:
+            payload["fdr_q_registered_after_outcomes"] = bool(outcomes)
     elif not path.exists():
         _record_design_plan_event(
             settings, out_dir, tag, "created", new_hash)
@@ -3459,9 +3571,15 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
     underpowered plan is a warning that a null read is uninformative, not a
     licence to drop the contrast.  Power is also not claim eligibility: a
     design below ``min_seeds_for_claim`` is marked ineligible even when its
-    sensitivity budget is met.  The published artifact is frozen once
-    outcome rows exist (see :func:`_publish_design_plan`), so a later
-    invocation cannot silently rewrite the study it is analysing.
+    sensitivity budget is met.  One further preparation criterion is
+    independent of power: the exact paired sign-flip test can only report
+    p-values down to a floor fixed by the seed count and the registered
+    alternative.  A two-sided claim at five seeds (floor 0.0625) cannot be
+    confirmed at q=0.05 even if the bootstrap CI is tight, so each metric
+    row also reports the exact floor and the seed count required to clear
+    it.  The published artifact is frozen once outcome rows exist (see
+    :func:`_publish_design_plan`), so a later invocation cannot silently
+    rewrite the study it is analysing.
     """
     # Re-validate at the boundary: the CLI and tests mutate Settings
     # attributes after construction, and a malformed seed set or claim floor
@@ -3488,6 +3606,20 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
             raise ValueError(
                 f"{name} must be a finite number strictly between 0 and 1, "
                 f"got {value!r}")
+    # The FDR level is part of the decision rule, not just an analysis
+    # switch: the exact sign-flip floor is compared with this q, and a
+    # change of q after outcomes would move the goalposts.  Re-validate it
+    # here because callers may mutate Settings after construction.
+    try:
+        fdr_q = float(settings.fdr_q)
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+        raise ValueError(
+            f"fdr_q must be a finite number strictly between 0 and 1, got "
+            f"{settings.fdr_q!r}") from exc
+    if not (_finite(fdr_q) and 0.0 < fdr_q < 1.0):
+        raise ValueError(
+            f"fdr_q must be a finite number strictly between 0 and 1, got "
+            f"{settings.fdr_q!r}")
     # Two different pilot quantities answer two different questions:
     #   * the single-arm SD is the legacy, optimistic scale (it assumes
     #     the two arms' seed effects are perfectly correlated);
@@ -3533,6 +3665,48 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
             "min_seeds_for_claim": floor,
             "claim_floor_met": meets_floor,
         }
+        # Exact paired sign-flip resolution.  Power alone can certify a
+        # design that the exact confirmation test cannot reject: at n=5 a
+        # two-sided exact p is at best 0.0625, above the usual q=0.05, so
+        # an undirected contrast is unfalsifiable no matter how large its
+        # effect.  Plan every registered alternative of this
+        # metric (see ``_exact_alternatives_for``), not only the pooled
+        # main-effect sign, and report the required seed count before the
+        # grid spends compute.
+        exact_resolution = {}
+        for alternative in item.get("exact_alternatives") or ["two-sided"]:
+            resolution = sign_flip_resolution(n, alternative)
+            required_exact = sign_flip_min_units(alternative, fdr_q)
+            exact_resolution[alternative] = {
+                "min_attainable_p": float(
+                    resolution["min_attainable_p"]),
+                "method": resolution["method"],
+                "resolved_at_planned_n": bool(
+                    resolution["valid"]
+                    and float(resolution["min_attainable_p"]) <= fdr_q),
+                "min_seeds": required_exact,
+            }
+        exact_unfalsifiable = sorted(
+            alternative for alternative, info
+            in exact_resolution.items()
+            if not info["resolved_at_planned_n"])
+        exact_required = [info["min_seeds"]
+                          for info in exact_resolution.values()]
+        exact_required_seeds = (
+            max(exact_required)
+            if exact_required and all(value is not None
+                                      for value in exact_required)
+            else None)
+        row.update({
+            "exact_alternatives": sorted(exact_resolution),
+            "exact_resolution": exact_resolution,
+            "exact_resolution_met": not exact_unfalsifiable,
+            "exact_unfalsifiable_alternatives": exact_unfalsifiable,
+            "exact_required_seeds": exact_required_seeds,
+            "exact_seed_shortfall": (
+                max(0, int(exact_required_seeds) - n)
+                if exact_required_seeds is not None else None),
+        })
         # The pilot is an accuracy-scale quantity; applying it to a metric
         # with different units would be a fabricated variance.
         accuracy_metric = "accuracy" in metric
@@ -3634,6 +3808,17 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
                           if r["status"] == "unpowerable"})
     stream_limited = sorted({r["metric"] for r in accuracy_rows
                              if r.get("stream_limited_worst_case")})
+    exact_unfalsifiable = sorted(
+        {r["metric"] for r in rows if not r["exact_resolution_met"]})
+    exact_unfalsifiable_hypotheses = sorted(
+        {hyp for r in rows if not r["exact_resolution_met"]
+         for hyp in (r.get("hypotheses") or [])})
+    accuracy_exact_unfalsifiable = sorted(
+        {r["metric"] for r in accuracy_rows
+         if not r["exact_resolution_met"]})
+    exact_shortfall = [
+        int(r["exact_seed_shortfall"]) for r in rows
+        if r.get("exact_seed_shortfall") is not None]
     if not accuracy_rows:
         all_powered = None
     else:
@@ -3642,6 +3827,13 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
         # would certify a design whose SESOI resolution is not even
         # representable.
         all_powered = all(r["status"] == "powered" for r in accuracy_rows)
+    if not accuracy_rows:
+        all_accuracy_exact_met = None
+    else:
+        all_accuracy_exact_met = all(
+            r["exact_resolution_met"] for r in accuracy_rows)
+    all_metric_exact_met = (
+        all(r["exact_resolution_met"] for r in rows) if rows else None)
     # Power and claim eligibility are different questions.  A design can
     # clear its sensitivity budget at n=5 yet still be below the
     # pre-registered independent-seed floor; the contrast layer would mark
@@ -3661,6 +3853,16 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
     else:
         all_claim_seed_eligible = True
         all_claims_ready = bool(all_powered)
+    if not meets_floor:
+        all_claims_confirmable = False
+    elif not accuracy_rows:
+        all_claims_confirmable = None
+    else:
+        # A claim needs statistical power *and* an exact test that can
+        # actually reject at this n; either condition alone is not a
+        # confirmable design.
+        all_claims_confirmable = bool(all_powered
+                                      and all_accuracy_exact_met)
     payload = {
         "experiment": tag,
         "planned_n": n,
@@ -3671,8 +3873,25 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
         "claim_floor_blocked_metrics": seed_floor_blocked,
         "all_accuracy_claims_seed_eligible": all_claim_seed_eligible,
         "all_accuracy_claims_ready": all_claims_ready,
+        "all_accuracy_claims_confirmable": all_claims_confirmable,
         "alpha": alpha,
         "power_target": target,
+        # FDR level is part of the hashed design (see
+        # ``_design_plan_fingerprint``), because the exact-test floor is
+        # compared with it and changing q after outcomes would be an
+        # adaptive decision-rule change.
+        "fdr_q": fdr_q,
+        "min_seeds_for_exact_one_sided": sign_flip_min_units(
+            "greater", fdr_q),
+        "min_seeds_for_exact_two_sided": sign_flip_min_units(
+            "two-sided", fdr_q),
+        "exact_unfalsifiable_metrics": exact_unfalsifiable,
+        "exact_unfalsifiable_hypotheses": exact_unfalsifiable_hypotheses,
+        "accuracy_exact_unfalsifiable": accuracy_exact_unfalsifiable,
+        "all_accuracy_exact_resolutions_met": all_accuracy_exact_met,
+        "all_metric_exact_resolutions_met": all_metric_exact_met,
+        "max_exact_seed_shortfall": (
+            max(exact_shortfall) if exact_shortfall else 0),
         # Legacy single-arm field (kept for readers of older plans) and the
         # paired field actually used by the power calculation.
         "pilot_accuracy_sd": float(pilot_sd),
@@ -3712,9 +3931,14 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
             "companion: it assumes independent arm errors, and more seeds "
             "cannot remove it, so a stream-limited warning calls for a "
             "wider evaluation stream (the post-hoc seed x item bootstrap "
-            "measures the realized paired item variance).  An underpowered "
-            "row means a null result is uninformative at this N, not that "
-            "the effect is absent."),
+            "measures the realized paired item variance).  The exact "
+            "sign-flip resolution is planned per registered alternative: "
+            "at n=5 a two-sided exact p-value cannot fall below 0.0625, so "
+            "an undirected row is unfalsifiable at q=0.05 however large its "
+            "effect; the plan reports the required seed count rather than "
+            "discovering this after the grid.  An underpowered row means a "
+            "null result is uninformative at this N, not that the effect is "
+            "absent."),
         "hypotheses_sha256": _hypotheses_sha(),
         **_stamp(settings),
     }
@@ -3777,6 +4001,33 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
               f"remove this finite-stream floor, so widen the evaluation "
               f"stream (eval_batch x eval_batches) if the realized "
               f"seed x item bootstrap also shows item variance dominating")
+    one_sided_floor = sign_flip_resolution(n, "greater")[
+        "min_attainable_p"]
+    two_sided_floor = sign_flip_resolution(n, "two-sided")[
+        "min_attainable_p"]
+    print(f"  exact sign-flip floor at n={n} (q={fdr_q:g}): "
+          f"one-sided={one_sided_floor:.5g}, "
+          f"two-sided={two_sided_floor:.5g}")
+    if exact_unfalsifiable:
+        details = []
+        for metric in exact_unfalsifiable:
+            entries = [r for r in rows if r["metric"] == metric]
+            alternatives = sorted({
+                alternative for r in entries
+                for alternative in r["exact_unfalsifiable_alternatives"]})
+            required = [r.get("exact_required_seeds") for r in entries]
+            required_s = ("/".join(str(v) for v in sorted(set(required))
+                                   if v is not None) or "n/a")
+            details.append(f"{metric} ({'/'.join(alternatives)}; "
+                           f"need>={required_s})")
+        print(f"  WARNING: at n={n} the exact paired sign-flip test cannot "
+              f"reach q={fdr_q:g} for {', '.join(details)}; the bootstrap "
+              f"may appear significant while the design cannot confirm it. "
+              f"Add seeds before claiming these rows (or register a "
+              f"direction where the hypothesis is directional)")
+    elif rows:
+        print("  exact sign-flip resolution: every registered alternative "
+              "is falsifiable at the planned seed count")
     return payload
 
 
