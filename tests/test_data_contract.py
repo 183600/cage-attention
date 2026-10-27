@@ -53,6 +53,17 @@ class UniformityInputTest(unittest.TestCase):
         out = answer_uniformity_test([large, large], n_sim=1)
         self.assertEqual(out["n"], 2 * (2 ** 24 + 1))
 
+    def test_exact_integer_total_survives_float64_rounding(self):
+        from cage.data import answer_uniformity_test
+
+        huge = 2 ** 53 + 1
+        for counts in ([huge, huge], torch.tensor([huge, huge]),
+                       [10 ** 30, 10 ** 30], [float(2 ** 53), 1.0]):
+            with self.subTest(counts=counts):
+                out = answer_uniformity_test(counts, n_sim=1)
+                expected = sum(int(value) for value in counts)
+                self.assertEqual(out["n"], expected)
+
     def test_overflowing_count_sum_and_sampler_abstain(self):
         from cage.data import answer_uniformity_test
 

@@ -2574,6 +2574,38 @@ _UNIFORMITY_SIM = 500
 _UNIFORMITY_SIM_SEED = 8675309
 
 
+def _exact_count_total(values):
+    if torch.is_tensor(values):
+        flat = values.detach().cpu().reshape(-1)
+        if flat.dtype == torch.bool or flat.is_complex():
+            return None
+        items = flat.tolist()
+    elif isinstance(values, (str, bytes, Mapping)):
+        return None
+    else:
+        try:
+            items = list(values)
+        except TypeError:
+            return None
+    total = 0
+    for item in items:
+        if isinstance(item, bool):
+            return None
+        try:
+            total += operator.index(item)
+            continue
+        except TypeError:
+            pass
+        try:
+            number = float(item)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(number) or not number.is_integer():
+            return None
+        total += int(number)
+    return total
+
+
 def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
                            seed=_UNIFORMITY_SIM_SEED) -> dict:
     """Monte Carlo goodness-of-fit of answer counts against *uniform*.
@@ -2653,9 +2685,15 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     if not bool(c.eq(c.round()).all()):
         raise ValueError("answer counts must be integers")
     n = float(c.sum())
+    exact_n = _exact_count_total(counts)
+    if not math.isfinite(n):
+        exact_n = None
+    total = exact_n if exact_n is not None else n
     k = c.numel()
-    out = {"n": int(n) if math.isfinite(n) else 0, "n_classes": int(k),
-           "expected_per_class": (float(n / k)
+    out = {"n": (int(total) if exact_n is not None
+                 else (int(n) if math.isfinite(n) else 0)),
+           "n_classes": int(k),
+           "expected_per_class": (float(total / k)
                                   if k and math.isfinite(n)
                                   else float("nan")),
            "chi2": float("nan"), "df": int(max(k - 1, 0)),
@@ -2675,7 +2713,7 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     if n_sim_int < 1:
         return out
     n_sim = n_sim_int
-    expected = n / k
+    expected = total / k
     chi2 = float((((c - expected) ** 2) / expected).sum())
     gen = torch.Generator().manual_seed(_audit_seed(seed))
     try:
