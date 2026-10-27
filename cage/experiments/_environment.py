@@ -586,6 +586,25 @@ def _check_environment(out_dir) -> int:
     return 1
 
 
+def _source_hash_of(record):
+    """Code-content hash carried by one archived record, if any.
+
+    Full run records and manifests carry ``source_tree_sha256`` at the top
+    level; analysis companions nest the same stamp under ``_provenance``.
+    Documents without either are ignored here; :func:`_check_source` still
+    fails closed when a record declares a ``run_id`` or ``setup_sha256``
+    without a source hash.
+    """
+    if not isinstance(record, Mapping):
+        return None
+    value = record.get("source_tree_sha256")
+    if value is None:
+        provenance = record.get("_provenance")
+        if isinstance(provenance, Mapping):
+            value = provenance.get("source_tree_sha256")
+    return value
+
+
 def _source_hash_values(record) -> list:
     """Every code hash carried by one archived record.
 

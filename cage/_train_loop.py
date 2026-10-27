@@ -490,6 +490,21 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
 
 
 @torch.inference_mode()
+def collect_error_cases(model, n_pairs, vocab, device, batch=128, batches=4,
+                        seed=STATS_SEED, max_cases=64):
+    """Bad-case mining: dump and taxonomise the samples the model gets wrong.
+
+    Single-purpose wrapper around ``collect_stats_and_errors``; returns
+    ``{"cases": [...], "summary": {...}}`` with cases capped at
+    ``max_cases``, keeping the highest-confidence errors across the stream,
+    while the summary aggregates every evaluated sample.
+    """
+    _, errors = collect_stats_and_errors(
+        model, n_pairs, vocab, device, batch=batch, batches=batches, seed=seed,
+        max_cases=max_cases)
+    return errors
+
+
 def _attention_mass_on_key(x, weight, meta, n_heads, inv_scale, null_k):
     """Attention mass the query puts on the *correct* key, per sample.
 
@@ -579,9 +594,6 @@ def _error_case_flags(idx, meta, pred, n_pairs):
         "value_repeats": (vals == answer.unsqueeze(1)).sum(dim=1) > 1,
         "pred_in_context": (vals == pred.unsqueeze(1)).any(dim=1),
     }
-
-
-@torch.inference_mode()
 
 
 def _linked_positive_int(value, name):

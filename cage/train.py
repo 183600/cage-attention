@@ -558,6 +558,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
         })
     return hist
 
+@torch.inference_mode()
 def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
                   seed=VAL_SEED):
     """Recall accuracy at the query position.
@@ -594,6 +595,7 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
             module.train(training)
         release_eval_scratch()
 
+@torch.inference_mode()
 def collect_stats(model, n_pairs, vocab, device, batch=128, batches=4,
                   seed=STATS_SEED):
     """Collect per-layer gate / entropy / maxprob / null-mass at query positions,

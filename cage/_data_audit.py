@@ -655,6 +655,10 @@ def _distribution_from_counts(counts):
     return counts / counts.sum().clamp_min(1.0)
 
 
+def _distribution(values, n_categories):
+    return _distribution_from_counts(_counts(values, n_categories))
+
+
 def _total_variation(p, q):
     return float(0.5 * (p - q).abs().sum())
 

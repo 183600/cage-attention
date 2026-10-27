@@ -368,9 +368,6 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         release_eval_scratch()
 
 
-@torch.inference_mode()
-
-
 def _stats_layer_matrix(stats, key, n_rows=None):
     """A finite real ``(samples, layers)`` statistic matrix, or ``None``.
 
