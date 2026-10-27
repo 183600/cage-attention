@@ -2741,6 +2741,9 @@ def _counterfactual_counts(original_pred, answer, value_swap_pred,
                 raise ValueError(
                     f"{name} must contain integral token ids, got "
                     f"fractional or non-finite values")
+            if not bool(((t >= -2.0 ** 63) & (t < 2.0 ** 63)).all()):
+                raise ValueError(
+                    f"{name} token ids must fit in int64")
         try:
             return t.reshape(-1).to(torch.long)
         except (TypeError, ValueError, RuntimeError, OverflowError) as exc:

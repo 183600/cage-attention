@@ -210,6 +210,16 @@ class CounterfactualCountsTest(unittest.TestCase):
                     _counterfactual_counts(
                         bad, valid, valid, valid, valid, valid)
 
+    def test_integral_predictions_outside_int64_are_rejected(self):
+        valid = torch.tensor([5, 5, 5, 7])
+        for bad in ([1e30, 5.0, 5.0, 7.0],
+                    [-1e30, 5.0, 5.0, 7.0],
+                    [2.0 ** 63, 5.0, 5.0, 7.0]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    _counterfactual_counts(
+                        bad, valid, valid, valid, valid, valid)
+
     def test_empty_counts_abstain(self):
         for counts in ({}, None, [], "bad", object()):
             with self.subTest(counts=type(counts).__name__):
