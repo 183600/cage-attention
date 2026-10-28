@@ -3,3 +3,7 @@ __pycache__/
 results_quick/
 results/
 run_quick.log
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
