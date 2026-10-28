@@ -105,6 +105,16 @@ class ReplicationIntervalTest(unittest.TestCase):
         self.assertTrue(rep["replicates"])
         self.assertGreater(rep["prob_replicates"], 0.99)
 
+    def test_tiny_alpha_searches_the_upper_tail_without_cancellation(self):
+        # alpha/2 = 5e-17 used to round 1 - alpha/2 to 1.0, so a valid
+        # design alpha produced NaN instead of the finite large-t critical
+        # value.  Pin the df=3 quantile against the exact upper-tail root.
+        rep = replication_interval([0.1, 0.2, 0.3, 0.4], alpha=1e-16)
+        self.assertTrue(rep["valid"], rep["reason"])
+        self.assertAlmostEqual(rep["t_crit"], 280429.4253211925,
+                               delta=1e-3)
+        self.assertGreater(rep["hi"], rep["lo"])
+
     def test_noisy_positive_mean_is_not_expected_to_replicate(self):
         # Mean 0.058, but the between-seed spread is large enough that a
         # same-size repeat's interval crosses zero.  The current mean is

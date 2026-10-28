@@ -538,36 +538,49 @@ def _student_t_cdf(t: float, df: float) -> float:
     return 1.0 - tail if t > 0.0 else tail
 
 
-def _student_t_ppf(p: float, df: float) -> float:
-    """Quantile of Student's t (bisection on the monotone CDF).
+def _student_t_sf(t: float, df: float) -> float:
+    """Survival function of Student's t (the upper tail)."""
+    if not math.isfinite(t):
+        return 0.0 if t > 0.0 else 1.0
+    if not (math.isfinite(df) and df > 0.0):
+        return float("nan")
+    x = df / (df + t * t)
+    tail = 0.5 * _regularized_incomplete_beta(df / 2.0, 0.5, x)
+    return tail if t > 0.0 else 1.0 - tail
 
-    ``p`` is restricted to ``(0, 1)``; the symmetry of the t distribution
-    lets the search run on the upper half only.  The very-large-``df``
-    branch avoids spending iterations on a distribution that is normal to
-    machine precision.
+
+def _student_t_ppf(p: float, df: float) -> float:
+    """Quantile of Student's t (bisection on the monotone survival).
+
+    ``p`` is restricted to ``(0, 1)``.  Searching the *upper* tail directly
+    avoids forming ``1 - p`` for a tiny lower-tail probability: that
+    subtraction rounds to 1 and made a valid tiny alpha return NaN (or an
+    inaccurate quantile) instead of the finite large-``t`` critical value.
+    The very-large-``df`` branch avoids spending iterations on a
+    distribution that is normal to machine precision.
     """
     if not (0.0 < p < 1.0) or not (math.isfinite(df) and df > 0.0):
         return float("nan")
     if p == 0.5:
         return 0.0
-    if p < 0.5:
-        return -_student_t_ppf(1.0 - p, df)
     if df > 1e6:
-        return NormalDist().inv_cdf(p)
+        return _normal_quantile(p)
+    sign = -1.0 if p < 0.5 else 1.0
+    target = p if p < 0.5 else 1.0 - p
     lo, hi = 0.0, 1.0
-    while _student_t_cdf(hi, df) < p:
+    while _student_t_sf(hi, df) > target:
         hi *= 2.0
         if hi > 1e12:
-            return float("inf")
+            return sign * float("inf")
     for _ in range(200):
         mid = 0.5 * (lo + hi)
-        if _student_t_cdf(mid, df) < p:
+        if _student_t_sf(mid, df) > target:
             lo = mid
         else:
             hi = mid
         if hi - lo <= 1e-14 * max(1.0, hi):
             break
-    return 0.5 * (lo + hi)
+    return sign * 0.5 * (lo + hi)
 
 
 def replication_interval(diffs, direction=None, mode: str = "difference",
