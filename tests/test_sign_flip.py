@@ -42,6 +42,25 @@ class ExactSignFlipTest(unittest.TestCase):
         self.assertAlmostEqual(result["min_attainable_p_values"]["two-sided"],
                                2 / 32)
 
+    def test_tolerance_is_relative_to_the_data_scale(self):
+        # Tiny but non-zero effects are still a perfectly consistent sign
+        # pattern.  An absolute 1e-12 tie tolerance used to count every
+        # assignment as a tie here, returning p=1 instead of the exact
+        # floor.
+        reference = sign_flip_test([1.0] * 5)["p_values"]
+        for scale in (1e-10, 1e-12, 1e-13, 1e-15):
+            with self.subTest(scale=scale):
+                result = sign_flip_test([scale] * 5)
+                self.assertTrue(result["valid"], result["reason"])
+                self.assertAlmostEqual(result["p_values"]["greater"],
+                                       reference["greater"])
+                self.assertAlmostEqual(result["p_values"]["less"],
+                                       reference["less"])
+                self.assertAlmostEqual(result["p_values"]["two-sided"],
+                                       reference["two-sided"])
+                self.assertAlmostEqual(
+                    result["min_attainable_p_values"]["greater"], 1 / 32)
+
     def test_partial_sign_consistency_is_not_significant(self):
         # Four positive and one negative: six of 32 sign assignments are at
         # least this extreme, so p = 6/32 = 0.1875.  A bootstrap on the same

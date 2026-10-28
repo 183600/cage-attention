@@ -662,7 +662,14 @@ def sign_flip_test(diffs, alternative: str = "two-sided",
         out["reason"] = "paired differences overflow the sample mean"
         return out
     abs_obs = abs(obs)
-    tol = 1e-12 * max(1.0, abs_obs)
+    # Roundoff in the enumerated means scales with the largest difference,
+    # not with an absolute floor: a sample of tiny (but valid) effects such
+    # as [1e-13] * 5 must still reach the exact 1/2**n floor instead of
+    # having every assignment counted as a tie.  Keep the tolerance
+    # relative to the data scale (and to the observed mean after
+    # cancellation).
+    scale = max(abs_obs, float(d.abs().max()))
+    tol = 1e-12 * scale
     counts = {"greater": 0, "less": 0, "two-sided": 0}
     overflow = False
     if n <= max_exact_int:
