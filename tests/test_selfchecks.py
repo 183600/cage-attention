@@ -26,6 +26,20 @@ class MetricInputValidationTest(unittest.TestCase):
         self.assertTrue(math.isnan(metrics.brier_score([0.5], [0.5])))
         self.assertTrue(math.isnan(metrics.brier_score([0.5], [-1.0])))
 
+    def test_unrepresentable_metric_loop_sizes_abstain(self):
+        # Counts size ranges, bootstrap loops and bincount(minlength=...).
+        # Values outside torch's int64 index range cannot be honoured and
+        # must abstain before torch attempts an impossible allocation.
+        for huge in (2 ** 63, 10 ** 400):
+            with self.subTest(huge=huge):
+                self.assertTrue(math.isnan(
+                    metrics.expected_calibration_error(
+                        [0.5, 0.6], [1.0, 0.0], n_bins=huge)))
+                ci = metrics.paired_bootstrap_ci(
+                    [0.1, 0.2, 0.3], n_boot=huge)
+                self.assertEqual(ci["n"], 3)
+                self.assertTrue(math.isnan(ci["lo"]))
+
     def test_near_binary_labels_do_not_round_through_float32(self):
         # 0.9999999999999999 and 1.0000000001 are not exactly 0/1; the
         # default float32 capture would round both to an accepted label.

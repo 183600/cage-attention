@@ -96,14 +96,19 @@ def _binary_labels(values, device=None):
     return out
 
 
+_MAX_TORCH_INDEX = int(torch.iinfo(torch.long).max)
+
+
 def _positive_integer(value):
     if isinstance(value, bool):
         return None
     # Preserve exact integers instead of routing them through float: a
     # Python/NumPy integer above 2**53 would otherwise be silently rounded
-    # to a *different* count (e.g. 2**53 + 1 -> 2**53).  Keep the historical
-    # fail-closed behavior for integers too large to be represented as a
-    # finite float, so a JSON value such as 10**400 cannot size a loop.
+    # to a *different* count (e.g. 2**53 + 1 -> 2**53).  Counts size ranges,
+    # bootstrap loops and ``bincount(minlength=...)``, so anything outside
+    # torch's signed 64-bit index range cannot be honoured: reject it here
+    # rather than letting torch fail with an overflow or attempting an
+    # impossible allocation.
     try:
         exact = operator.index(value)
     except TypeError:
@@ -114,18 +119,14 @@ def _positive_integer(value):
         except (TypeError, ValueError):
             exact = None
     if exact is not None:
-        if exact < 1:
-            return None
-        try:
-            float(exact)
-        except (OverflowError, ValueError):
+        if exact < 1 or exact > _MAX_TORCH_INDEX:
             return None
         return int(exact)
     try:
         number = float(value)
     except (TypeError, ValueError, RuntimeError, OverflowError):
         return None
-    if not (math.isfinite(number) and number >= 1.0
+    if not (math.isfinite(number) and 1.0 <= number <= _MAX_TORCH_INDEX
             and number == int(number)):
         return None
     return int(number)
