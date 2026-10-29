@@ -68,6 +68,7 @@ except ImportError:  # torch without torch.compile
 
 
 _EPS = 1e-9
+_MAX_TORCH_INDEX = int(torch.iinfo(torch.long).max)
 
 _zero_scalar_cache: dict = {}
 
@@ -164,6 +165,10 @@ class Cfg:
             except TypeError as exc:
                 raise ValueError(
                     f"{name} must be an integer, got {raw!r}") from exc
+            if value > _MAX_TORCH_INDEX:
+                raise ValueError(
+                    f"{name}={value} exceeds torch's signed 64-bit index "
+                    f"range")
             setattr(self, name, value)
         if self.d_model <= 0 or self.n_heads <= 0 \
                 or self.d_model % self.n_heads:

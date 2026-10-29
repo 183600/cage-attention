@@ -1294,6 +1294,16 @@ class ComplexScalarValidationTest(unittest.TestCase):
                     Cfg(vocab_size=8, d_model=8, n_heads=2, n_layers=1,
                         max_len=4, gate="none", **{name: bad})
 
+    def test_unrepresentable_cfg_geometry_raises_value_error(self):
+        from cage.model import Cfg
+
+        for name in ("vocab_size", "d_model", "n_heads", "n_layers",
+                     "max_len"):
+            for huge in (2 ** 63, 10 ** 400):
+                with self.subTest(name=name, huge=huge):
+                    with self.assertRaises(ValueError):
+                        Cfg(**{name: huge})
+
     def test_complex_settings_numeric_fields_raise_value_error(self):
         import torch
 
