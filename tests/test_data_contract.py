@@ -365,6 +365,16 @@ class TorchIndexBoundsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_batch(2 ** 63, 1, 4, "cpu")
 
+    def test_derived_sequence_width_outside_int64_raises_value_error(self):
+        from cage.data import check_data_geometry
+
+        n_pairs = torch.iinfo(torch.long).max // 2 + 1
+        vocab = n_pairs + 2
+        with self.assertRaises(ValueError):
+            check_data_geometry(n_pairs, vocab)
+        with self.assertRaises(ValueError):
+            make_batch(0, n_pairs, vocab, "cpu")
+
 
 class LengthSweepBoundsTest(unittest.TestCase):
     def test_huge_sweep_request_stops_at_the_first_unfitted_length(self):

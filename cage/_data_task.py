@@ -697,6 +697,11 @@ def check_data_geometry(n_pairs, vocab, max_len=None) -> None:
         raise ValueError(
             f"n_pairs={n_pairs} and vocab={vocab} must fit torch's signed "
             f"64-bit index range")
+    tensor_width = 2 * n_pairs + 3
+    if tensor_width > _MAX_TORCH_INDEX:
+        raise ValueError(
+            f"n_pairs={n_pairs} needs a per-row tensor width of "
+            f"{tensor_width}, exceeding torch's signed 64-bit index range")
     if vocab < 4:
         raise ValueError(
             f"vocab must be >= 4 (two reserved ids plus at least two "
