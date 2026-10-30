@@ -117,6 +117,18 @@ class GeneratorCalibrationTest(unittest.TestCase):
         # More draws than selectable values guarantees a collision.
         self.assertEqual(data._expected_value_repeat_rate(5, 4), 1.0)
 
+    def test_repeat_rate_stays_accurate_for_large_vocabularies(self):
+        for vocab in (10**6, 10**9, 10**12, 10**15):
+            selectable = vocab - 2
+            self.assertAlmostEqual(
+                data._expected_value_repeat_rate(2, vocab) * selectable,
+                1.0, places=12)
+            expected_three = 3.0 / selectable - 2.0 / selectable ** 2
+            self.assertAlmostEqual(
+                data._expected_value_repeat_rate(3, vocab)
+                / expected_three,
+                1.0, places=12)
+
     def test_split_audit_stamps_generator_calibration(self):
         audit = data.split_leakage_audit(
             3, 17, batch=8, batches=2, train_seeds=(0,))

@@ -1374,7 +1374,9 @@ def _expected_value_repeat_rate(n_pairs, vocab) -> float:
     is the DGP-implied companion to the observed
     ``value_repeat_rate``: a generator that silently sampled values without
     replacement would produce a zero rate while leaving every marginal
-    uniform.
+    uniform.  For a large vocabulary the log-gamma difference between two
+    almost equal arguments loses nearly all significant digits, so the
+    direct log-product is summed whenever that is cheap.
     """
     n_pairs = _positive_audit_count(n_pairs, "n_pairs")
     vocab = _positive_audit_count(vocab, "vocab")
@@ -1386,9 +1388,14 @@ def _expected_value_repeat_rate(n_pairs, vocab) -> float:
         return 0.0
     if n_pairs > selectable:
         return 1.0
-    log_distinct = (math.lgamma(selectable + 1.0)
-                    - math.lgamma(selectable - n_pairs + 1.0)
-                    - n_pairs * math.log(selectable))
+    if n_pairs <= 1 << 20:
+        log_distinct = math.fsum(
+            math.log1p(-index / selectable)
+            for index in range(1, n_pairs))
+    else:
+        log_distinct = (math.lgamma(selectable + 1.0)
+                        - math.lgamma(selectable - n_pairs + 1.0)
+                        - n_pairs * math.log(selectable))
     return min(1.0, max(0.0, -math.expm1(log_distinct)))
 
 
