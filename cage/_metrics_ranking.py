@@ -97,6 +97,7 @@ def _binary_labels(values, device=None):
 
 
 _MAX_TORCH_INDEX = int(torch.iinfo(torch.long).max)
+_MAX_EXACT_FLOAT_INT = 1 << 53
 
 
 def _positive_integer(value):
@@ -978,8 +979,13 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     if n == 0 or c.numel() != n:
         return float("nan")
     n_bins = _positive_integer(n_bins)
-    if n_bins is None or not bool(torch.isfinite(p).all()) \
-            or not bool(torch.isfinite(c).all()):
+    # A bin index must be exactly representable in the float64 arithmetic
+    # that computes it; beyond 2**53 the index grid is coarser than the
+    # requested count and no honest ECE can be reported.  (Counts outside
+    # torch's int64 range are already rejected by ``_positive_integer``.)
+    if (n_bins is None or n_bins > _MAX_EXACT_FLOAT_INT
+            or not bool(torch.isfinite(p).all())
+            or not bool(torch.isfinite(c).all())):
         return float("nan")
     # Correctness is a binary outcome; a fractional/out-of-range value is
     # not a count of correct rows and would silently distort the bin
@@ -992,9 +998,15 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     if not bool(((p >= 0.0) & (p <= 1.0)).all()):
         return float("nan")
     bin_id = (p * n_bins).long().clamp(max=n_bins - 1)
-    counts = torch.bincount(bin_id, minlength=n_bins).to(torch.float64)
-    conf = torch.bincount(bin_id, weights=p, minlength=n_bins)
-    acc = torch.bincount(bin_id, weights=c, minlength=n_bins)
+    # Only the bins that actually contain a sample contribute to ECE.  Use
+    # their observed labels as compact group ids instead of asking
+    # ``bincount`` to allocate one slot per requested bin: n_bins can be
+    # large even when the evaluated panel has only a handful of rows.
+    observed, inverse = torch.unique(bin_id, return_inverse=True)
+    n_observed = int(observed.numel())
+    counts = torch.bincount(inverse, minlength=n_observed).to(torch.float64)
+    conf = torch.bincount(inverse, weights=p, minlength=n_observed)
+    acc = torch.bincount(inverse, weights=c, minlength=n_observed)
     nz = counts > 0
     gap = (acc[nz] / counts[nz] - conf[nz] / counts[nz]).abs()
     return float(((counts[nz] / n) * gap).sum())

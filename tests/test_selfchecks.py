@@ -40,6 +40,23 @@ class MetricInputValidationTest(unittest.TestCase):
                 self.assertEqual(ci["n"], 3)
                 self.assertTrue(math.isnan(ci["lo"]))
 
+    def test_huge_calibration_bin_counts_avoid_dense_allocation(self):
+        # A positive bin count inside torch's int64 range can still be far
+        # larger than the evaluated panel.  Only occupied bins contribute,
+        # so the ECE must not allocate one slot per requested bin.
+        self.assertAlmostEqual(
+            metrics.expected_calibration_error(
+                [0.5, 0.6], [1.0, 0.0], n_bins=10 ** 9),
+            0.55, places=12)
+        # Beyond 2**53 the float64 bin grid is coarser than the requested
+        # count; abstaining is honest and avoids both overflow and a huge
+        # allocation.
+        for huge in (2 ** 53 + 1, 2 ** 63 - 1):
+            with self.subTest(huge=huge):
+                self.assertTrue(math.isnan(
+                    metrics.expected_calibration_error(
+                        [0.5, 0.6], [1.0, 0.0], n_bins=huge)))
+
     def test_near_binary_labels_do_not_round_through_float32(self):
         # 0.9999999999999999 and 1.0000000001 are not exactly 0/1; the
         # default float32 capture would round both to an accepted label.
