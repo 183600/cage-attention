@@ -950,6 +950,29 @@ def association_codes(idx, meta, vocab) -> dict:
     return {"key": key, "value": value, "code": code}
 
 
+def _association_code_int(code) -> int:
+    """Canonicalize one non-negative association code."""
+    if isinstance(code, bool):
+        raise ValueError(
+            f"association codes must be integers, got {code!r}")
+    if isinstance(code, float):
+        # JSON round-trips may spell an integral code as 2.0; accept
+        # those but never truncate a genuinely fractional one.
+        if not math.isfinite(code) or not code.is_integer():
+            raise ValueError(
+                f"association codes must be integers, got {code!r}")
+        code = int(code)
+    try:
+        value = operator.index(code)
+    except TypeError as exc:
+        raise ValueError(
+            f"association codes must be integers, got {code!r}") from exc
+    if value < 0:
+        raise ValueError(
+            f"association codes must be non-negative, got {code!r}")
+    return int(value)
+
+
 def association_reference_codes(codes) -> frozenset:
     """Normalize a training-stream association-code reference.
 
@@ -971,28 +994,54 @@ def association_reference_codes(codes) -> frozenset:
         raise ValueError(
             "association reference must be an iterable of integer codes, "
             f"got {type(codes).__name__}") from exc
-    out = set()
-    for code in iterator:
-        if isinstance(code, bool):
+    return frozenset(_association_code_int(code) for code in iterator)
+
+
+def association_reference_counts(counts) -> dict:
+    """Normalize a training-stream ``association code -> exposure`` mapping.
+
+    The split audit can replay each training stream and count how many
+    times every exact ``(query key, answer value)`` pair was drawn.  A
+    binary seen/unseen split discards that dose information: an association
+    seen once and one seen dozens of times are pooled, even though a
+    memorising model should benefit more from the latter.  This helper
+    validates the mapping used for the exposure-dose readout and returns a
+    plain ``{int code: positive int count}`` dict.  Integral floats are
+    accepted for JSON round-trips; booleans, fractional/non-finite values,
+    negative codes and non-positive counts are rejected instead of being
+    silently coerced.
+    """
+    if isinstance(counts, (str, bytes)) or not isinstance(counts, Mapping):
+        raise ValueError(
+            "association count reference must be a mapping of integer "
+            f"codes to positive counts, got {type(counts).__name__}")
+    out = {}
+    for raw_code, raw_count in counts.items():
+        code = _association_code_int(raw_code)
+        if isinstance(raw_count, bool):
             raise ValueError(
-                f"association codes must be integers, got {code!r}")
-        if isinstance(code, float):
-            # JSON round-trips may spell an integral code as 2.0; accept
-            # those but never truncate a genuinely fractional one.
-            if not math.isfinite(code) or not code.is_integer():
+                f"association counts must be integers, got {raw_count!r}")
+        if isinstance(raw_count, float):
+            if not math.isfinite(raw_count) or not raw_count.is_integer():
                 raise ValueError(
-                    f"association codes must be integers, got {code!r}")
-            code = int(code)
+                    f"association counts must be integers, got "
+                    f"{raw_count!r}")
+            raw_count = int(raw_count)
         try:
-            value = operator.index(code)
+            count = operator.index(raw_count)
         except TypeError as exc:
             raise ValueError(
-                f"association codes must be integers, got {code!r}") from exc
-        if value < 0:
+                f"association counts must be integers, got "
+                f"{raw_count!r}") from exc
+        if count < 1:
             raise ValueError(
-                f"association codes must be non-negative, got {code!r}")
-        out.add(int(value))
-    return frozenset(out)
+                f"association counts must be positive, got {raw_count!r}")
+        if count > _MAX_TORCH_INDEX:
+            raise ValueError(
+                f"association count={count} exceeds torch's signed 64-bit "
+                f"index range")
+        out[code] = int(count)
+    return out
 
 
 def _count_duplicate_rows(idx) -> int:

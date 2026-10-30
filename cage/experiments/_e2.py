@@ -510,7 +510,9 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                     batch=settings.eval_batch,
                     batches=settings.eval_batches, seed=TEST_SEED,
                     train_association_codes=getattr(
-                        settings, "_train_association_codes", None))
+                        settings, "_train_association_codes", None),
+                    train_association_counts=getattr(
+                        settings, "_train_association_counts", None))
                 rec = {
                     "experiment": "e2_per_variant_tuning",
                     "hypotheses": ["H2a", "H2d"],

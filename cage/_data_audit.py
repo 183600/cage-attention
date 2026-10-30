@@ -52,8 +52,10 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
     expected, while only cross-group *row* overlap and seed reuse are hard
     failures.  Pass ``include_train_association_codes=True`` to also return
     the training code set (``train_association_codes``, a Python set that
-    is not JSON-serializable) for exposure-stratified evaluation; callers
-    must pop it before persisting the audit.
+    is not JSON-serializable) for exposure-stratified evaluation, plus the
+    exact per-code replay counts (``train_association_counts``) for the
+    exposure-dose readout; callers must pop both before persisting the
+    audit.
 
     It returns per-stream row/duplicate counts, the pairwise overlap matrix
     over row-content fingerprints, and the association-exposure readout.
@@ -260,10 +262,17 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
             "accuracy gain to in-context retrieval."),
     }
     if include_train_association_codes:
-        # Not JSON-serializable on purpose: the caller must pop it before
+        # Not JSON-serializable on purpose: the caller must pop these before
         # persisting the audit (the experiment layer does so when it hands
-        # the set to exposure-stratified evaluation).
+        # the references to exposure-stratified evaluation).
         out["train_association_codes"] = train_codes
+        train_counts = {}
+        for name in names:
+            if groups[name] != "train":
+                continue
+            for code in associations[name]:
+                train_counts[code] = train_counts.get(code, 0) + 1
+        out["train_association_counts"] = train_counts
     return out
 
 

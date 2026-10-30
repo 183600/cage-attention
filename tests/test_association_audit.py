@@ -14,6 +14,7 @@ import math
 import pathlib
 import tempfile
 import unittest
+from collections import Counter
 
 import torch
 import torch.nn as nn
@@ -24,6 +25,7 @@ from cage.data import (
     actual_stream_overlap_audit,
     association_codes,
     association_reference_codes,
+    association_reference_counts,
     make_batch,
     stream_seed_key,
 )
@@ -77,6 +79,17 @@ class AssociationReferenceTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     association_reference_codes(bad)
 
+    def test_exposure_counts_are_canonicalized_and_validated(self):
+        self.assertEqual(
+            association_reference_counts({1: 2, 2.0: 3.0}),
+            {1: 2, 2: 3})
+        for bad in (None, 3, "12", [1, 2],
+                    {1: 0}, {1: -2}, {1: 1.5}, {1: float("nan")},
+                    {True: 1}, {-1: 1}, {1: True}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    association_reference_counts(bad)
+
 
 class AssociationExposureAuditTest(unittest.TestCase):
     def _audit(self):
@@ -127,6 +140,14 @@ class AssociationExposureAuditTest(unittest.TestCase):
     def test_exposure_counts_match_an_independent_replay(self):
         audit = self._audit()
         train_codes = audit.pop("train_association_codes")
+        train_counts = audit.pop("train_association_counts")
+        train_batches = _draw(0, batch=4, batches=8, n_pairs=3, vocab=32)
+        train_batches += _draw(0, batch=5, batches=2, n_pairs=3, vocab=32)
+        expected_counts = Counter(
+            int(code) for idx, _, meta in train_batches
+            for code in association_codes(idx, meta, 32)["code"].tolist())
+        self.assertEqual(train_counts, dict(expected_counts))
+        self.assertEqual(set(train_counts), set(train_codes))
         test_batches = _draw(TEST_SEED, batch=4, batches=2, n_pairs=3,
                             vocab=32)
         test_codes = [
@@ -149,9 +170,10 @@ class AssociationExposureAuditTest(unittest.TestCase):
             heldout_specs={"test": {"seed": TEST_SEED, "batch": 4,
                                     "batches": 1}})
         self.assertNotIn("train_association_codes", audit)
+        self.assertNotIn("train_association_counts", audit)
         self.assertGreater(
             audit["streams"]["train:0"]["n_unique_associations"], 0)
-        json.dumps(audit)  # must stay serializable without the code set
+        json.dumps(audit)  # must stay serializable without the references
 
     def test_experiment_layer_keeps_codes_off_disk(self):
         from cage.experiments import Settings, _audit_data_splits
@@ -163,15 +185,23 @@ class AssociationExposureAuditTest(unittest.TestCase):
             self.assertIsInstance(settings._train_association_codes,
                                   frozenset)
             self.assertTrue(settings._train_association_codes)
+            self.assertIsInstance(settings._train_association_counts, dict)
+            self.assertEqual(set(settings._train_association_counts),
+                             set(settings._train_association_codes))
             self.assertIn("association_exposure", audit)
             self.assertNotIn("train_association_codes", audit)
+            self.assertNotIn("train_association_counts", audit)
             self.assertNotIn(
                 "train_association_codes",
+                audit["actual_stream_overlap"])
+            self.assertNotIn(
+                "train_association_counts",
                 audit["actual_stream_overlap"])
             payload = json.loads(
                 (out / "unit_split_audit.json").read_text(encoding="utf-8"))
             self.assertIn("association_exposure", payload)
             self.assertNotIn("train_association_codes", payload)
+            self.assertNotIn("train_association_counts", payload)
 
 
 class _OracleRetrieval(nn.Module):
@@ -235,6 +265,66 @@ class ExposureStratifiedEvalTest(unittest.TestCase):
             block["seen"]["cf_value_follow_rate"], 1.0)
         self.assertAlmostEqual(
             block["unseen"]["cf_value_follow_rate"], 1.0)
+
+    @staticmethod
+    def _dose_bin(count):
+        if count == 0:
+            return 0
+        if count == 1:
+            return 1
+        if count == 2:
+            return 2
+        if count <= 4:
+            return 3
+        if count <= 9:
+            return 4
+        return 5
+
+    def test_counts_produce_the_exposure_dose_readout(self):
+        unique_codes = sorted(set(self.eval_codes))
+        counts = {code: (i % 6) + 1
+                  for i, code in enumerate(unique_codes[::2])}
+        out = eval_metrics(_OracleRetrieval(17), 3, 17, "cpu", batch=8,
+                           batches=2, seed=123,
+                           train_association_counts=counts)
+        block = out["association_exposure_dose"]
+        binary = out["association_exposure"]
+        expected_n = [0] * len(block["bins"])
+        expected_total = 0
+        for code in self.eval_codes:
+            count = counts.get(code, 0)
+            expected_n[self._dose_bin(count)] += 1
+            expected_total += count
+        self.assertEqual(block["n_items"], out["n"])
+        self.assertEqual(binary["n_seen"], out["n"] - expected_n[0])
+        self.assertEqual([row["n"] for row in block["bins"]], expected_n)
+        self.assertEqual(block["max_train_count"], max(counts.values()))
+        self.assertAlmostEqual(
+            block["mean_train_count"], expected_total / out["n"])
+        self.assertAlmostEqual(
+            block["seen_rate"], 1.0 - expected_n[0] / out["n"])
+        for row in block["bins"]:
+            if row["n"]:
+                self.assertAlmostEqual(row["accuracy"], 1.0)
+                self.assertLessEqual(row["max_train_count"], 6)
+            else:
+                self.assertTrue(math.isnan(row["accuracy"]))
+        self.assertAlmostEqual(block["seen_accuracy"], 1.0)
+        if expected_n[0]:
+            self.assertAlmostEqual(
+                block["seen_minus_unseen_accuracy"], 0.0)
+        else:
+            self.assertTrue(math.isnan(
+                block["seen_minus_unseen_accuracy"]))
+
+    def test_codes_and_counts_must_describe_the_same_set(self):
+        counts = {self.eval_codes[0]: 2}
+        with self.assertRaisesRegex(ValueError, "different exact"):
+            eval_metrics(_OracleRetrieval(17), 3, 17, "cpu", batch=4,
+                         batches=1, seed=123,
+                         train_association_codes=frozenset(
+                             {max(self.eval_codes) + 1}),
+                         train_association_counts=counts)
 
     def test_memorised_lookup_scores_above_chance_only_on_seen_pairs(self):
         reference = frozenset(self.eval_codes[::2])

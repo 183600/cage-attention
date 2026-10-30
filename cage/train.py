@@ -19,6 +19,7 @@ from .data import (
     VAL_SEED,
     association_codes,
     association_reference_codes,
+    association_reference_counts,
     batch_fingerprint,
     check_train_seed,
     difficulty_strata,

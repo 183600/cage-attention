@@ -96,7 +96,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                                     seed=eval_seed,
                                     train_association_codes=getattr(
                                         settings,
-                                        "_train_association_codes", None)))
+                                        "_train_association_codes", None),
+                                    train_association_counts=getattr(
+                                        settings,
+                                        "_train_association_counts", None)))
             want_errors = length == lengths[-1]
             # Only the last length also collects the error-mining
             # record.

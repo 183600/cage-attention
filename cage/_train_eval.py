@@ -138,9 +138,67 @@ def _association_exposure_summary(totals) -> dict:
     return out
 
 
+def _association_exposure_dose_summary(totals) -> dict:
+    """Rates for the fixed training-exposure dose bins.
+
+    Counts are kept exact until this final step, so an empty bin abstains
+    with NaN instead of contributing a fabricated zero.  The table is a
+    dose-response companion to the binary seen/unseen block: it asks
+    whether accuracy changes as the same exact association is replayed
+    more often in the training streams.
+    """
+    entries = totals if isinstance(totals, (list, tuple)) else ()
+    rows = []
+    n_items = n_correct = exposure_total = max_exposure = 0
+    for label, entry in zip(_EXPOSURE_DOSE_LABELS, entries):
+        n = int(entry["n"])
+        correct = int(entry["n_correct"])
+        n_items += n
+        n_correct += correct
+        exposure_total += int(entry["exposure_total"])
+        max_exposure = max(max_exposure, int(entry["max_exposure"]))
+        rows.append({
+            "bin": label,
+            "n": n,
+            "n_correct": correct,
+            "accuracy": correct / n if n else float("nan"),
+            "mean_train_count": (
+                int(entry["exposure_total"]) / n if n else float("nan")),
+            "max_train_count": int(entry["max_exposure"]),
+        })
+    seen_n = sum(row["n"] for row in rows[1:])
+    seen_correct = sum(row["n_correct"] for row in rows[1:])
+    unseen = rows[0]
+    seen_accuracy = seen_correct / seen_n if seen_n else float("nan")
+    gap = (seen_accuracy - unseen["accuracy"]
+           if seen_n and unseen["n"] else float("nan"))
+    return {
+        "definition": (
+            "training-exposure dose = number of times the exact evaluated "
+            "(query key, answer value) association was drawn by a "
+            "training-group stream"),
+        "bins": rows,
+        "n_items": int(n_items),
+        "n_seen": int(seen_n),
+        "seen_rate": seen_n / n_items if n_items else float("nan"),
+        "seen_accuracy": seen_accuracy,
+        "seen_minus_unseen_accuracy": gap,
+        "mean_train_count": (
+            exposure_total / n_items if n_items else float("nan")),
+        "max_train_count": int(max_exposure),
+        "note": (
+            "pre-treatment descriptive dose-response, not a causal "
+            "contrast: repeated training exposure is not randomised, so "
+            "read the per-bin accuracy next to the counterfactual "
+            "value-swap rates before attributing an accuracy gain to "
+            "memorisation."),
+    }
+
+
 @torch.inference_mode()
 def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
-                 seed=VAL_SEED, topk=5, train_association_codes=None):
+                 seed=VAL_SEED, topk=5, train_association_codes=None,
+                 train_association_counts=None):
     """Full metric panel at the query position.
 
     Same evaluation protocol as ``eval_accuracy`` (eval mode restored
@@ -182,6 +240,17 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     only on the training data, never on the model's answer, so it can expose
     an accuracy gain that is concentrated on memorisable pairs instead of
     being attributed to in-context retrieval.
+
+    ``train_association_counts`` optionally supplies the training replay
+    count for every association code (from the same audit).  When present,
+    ``out['association_exposure_dose']`` bins items by that count (0, 1,
+    2, 3-4, 5-9, 10+) and reports accuracy per bin.  This separates a
+    single-exposure effect from a dose-response: if clean accuracy keeps
+    rising with repeated training exposure, the binary seen/unseen
+    contrast is pooling materially different memorisation opportunities.
+    Passing counts alone also enables the binary exposure block, because
+    its reference set is the mapping's key set.  If both references are
+    given they must describe the same exact association set.
     """
     raw_batch, raw_batches = batch, batches
     batch = _positive_integer(raw_batch)
@@ -203,6 +272,17 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     n_realizable_key_bins = min(n_key_bins, max(1, int(n_pairs)))
     reference_codes = (None if train_association_codes is None else
                        association_reference_codes(train_association_codes))
+    reference_counts = (None if train_association_counts is None else
+                        association_reference_counts(
+                            train_association_counts))
+    if reference_counts is not None:
+        count_codes = frozenset(reference_counts)
+        if reference_codes is None:
+            reference_codes = count_codes
+        elif reference_codes != count_codes:
+            raise ValueError(
+                "train_association_codes and train_association_counts "
+                "describe different exact association sets")
     training_states = {module: module.training for module in model.modules()}
     try:
         model.eval()
@@ -210,6 +290,8 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         digest_batches = []
         cf_totals = None
         exposure_totals = {}
+        exposure_dose_totals = (
+            _blank_exposure_dose() if reference_counts is not None else None)
         for i in range(batches):
             idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
             validate_batch(idx, tgt, meta, vocab, diagnostics=False)
@@ -267,6 +349,10 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
                                  else edits["value_swap_answer"]),
                     distractor_pred=distractor_pred,
                     relocation_pred=relocation_pred)
+            if reference_counts is not None:
+                _association_exposure_dose_accumulate(
+                    exposure_dose_totals, idx, meta, vocab,
+                    reference_counts, pred, meta["answer"])
         if logits_all:
             logits_cat = torch.cat(logits_all, dim=0).cpu()
             tgt_cat = torch.cat(tgt_all, dim=0).cpu()
@@ -380,6 +466,9 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
             exposure = _association_exposure_summary(exposure_totals)
             out["association_exposure"] = exposure
             out.update(exposure["flat"])
+        if reference_counts is not None:
+            out["association_exposure_dose"] = (
+                _association_exposure_dose_summary(exposure_dose_totals))
         return out
     finally:
         for module, training in training_states.items():

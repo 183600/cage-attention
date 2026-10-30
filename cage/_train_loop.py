@@ -1336,6 +1336,67 @@ def _blank_exposure_cohort() -> dict:
     }
 
 
+_EXPOSURE_DOSE_LABELS = ("0", "1", "2", "3-4", "5-9", "10+")
+_EXPOSURE_DOSE_BOUNDARIES = (1, 2, 3, 5, 10)
+
+
+def _blank_exposure_dose() -> list:
+    """Integer accumulators for the fixed training-exposure dose bins."""
+    return [{"n": 0, "n_correct": 0, "exposure_total": 0,
+             "max_exposure": 0} for _ in _EXPOSURE_DOSE_LABELS]
+
+
+def _association_exposure_dose_accumulate(totals, idx, meta, vocab,
+                                          reference_counts, pred,
+                                          answer) -> None:
+    """Add one batch to the training-exposure dose-response counters.
+
+    ``reference_counts`` maps every exact ``(query key, answer value)``
+    association realized by the training streams to the number of times it
+    was drawn.  Items are binned by that count (0, 1, 2, 3-4, 5-9, 10+), a
+    pre-treatment split that depends only on the training data.  Pooling
+    all seen pairs into one cohort can hide a dose-response: if accuracy
+    rises with repeated exposure, the binary seen/unseen gap understates
+    memorisation and the highest-exposure cohort is the informative one.
+    """
+    try:
+        pred = (pred.detach() if torch.is_tensor(pred)
+                else torch.as_tensor(pred).detach()).reshape(-1)
+        answer = (answer.detach() if torch.is_tensor(answer)
+                  else torch.as_tensor(answer).detach()).reshape(-1)
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+        raise ValueError(
+            "pred and answer must be tensor-like sequences, got "
+            f"{type(pred).__name__}/{type(answer).__name__}") from exc
+    if pred.numel() != answer.numel():
+        raise ValueError(
+            f"answer has {int(answer.numel())} entries for "
+            f"{int(pred.numel())} predictions")
+    codes = association_codes(idx, meta, vocab)["code"].tolist()
+    if len(codes) != int(pred.numel()):
+        raise ValueError(
+            f"association exposure has {len(codes)} entries for "
+            f"{int(pred.numel())} rows")
+    counts = torch.tensor(
+        [int(reference_counts.get(int(code), 0)) for code in codes],
+        dtype=torch.long, device=pred.device)
+    boundaries = torch.tensor(
+        _EXPOSURE_DOSE_BOUNDARIES, dtype=torch.long, device=pred.device)
+    bins = torch.bucketize(counts, boundaries, right=True)
+    correct = pred.to(device=counts.device).eq(
+        answer.to(device=counts.device))
+    for bin_idx, entry in enumerate(totals):
+        mask = bins.eq(bin_idx)
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        entry["n"] += n
+        entry["n_correct"] += int(correct[mask].sum())
+        entry["exposure_total"] += int(counts[mask].sum())
+        entry["max_exposure"] = max(
+            entry["max_exposure"], int(counts[mask].max()))
+
+
 def _association_exposure_accumulate(totals, idx, meta, vocab, reference,
                                      pred, answer, swap_pred=None,
                                      swap_answer=None, distractor_pred=None,

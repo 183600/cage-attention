@@ -251,7 +251,9 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
                            settings.device, batch=settings.eval_batch,
                            batches=settings.eval_batches, seed=eval_seed,
                            train_association_codes=getattr(
-                               settings, "_train_association_codes", None))
+                               settings, "_train_association_codes", None),
+                           train_association_counts=getattr(
+                               settings, "_train_association_counts", None))
     return model, params, metrics, _curve_record(
         hist, early_stop_info, seeding), model_cfg
 
@@ -749,11 +751,15 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
                 },
             },
             include_train_association_codes=True)
-        # The code set is not JSON-serializable and can be large; keep it on
-        # the in-process Settings so exposure-stratified evaluation can use
-        # it, and persist only the aggregate exposure readout below.
+        # The code set/count mapping are not JSON-serializable and can be
+        # large; keep them on the in-process Settings so exposure-stratified
+        # evaluation can use them, and persist only the aggregate readout.
         settings._train_association_codes = frozenset(
             actual.pop("train_association_codes", ()))
+        settings._train_association_counts = {
+            int(code): int(count)
+            for code, count in actual.pop(
+                "train_association_counts", {}).items()}
         audit["actual_stream_overlap"] = actual
         audit["max_actual_stream_overlap"] = actual["max_overlap"]
         audit["actual_stream_seed_collisions"] = actual[
