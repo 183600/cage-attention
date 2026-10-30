@@ -418,13 +418,14 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         # Per-stratum recall by *pre-treatment* difficulty: retrieval
         # position (relative tertile) x structural ambiguity.  A length
         # sweep changes the ambiguity mix by construction (more pairs ->
-        # more repeated values / naive-confusable queries), so the raw
-        # accuracy drop conflates length with data difficulty.  Recording
-        # the joint counts lets the experiment layer post-stratify to a
-        # common reference mix (``cage.metrics.standardized_proportion``)
-        # without a second model pass.
-        n_strata = 4 * n_key_bins
-        n_realizable_strata = 4 * n_realizable_key_bins
+        # more repeated values, naive-confusable queries and answer-as-key
+        # copy-source targets), so the raw accuracy drop conflates length
+        # with data difficulty.  Recording the joint counts lets the
+        # experiment layer post-stratify to a common reference mix
+        # (``cage.metrics.standardized_proportion``) without a second model
+        # pass.
+        n_strata = 8 * n_key_bins
+        n_realizable_strata = 8 * n_realizable_key_bins
         correct_rows = pred == tgt_cat
         strata_counts = torch.bincount(strata_cat, minlength=n_strata)
         strata_correct = torch.bincount(

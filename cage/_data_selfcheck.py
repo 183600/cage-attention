@@ -132,11 +132,15 @@ def _self_test() -> int:
           abs(_expected_value_repeat_rate(1, 4) - 0.0) < 1e-12
           and abs(_expected_value_repeat_rate(2, 4) - 0.5) < 1e-12
           and _expected_value_repeat_rate(5, 4) == 1.0)
+    check("answer_as_key_rate",
+          abs(_expected_answer_as_key_rate(1, 4) - 0.5) < 1e-12
+          and abs(_expected_answer_as_key_rate(3, 8) - 0.5) < 1e-12
+          and _expected_answer_as_key_rate(5, 4) == 1.0)
 
     # Structural difficulty covariates: hand-built sequences pin where the
-    # matching key sits, whether the answer value repeats, and whether the
-    # naive last-match rule is misled by the query token appearing later
-    # as a value.
+    # matching key sits, whether the answer value repeats, whether the naive
+    # last-match rule is misled by the query token appearing later as a
+    # value, and whether the answer also occurs as a key.
     feat_split = {
         "idx": torch.tensor([[5, 10, 7, 7, 9, 12, SEP_ID, 7],
                              [3, 20, 4, 20, 5, 9, SEP_ID, 4]]),
@@ -149,8 +153,10 @@ def _self_test() -> int:
           feat["value_repeats"].tolist() == [0, 1])
     check("difficulty_naive_confusable",
           feat["naive_confusable"].tolist() == [1, 0])
+    check("difficulty_answer_as_key",
+          feat["answer_as_key"].tolist() == [1, 0])
     check("difficulty_joint_encoding",
-          _joint_difficulty_values(feat).tolist() == [5, 6])
+          _joint_difficulty_values(feat).tolist() == [13, 10])
     # Difficulty strata are the *pre-treatment* covariate used to
     # post-stratify accuracy across lengths.  With one bin per pair the
     # stratum must reproduce the historical joint encoding exactly; with
@@ -158,11 +164,11 @@ def _self_test() -> int:
     strata_exact = difficulty_strata(
         feat_split["idx"], feat_split["answer"], 3, n_key_bins=3)
     check("difficulty_strata_matches_joint",
-          strata_exact["stratum"].tolist() == [5, 6])
+          strata_exact["stratum"].tolist() == [13, 10])
     check("difficulty_strata_labels_complete",
-          len(strata_exact["labels"]) == 12
+          len(strata_exact["labels"]) == 24
           and [row["id"] for row in strata_exact["labels"]]
-          == list(range(12)))
+          == list(range(24)))
     check("difficulty_strata_bounds_cover_pairs",
           strata_exact["key_bin_bounds"][0][0] == 0
           and strata_exact["key_bin_bounds"][-1][1] == 3)
@@ -530,6 +536,7 @@ def _self_test() -> int:
         "key_pos": torch.tensor([0.7, 0.2, 0.08, 0.02], dtype=torch.float64),
         "value_repeats": torch.tensor([0.9, 0.1], dtype=torch.float64),
         "naive_confusable": torch.tensor([0.8, 0.2], dtype=torch.float64),
+        "answer_as_key": torch.tensor([0.9, 0.1], dtype=torch.float64),
     }
 
     def draw_rare_split(seed, n=2048):
@@ -550,6 +557,7 @@ def _self_test() -> int:
     tail["key_pos"] = torch.full((2048,), 3, dtype=torch.long)
     tail["value_repeats"] = torch.ones(2048, dtype=torch.long)
     tail["naive_confusable"] = torch.ones(2048, dtype=torch.long)
+    tail["answer_as_key"] = torch.ones(2048, dtype=torch.long)
     for field, vals in tail.items():
         odd_values[("stats", field)] = vals
     odd_names = ["train:0", "train:1", "val", "test", "stats"]

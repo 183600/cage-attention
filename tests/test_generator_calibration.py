@@ -17,14 +17,15 @@ class GeneratorCalibrationTest(unittest.TestCase):
             4, 32, batch=64, batches=2, seed=0, n_sim=200)
         self.assertEqual(out["n_rows"], 128)
         self.assertEqual(out["n_pair_observations"], 512)
-        self.assertEqual(out["family"]["n_tests"], 9)
+        self.assertEqual(out["family"]["n_tests"], 10)
         self.assertEqual(out["family"]["abstained"], [])
         self.assertTrue(out["calibration_supported"])
         self.assertTrue(all(
             math.isfinite(test["p_value"])
             for test in (*out["marginal_uniformity"].values(),
                          *out["independence"].values(),
-                         out["value_repeat_rate"]) if test["applicable"]))
+                         out["value_repeat_rate"],
+                         out["answer_as_key_rate"]) if test["applicable"]))
 
     def test_single_pair_geometry_abstains_on_unavailable_checks(self):
         out = data.generator_calibration_audit(
@@ -32,7 +33,7 @@ class GeneratorCalibrationTest(unittest.TestCase):
         self.assertFalse(
             out["marginal_uniformity"]["query_rank"]["applicable"])
         self.assertFalse(out["value_repeat_rate"]["applicable"])
-        self.assertEqual(out["family"]["n_tests"], 6)
+        self.assertEqual(out["family"]["n_tests"], 7)
         self.assertTrue(out["calibration_supported"])
 
     def test_biased_key_value_coupling_is_rejected(self):
@@ -64,6 +65,33 @@ class GeneratorCalibrationTest(unittest.TestCase):
                       out["family"]["rejected"])
         self.assertLessEqual(
             out["independence"]["key_value"]["p_value"], 1.0 / 201.0)
+
+    def test_answer_copying_a_key_is_rejected(self):
+        original = data.make_batch
+
+        def copy_key(batch, n_pairs, vocab, device, dense_lm=False, gen=None):
+            idx, targets, meta = original(
+                batch, n_pairs, vocab, device, dense_lm=dense_lm, gen=gen)
+            idx = idx.clone()
+            rows = torch.arange(batch, device=idx.device)
+            answer = idx[:, -1]
+            idx[rows, meta["key_pos"] + 1] = answer
+            targets = torch.full_like(idx, -1)
+            targets[rows, meta["query_pos"]] = answer
+            meta = dict(meta)
+            meta["answer"] = answer
+            data.validate_batch(idx, targets, meta, vocab,
+                                diagnostics=False)
+            return idx, targets, meta
+
+        with patch.object(data, "make_batch", copy_key):
+            out = data.generator_calibration_audit(
+                4, 32, batch=64, batches=2, seed=0, n_sim=200)
+        self.assertFalse(out["calibration_supported"])
+        self.assertIn("answer_as_key_rate", out["family"]["rejected"])
+        self.assertEqual(out["answer_as_key_rate"]["observed"], 128)
+        self.assertLessEqual(
+            out["answer_as_key_rate"]["p_value"], 1.0 / 201.0)
 
     def test_without_replacement_values_are_rejected(self):
         original = data.make_batch
@@ -110,6 +138,13 @@ class GeneratorCalibrationTest(unittest.TestCase):
             left, left, 10_000, 10_000, n_sim=10, seed=0)
         self.assertFalse(too_wide["valid"])
         self.assertIn("audit budget", too_wide["reason"])
+
+    def test_expected_answer_as_key_rate_matches_the_dgp(self):
+        self.assertAlmostEqual(
+            data._expected_answer_as_key_rate(1, 4), 0.5)
+        self.assertAlmostEqual(
+            data._expected_answer_as_key_rate(3, 8), 0.5)
+        self.assertEqual(data._expected_answer_as_key_rate(5, 4), 1.0)
 
     def test_expected_value_repeat_rate_matches_the_birthday_probability(self):
         self.assertEqual(data._expected_value_repeat_rate(1, 4), 0.0)

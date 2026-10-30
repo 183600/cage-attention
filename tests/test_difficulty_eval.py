@@ -63,7 +63,7 @@ class JsonLengthKeyTest(unittest.TestCase):
     @staticmethod
     def _block(n, correct):
         return {"difficulty": {
-            "n_strata": 12,
+            "n_strata": 24,
             "strata": [{"id": 0, "n": n, "correct": correct}],
         }}
 
@@ -194,23 +194,28 @@ class DifficultyStrataTest(unittest.TestCase):
         self.assertEqual(features["key_pos"].tolist(), [1, 1])
         self.assertEqual(features["value_repeats"].tolist(), [0, 1])
         self.assertEqual(features["naive_confusable"].tolist(), [1, 0])
+        self.assertEqual(features["answer_as_key"].tolist(), [1, 0])
 
-    def test_stratum_reproduces_the_historical_joint_encoding(self):
-        # With one bin per pair, the stratum id must equal the audit's
-        # ``difficulty_joint`` encoding: key_pos * 4 + repeat * 2 + naive.
+    def test_stratum_matches_the_joint_difficulty_encoding(self):
+        # With one bin per pair, the stratum id equals the audit's
+        # ``difficulty_joint`` encoding.  The ambiguity bits are naive (1),
+        # repeated value (2) and answer-as-key (4), above key_pos * 8.
         strata = difficulty_strata(self.idx, self.answer, 3, n_key_bins=3)
-        self.assertEqual(strata["stratum"].tolist(), [5, 6])
+        self.assertEqual(strata["stratum"].tolist(), [13, 10])
         self.assertEqual(strata["key_bin"].tolist(), [1, 1])
-        self.assertEqual(strata["ambiguity"].tolist(), [1, 2])
+        self.assertEqual(strata["ambiguity"].tolist(), [5, 2])
 
     def test_labels_cover_every_stratum(self):
         labels = difficulty_stratum_labels(DEFAULT_DIFFICULTY_KEY_BINS)
-        self.assertEqual(len(labels), 4 * DEFAULT_DIFFICULTY_KEY_BINS)
+        self.assertEqual(len(labels), 8 * DEFAULT_DIFFICULTY_KEY_BINS)
         self.assertEqual([row["id"] for row in labels],
                          list(range(len(labels))))
         self.assertEqual({row["ambiguity"] for row in labels},
                          {"none", "naive_confusable", "value_repeats",
-                          "both"})
+                          "both", "answer_as_key",
+                          "naive_confusable+answer_as_key",
+                          "value_repeats+answer_as_key",
+                          "both+answer_as_key"})
 
     def test_generated_batches_use_the_same_layout(self):
         idx, _, meta = make_batch(
@@ -219,7 +224,7 @@ class DifficultyStrataTest(unittest.TestCase):
         self.assertEqual(strata["stratum"].shape, (8,))
         self.assertTrue(bool((strata["stratum"] >= 0).all()))
         self.assertTrue(bool((strata["stratum"]
-                              < 4 * DEFAULT_DIFFICULTY_KEY_BINS).all()))
+                              < 8 * DEFAULT_DIFFICULTY_KEY_BINS).all()))
 
     def test_malformed_geometry_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -589,15 +594,15 @@ class EvalDifficultyRecordTest(unittest.TestCase):
                            seed=123)
         block = out["difficulty"]
         self.assertEqual(block["n_pairs"], 3)
-        self.assertEqual(len(block["strata"]), 12)
+        self.assertEqual(len(block["strata"]), 24)
         self.assertEqual(sum(row["n"] for row in block["strata"]), out["n"])
         self.assertEqual(sum(row["correct"] for row in block["strata"]),
                          round(out["accuracy"] * out["n"]))
         self.assertGreaterEqual(block["observed_strata"], 1)
-        self.assertLessEqual(block["observed_strata"], 12)
+        self.assertLessEqual(block["observed_strata"], 24)
         self.assertAlmostEqual(
             block["coverage_of_possible"],
-            block["observed_strata"] / 12, places=12)
+            block["observed_strata"] / 24, places=12)
 
 
 if __name__ == "__main__":

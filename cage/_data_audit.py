@@ -280,17 +280,20 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
 # quantity the accuracy / loss metrics are computed on), the key / value
 # sub-populations, and the *structural difficulty* covariates that decide
 # whether accuracy is comparable across splits: where the matching key sits
-# (retrieval distance), whether the answer value repeats in the context, and
+# (retrieval distance), whether the answer value repeats in the context,
 # whether a naive last-match rule would be misled by the query token
-# appearing later as a value.  Marginal token frequencies can match perfectly
-# while one split contains systematically later keys or more ambiguous
-# samples; such a shift changes the ceiling/accuracy of a split and would
-# otherwise be invisible to the audit.  All fields are categorical, so a
-# distribution shift shows up directly as a total-variation distance and a
-# calibrated chi-square.
+# appearing later as a value, and whether the answer token itself occurs as
+# a key (a copy-from-context shortcut).  Marginal token frequencies can match
+# perfectly while one split contains systematically later keys, more
+# ambiguous samples or more copy-source targets; such a shift changes the
+# ceiling/accuracy of a split and would otherwise be invisible to the audit.
+# All fields are categorical, so a distribution shift shows up directly as a
+# total-variation distance and a calibrated chi-square.
 _AUDIT_FIELDS = ("token", "answer", "key", "value", "key_pos",
-                 "value_repeats", "naive_confusable", "difficulty_joint")
-_AUDIT_DERIVED_FIELDS = ("key_pos", "value_repeats", "naive_confusable")
+                 "value_repeats", "naive_confusable", "answer_as_key",
+                 "difficulty_joint")
+_AUDIT_DERIVED_FIELDS = ("key_pos", "value_repeats", "naive_confusable",
+                         "answer_as_key")
 
 def _audit_seed(value) -> int:
     """Validate a Monte Carlo audit seed instead of silently truncating it.
@@ -319,13 +322,13 @@ def _audit_seed(value) -> int:
 
 
 # Calibration of the distribution-shift check.  ``_AUDIT_SIM`` Monte Carlo
-# replicates set the p-value resolution to ``1 / (_AUDIT_SIM + 1)`` (500
-# replicates resolve the 0.0024 rank-one threshold of a 21-test
+# replicates set the p-value resolution to ``1 / (_AUDIT_SIM + 1)`` (600
+# replicates resolve the 0.0019 rank-one threshold of a 27-test
 # Benjamini-Hochberg family at q=0.05); the fixed seed keeps the audit
 # deterministic; ``_AUDIT_SMOOTH`` is the Haldane-Anscombe add-half count
 # that keeps unobserved classes testable instead of producing an infinite
 # statistic.
-_AUDIT_SIM = 500
+_AUDIT_SIM = 600
 _AUDIT_SIM_SEED = 90210
 _AUDIT_SMOOTH = 0.5
 
@@ -344,10 +347,19 @@ _GENERATOR_MAX_INDEPENDENCE_CELLS = 4_000_000
 
 
 # Ambiguity strata used by :func:`difficulty_strata`.  The encoding is a
-# two-bit code: bit 0 = naive-confusable, bit 1 = repeated answer value, so
-# every id in [0, 4) names one combination and the id is stable across
-# audits/records.
-_AMBIGUITY_LABELS = ("none", "naive_confusable", "value_repeats", "both")
+# three-bit code: bit 0 = naive-confusable, bit 1 = repeated answer value,
+# bit 2 = answer occurs as a key, so every id in [0, 8) names one
+# combination and the id is stable across audits/records.
+_AMBIGUITY_LABELS = (
+    "none",
+    "naive_confusable",
+    "value_repeats",
+    "both",
+    "answer_as_key",
+    "naive_confusable+answer_as_key",
+    "value_repeats+answer_as_key",
+    "both+answer_as_key",
+)
 
 # Relative retrieval-position bins used by the default difficulty stratum.
 # Three bins keep every cell populated at the audit/evaluation sizes while
@@ -385,19 +397,23 @@ def difficulty_features(idx, answer, n_pairs):
       values, so a perfect key lookup does not uniquely determine it;
     * ``naive_confusable`` - the query token occurs after the matching key
       as a value, so the naive "last visible match wins" rule differs from
-      the exact pair lookup.
+      the exact pair lookup;
+    * ``answer_as_key`` - the answer token also occurs in a key slot, so a
+      model can copy the target from the context instead of retrieving it.
 
     These are exactly the task-structural factors that make a length sweep
     non-comparable: with more pairs per sequence the chance that a value
-    repeats or that the query token appears later as a value grows, so raw
-    accuracy at a longer length mixes a length effect with a data-
-    difficulty effect.  :func:`difficulty_strata` turns the covariates into
-    a small categorical stratum that can be used for post-stratification
+    repeats, that the query token appears later as a value, or that the
+    answer appears among the keys grows, so raw accuracy at a longer length
+    mixes a length effect with a data-difficulty effect.
+    :func:`difficulty_strata` turns the covariates into a small categorical
+    stratum that can be used for post-stratification
     (:func:`cage.metrics.standardized_proportion`).
 
-    Mirrors ``cage.train._error_case_flags`` so the audit measures exactly
-    the difficulty factors used to explain errors downstream.  The batch
-    geometry is checked instead of inferred from slicing: a narrower
+    The first three covariates mirror ``cage.train._error_case_flags``;
+    ``answer_as_key`` extends that set with the copy-from-context shortcut
+    that grows with sequence length.  The batch geometry is checked instead
+    of inferred from slicing: a narrower
     ``idx`` would otherwise silently pair the wrong columns and label a
     malformed batch as easy/hard.
     """
@@ -470,6 +486,7 @@ def difficulty_features(idx, answer, n_pairs):
             "difficulty features would describe a different label")
     value_repeats = (values.eq(answer.unsqueeze(1)).sum(dim=1)
                      > 1).to(torch.int64)
+    answer_as_key = keys.eq(answer.unsqueeze(1)).any(dim=1).to(torch.int64)
     # Position indices must live on the batch's device: the comparison
     # below is boolean-ANDed with a tensor derived from ``idx``.
     positions = torch.arange(idx.size(1), device=idx.device).view(1, -1)
@@ -479,11 +496,12 @@ def difficulty_features(idx, answer, n_pairs):
                              torch.full_like(positions, -1)).max(dim=1).values
     naive_confusable = last_match.ne(key_pos.mul(2)).to(torch.int64)
     return {"key_pos": key_pos, "value_repeats": value_repeats,
-            "naive_confusable": naive_confusable}
+            "naive_confusable": naive_confusable,
+            "answer_as_key": answer_as_key}
 def difficulty_stratum_labels(n_key_bins=DEFAULT_DIFFICULTY_KEY_BINS):
     """JSON-safe labels for :func:`difficulty_strata` ids.
 
-    Ids are ``key_bin * 4 + ambiguity_code``; the accompanying bounds are
+    Ids are ``key_bin * 8 + ambiguity_code``; the accompanying bounds are
     in *pair-index* space (``key_bin`` is a relative retrieval-position
     tercile, so the same id is comparable across lengths even though the
     absolute distance differs).
@@ -491,17 +509,17 @@ def difficulty_stratum_labels(n_key_bins=DEFAULT_DIFFICULTY_KEY_BINS):
     n_key_bins = _difficulty_int(n_key_bins, "n_key_bins")
     if n_key_bins < 1:
         raise ValueError(f"n_key_bins must be >= 1, got {n_key_bins}")
-    if 4 * n_key_bins > _MAX_DIFFICULTY_STRATA:
+    if 8 * n_key_bins > _MAX_DIFFICULTY_STRATA:
         raise ValueError(
-            f"n_key_bins={n_key_bins} would create {4 * n_key_bins} "
+            f"n_key_bins={n_key_bins} would create {8 * n_key_bins} "
             f"strata; the maximum supported encoding is "
             f"{_MAX_DIFFICULTY_STRATA}")
     return [
-        {"id": bin_idx * 4 + ambiguity,
+        {"id": bin_idx * 8 + ambiguity,
          "key_bin": bin_idx,
          "ambiguity": _AMBIGUITY_LABELS[ambiguity]}
         for bin_idx in range(n_key_bins)
-        for ambiguity in range(4)
+        for ambiguity in range(8)
     ]
 
 
@@ -510,8 +528,8 @@ def difficulty_strata(idx, answer, n_pairs,
     """Map each sample to a joint retrieval-position x ambiguity stratum.
 
     ``n_key_bins`` relative retrieval-position bins are crossed with the
-    four ambiguity states of :data:`_AMBIGUITY_LABELS`, giving
-    ``4 * n_key_bins`` strata.  A stratum is a *pre-treatment* covariate:
+    eight ambiguity states of :data:`_AMBIGUITY_LABELS`, giving
+    ``8 * n_key_bins`` strata.  A stratum is a *pre-treatment* covariate:
     it is fixed by the generated sequence, not by a model, so conditioning
     on it cannot remove the effect of the mechanism under test.  That is
     what makes it valid for post-stratifying accuracy across lengths:
@@ -527,9 +545,9 @@ def difficulty_strata(idx, answer, n_pairs,
     n_key_bins = _difficulty_int(n_key_bins, "n_key_bins")
     if n_key_bins < 1:
         raise ValueError(f"n_key_bins must be >= 1, got {n_key_bins}")
-    if 4 * n_key_bins > _MAX_DIFFICULTY_STRATA:
+    if 8 * n_key_bins > _MAX_DIFFICULTY_STRATA:
         raise ValueError(
-            f"n_key_bins={n_key_bins} would create {4 * n_key_bins} "
+            f"n_key_bins={n_key_bins} would create {8 * n_key_bins} "
             f"strata; the maximum supported encoding is "
             f"{_MAX_DIFFICULTY_STRATA}")
     n_pairs = _difficulty_int(n_pairs, "n_pairs")
@@ -538,12 +556,13 @@ def difficulty_strata(idx, answer, n_pairs,
     features = difficulty_features(idx, answer, n_pairs)
     key_bin = (features["key_pos"] * n_key_bins // n_pairs).clamp(
         max=n_key_bins - 1).to(torch.long)
-    # bit 0 = naive-confusable, bit 1 = repeated value.  Ordering repeat
-    # above naive matches the historical ``difficulty_joint`` encoding at
+    # bit 0 = naive-confusable, bit 1 = repeated value, bit 2 = answer as
+    # key.  This is the same dense encoding as ``difficulty_joint`` at
     # n_key_bins == n_pairs, so the two audit views cannot drift apart.
-    ambiguity = (features["value_repeats"] * 2
+    ambiguity = (features["answer_as_key"] * 4
+                 + features["value_repeats"] * 2
                  + features["naive_confusable"]).to(torch.long)
-    stratum = key_bin * 4 + ambiguity
+    stratum = key_bin * 8 + ambiguity
     bounds = [[math.ceil(bin_idx * n_pairs / n_key_bins),
                math.ceil((bin_idx + 1) * n_pairs / n_key_bins)]
               for bin_idx in range(n_key_bins)]
@@ -554,7 +573,7 @@ def difficulty_strata(idx, answer, n_pairs,
         "labels": difficulty_stratum_labels(n_key_bins),
         "key_bin_bounds": bounds,
         "n_key_bins": n_key_bins,
-        "n_strata": 4 * n_key_bins,
+        "n_strata": 8 * n_key_bins,
     }
 
 
@@ -564,14 +583,16 @@ def _difficulty_features(split, n_pairs):
 
 
 def _joint_difficulty_values(features):
-    """Encode ``(key_pos, value_repeats, naive_confusable)`` as one category.
+    """Encode all structural covariates as one dense category.
 
-    The binary ambiguity flags are the two least-significant digits, so the
-    encoding is dense (``0 .. 4*n_pairs-1``) and no joint cell is dropped.
+    The ambiguity flags occupy bits 0-2 (naive-confusable, repeated value,
+    answer-as-key) and ``key_pos`` is shifted above them, so the encoding is
+    dense (``0 .. 8*n_pairs-1``) and no joint cell is dropped.
     """
-    return (((features["key_pos"].to(torch.long) * 2
-              + features["value_repeats"].to(torch.long)) * 2)
-            + features["naive_confusable"].to(torch.long))
+    ambiguity = (features["answer_as_key"].to(torch.long) * 4
+                 + features["value_repeats"].to(torch.long) * 2
+                 + features["naive_confusable"].to(torch.long))
+    return features["key_pos"].to(torch.long) * 8 + ambiguity
 
 
 def _field_values(split, n_pairs, field):
@@ -596,8 +617,8 @@ def _field_categories(field, vocab, n_pairs):
     if field == "key_pos":
         return max(int(n_pairs), 1)
     if field == "difficulty_joint":
-        return max(int(n_pairs), 1) * 4
-    if field in ("value_repeats", "naive_confusable"):
+        return max(int(n_pairs), 1) * 8
+    if field in ("value_repeats", "naive_confusable", "answer_as_key"):
         return 2
     return int(vocab)
 
@@ -881,7 +902,8 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
 # difficulty tail in a held-out split, so a train-fitted typicality score is
 # added here.  Every probability and the tail threshold are fitted on the
 # training streams only; held-out splits are only scored (transform-only).
-_OUTLIER_FIELDS = ("answer", "key_pos", "value_repeats", "naive_confusable")
+_OUTLIER_FIELDS = ("answer", "key_pos", "value_repeats",
+                   "naive_confusable", "answer_as_key")
 _OUTLIER_QUANTILE = 0.99
 # Conservative tail-rate bound: flag a held-out split only when its atypical
 # rate exceeds both a multiple of the training rate and an absolute floor.
@@ -896,7 +918,7 @@ _OUTLIER_RATE_FLOOR = 0.05
 # exactly one value per sample, so "first half of the stream" maps onto
 # whole samples (unlike pooled token fields, which are per-token).
 _STATIONARITY_FIELDS = ("answer", "key_pos", "value_repeats",
-                        "naive_confusable")
+                        "naive_confusable", "answer_as_key")
 
 
 def _typicality_scores(split_values, reference) -> torch.Tensor:
@@ -1408,6 +1430,27 @@ def _expected_value_repeat_rate(n_pairs, vocab) -> float:
     return min(1.0, max(0.0, -math.expm1(log_distinct)))
 
 
+def _expected_answer_as_key_rate(n_pairs, vocab) -> float:
+    """Probability that the answer token also occurs among the context keys.
+
+    The answer is the value paired with a uniformly random query key.  Keys
+    are a uniformly random ``n_pairs``-subset of the ``vocab - 2`` selectable
+    ids and values are i.i.d. uniform and independent of the keys, so the
+    answer is uniform on the selectable ids and the event has probability
+    ``n_pairs / (vocab - 2)``.  This is the DGP-implied companion to the
+    observed ``answer_as_key_rate``: a generator that makes the answer a
+    copy of its query key, or that couples values to keys, changes this
+    rate while leaving the marginal token counts uniform.
+    """
+    n_pairs = _positive_audit_count(n_pairs, "n_pairs")
+    vocab = _positive_audit_count(vocab, "vocab")
+    selectable = vocab - 2
+    if selectable < 1:
+        raise ValueError(
+            f"vocab={vocab} leaves no selectable ids")
+    return min(1.0, n_pairs / selectable)
+
+
 def _binomial_rate_test(observed, n, probability, n_sim=_GENERATOR_SIM,
                         seed=_GENERATOR_SIM_SEED) -> dict:
     """Monte Carlo two-sided binomial test for one observed rate."""
@@ -1558,12 +1601,20 @@ def _generator_calibration_from_idx(idx, answer, n_pairs, vocab,
         seed=_generator_offset_seed(sim_seed, 21))
     repeat_test["applicable"] = bool(n_pairs >= 2 and repeat_test["valid"])
 
+    answer_in_keys = keys.eq(answer.unsqueeze(1)).any(dim=1)
+    answer_key_test = _binomial_rate_test(
+        int(answer_in_keys.sum()), rows,
+        _expected_answer_as_key_rate(n_pairs, vocab), n_sim=n_sim,
+        seed=_generator_offset_seed(sim_seed, 22))
+    answer_key_test["applicable"] = bool(answer_key_test["valid"])
+
     checks = {}
     checks.update({f"marginal:{name}": test
                    for name, test in marginals.items()})
     checks.update({f"independence:{name}": test
                    for name, test in independence.items()})
     checks["value_repeat_rate"] = repeat_test
+    checks["answer_as_key_rate"] = answer_key_test
     applicable = {name: test for name, test in checks.items()
                   if test.get("applicable")}
     p_values = [test["p_value"] for test in applicable.values()
@@ -1587,6 +1638,7 @@ def _generator_calibration_from_idx(idx, answer, n_pairs, vocab,
         "marginal_uniformity": marginals,
         "independence": independence,
         "value_repeat_rate": repeat_test,
+        "answer_as_key_rate": answer_key_test,
         "family": {
             "alpha": _GENERATOR_FAMILY_ALPHA,
             "per_test_alpha": per_test_alpha,
@@ -1687,8 +1739,8 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
     * **per-field distribution shift**: for pooled tokens, supervised
       answers, key / value sub-populations and the structural difficulty
       covariates (key position, repeated answer values, naive-confusable
-      queries) and their joint ``(key_pos, value_repeats, naive_confusable)``
-      cell, the total-variation distance between each held-out split
+      queries, answer-as-key copy sources) and their joint cell, the
+      total-variation distance between each held-out split
       and the pooled training distribution is reported against a same-size
       noise floor measured between disjoint training streams
       (:func:`_noise_floor`), *and* the same-distribution null is tested
@@ -1854,7 +1906,8 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
     # Descriptive difficulty profile per split: the calibrated tests decide
     # *whether* a shift exists, these shares say *what* differs (mean pair
     # index of the matching key, repeated-answer rate, naive-confusable
-    # rate), all computed without any held-out-fitted statistic.
+    # rate, answer-as-key copy-source rate), all computed without any
+    # held-out-fitted statistic.
     difficulty = {}
     for name, split in splits.items():
         feat = features[name]
@@ -1866,6 +1919,8 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
             "value_repeat_rate": float(feat["value_repeats"].sum()) / n,
             "naive_confusable_rate": (
                 float(feat["naive_confusable"].sum()) / n),
+            "answer_as_key_rate": (
+                float(feat["answer_as_key"].sum()) / n),
         }
 
     out = {
