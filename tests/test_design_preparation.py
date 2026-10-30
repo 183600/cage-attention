@@ -1274,6 +1274,14 @@ class CoverageMalformedRunTest(unittest.TestCase):
         self.assertEqual(mixed["mean"], 0.0)
         self.assertTrue(math.isfinite(mixed["std"]))
         self.assertTrue(math.isnan(_linear_slope(None, None)))
+        # The least-squares line must not be forced through the first
+        # translated observation: [0, 1, 2] vs [1, 3, 4] has slope 1.5
+        # (not the 1.6 line through (0, 1)).
+        self.assertAlmostEqual(_linear_slope([0.0, 1.0, 2.0],
+                                             [1.0, 3.0, 4.0]), 1.5)
+        self.assertAlmostEqual(
+            _linear_slope([1e6, 1e6 + 1, 1e6 + 2],
+                          [-1e6 + 1, -1e6 + 3, -1e6 + 4]), 1.5)
         # The slope must survive the same finite-but-huge values: raw
         # squared deviations overflow even though the true slope is tiny.
         x0 = 1e308

@@ -733,11 +733,20 @@ def _linear_slope(xs, ys):
         return 0.0
     dx_norm = [value / x_scale for value in dx]
     dy_norm = [value / y_scale for value in dy]
-    denom = math.fsum(value * value for value in dx_norm)
+    # Translating to the first pair removes the common offset; least squares
+    # still needs the *mean* of the translated coordinates, otherwise the
+    # fitted line is forced through the first observation.  Centring the
+    # bounded (normalised) values keeps the sums representable even when the
+    # raw offsets are extreme.
+    x_mean = math.fsum(dx_norm) / n
+    y_mean = math.fsum(dy_norm) / n
+    dx_centered = [value - x_mean for value in dx_norm]
+    dy_centered = [value - y_mean for value in dy_norm]
+    denom = math.fsum(value * value for value in dx_centered)
     if denom <= 0.0:
         return float("nan")
     slope_norm = math.fsum(
-        x * y for x, y in zip(dx_norm, dy_norm)) / denom
+        x * y for x, y in zip(dx_centered, dy_centered)) / denom
     if slope_norm == 0.0:
         return 0.0
     if not math.isfinite(slope_norm):
