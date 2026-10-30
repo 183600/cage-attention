@@ -447,7 +447,32 @@ def _as_indices(index, n: int) -> torch.Tensor:
         else:
             idx = torch.arange(start, stop, step, dtype=torch.long)
     elif isinstance(index, range):
-        idx = torch.tensor(list(index), dtype=torch.long)
+        if index.step > 0:
+            if index.start >= index.stop:
+                idx = torch.empty(0, dtype=torch.long)
+            else:
+                lo = index.start
+                hi = index.start + (
+                    (index.stop - index.start - 1) // index.step
+                ) * index.step
+                if lo < 0 or hi >= n:
+                    raise ValueError(
+                        f"split indices must lie in [0, {n}), got range "
+                        f"[{lo}, {hi}]")
+                idx = torch.tensor(list(index), dtype=torch.long)
+        else:
+            if index.start <= index.stop:
+                idx = torch.empty(0, dtype=torch.long)
+            else:
+                lo = index.start + (
+                    (index.start - index.stop - 1) // (-index.step)
+                ) * index.step
+                hi = index.start
+                if lo < 0 or hi >= n:
+                    raise ValueError(
+                        f"split indices must lie in [0, {n}), got range "
+                        f"[{lo}, {hi}]")
+                idx = torch.tensor(list(index), dtype=torch.long)
     else:
         try:
             t = torch.as_tensor(index)

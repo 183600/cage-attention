@@ -360,6 +360,16 @@ class TorchIndexBoundsTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     assert_split_partition(n, {"train": []})
 
+    def test_huge_out_of_range_ranges_are_rejected_without_materializing(self):
+        from cage.data import assert_split_partition
+
+        for indices in (range(0, 10 ** 12), range(10 ** 12, 0, -1),
+                        range(2 ** 63, 2 ** 63 + 10),
+                        range(-10 ** 12, 10)):
+            with self.subTest(indices=indices):
+                with self.assertRaises(ValueError):
+                    assert_split_partition(3, {"train": indices})
+
     def test_max_representable_count_is_checked_without_dense_mask(self):
         from cage.data import assert_split_partition, time_ordered_split
 
