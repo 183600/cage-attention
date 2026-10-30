@@ -487,6 +487,59 @@ def pearson(x, y):
     return (dx * dy).sum() / (dx.norm() * dy.norm())
 
 
+def partial_pearson(x, y, control):
+    """Pearson correlation of ``x`` and ``y`` after removing ``control``.
+
+    The diagnostic statistics are observational: a gate that opens on
+    diffuse attention can look correlated with entropy even when both
+    quantities are just tracking attention concentration (max-prob).  This
+    helper answers the controlled question - is the within-layer gate /
+    entropy association still present after linearly removing max-prob? -
+    by correlating the residuals of ``x`` and ``y`` after regressing each
+    on ``control`` (with an intercept).
+
+    At least four observations are required: with fewer, the residual
+    correlation has too little residual variation to be informative.  A
+    constant control, a control that is collinear with ``x`` or ``y``, a
+    non-finite value, or mismatched lengths abstains with NaN rather than
+    fabricating a coefficient.
+    """
+    x = x.flatten()
+    y = y.flatten()
+    control = control.flatten()
+    if x.is_complex() or y.is_complex() or control.is_complex():
+        return torch.tensor(float("nan"))
+    x = x.to(torch.float64)
+    y = y.to(torch.float64)
+    control = control.to(torch.float64)
+    if x.numel() < 4 or y.numel() != x.numel() \
+            or control.numel() != x.numel():
+        return torch.tensor(float("nan"))
+    if not (bool(torch.isfinite(x).all())
+            and bool(torch.isfinite(y).all())
+            and bool(torch.isfinite(control).all())):
+        return torch.tensor(float("nan"))
+    dc = control - control.mean()
+    denom = (dc * dc).sum()
+    if not math.isfinite(float(denom)) or float(denom) <= 0.0:
+        return torch.tensor(float("nan"))
+    dx = x - x.mean()
+    dy = y - y.mean()
+    rx = dx - (dx * dc).sum() / denom * dc
+    ry = dy - (dy * dc).sum() / denom * dc
+    if (not bool(torch.isfinite(rx).all())
+            or not bool(torch.isfinite(ry).all())
+            or rx.abs().max() == 0.0 or ry.abs().max() == 0.0):
+        return torch.tensor(float("nan"))
+    norm_x = rx.norm()
+    norm_y = ry.norm()
+    if (not math.isfinite(float(norm_x))
+            or not math.isfinite(float(norm_y))
+            or float(norm_x) == 0.0 or float(norm_y) == 0.0):
+        return torch.tensor(float("nan"))
+    return (rx * ry).sum() / (norm_x * norm_y)
+
+
 def spearman(x, y):
     """Rank correlation (average ranks for ties).
 
@@ -560,6 +613,21 @@ def gate_stat_correlations(stats):
     r_list_m = [pearson(g[:, i], mp[:, i]).item() for i in cols]
     s_list_m = [spearman(g[:, i], mp[:, i]).item() for i in cols]
     r_list_c = [pearson(g[:, i], corr).item() for i in cols]
+    partial_ent = [partial_pearson(g[:, i], ent[:, i], mp[:, i]).item()
+                   for i in cols]
+    partial_mp = [partial_pearson(g[:, i], mp[:, i], ent[:, i]).item()
+                  for i in cols]
+    correct_mask = corr > 0.5
+    n_correct = int(correct_mask.sum())
+    n_error = int((~correct_mask).sum())
+
+    def _stratum_r(mask):
+        if int(mask.sum()) < 3:
+            return [float("nan")] * len(r_list)
+        return [pearson(g[mask, i], ent[mask, i]).item() for i in cols]
+
+    within_correct = _stratum_r(correct_mask)
+    within_error = _stratum_r(~correct_mask)
     r["gate_vs_entropy"] = _fisher_mean(r_list)
     r["gate_vs_maxprob"] = _fisher_mean(r_list_m)
     r["gate_vs_correct"] = _fisher_mean(r_list_c)
@@ -580,6 +648,15 @@ def gate_stat_correlations(stats):
     r["gate_vs_maxprob_by_layer"] = _zmean_std(r_list_m)
     r["gate_vs_entropy_spearman_by_layer"] = _zmean_std(s_list)
     r["gate_vs_maxprob_spearman_by_layer"] = _zmean_std(s_list_m)
+    r["gate_vs_entropy_partial_maxprob"] = _fisher_mean(partial_ent)
+    r["gate_vs_maxprob_partial_entropy"] = _fisher_mean(partial_mp)
+    r["gate_vs_entropy_within_correct"] = _fisher_mean(within_correct)
+    r["gate_vs_entropy_within_error"] = _fisher_mean(within_error)
+    r["gate_vs_entropy_partial_maxprob_by_layer"] = _zmean_std(partial_ent)
+    r["gate_vs_maxprob_partial_entropy_by_layer"] = _zmean_std(partial_mp)
+    r["gate_vs_entropy_within_correct_by_layer"] = _zmean_std(
+        within_correct)
+    r["gate_vs_entropy_within_error_by_layer"] = _zmean_std(within_error)
     # Raw per-layer values alongside the Fisher-z summary.  The mean alone
     # cannot reveal a correlation carried by one layer or a sign flip across
     # depth, and the E1 claim is explicitly about *within-layer* association
@@ -591,6 +668,21 @@ def gate_stat_correlations(stats):
     r["gate_vs_maxprob_per_layer"] = _per_layer(r_list_m)
     r["gate_vs_entropy_spearman_per_layer"] = _per_layer(s_list)
     r["gate_vs_maxprob_spearman_per_layer"] = _per_layer(s_list_m)
+    r["gate_vs_entropy_partial_maxprob_per_layer"] = _per_layer(partial_ent)
+    r["gate_vs_maxprob_partial_entropy_per_layer"] = _per_layer(partial_mp)
+    r["gate_vs_entropy_within_correct_per_layer"] = _per_layer(
+        within_correct)
+    r["gate_vs_entropy_within_error_per_layer"] = _per_layer(within_error)
+    r["gate_vs_entropy_partial_maxprob_layers"] = sum(
+        1 for x in partial_ent if math.isfinite(x))
+    r["gate_vs_maxprob_partial_entropy_layers"] = sum(
+        1 for x in partial_mp if math.isfinite(x))
+    r["gate_vs_entropy_within_correct_layers"] = sum(
+        1 for x in within_correct if math.isfinite(x))
+    r["gate_vs_entropy_within_error_layers"] = sum(
+        1 for x in within_error if math.isfinite(x))
+    r["n_correct"] = n_correct
+    r["n_error"] = n_error
     return r
 
 

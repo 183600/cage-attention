@@ -873,6 +873,39 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{rcell('gate_vs_maxprob'):>17} "
               f"{rcell('gate_vs_maxprob_spearman'):>19}")
 
+    print("\n[e1] H1a confound-controlled check (exploratory, outside the "
+          "FDR family): partial r removes max-prob linearly within each "
+          "layer, so the gate-entropy path is not credited merely because "
+          "both track attention concentration; the correct/error columns "
+          "are descriptive subgroup correlations (correctness is an "
+          "outcome, not a pre-treatment covariate).  Mean±std over seeds; "
+          "n_L = layers with a finite partial estimate:")
+    print(f"{'gate':>6} {'r_entropy':>19} {'partial r|maxprob':>21} "
+          f"{'n_L':>5} {'r_ent|correct':>19} {'n_correct':>10} "
+          f"{'r_ent|error':>19} {'n_error':>9}")
+    for gate in GATES:
+        t = table[gate]
+
+        def mcell(key):
+            m = t.get(key)
+            if not m or not math.isfinite(m["mean"]):
+                return "n/a"
+            return f"{m['mean']:.4f}±{m['std']:.4f}"
+
+        def ncell(key):
+            m = t.get(key)
+            if not m or not math.isfinite(m["mean"]):
+                return "n/a"
+            return f"{int(round(m['mean']))}"
+
+        print(f"{gate:>6} {mcell('gate_vs_entropy'):>19} "
+              f"{mcell('gate_vs_entropy_partial_maxprob'):>21} "
+              f"{ncell('gate_vs_entropy_partial_maxprob_layers'):>5} "
+              f"{mcell('gate_vs_entropy_within_correct'):>19} "
+              f"{ncell('n_correct'):>10} "
+              f"{mcell('gate_vs_entropy_within_error'):>19} "
+              f"{ncell('n_error'):>9}")
+
     # The Fisher-z mean is a summary of *per-layer* associations; print the
     # layer profile for the gated arms so a single-layer association or a
     # depth sign flip is not hidden by the average.

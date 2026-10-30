@@ -1229,6 +1229,88 @@ class CorrelationInputValidationTest(unittest.TestCase):
                     self.assertTrue(math.isnan(float(fn(y, x))))
 
 
+class PartialCorrelationTest(unittest.TestCase):
+    def test_partial_correlation_matches_residualized_pearson(self):
+        import torch
+
+        from cage.train import partial_pearson, pearson
+
+        control = torch.tensor([0., 1., 2., 3., 4., 5., 6., 7.],
+                               dtype=torch.float64)
+        x = torch.tensor([1., 3., 2., 5., 4., 7., 6., 9.],
+                         dtype=torch.float64)
+        y = torch.tensor([2., 1., 4., 3., 6., 5., 8., 7.],
+                         dtype=torch.float64)
+
+        def residualized(values):
+            design = torch.stack(
+                [torch.ones_like(control), control], dim=1)
+            coef = torch.linalg.lstsq(design, values).solution
+            return values - design @ coef
+
+        expected = float(pearson(residualized(x), residualized(y)))
+        self.assertAlmostEqual(
+            float(partial_pearson(x, y, control)), expected, places=12)
+        self.assertAlmostEqual(
+            float(partial_pearson(x * 3.0 - 7.0, y * 2.0 + 5.0, control)),
+            expected, places=12)
+
+    def test_partial_correlation_abstains_on_degenerate_input(self):
+        import torch
+
+        from cage.train import partial_pearson
+
+        control = torch.arange(8, dtype=torch.float64)
+        x = torch.tensor([1., 3., 2., 5., 4., 7., 6., 9.],
+                         dtype=torch.float64)
+        y = torch.tensor([2., 1., 4., 3., 6., 5., 8., 7.],
+                         dtype=torch.float64)
+        self.assertTrue(math.isfinite(float(partial_pearson(x, y, control))))
+        for bad in (
+            partial_pearson(x[:3], y[:3], control[:3]),
+            partial_pearson(x, y[:4], control),
+            partial_pearson(x, y, torch.ones(8, dtype=torch.float64)),
+            partial_pearson(x, y, x),
+            partial_pearson(x.to(torch.complex128), y, control),
+            partial_pearson(
+                torch.tensor([1., float("nan"), 2., 3., 4., 5., 6., 7.],
+                             dtype=torch.float64), y, control),
+        ):
+            self.assertTrue(math.isnan(float(bad)))
+
+    def test_gate_correlations_include_confound_controls(self):
+        import torch
+
+        from cage.train import gate_stat_correlations
+
+        n = 64
+        control = torch.linspace(-1.0, 1.0, n, dtype=torch.float64)
+        ticks = torch.arange(n, dtype=torch.float64)
+        gate = control + 0.05 * torch.sin(ticks)
+        entropy = control + 0.05 * torch.cos(ticks)
+        maxprob = control + 0.05 * torch.sin(ticks + 0.7)
+        stats = {
+            "gate": gate[:, None],
+            "entropy": entropy[:, None],
+            "maxprob": maxprob[:, None],
+            "correct": torch.arange(n) < n // 2,
+        }
+        out = gate_stat_correlations(stats)
+        for key in ("gate_vs_entropy_partial_maxprob",
+                    "gate_vs_maxprob_partial_entropy",
+                    "gate_vs_entropy_within_correct",
+                    "gate_vs_entropy_within_error"):
+            self.assertIn(key, out)
+            self.assertTrue(math.isfinite(out[key]))
+        self.assertEqual(out["n_correct"], n // 2)
+        self.assertEqual(out["n_error"], n - n // 2)
+        self.assertEqual(out["gate_vs_entropy_partial_maxprob_layers"], 1)
+        self.assertEqual(out["gate_vs_entropy_within_correct_layers"], 1)
+        self.assertEqual(out["gate_vs_entropy_within_error_layers"], 1)
+        self.assertLess(abs(out["gate_vs_entropy_partial_maxprob"]),
+                        abs(out["gate_vs_entropy"]))
+
+
 class CorrectMaskInputTest(unittest.TestCase):
     def test_malformed_mask_input_raises_value_error(self):
         from cage.train import encode_correct_mask
