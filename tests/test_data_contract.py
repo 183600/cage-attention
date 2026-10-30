@@ -405,6 +405,36 @@ class TorchIndexBoundsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             assert_split_partition(n, {"train": range(n), "test": [n - 1]})
 
+    def test_huge_arithmetic_splits_are_audited_without_materializing(self):
+        from cage.data import assert_split_partition
+
+        n = 10 ** 12
+        assert_split_partition(
+            n, {"train": range(0, n, 2), "test": range(1, n, 2)})
+        assert_split_partition(
+            n, {"train": range(0, n, 2)}, require_all=False)
+        assert_split_partition(n, {"train": range(n - 1, -1, -1)})
+        assert_split_partition(n, {"train": slice(None, None, -1)})
+        assert_split_partition(
+            n, {"train": range(0, n, 2), "test": [1]}, require_all=False)
+        assert_split_partition(
+            n, {"even": range(0, n, 2), "three_mod_four": range(3, n, 4)},
+            require_all=False)
+        with self.assertRaises(ValueError):
+            assert_split_partition(n, {"train": range(0, n, 2)})
+        with self.assertRaises(ValueError):
+            assert_split_partition(
+                n, {"train": range(0, n, 2), "test": range(2, n, 2)},
+                require_all=False)
+        with self.assertRaises(ValueError):
+            assert_split_partition(
+                n, {"even": range(0, n, 2), "two_mod_four": range(2, n, 4)},
+                require_all=False)
+        with self.assertRaises(ValueError):
+            assert_split_partition(
+                n, {"train": range(0, n, 2), "test": [2]},
+                require_all=False)
+
     def test_unrepresentable_geometry_raises_value_error(self):
         from cage.data import (check_data_geometry, make_batch,
                                stream_fingerprint, validate_batch)

@@ -533,24 +533,93 @@ def _split_container(splits):
 _DENSE_PARTITION_LIMIT = 10_000_000
 
 
+def _sparse_progression(indices, n: int):
+    """Describe a slice/range as ``(start, count, step, name)``.
+
+    ``start`` is the smallest value and ``step`` is positive; both slice and
+    range sequences are arithmetic progressions, so a huge split can be
+    audited without materializing one tensor element per index.  Returns
+    ``None`` for an empty sequence or for a non-slice/range container (which
+    the caller normalizes through ``_as_indices``).
+    """
+    if isinstance(indices, slice):
+        start, stop, step = indices.indices(n)
+        if (step > 0 and start >= stop) or (step < 0 and start <= stop):
+            return None
+        if step > 0:
+            count = (stop - start - 1) // step + 1
+        else:
+            count = (start - stop - 1) // (-step) + 1
+        if step < 0:
+            start += (count - 1) * step
+            step = -step
+        return start, count, step, None
+    if isinstance(indices, range):
+        start, stop, step = indices.start, indices.stop, indices.step
+        if step > 0:
+            if start >= stop:
+                return None
+            count = (stop - start - 1) // step + 1
+            last = start + (count - 1) * step
+            if start < 0 or last >= n:
+                raise ValueError(
+                    f"split indices must lie in [0, {n}), got range "
+                    f"[{start}, {last}]")
+        else:
+            if start <= stop:
+                return None
+            count = (start - stop - 1) // (-step) + 1
+            last = start + (count - 1) * step
+            if last < 0 or start >= n:
+                raise ValueError(
+                    f"split indices must lie in [0, {n}), got range "
+                    f"[{last}, {start}]")
+            start = last
+            step = -step
+        return start, count, step, None
+    return None
+
+
+def _progressions_overlap(left, right) -> bool:
+    """Whether two integer arithmetic progressions share one value.
+
+    Both inputs are ``(start, count, step, name)`` with positive ``step``.
+    Intersecting the value ranges first and then solving the congruence
+    avoids iterating over either (possibly huge) progression.
+    """
+    s1, c1, d1, _ = left
+    s2, c2, d2, _ = right
+    g = math.gcd(d1, d2)
+    if (s2 - s1) % g:
+        return False
+    period = d2 // g
+    if period == 1:
+        residue = 0
+    else:
+        residue = (((s2 - s1) // g)
+                   * pow(d1 // g, -1, period)) % period
+    low = max(s1, s2)
+    high = min(s1 + (c1 - 1) * d1, s2 + (c2 - 1) * d2)
+    if low > high:
+        return False
+    k_min = (low - s1 + d1 - 1) // d1
+    k_max = (high - s1) // d1
+    if k_min > k_max:
+        return False
+    k = k_min + ((residue - k_min) % period)
+    return k <= k_max
+
+
 def _assert_sparse_partition(n: int, splits, require_all: bool) -> None:
-    intervals = []
+    progressions = []
     points = {}
     for name, indices in splits.items():
-        if isinstance(indices, slice):
-            start, stop, step = indices.indices(n)
-            if step == 1:
-                if start < stop:
-                    intervals.append((start, stop, name))
-                continue
-        elif isinstance(indices, range) and indices.step == 1:
-            start, stop = indices.start, indices.stop
-            if start < stop:
-                if start < 0 or stop > n:
-                    raise ValueError(
-                        f"split indices must lie in [0, {n}), got range "
-                        f"[{start}, {stop - 1}]")
-                intervals.append((start, stop, name))
+        progression = _sparse_progression(indices, n)
+        if progression is not None:
+            progressions.append((progression[0], progression[1],
+                                 progression[2], name))
+            continue
+        if isinstance(indices, (slice, range)):
             continue
         idx = _as_indices(indices, n)
         if idx.numel() == 0:
@@ -567,27 +636,20 @@ def _assert_sparse_partition(n: int, splits, require_all: bool) -> None:
                     f"split {name!r} repeats a sample already assigned to "
                     f"another split: splits must be disjoint")
             points[value] = name
-    intervals.sort(key=lambda item: (item[0], item[1]))
-    merged = []
-    covered = 0
-    for start, stop, name in intervals:
-        if merged and start < merged[-1][1]:
-            raise ValueError(
-                f"split {name!r} repeats a sample already assigned to "
-                f"another split: splits must be disjoint")
-        if merged and start == merged[-1][1]:
-            covered += stop - start
-            merged[-1] = (merged[-1][0], stop)
-        else:
-            covered += stop - start
-            merged.append((start, stop))
-    starts = [start for start, _ in merged]
+    for i, left in enumerate(progressions):
+        for right in progressions[i + 1:]:
+            if _progressions_overlap(left, right):
+                raise ValueError(
+                    f"split {right[3]!r} repeats a sample already assigned "
+                    f"to another split: splits must be disjoint")
+    covered = sum(item[1] for item in progressions)
     for value, name in points.items():
-        i = bisect.bisect_right(starts, value) - 1
-        if i >= 0 and value < merged[i][1]:
-            raise ValueError(
-                f"split {name!r} repeats a sample already assigned to "
-                f"another split: splits must be disjoint")
+        for start, count, step, _ in progressions:
+            last = start + (count - 1) * step
+            if start <= value <= last and (value - start) % step == 0:
+                raise ValueError(
+                    f"split {name!r} repeats a sample already assigned to "
+                    f"another split: splits must be disjoint")
     if require_all and covered + len(points) != n:
         missing = n - covered - len(points)
         raise ValueError(
