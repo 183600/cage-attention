@@ -26,7 +26,11 @@ Metric choices (and why)
   collapses (the extreme-imbalance regime).
 * Calibration is the research object here ("calibrated" gating), so
   expected calibration error and the Brier score of the answer
-  distribution are first-class metrics rather than extras.
+  distribution are first-class metrics rather than extras.  ECE is read at
+  several bin counts (a single width can manufacture or hide a gap), and
+  ``brier_decomposition`` separates the Brier score into reliability,
+  resolution and uncertainty: a lower Brier can mean better calibration or
+  merely an easier evaluation stream, and the decomposition says which.
 * Comparisons across configurations are **paired over training seeds**;
   ``paired_bootstrap_ci`` quantifies the uncertainty of the mean
   difference without assuming normality (and without SciPy).  The same
@@ -142,6 +146,7 @@ __all__ = [
     "multiclass_metrics",
     "expected_calibration_error",
     "brier_score",
+    "brier_decomposition",
     "paired_bootstrap_ci",
     "sign_flip_test",
     "sign_flip_resolution",
@@ -562,6 +567,30 @@ def _self_test() -> int:
           math.isnan(expected_calibration_error([float("nan")], [True]))
           and math.isnan(expected_calibration_error([float("inf")], [True]))
           and math.isnan(expected_calibration_error([float("-inf")], [True])))
+    # Two confidence bins: 0.9 predicts 100% and 0.1 predicts 0%, so the
+    # bin-constant forecast has reliability 0.01 and resolution 0.25; the
+    # base-rate forecast scores 0.25, giving a skill score of 0.96.
+    brier_parts = brier_decomposition([0.9, 0.9, 0.1, 0.1], [1, 1, 0, 0])
+    brier_perfect = brier_decomposition([1.0, 1.0, 0.0, 0.0], [1, 1, 0, 0])
+    check("brier_decomposition_pinned",
+          brier_parts["valid"]
+          and abs(brier_parts["brier"] - 0.01) < 1e-12
+          and abs(brier_parts["brier_binned"] - 0.01) < 1e-12
+          and abs(brier_parts["reliability"] - 0.01) < 1e-12
+          and abs(brier_parts["resolution"] - 0.25) < 1e-12
+          and abs(brier_parts["uncertainty"] - 0.25) < 1e-12
+          and abs(brier_parts["brier_skill_score"] - 0.96) < 1e-12
+          and abs(brier_perfect["reliability"]) < 1e-12
+          and abs(brier_perfect["brier"]) < 1e-12
+          and abs(brier_perfect["brier_skill_score"] - 1.0) < 1e-12)
+    brier_bad = brier_decomposition([0.5], [True], n_bins=0)
+    check("brier_decomposition_invalid_no_claim",
+          not brier_bad["valid"]
+          and math.isnan(brier_bad["reliability"])
+          and math.isnan(brier_decomposition([1.5], [True])["reliability"])
+          and math.isnan(brier_decomposition([0.5], [0.5])["reliability"])
+          and math.isnan(brier_decomposition([0.5], [True, False])[
+              "reliability"]))
 
     # FDR: monotone adjusted p, small p-values survive, large ones do not,
     # NaN stays untestable.

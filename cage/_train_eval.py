@@ -294,9 +294,28 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
         out["nll"] = float(torch.nn.functional.cross_entropy(logits_cat, tgt_cat))
         probs = logits_cat.softmax(dim=-1)
         confidence, pred = probs.max(dim=-1)
-        out["ece_15bin"] = expected_calibration_error(confidence, pred == tgt_cat,
-                                                      n_bins=15)
-        out["brier"] = brier_score(confidence, pred == tgt_cat)
+        # Calibration is the research object, so the headline ECE is
+        # accompanied by a bin-count sensitivity readout (a single bin width
+        # can manufacture or hide a gap) and by the Murphy decomposition of
+        # the Brier score.  The decomposition separates a reliability change
+        # from a resolution/easy-stream change, which the raw Brier scalar
+        # cannot: an arm that is less accurate but better calibrated must not
+        # be read as uniformly worse.
+        correct_rows_cal = pred == tgt_cat
+        out["ece_10bin"] = expected_calibration_error(
+            confidence, correct_rows_cal, n_bins=10)
+        out["ece_15bin"] = expected_calibration_error(
+            confidence, correct_rows_cal, n_bins=15)
+        out["ece_20bin"] = expected_calibration_error(
+            confidence, correct_rows_cal, n_bins=20)
+        out["brier"] = brier_score(confidence, correct_rows_cal)
+        brier_parts = brier_decomposition(
+            confidence, correct_rows_cal, n_bins=15)
+        out["brier_decomposition"] = brier_parts
+        out["brier_reliability"] = brier_parts["reliability"]
+        out["brier_resolution"] = brier_parts["resolution"]
+        out["brier_uncertainty"] = brier_parts["uncertainty"]
+        out["brier_skill_score"] = brier_parts["brier_skill_score"]
         # Item-level correctness in a compact, JSON-safe form: the shared
         # finite stream is a real source of uncertainty for paired contrasts
         # (see ``cage.experiments._paired_diff``).

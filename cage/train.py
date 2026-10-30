@@ -36,6 +36,7 @@ from .metrics import (
     _positive_integer,
     average_ranks,
     auc_paired_bootstrap_ci,
+    brier_decomposition,
     brier_score,
     cohens_d_paired,
     expected_calibration_error,

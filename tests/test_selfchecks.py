@@ -10,6 +10,57 @@ import unittest
 from cage import data, metrics
 
 
+class BrierDecompositionTest(unittest.TestCase):
+    def test_known_decomposition(self):
+        parts = metrics.brier_decomposition(
+            [0.9, 0.9, 0.1, 0.1], [1, 1, 0, 0])
+        self.assertTrue(parts["valid"])
+        self.assertAlmostEqual(parts["brier"], 0.01, places=12)
+        self.assertAlmostEqual(parts["brier_binned"], 0.01, places=12)
+        self.assertAlmostEqual(parts["reliability"], 0.01, places=12)
+        self.assertAlmostEqual(parts["resolution"], 0.25, places=12)
+        self.assertAlmostEqual(parts["uncertainty"], 0.25, places=12)
+        self.assertAlmostEqual(parts["brier_skill_score"], 0.96, places=12)
+        perfect = metrics.brier_decomposition(
+            [1.0, 1.0, 0.0, 0.0], [1, 1, 0, 0])
+        self.assertAlmostEqual(perfect["brier"], 0.0, places=12)
+        self.assertAlmostEqual(perfect["reliability"], 0.0, places=12)
+        self.assertAlmostEqual(perfect["brier_skill_score"], 1.0, places=12)
+
+    def test_invalid_inputs_abstain(self):
+        for probs, correct, n_bins in (
+            ([0.5], [True, False], 15),
+            ([0.5], [0.5], 15),
+            ([1.5], [True], 15),
+            ([float("nan")], [True], 15),
+            ([0.5], [True], 0),
+            ([0.5], [True], 15.5),
+        ):
+            with self.subTest(probs=probs, correct=correct, n_bins=n_bins):
+                parts = metrics.brier_decomposition(
+                    probs, correct, n_bins=n_bins)
+                self.assertFalse(parts["valid"])
+                self.assertTrue(math.isnan(parts["reliability"]))
+
+    def test_eval_metrics_records_calibration_companions(self):
+        from cage.model import build
+        from cage.train import eval_metrics
+
+        model = build({
+            "vocab_size": 17, "d_model": 16, "n_heads": 4,
+            "n_layers": 1, "max_len": 64, "gate": "query",
+        }, compile=False)
+        out = eval_metrics(model, 3, 17, "cpu", batch=8, batches=2,
+                           seed=123)
+        for key in ("ece_10bin", "ece_15bin", "ece_20bin", "brier",
+                    "brier_reliability", "brier_resolution",
+                    "brier_uncertainty", "brier_skill_score"):
+            self.assertIn(key, out)
+        self.assertTrue(0.0 <= out["ece_15bin"] <= 1.0)
+        self.assertTrue(0.0 <= out["brier"] <= 1.0)
+        self.assertTrue(out["brier_decomposition"]["valid"])
+
+
 class MetricInputValidationTest(unittest.TestCase):
     def test_calibration_metrics_preserve_float64_precision(self):
         self.assertAlmostEqual(metrics.brier_score([0.9], [0]), 0.81,

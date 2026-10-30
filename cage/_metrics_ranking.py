@@ -1036,6 +1036,98 @@ def brier_score(probs, correct) -> float:
     return float(((p - c) ** 2).mean())
 
 
+def brier_decomposition(probs, correct, n_bins: int = 15) -> dict:
+    """Murphy decomposition of the top-1 correctness Brier score.
+
+    ``brier_score`` says *how wrong* the confidence forecasts are; the
+    decomposition says *why*: for the bin-constant forecast ``f_k`` and the
+    observed correctness rate ``o_k`` in confidence bin ``k``,
+
+        Brier_binned = reliability - resolution + uncertainty
+        reliability  = sum_k (n_k / n) * (f_k - o_k)^2
+        resolution   = sum_k (n_k / n) * (o_k - o_bar)^2
+        uncertainty  = o_bar * (1 - o_bar)
+
+    Reliability is the calibration penalty (forecast vs observed rate),
+    resolution is the information gained over the base rate (how much the
+    bins separate correct from wrong rows), and uncertainty is the Brier
+    score of always predicting the base rate.  A low Brier can therefore
+    mean "well calibrated" or merely "easy stream"; ``brier_skill_score``
+    ``1 - Brier / uncertainty`` normalises for that and is NaN when the
+    stream is degenerate (all correct or all wrong).
+
+    The decomposition is exact for the *binned* forecasts.  The raw
+    (unbinned) Brier is also returned, and ``within_bin`` is their
+    difference: it is the part of the score that depends on the spread of
+    forecasts inside a bin, not a variance component.  The function follows
+    the reporting contract of :func:`expected_calibration_error` and
+    :func:`brier_score`: malformed, non-finite, non-binary or out-of-range
+    inputs abstain with ``valid=False`` instead of raising.
+    """
+    invalid = {
+        "brier": float("nan"), "brier_binned": float("nan"),
+        "within_bin": float("nan"), "reliability": float("nan"),
+        "resolution": float("nan"), "uncertainty": float("nan"),
+        "brier_skill_score": float("nan"), "n": 0, "n_bins": 0,
+        "n_observed_bins": 0, "valid": False, "reason": "",
+    }
+    try:
+        p = _flatten_float(probs)
+        c = _flatten_float(correct).to(p.device)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        invalid["reason"] = "probs/correct must be real numeric values"
+        return invalid
+    n = p.numel()
+    if n == 0 or c.numel() != n:
+        invalid["reason"] = "probs and correct must be non-empty and aligned"
+        invalid["n"] = int(n)
+        return invalid
+    n_bins = _positive_integer(n_bins)
+    if (n_bins is None or n_bins > _MAX_EXACT_FLOAT_INT):
+        invalid["reason"] = "n_bins must be a positive integer"
+        invalid["n"] = int(n)
+        return invalid
+    invalid["n_bins"] = int(n_bins)
+    if not bool(torch.isfinite(p).all()) \
+            or not bool(torch.isfinite(c).all()):
+        invalid["reason"] = "probs and correct must be finite"
+        return invalid
+    if not bool(((c == 0.0) | (c == 1.0)).all()):
+        invalid["reason"] = "correct must contain only 0/1 outcomes"
+        return invalid
+    if not bool(((p >= 0.0) & (p <= 1.0)).all()):
+        invalid["reason"] = "probs must lie in [0, 1]"
+        return invalid
+
+    brier = float(((p - c) ** 2).mean())
+    base = float(c.mean())
+    uncertainty = base * (1.0 - base)
+    bin_id = (p * n_bins).long().clamp(max=n_bins - 1)
+    observed, inverse = torch.unique(bin_id, return_inverse=True)
+    n_observed = int(observed.numel())
+    counts = torch.bincount(inverse, minlength=n_observed).to(torch.float64)
+    conf = torch.bincount(inverse, weights=p, minlength=n_observed)
+    acc = torch.bincount(inverse, weights=c, minlength=n_observed)
+    forecast = conf / counts
+    observed_rate = acc / counts
+    weights = counts / n
+    reliability = float((weights * (forecast - observed_rate) ** 2).sum())
+    resolution = float(
+        (weights * (observed_rate - base) ** 2).sum())
+    binned = reliability - resolution + uncertainty
+    skill = (1.0 - brier / uncertainty
+             if math.isfinite(uncertainty) and uncertainty > 1e-12
+             else float("nan"))
+    return {
+        "brier": brier, "brier_binned": binned,
+        "within_bin": brier - binned,
+        "reliability": reliability, "resolution": resolution,
+        "uncertainty": uncertainty, "brier_skill_score": skill,
+        "n": int(n), "n_bins": int(n_bins),
+        "n_observed_bins": n_observed, "valid": True, "reason": "",
+    }
+
+
 def _bootstrap_means(d: torch.Tensor, n_boot: int,
                      seed: int) -> torch.Tensor:
     """Bootstrap distribution of the mean of the paired values ``d``."""

@@ -75,6 +75,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                "maxprob_by_length": {}, "gate_by_length": {},
                "gate_vs_entropy_by_length": {},
                "gate_vs_maxprob_by_length": {},
+               "ece_by_length": {}, "brier_by_length": {},
+               "brier_skill_by_length": {},
                "difficulty_standardized_accuracy_by_length": {},
                "difficulty_standardized_coverage_by_length": {},
                "difficulty_standardized_effective_n_by_length": {},
@@ -120,6 +122,16 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 rec["entropy_by_length"][length]
                 / math.log(max(2 * length + 2, 2)))
             rec["maxprob_by_length"][length] = float(stats["maxprob"].mean())
+            # Calibration drift is a separate failure mode from accuracy
+            # drift: a model can keep its accuracy at long lengths while
+            # becoming systematically overconfident.  Read the same
+            # eval_metrics fields the base length already carries.
+            rec["ece_by_length"][length] = metrics.get(
+                "ece_15bin", float("nan"))
+            rec["brier_by_length"][length] = metrics.get(
+                "brier", float("nan"))
+            rec["brier_skill_by_length"][length] = metrics.get(
+                "brier_skill_score", float("nan"))
             if stats.get("gate") is not None:
                 rec["gate_by_length"][length] = float(stats["gate"].mean())
             # The gate hypothesis is about tracking the attention
@@ -452,6 +464,62 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
           "checks that the calibrated arm's distribution pathway is actually "
           "used at the extrapolated lengths rather than only at the training "
           "length.)")
+
+    # Accuracy drift is not the only length-generalisation failure mode: a
+    # model can keep its accuracy while its confidence becomes
+    # systematically wrong.  Read the calibration fields eval_metrics
+    # already computes at every sweep length (no new runs).  Exploratory
+    # companion; H2a/H2b remain the decisions.
+    print(f"\n[e2] calibration drift across the length sweep (ECE15 and "
+          f"Brier; lower is better, BSS>0 beats the base-rate forecast; "
+          f"mean±std over seeds).  'ECE drift' = longest - training length "
+          f"(positive = more miscalibrated at the extrapolated length):")
+    print(f"{'arm':>16} {'ECE@base':>15} {'ECE@long':>15} "
+          f"{'ECE drift':>15} {'Brier@base':>15} {'Brier@long':>15} "
+          f"{'BSS@long':>15}")
+    calibration_by_length = {}
+    for label, *_ in _E2_VARIANTS:
+        rows = by_variant[label]
+
+        def _length_value(r, metric, length):
+            values = r.get(metric)
+            if not isinstance(values, Mapping):
+                return float("nan")
+            return values.get(length)
+
+        def _at(metric, length):
+            return _mean_std([_length_value(r, metric, length)
+                              for r in rows])
+
+        def _cell(agg):
+            if not _finite(agg["mean"]):
+                return "n/a"
+            return f"{agg['mean']:.3f}±{agg['std']:.3f}"
+
+        def _ece_drift(r):
+            base = _length_value(r, "ece_by_length", settings.n_pairs)
+            long = _length_value(r, "ece_by_length", lengths[-1])
+            if not (_finite(base) and _finite(long)):
+                return float("nan")
+            return float(long) - float(base)
+
+        ece_base = _at("ece_by_length", settings.n_pairs)
+        ece_long = _at("ece_by_length", lengths[-1])
+        ece_drift = _mean_std([_ece_drift(r) for r in rows])
+        brier_base = _at("brier_by_length", settings.n_pairs)
+        brier_long = _at("brier_by_length", lengths[-1])
+        bss_long = _at("brier_skill_by_length", lengths[-1])
+        print(f"{label:>16} {_cell(ece_base):>15} {_cell(ece_long):>15} "
+              f"{_cell(ece_drift):>15} {_cell(brier_base):>15} "
+              f"{_cell(brier_long):>15} {_cell(bss_long):>15}")
+        calibration_by_length[label] = {
+            "ece_base": ece_base, "ece_long": ece_long,
+            "ece_drift": ece_drift, "brier_base": brier_base,
+            "brier_long": brier_long, "bss_long": bss_long,
+        }
+    print("  (exploratory: a length-stable accuracy curve with a positive "
+          "ECE drift means the arm becomes overconfident even where it still "
+          "answers correctly; the H2 decision rows above are unchanged.)")
 
     # Decompose the trained gate into the two additive calibration terms at
     # the training and longest lengths.  This is derived from data already
@@ -931,6 +999,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     e2_summary["_calibration_term_contributions"] = term_contributions
     e2_summary["_learned_correction_check"] = learned_correction_check
     e2_summary["_gate_stat_correlations_by_length"] = gate_corr_by_length
+    e2_summary["_calibration_by_length"] = calibration_by_length
     e2_summary["_per_variant_tuning"] = per_variant_tuning
     e2_summary["_efficiency"] = length_efficiency
     e2_summary["_class_frequency_companions"] = endpoint_companions

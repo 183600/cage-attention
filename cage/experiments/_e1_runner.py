@@ -947,6 +947,54 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{int(ci.get('n') or 0):>5}")
     table["_correlation_level_check"] = corr_level
 
+    # Calibration is the research object ("calibrated" gating), yet ECE and
+    # the Brier score were recorded per run and never analysed.  Report the
+    # per-arm levels (with bin-count sensitivity, so a single bin width
+    # cannot carry the readout) and the paired calib-minus-control
+    # differences.  Lower ECE/Brier is better; higher Brier skill is better.
+    # This is exploratory: the pre-registered H1 decisions remain the FDR
+    # family above, and a calibration difference is not substituted for the
+    # accuracy/mechanism rows.
+    calibration = {}
+    print("\n[e1] calibration check (exploratory, outside the FDR family): "
+          "ECE is reported at three bin counts; Rel/Res are the Murphy "
+          "reliability/resolution terms of the binned Brier score (lower "
+          "reliability is better, higher resolution is better); BSS = "
+          "1 - Brier/uncertainty, so BSS>0 beats the base-rate forecast.  "
+          "Mean±std over seeds:")
+    print(f"{'arm':>6} {'ECE10':>15} {'ECE15':>15} {'ECE20':>15} "
+          f"{'Brier':>15} {'Rel':>15} {'Res':>15} {'BSS':>15}")
+    for gate in GATES:
+        cells = []
+        for metric in ("ece_10bin", "ece_15bin", "ece_20bin", "brier",
+                       "brier_reliability", "brier_resolution",
+                       "brier_skill_score"):
+            agg = _mean_std([r.get(metric) for r in by_gate[gate]])
+            calibration[f"{gate}:{metric}"] = agg
+            cells.append("n/a" if not _finite(agg["mean"])
+                         else f"{agg['mean']:.3f}±{agg['std']:.3f}")
+        print(f"{gate:>6}" + "".join(f"{c:>15}" for c in cells))
+    print("  paired calibration differences (calib - baseline; a negative "
+          "ECE/Brier difference is better, a positive BSS difference is "
+          "better):")
+    print(f"{'contrast':>34} {'readout':>10} {'mean [95% CI]':>30} {'n':>5}")
+    for baseline in ("none", "query", "null"):
+        for metric, label in (("ece_15bin", "ECE15"),
+                              ("brier", "Brier"),
+                              ("brier_skill_score", "BSS")):
+            ci = _paired_diff(by_gate["calib"], by_gate[baseline], metric)
+            calibration[f"calib-{baseline}:{metric}"] = {
+                "mean": ci.get("mean"), "lo": ci.get("lo"),
+                "hi": ci.get("hi"), "n": ci.get("n"),
+                "seeds_used": ci.get("seeds_used"),
+                "seeds_dropped": ci.get("seeds_dropped"),
+                "controlled": (ci.get("controlled") or {}).get(
+                    "controlled"),
+            }
+            print(f"{'calib - ' + baseline:>34} {label:>10} "
+                  f"{_fmt_ci(ci):>30} {int(ci.get('n') or 0):>5}")
+    table["_calibration_check"] = calibration
+
     print("\n[e1] H1b robustness: gate margin (correct - false-conc) across "
           "the high-maxprob threshold sweep (pre-registered decision point "
           "is thr=0.5; a sign flip at other cutoffs means the margin is a "
