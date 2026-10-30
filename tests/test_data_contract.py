@@ -318,6 +318,18 @@ class SplitContainerInputTest(unittest.TestCase):
                     assert_time_ordered([0, 1], bad)
 
 
+class EmptySliceInputTest(unittest.TestCase):
+    def test_empty_python_slices_are_empty_splits(self):
+        from cage.data import assert_split_partition
+
+        empty = (slice(5, 1, 1), slice(5, 1, 2), slice(1, 5, -1),
+                 slice(1, 5, -2), slice(11, -7, 1), slice(-2, 3, 2))
+        for index in empty:
+            with self.subTest(index=index):
+                assert_split_partition(
+                    10, {"train": index}, require_all=False)
+
+
 class SplitIndexShapeTest(unittest.TestCase):
     def test_two_dimensional_boolean_masks_are_rejected(self):
         from cage.data import assert_split_partition
@@ -347,6 +359,22 @@ class TorchIndexBoundsTest(unittest.TestCase):
                     time_ordered_split(n)
                 with self.assertRaises(ValueError):
                     assert_split_partition(n, {"train": []})
+
+    def test_max_representable_count_is_checked_without_dense_mask(self):
+        from cage.data import assert_split_partition, time_ordered_split
+
+        n = 2 ** 63 - 1
+        splits = time_ordered_split(n)
+        self.assertEqual(splits["train"].start, 0)
+        self.assertEqual(splits["test"].stop, n)
+        assert_split_partition(n, splits)
+        assert_split_partition(n, {"train": range(n)})
+        assert_split_partition(n, {"train": [0], "val": [1]},
+                               require_all=False)
+        with self.assertRaises(ValueError):
+            assert_split_partition(n, {"train": []})
+        with self.assertRaises(ValueError):
+            assert_split_partition(n, {"train": range(n), "test": [n - 1]})
 
     def test_unrepresentable_geometry_raises_value_error(self):
         from cage.data import (check_data_geometry, make_batch,

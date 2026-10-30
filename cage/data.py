@@ -16,6 +16,7 @@ The label for the position right after qi is vi.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import math
 import operator

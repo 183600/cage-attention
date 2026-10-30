@@ -441,7 +441,11 @@ def _as_indices(index, n: int) -> torch.Tensor:
     if n < 0:
         raise ValueError(f"sample count must be non-negative, got {n}")
     if isinstance(index, slice):
-        idx = torch.arange(*index.indices(n), dtype=torch.long)
+        start, stop, step = index.indices(n)
+        if (step > 0 and start >= stop) or (step < 0 and start <= stop):
+            idx = torch.empty(0, dtype=torch.long)
+        else:
+            idx = torch.arange(start, stop, step, dtype=torch.long)
     elif isinstance(index, range):
         idx = torch.tensor(list(index), dtype=torch.long)
     else:
@@ -501,6 +505,70 @@ def _split_container(splits):
     return splits
 
 
+_DENSE_PARTITION_LIMIT = 10_000_000
+
+
+def _assert_sparse_partition(n: int, splits, require_all: bool) -> None:
+    intervals = []
+    points = {}
+    for name, indices in splits.items():
+        if isinstance(indices, slice):
+            start, stop, step = indices.indices(n)
+            if step == 1:
+                if start < stop:
+                    intervals.append((start, stop, name))
+                continue
+        elif isinstance(indices, range) and indices.step == 1:
+            start, stop = indices.start, indices.stop
+            if start < stop:
+                if start < 0 or stop > n:
+                    raise ValueError(
+                        f"split indices must lie in [0, {n}), got range "
+                        f"[{start}, {stop - 1}]")
+                intervals.append((start, stop, name))
+            continue
+        idx = _as_indices(indices, n)
+        if idx.numel() == 0:
+            continue
+        if idx.numel() != idx.unique().numel():
+            raise ValueError(
+                f"split {name!r} contains repeated row indices; an index "
+                f"split is a set and duplicates would silently over-weight "
+                f"those rows")
+        for value in idx.tolist():
+            value = int(value)
+            if value in points:
+                raise ValueError(
+                    f"split {name!r} repeats a sample already assigned to "
+                    f"another split: splits must be disjoint")
+            points[value] = name
+    intervals.sort(key=lambda item: (item[0], item[1]))
+    merged = []
+    covered = 0
+    for start, stop, name in intervals:
+        if merged and start < merged[-1][1]:
+            raise ValueError(
+                f"split {name!r} repeats a sample already assigned to "
+                f"another split: splits must be disjoint")
+        if merged and start == merged[-1][1]:
+            covered += stop - start
+            merged[-1] = (merged[-1][0], stop)
+        else:
+            covered += stop - start
+            merged.append((start, stop))
+    starts = [start for start, _ in merged]
+    for value, name in points.items():
+        i = bisect.bisect_right(starts, value) - 1
+        if i >= 0 and value < merged[i][1]:
+            raise ValueError(
+                f"split {name!r} repeats a sample already assigned to "
+                f"another split: splits must be disjoint")
+    if require_all and covered + len(points) != n:
+        missing = n - covered - len(points)
+        raise ValueError(
+            f"split assignment leaves {missing} of {n} samples unassigned")
+
+
 def assert_split_partition(n_samples: int, splits, require_all: bool = True) -> None:
     """Raise unless the split indices are disjoint (and optionally complete).
 
@@ -525,6 +593,9 @@ def assert_split_partition(n_samples: int, splits, require_all: bool = True) -> 
         raise ValueError(
             f"n_samples={n} exceeds torch's signed 64-bit index range")
     splits = _split_container(splits)
+    if n > _DENSE_PARTITION_LIMIT:
+        _assert_sparse_partition(n, splits, require_all)
+        return
     seen = torch.zeros(n, dtype=torch.bool)
     for name, indices in splits.items():
         idx = _as_indices(indices, n)
