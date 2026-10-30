@@ -1273,6 +1273,14 @@ class CoverageMalformedRunTest(unittest.TestCase):
         mixed = _mean_std([-1e308, 1e308])
         self.assertEqual(mixed["mean"], 0.0)
         self.assertTrue(math.isfinite(mixed["std"]))
+        for scale in (1e-200, 1e-300):
+            with self.subTest(scale=scale):
+                tiny = _mean_std([scale, 2.0 * scale])
+                self.assertTrue(math.isfinite(tiny["mean"]))
+                self.assertTrue(math.isfinite(tiny["std"]))
+                self.assertGreater(tiny["std"], 0.0)
+                self.assertAlmostEqual(
+                    tiny["std"] / scale, 1.0 / math.sqrt(2.0), places=12)
         self.assertTrue(math.isnan(_linear_slope(None, None)))
         # The least-squares line must not be forced through the first
         # translated observation: [0, 1, 2] vs [1, 3, 4] has slope 1.5

@@ -668,9 +668,12 @@ def _mean_std(values):
             var = sum((v - mean) ** 2 for v in vals) / (len(vals) - 1)
         except OverflowError:
             var = float("inf")
-        if not math.isfinite(var):
-            # Same overflow issue for the squared deviations; factor out the
-            # largest deviation so the true finite SD remains representable.
+        if (not math.isfinite(var)
+                or (var == 0.0 and any(v != mean for v in vals))):
+            # Same scaling issue for the squared deviations, in either
+            # direction: factor out the largest deviation so a true finite
+            # SD remains representable when the raw squares overflow or
+            # underflow.
             scale = max(abs(v - mean) for v in vals)
             if scale > 0.0 and math.isfinite(scale):
                 scaled_var = (sum(((v - mean) / scale) ** 2 for v in vals)
