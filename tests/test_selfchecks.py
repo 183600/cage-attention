@@ -444,6 +444,26 @@ class PairedEffectSizeCompanionTest(unittest.TestCase):
             diffs, n_boot=500, seed=3)
         self.assertEqual(out, again)
 
+    def test_finite_extreme_scale_keeps_standardized_effect(self):
+        diffs = [0.02, 0.05, 0.01, 0.04, 0.03]
+        expected_d = metrics.cohens_d_paired(diffs)
+        expected_g = metrics.hedges_g_paired(diffs)
+        for scale in (1e200, 1e-200):
+            with self.subTest(scale=scale):
+                scaled = [value * scale for value in diffs]
+                self.assertAlmostEqual(
+                    metrics.cohens_d_paired(scaled), expected_d, places=12)
+                self.assertAlmostEqual(
+                    metrics.hedges_g_paired(scaled), expected_g, places=12)
+                out = metrics.paired_effect_size_ci(
+                    scaled, n_boot=200, seed=3)
+                self.assertTrue(
+                    out["effect_size_valid"], out["effect_size_reason"])
+                self.assertAlmostEqual(
+                    out["cohens_d"], expected_d, places=12)
+                self.assertAlmostEqual(
+                    out["hedges_g"], expected_g, places=12)
+
     def test_bootstrap_result_carries_the_same_standardized_interval(self):
         diffs = [0.02, 0.05, 0.01, 0.04, 0.03]
         ci = metrics.paired_bootstrap_ci(diffs, n_boot=500, seed=4)

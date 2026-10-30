@@ -545,6 +545,10 @@ def cohens_d_paired(diffs) -> float:
     d = _flatten_float(diffs)
     if d.numel() == 0:
         return float("nan")
+    scale = float(d.abs().max())
+    if not (math.isfinite(scale) and scale > 0.0):
+        return float("nan")
+    d = d / scale
     if d.numel() == 1:
         sd = float(d.std(unbiased=False))
     else:
@@ -644,9 +648,8 @@ def paired_effect_size_ci(diffs, n_boot: int = 10000, seed: int = 0,
     if n == 0:
         out["effect_size_reason"] = "no paired differences supplied"
         return out
-    if not bool(torch.isfinite(d).all()) or not _finite_moments(d):
-        out["effect_size_reason"] = (
-            "paired differences or their moments are not finite")
+    if not bool(torch.isfinite(d).all()):
+        out["effect_size_reason"] = "paired differences are not finite"
         return out
     d_point = cohens_d_paired(d)
     g_point = hedges_g_paired(d)
@@ -684,9 +687,15 @@ def paired_effect_size_ci(diffs, n_boot: int = 10000, seed: int = 0,
             "bootstrap grid is too large to materialize for the "
             "standardized-effect companion")
         return out
+    scale = float(d.abs().max())
+    if not (math.isfinite(scale) and scale > 0.0):
+        out["effect_size_reason"] = (
+            "paired differences have no finite scale")
+        return out
+    scaled = d / scale
     gen = torch.Generator(device=d.device).manual_seed(boot_seed)
     idx = torch.randint(0, n, (n_boot, n), generator=gen, device=d.device)
-    samples = d[idx]
+    samples = scaled[idx]
     means = samples.mean(dim=1)
     sds = samples.std(dim=1, unbiased=True)
     usable = torch.isfinite(means) & torch.isfinite(sds) & (sds > 0.0)
