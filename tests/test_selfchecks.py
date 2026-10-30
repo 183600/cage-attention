@@ -1228,6 +1228,24 @@ class CorrelationInputValidationTest(unittest.TestCase):
                     self.assertTrue(math.isnan(float(fn(x, y))))
                     self.assertTrue(math.isnan(float(fn(y, x))))
 
+    def test_finite_extreme_correlations_preserve_scale(self):
+        import torch
+
+        from cage.train import pearson
+
+        x = torch.tensor([1., 2., 3., 4.], dtype=torch.float64)
+        y = torch.tensor([1., 4., 9., 16.], dtype=torch.float64)
+        expected = float(pearson(x, y))
+        for scale in (1e200, 1e-200):
+            with self.subTest(scale=scale):
+                self.assertAlmostEqual(
+                    float(pearson(x * scale, y * scale)), expected, places=12)
+        self.assertAlmostEqual(
+            float(pearson(
+                torch.tensor([1e308, -1e308], dtype=torch.float64),
+                torch.tensor([1e308, -1e308], dtype=torch.float64))),
+            1.0, places=12)
+
 
 class PartialCorrelationTest(unittest.TestCase):
     def test_partial_correlation_matches_residualized_pearson(self):
@@ -1254,6 +1272,25 @@ class PartialCorrelationTest(unittest.TestCase):
         self.assertAlmostEqual(
             float(partial_pearson(x * 3.0 - 7.0, y * 2.0 + 5.0, control)),
             expected, places=12)
+
+    def test_partial_correlation_preserves_finite_extreme_scale(self):
+        import torch
+
+        from cage.train import partial_pearson
+
+        control = torch.tensor([0., 1., 2., 3., 4., 5., 6., 7.],
+                               dtype=torch.float64)
+        x = torch.tensor([1., 3., 2., 5., 4., 7., 6., 9.],
+                         dtype=torch.float64)
+        y = torch.tensor([2., 1., 4., 3., 6., 5., 8., 7.],
+                         dtype=torch.float64)
+        expected = float(partial_pearson(x, y, control))
+        for scale in (1e200, 1e-200):
+            with self.subTest(scale=scale):
+                self.assertAlmostEqual(
+                    float(partial_pearson(
+                        x * scale, y * scale, control * scale)),
+                    expected, places=12)
 
     def test_partial_correlation_abstains_on_degenerate_input(self):
         import torch

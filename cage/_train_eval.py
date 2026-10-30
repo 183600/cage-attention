@@ -455,6 +455,19 @@ def gate_depth_ratio(stats, n_early=2):
     return (deep / early).item()
 
 
+def _centered_unit(values):
+    """Centered values scaled so their largest magnitude is one."""
+    scale = float(values.abs().max())
+    if not (math.isfinite(scale) and scale > 0.0):
+        return None
+    scaled = values / scale
+    centered = scaled - scaled.mean()
+    spread = float(centered.abs().max())
+    if not (math.isfinite(spread) and spread > 0.0):
+        return None
+    return centered / spread
+
+
 def pearson(x, y):
     # Keep the caller's precision: downcasting float64 to float32 can turn
     # distinct values into ties (and a large common offset then looks like a
@@ -475,14 +488,14 @@ def pearson(x, y):
         # finite correlation after ranking NaN/Inf would fabricate an
         # association from a malformed sample.
         return torch.tensor(float("nan"))
-    dx = x - x.mean()
-    dy = y - y.mean()
+    dx = _centered_unit(x)
+    dy = _centered_unit(y)
     # A constant input is exactly the case with zero centered spread.  The
     # old guard compared that spread with the *raw* magnitude of x, so data
     # with a large common offset (e.g. 1e6, 1e6+1, ...) was misclassified as
     # constant.  Centered spread is the right scale; exact zero is the only
     # genuinely undefined case.
-    if dx.abs().max() == 0.0 or dy.abs().max() == 0.0:
+    if dx is None or dy is None:
         return torch.tensor(float("nan"))
     return (dx * dy).sum() / (dx.norm() * dy.norm())
 
@@ -519,12 +532,14 @@ def partial_pearson(x, y, control):
             and bool(torch.isfinite(y).all())
             and bool(torch.isfinite(control).all())):
         return torch.tensor(float("nan"))
-    dc = control - control.mean()
+    dx = _centered_unit(x)
+    dy = _centered_unit(y)
+    dc = _centered_unit(control)
+    if dx is None or dy is None or dc is None:
+        return torch.tensor(float("nan"))
     denom = (dc * dc).sum()
     if not math.isfinite(float(denom)) or float(denom) <= 0.0:
         return torch.tensor(float("nan"))
-    dx = x - x.mean()
-    dy = y - y.mean()
     rx = dx - (dx * dc).sum() / denom * dc
     ry = dy - (dy * dc).sum() / denom * dc
     if (not bool(torch.isfinite(rx).all())
