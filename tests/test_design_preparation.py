@@ -482,6 +482,30 @@ class SelectionReliabilityInputTest(unittest.TestCase):
                                              grid_keys=keys)
                 self.assertIsNone(out["best_at_grid_boundary"])
 
+    def test_selection_margin_se_survives_extreme_finite_std(self):
+        huge = [
+            {"val_accuracy_mean": 2.0, "val_accuracy_std": 1e308,
+             "n_seeds": 2},
+            {"val_accuracy_mean": 1.0, "val_accuracy_std": 1e308,
+             "n_seeds": 2},
+        ]
+        out = _selection_reliability(huge)
+        self.assertTrue(math.isfinite(out["margin_se"]), out)
+        self.assertLess(abs(out["margin_se"] / 1e308 - 1.0), 1e-12)
+        self.assertIs(out["within_noise"], True)
+
+        # Squaring 1e-200 underflows to 0, but the gap SE (1e-200) is
+        # representable and larger than this 1e-210 margin.
+        tiny = [
+            {"val_accuracy_mean": 2e-210, "val_accuracy_std": 1e-200,
+             "n_seeds": 2},
+            {"val_accuracy_mean": 1e-210, "val_accuracy_std": 1e-200,
+             "n_seeds": 2},
+        ]
+        out = _selection_reliability(tiny)
+        self.assertAlmostEqual(out["margin_se"], 1e-200, places=214)
+        self.assertIs(out["within_noise"], True)
+
 
 class PilotSdTest(unittest.TestCase):
     def test_largest_rung_sd_is_used(self):

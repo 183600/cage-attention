@@ -867,17 +867,20 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
     def _se(row):
         # A single-seed row carries a convention-0 std, not a noise
         # estimate; reading it as 0 resolution would be exactly the
-        # overconfidence this audit exists to catch.
+        # overconfidence this audit exists to catch.  Return the standard
+        # error itself: squaring a large finite std overflows, and squaring
+        # a tiny one underflows below the representable range even when its
+        # square root (the actual SE) is representable.
         std = row.get(std_key)
         n = _positive_integer(row.get(n_key))
         if (_finite(std) and float(std) >= 0.0
                 and n is not None and n >= 2):
-            return (float(std) ** 2) / float(n)
+            return float(std) / math.sqrt(float(n))
         return float("nan")
 
-    var_best, var_second = _se(r_best), _se(r_second)
-    margin_se = math.sqrt(var_best + var_second) \
-        if math.isfinite(var_best) and math.isfinite(var_second) \
+    se_best, se_second = _se(r_best), _se(r_second)
+    margin_se = math.hypot(se_best, se_second) \
+        if math.isfinite(se_best) and math.isfinite(se_second) \
         else float("nan")
     within_noise = None
     if margin <= 0.0:
