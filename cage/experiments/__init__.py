@@ -232,6 +232,7 @@ from ..data import (
     check_data_geometry,
     check_eval_seed,
     check_train_seed,
+    generator_calibration_audit,
     length_sweep_lengths,
     make_batch,
     split_leakage_audit,

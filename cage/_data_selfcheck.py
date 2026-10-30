@@ -109,6 +109,30 @@ def _self_test() -> int:
     except ValueError:
         check("fractional_audit_value_rejected", True)
 
+    # Generator calibration: a coupled key/value stream must be rejected by
+    # the permutation independence test, an independent stream must not be
+    # flagged, and the declared generator must pass its own family.  These
+    # are the model-free checks that catch a defect shared by every split.
+    coupled = _categorical_independence_test(
+        torch.arange(3000) % 10, (torch.arange(3000) + 1) % 10,
+        10, 10, n_sim=200, seed=0)
+    check("generator_coupling_detected",
+          coupled["valid"] and coupled["p_value"] <= 1.0 / 201.0)
+    independent = _categorical_independence_test(
+        torch.arange(3000) % 10, torch.arange(3000) % 7,
+        10, 10, n_sim=200, seed=0)
+    check("generator_independence_not_flagged",
+          independent["valid"] and independent["p_value"] > 0.05)
+    calibration = generator_calibration_audit(
+        8, 64, "cpu", batch=64, batches=2, seed=0, n_sim=200)
+    check("declared_generator_calibrated",
+          calibration["calibration_supported"] is True
+          and calibration["family"]["abstained"] == [])
+    check("value_repeat_birthday_probability",
+          abs(_expected_value_repeat_rate(1, 4) - 0.0) < 1e-12
+          and abs(_expected_value_repeat_rate(2, 4) - 0.5) < 1e-12
+          and _expected_value_repeat_rate(5, 4) == 1.0)
+
     # Structural difficulty covariates: hand-built sequences pin where the
     # matching key sits, whether the answer value repeats, and whether the
     # naive last-match rule is misled by the query token appearing later

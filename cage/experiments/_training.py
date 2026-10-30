@@ -836,6 +836,14 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
             for field in ("answer", "token", "key", "value")
             if field in coverage) if coverage else "n/a"
         actual = audit["actual_stream_overlap"]
+        calibration = audit.get("generator_calibration") or {}
+        calibration_txt = "n/a"
+        if calibration:
+            calibration_rejected = (
+                calibration.get("family") or {}).get("rejected") or []
+            calibration_txt = (
+                f"{calibration.get('calibration_supported')} "
+                f"(rejected={', '.join(calibration_rejected) or 'none'})")
         print(f"[{tag}] split audit (HB3, train seeds {list(train_seeds)}): "
               f"{detail}; pairwise overlap max="
               f"{audit['max_pairwise_duplicate_overlap']} over "
@@ -854,7 +862,8 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
               f"unseen-value rates [{cov_txt}]; "
               f"stream duplicates train="
               f"{audit['n_duplicate_rows_train']} ({dup_txt}); "
-              f"unique_key_rate={audit['unique_key_rate']:.4f}")
+              f"unique_key_rate={audit['unique_key_rate']:.4f}; "
+              f"generator calibration={calibration_txt}")
     else:
         print(f"[{tag}] split audit (HB3, train seeds {list(train_seeds)}): "
               f"deterministic result reused; hb3_supported="
@@ -898,6 +907,13 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
               f"({', '.join(drift)}): first and second halves of the "
               f"training stream differ beyond sampling noise, so a single "
               f"held-out split may not represent the future")
+    calibration = audit.get("generator_calibration") or {}
+    if calibration.get("calibration_supported") is False:
+        family = calibration.get("family") or {}
+        print(f"[{tag}] WARNING: generator calibration rejects "
+              f"{', '.join(family.get('rejected') or [])}: the realized "
+              f"stream differs from the declared data-generating process, "
+              f"so a defect shared by every split cannot be ruled out")
     if not audit["hb3_supported"]:
         print(f"[{tag}] WARNING: HB3 split/disjointness audit failed; "
               f"all reported numbers are suspect")
