@@ -24,6 +24,8 @@ from collections.abc import Mapping
 
 import torch
 
+from ._fragments import load_fragments
+
 SEP_ID = 1
 PAD_ID = 0
 _INTEGER_DTYPES = (torch.uint8, torch.int8, torch.int16, torch.int32,
@@ -37,22 +39,14 @@ _MAX_TORCH_INDEX = int(torch.iinfo(torch.long).max)
 # below.  They are compiled and executed into this module's namespace in
 # order, so every helper keeps its original public/private name and module
 # identity for callers and tests.
-_future = __import__("__future__")
-_pathlib = __import__("pathlib")
-
-_FRAGMENT_DIR = _pathlib.Path(__file__).resolve().parent
 _FRAGMENTS = (
     "_data_task.py",
     "_data_audit.py",
     "_data_selfcheck.py",
 )
-for _fragment_name in _FRAGMENTS:
-    _fragment_path = _FRAGMENT_DIR / _fragment_name
-    exec(compile(_fragment_path.read_text(encoding="utf-8"),
-                 str(_fragment_path), "exec",
-                 flags=_future.annotations.compiler_flag,
-                 dont_inherit=True), globals())
-del _fragment_name, _fragment_path
+load_fragments(globals(), _FRAGMENTS)
+del _FRAGMENTS
+
 
 def make_batch(batch: int, n_pairs: int, vocab: int, device, dense_lm: bool = False, gen: torch.Generator | None = None):
     """Returns idx, targets, eval_meta.

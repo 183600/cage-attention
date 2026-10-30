@@ -50,6 +50,29 @@ def _validated_curve_threshold(value, name):
     return number
 
 
+def _non_negative_integer(value, name):
+    """Coerce a non-negative integral option, rejecting flags and fractions.
+
+    ``log_every`` and ``eval_every`` use the same conversion: a boolean is a
+    switch rather than an interval, and a fractional or non-finite value
+    would otherwise be truncated or raise halfway through the run.
+    """
+    raw = value
+    if isinstance(raw, bool):
+        raise ValueError(
+            f"{name} must be a non-negative integer, got {raw!r}")
+    try:
+        number = float(raw)
+    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
+        raise ValueError(
+            f"{name} must be a non-negative integer, got {raw!r}") from exc
+    if not (math.isfinite(number) and number >= 0.0
+            and number == int(number)):
+        raise ValueError(
+            f"{name} must be a non-negative integer, got {raw!r}")
+    return int(number)
+
+
 def _validated_lr(value):
     """Validate a learning rate before it reaches an optimizer.
 

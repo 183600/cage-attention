@@ -11,7 +11,7 @@ help:
 	@echo "make verify           - env + artifact + provenance + source checks on $(OUT)"
 	@echo "make verify-env       - compare $(OUT)/environment.json with this process"
 	@echo "make verify-artifacts - verify $(OUT) against artifact_index.json"
-	@echo "make verify-provenance- recompute each record's setup/environment ids"
+	@echo "make verify-provenance - recompute each record's setup/environment ids"
 	@echo "make verify-source    - compare archived code hashes with this checkout"
 
 gate:

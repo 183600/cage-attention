@@ -210,6 +210,7 @@ from statistics import NormalDist
 
 import torch
 
+from .._fragments import load_fragments
 from ..baselines import (
     copy_last_token_stats,
     linear_probe_accuracy,
@@ -298,9 +299,6 @@ from ..train import (
 # helper keeps working as ``cage.experiments.<name>``, including tests and
 # tooling that monkeypatch module attributes such as ``_run_context`` or
 # ``_RUN_ARTIFACTS``.  Behaviour is byte-for-byte the pre-split implementation.
-import __future__ as _future
-
-_FRAGMENT_DIR = pathlib.Path(__file__).resolve().parent
 _FRAGMENTS = (
     "_config.py",
     "_design.py",
@@ -321,10 +319,5 @@ _FRAGMENTS = (
     "_e2_runner.py",
     "_e3_cli.py",
 )
-for _fragment_name in _FRAGMENTS:
-    _fragment_path = _FRAGMENT_DIR / _fragment_name
-    exec(compile(_fragment_path.read_text(encoding="utf-8"),
-                 str(_fragment_path), "exec",
-                 flags=_future.annotations.compiler_flag,
-                 dont_inherit=True), globals())
-del _fragment_name, _fragment_path
+load_fragments(globals(), _FRAGMENTS)
+del _FRAGMENTS

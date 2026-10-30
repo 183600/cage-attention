@@ -132,6 +132,8 @@ from statistics import NormalDist, StatisticsError
 
 import torch
 
+from ._fragments import load_fragments
+
 __all__ = [
     "average_ranks",
     "benjamini_hochberg",
@@ -180,22 +182,14 @@ _FLOAT_MAX = sys.float_info.max
 # below.  They are compiled and executed into this module's namespace in
 # order, so every helper keeps its original public/private name and module
 # identity for callers and tests.
-_future = __import__("__future__")
-_pathlib = __import__("pathlib")
-
-_FRAGMENT_DIR = _pathlib.Path(__file__).resolve().parent
 _FRAGMENTS = (
     "_metrics_ranking.py",
     "_metrics_inference.py",
     "_metrics_robustness.py",
 )
-for _fragment_name in _FRAGMENTS:
-    _fragment_path = _FRAGMENT_DIR / _fragment_name
-    exec(compile(_fragment_path.read_text(encoding="utf-8"),
-                 str(_fragment_path), "exec",
-                 flags=_future.annotations.compiler_flag,
-                 dont_inherit=True), globals())
-del _fragment_name, _fragment_path
+load_fragments(globals(), _FRAGMENTS)
+del _FRAGMENTS
+
 
 def _self_test() -> int:
     """Deterministic self-checks of the inference machinery.

@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ._fragments import load_fragments
 from .data import (
     DEFAULT_DIFFICULTY_KEY_BINS,
     STATS_SEED,
@@ -71,22 +72,14 @@ _ETA_MIN_FACTOR = 0.1
 # below.  They are compiled and executed into this module's namespace in
 # order, so every helper keeps its original public/private name and module
 # identity for callers and tests.
-_future = __import__("__future__")
-_pathlib = __import__("pathlib")
-
-_FRAGMENT_DIR = _pathlib.Path(__file__).resolve().parent
 _FRAGMENTS = (
     "_train_recipe.py",
     "_train_loop.py",
     "_train_eval.py",
 )
-for _fragment_name in _FRAGMENTS:
-    _fragment_path = _FRAGMENT_DIR / _fragment_name
-    exec(compile(_fragment_path.read_text(encoding="utf-8"),
-                 str(_fragment_path), "exec",
-                 flags=_future.annotations.compiler_flag,
-                 dont_inherit=True), globals())
-del _fragment_name, _fragment_path
+load_fragments(globals(), _FRAGMENTS)
+del _FRAGMENTS
+
 
 def _make_adamw(params, lr):
     """AdamW on the current device."""
@@ -235,44 +228,12 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     lr = _validated_lr(lr)
     grad_norm_explode = _validated_curve_threshold(
         grad_norm_explode, "grad_norm_explode")
-    raw_log_every = log_every
-    if isinstance(raw_log_every, bool):
-        raise ValueError(
-            f"log_every must be a non-negative integer, got "
-            f"{raw_log_every!r}")
-    try:
-        log_every_num = float(raw_log_every)
-    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
-        raise ValueError(
-            f"log_every must be a non-negative integer, got "
-            f"{raw_log_every!r}") from exc
-    if not (math.isfinite(log_every_num) and log_every_num >= 0.0
-            and log_every_num == int(log_every_num)):
-        raise ValueError(
-            f"log_every must be a non-negative integer, got "
-            f"{raw_log_every!r}")
-    log_every = int(log_every_num)
+    log_every = _non_negative_integer(log_every, "log_every")
     if nonfinite not in ("raise", "skip"):
         raise ValueError(
             f"nonfinite must be 'raise' or 'skip', got {nonfinite!r}: an "
             f"unrecognised mode would silently take the skip branch")
-    raw_eval_every = eval_every
-    if isinstance(raw_eval_every, bool):
-        raise ValueError(
-            f"eval_every must be a non-negative integer, got "
-            f"{raw_eval_every!r}")
-    try:
-        eval_every_num = float(raw_eval_every)
-    except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
-        raise ValueError(
-            f"eval_every must be a non-negative integer, got "
-            f"{raw_eval_every!r}") from exc
-    if not (math.isfinite(eval_every_num) and eval_every_num >= 0.0
-            and eval_every_num == int(eval_every_num)):
-        raise ValueError(
-            f"eval_every must be a non-negative integer, got "
-            f"{raw_eval_every!r}")
-    eval_every = int(eval_every_num)
+    eval_every = _non_negative_integer(eval_every, "eval_every")
     # Optional explicit validation steps.  ``eval_every`` can only produce
     # a periodic grid, which cannot hit an arbitrary configured number of
     # checks for every (steps, curve_points) pair; the experiment layer

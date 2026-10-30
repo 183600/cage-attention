@@ -1,77 +1,149 @@
-# CAGE-Attention: Calibrated Gated Attention × Normalization/Activation Co-design
-
-An experimental codebase addressing two reviewer concerns: "are sparse/gated
-attention just minor variants of existing gating?" and "insufficient
-contribution of deep layers". Core idea: **the gate should not depend only on
-the query (Gated-Attention style) but also be calibrated by the concentration
-(entropy) of the attention distribution and the sequence length**, co-designed
-with Pre/Post/Mix-LN, SeeDNorm-style dynamic normalization and LayerScale so
-that deep residual streams are "willing to write useful content".
+# CAGE-Attention: Calibrated Gated Attention × Normalization Co-design
 
 [中文说明](README.md) | **English**
 
-## Structure
+A controlled experimental codebase for studying gated attention. It addresses
+two reviewer concerns:
 
-```
-cage/
-  model.py   # CAGE model: 4 gate variants × 4 norm schemes × optional LayerScale
-  data.py    # associative-recall synthetic task with measurable "correct answers"
-  train.py   # training, evaluation, gate–entropy/max-prob correlation, false-concentration analysis
+1. Are gated attention mechanisms merely minor variants of existing gates?
+2. When deep residual streams contribute too little, how should gating and
+   normalization be co-designed?
+
+Core idea: **the gate should not depend only on the query (Gated-Attention
+style); it should also be calibrated by the concentration (entropy) of the
+attention distribution and by sequence length.** The gate is co-designed with
+Pre/Post/Mix-LN, SeeDNorm-style dynamic normalization and LayerScale so that
+deep residual streams can write useful content.
+
+The design boundary and experiment contract live in
+[docs/design_notes.md](docs/design_notes.md). Decisions marked 【固定】 keep the
+numerical path consistent across implementations and commits; code changes
+must respect them.
+
+## Layout
+
+| Path | Purpose |
+|---|---|
+| `cage/model.py` | CAGE model: 4 gate variants × 4 norm schemes × optional LayerScale |
+| `cage/data.py` | Associative-recall synthetic task and length sweep |
+| `cage/train.py` | Training, evaluation, gate statistics and false-concentration analysis |
+| `cage/metrics.py` | Torch-only statistics and effect-size utilities |
+| `cage/experiments/` | E1/E2/E3 runners, result records and provenance checks |
+| `tests/` | Standard-library `unittest` suite |
+| `ci_gate.py` | Syntax, design-pin and smoke-test gate |
+| `docs/design_notes.md` | Fixed design decisions and experiment contract |
+
+## Quick start
+
+Install the runtime dependencies:
+
+```bash
+python3 -m pip install -e .
 ```
 
-## Strictly compared variants (E1)
+Run the quality gate and tests:
+
+```bash
+make check          # ci_gate.py + unittest
+make gate           # design pins and smoke tests only
+make test           # unittest only
+```
+
+Check the complete pipeline with a tiny configuration:
+
+```bash
+python3 -m cage.experiments --only sanity --quick --out results_quick
+```
+
+Then run the experiment you need:
+
+```bash
+python3 -m cage.experiments --only e1 --seeds 5 --out results
+python3 -m cage.experiments --only e2 --seeds 5 --out results
+python3 -m cage.experiments --only e3 --seeds 5 --out results
+```
+
+## Use from Python
+
+```python
+from cage.model import build
+from cage.train import collect_stats, eval_accuracy, train_model
+
+model = build({
+    "vocab_size": 64,
+    "d_model": 32,
+    "n_heads": 4,
+    "n_layers": 2,
+    "max_len": 64,
+    "gate": "calib",
+})
+
+hist = train_model(model, steps=3, batch=4, n_pairs=6, vocab=64,
+                   log_every=1)
+accuracy = eval_accuracy(model, 6, 64, "cpu", batch=4, batches=1)
+stats = collect_stats(model, 6, 64, "cpu", batch=4, batches=1)
+print(hist[-1], accuracy, sorted(stats))
+```
+
+The `seed` passed to `train_model` governs both the data stream and dropout
+randomness; evaluation and statistics use fixed seeds by default, so identical
+configurations can be compared directly.
+
+## E1: the four strictly compared variants
 
 | gate | Description |
 |---|---|
 | `none`  | Standard attention (no gating) |
 | `query` | Pure query-dependent gating (Gated-Attention style), `σ(W_g x)` |
-| `calib` | **ours: length + concentration calibrated gate**, `σ((W_g x − a·log T − c·H̄)/τ)`, where H̄ is the attention entropy normalized by log T |
-| `null`  | Explicit null attention / sparse-selection baseline (learnable null KV slots compete with real tokens) |
+| `calib` | Our length- and concentration-calibrated gate, `σ((W_g x − a·log T − c·H̄)/τ)`, where `H̄` is attention entropy normalized by `log T` |
+| `null`  | Explicit null attention / sparse-selection baseline: learnable null KV slots compete with real tokens |
 
 ## Experiments
 
-- **E1 gate comparison**: associative-recall accuracy, Pearson correlation of
-  gate value vs attention entropy / max-prob, and whether the gate closes on
-  "false concentration" (high max-prob but wrong answer) — the calibrated
-  gate should give lower gate values under false concentration.
-- **E2 length generalization**: fixed training length, evaluated on a length
-  sweep with 2× spacing; the calibrated gate explicitly corrects the log-T
-  entropy growth and should degrade more slowly; entropy/max-prob/gate drift
-  at long lengths is reported.
-- **E3 normalization/activation co-design**: `query`/`calib` ×
-  `pre`/`post`/`mix`/`seednorm` × LayerScale (none/1e-2), reporting per-layer
-  residual-norm growth and the **deep/early gate ratio** (mean deep gate /
-  mean shallow gate), measuring whether deep layers become more willing to
-  "write useful content".
+- **E1 gate comparison**: associative-recall accuracy; for `query` / `calib`,
+  per-layer Pearson correlation of the gate with attention entropy and
+  max-prob (Fisher-z averaged); whether the gate closes under “false
+  concentration” (high max-prob but wrong answer); `null` additionally reports
+  `null_mass`.
+- **E2 length generalization**: train at a fixed length and evaluate on a
+  length sweep spaced by factors of 2. The calibrated gate explicitly corrects
+  the `log T` entropy growth and should degrade more slowly. Accuracy at each
+  length plus entropy, max-prob and gate drift are reported.
+- **E3 normalization/activation co-design**: `query` / `calib` × `pre` /
+  `post` / `mix` / `seednorm` × LayerScale (none / `1e-2`). Per-layer residual
+  norms and `gate_depth_ratio` (mean deep gate / mean shallow gate) show
+  whether deep layers become more willing to write useful content.
 
-## Key metric interpretation
+## Key metrics
 
-- `gate_vs_entropy` / `gate_vs_maxprob`: whether the gate genuinely uses
-  attention-distribution information (a `query` gate should not correlate
-  strongly with entropy; `calib` should correlate significantly).
-- `false_conc_rate`: error rate among high-max-prob samples; read together
-  with `gate_on_false_conc` vs `gate_on_correct` to assess the gate's
-  "self-doubt" capability.
-- `deep_gate_ratio > 1`: after co-designed normalization, deep layers write
-  more than shallow ones, indicating the Pre-LN deep-layer
-  under-contribution problem is mitigated.
+| Metric | Reading |
+|---|---|
+| `gate_vs_entropy` / `gate_vs_maxprob` | Whether the gate genuinely uses attention-distribution information; `query` should not correlate strongly with entropy, while `calib` should |
+| `false_conc_rate` | Error rate among high-max-prob samples |
+| `gate_on_false_conc` vs `gate_on_correct` | Whether the gate closes more often on false concentration |
+| `deep_gate_ratio` | Above 1 means deep layers write more than shallow ones |
+| `null_mass` | Share of attention weight assigned to the null slot in the `null` variant |
 
-## Reproducibility and engineering checks
+## Reproducibility and result checks
 
-- `make check` runs `ci_gate.py` (syntax + design pins + smoke) and then the
-  standard-library `unittest` suite under `tests/` (seed canonicalisation,
-  data contract, environment snapshot and results-directory integrity). The
-  tests need neither pytest nor numpy.
-- Every RNG and data stream consumes the same 32-bit canonical seed, so `s`
-  and `s + 2**32` are the same run; a bool or fractional seed is rejected
+- `make check` runs `ci_gate.py` (syntax, design pins, smoke) and then the
+  standard-library `unittest` suite under `tests/`; the tests need neither
+  pytest nor numpy.
+- Every RNG and data stream uses the same 32-bit canonical seed: `s` and
+  `s + 2**32` denote the same run, while bool or fractional seeds are rejected
   instead of being silently truncated.
-- Each result record carries its code revision/source hash, resolved config,
-  data-stream fingerprints and an environment snapshot (thread counts and
-  determinism switches included). `artifact_index.json` is cumulative across
-  invocations, and
-  `python3 -m cage.experiments --verify-artifacts --out <dir>` checks that
-  historical result files have not been truncated or edited.
-  `--check-environment` compares the recorded software/numerical
-  environment, while `--check-source` compares every archived
-  `source_tree_sha256` with the current `cage/*.py` tree; `make verify`
-  runs the environment, artifact, provenance and source checks in sequence.
+- Every result record carries its code revision or source hash, the resolved
+  configuration, data-stream fingerprints, and an environment snapshot
+  including thread counts and determinism switches.
+- `artifact_index.json` is cumulative across invocations. The following
+  commands verify a historical results directory independently:
+
+```bash
+python3 -m cage.experiments --verify-artifacts --out results
+python3 -m cage.experiments --check-environment --out results
+python3 -m cage.experiments --verify-provenance --out results
+python3 -m cage.experiments --check-source --out results
+```
+
+`make verify` runs the environment, artifact, provenance and source checks in
+sequence.

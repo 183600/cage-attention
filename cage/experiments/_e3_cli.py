@@ -965,7 +965,7 @@ def run_all(settings: Settings, out_dir: pathlib.Path) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Hypothesis-driven runners for E1/E2/E3 "
-                    "(see cage/experiments.py for the registry).")
+                    "(see cage/experiments/ for the registry).")
     parser.add_argument("--only", default="baselines",
                         choices=["baselines", "sanity", "e1", "e2", "e3", "all"])
     parser.add_argument("--quick", action="store_true",

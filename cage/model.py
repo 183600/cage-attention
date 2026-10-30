@@ -331,19 +331,31 @@ _MLP_CHUNK_ROWS = 2048
 _causal_mask_cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
 
 
+def _cache_lookup(cache: OrderedDict, key):
+    """Return the cached value and mark it as most recently used."""
+    value = cache.get(key)
+    if value is not None:
+        cache.move_to_end(key)
+    return value
+
+
+def _cache_store(cache: OrderedDict, key, value, limit: int):
+    """Insert ``value`` and evict the least recently used entry past ``limit``."""
+    cache[key] = value
+    if len(cache) > limit:
+        cache.popitem(last=False)
+    return value
+
+
 def _causal_mask(T: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     key = (T, device, dtype)
-    m = _causal_mask_cache.get(key)
+    m = _cache_lookup(_causal_mask_cache, key)
     if m is not None:
-        _causal_mask_cache.move_to_end(key)
         return m
     with torch.inference_mode(False):
         m = torch.full((T, T), float("-inf"), device=device, dtype=dtype)
         m.triu_(1)
-    _causal_mask_cache[key] = m
-    if len(_causal_mask_cache) > _MAX_MASK_CACHE:
-        _causal_mask_cache.popitem(last=False)
-    return m
+    return _cache_store(_causal_mask_cache, key, m, _MAX_MASK_CACHE)
 
 
 _MAX_NULL_CACHE = 64
@@ -359,18 +371,14 @@ def _causal_null_mask(T: int, device: torch.device,
     to the ``(B*H, T, T+1)`` scores.
     """
     key = (T, device, dtype)
-    m = _causal_null_cache.get(key)
+    m = _cache_lookup(_causal_null_cache, key)
     if m is not None:
-        _causal_null_cache.move_to_end(key)
         return m
     with torch.inference_mode(False):
         m = torch.full((T, T + 1), float("-inf"), device=device, dtype=dtype)
         m[:, 0] = 0.0
         m[:, 1:].triu_(1)
-    _causal_null_cache[key] = m
-    if len(_causal_null_cache) > _MAX_NULL_CACHE:
-        _causal_null_cache.popitem(last=False)
-    return m
+    return _cache_store(_causal_null_cache, key, m, _MAX_NULL_CACHE)
 
 
 _ARANGE_CACHE_MAX = 128
@@ -380,16 +388,12 @@ _arange_cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
 def _arange(n: int, device: torch.device) -> torch.Tensor:
     """Read-only ``arange(n)`` (index tensors only)."""
     key = (n, device)
-    a = _arange_cache.get(key)
+    a = _cache_lookup(_arange_cache, key)
     if a is not None and _servable(a):
-        _arange_cache.move_to_end(key)
         return a
     with torch.inference_mode(False):
         a = torch.arange(n, device=device)
-    _arange_cache[key] = a
-    if len(_arange_cache) > _ARANGE_CACHE_MAX:
-        _arange_cache.popitem(last=False)
-    return a
+    return _cache_store(_arange_cache, key, a, _ARANGE_CACHE_MAX)
 
 
 def _mask_rows(pos: torch.Tensor, T: int, h: int, dtype: torch.dtype) -> torch.Tensor:
@@ -596,9 +600,8 @@ def _layer_norm_into(ln: nn.LayerNorm, x: torch.Tensor,
 def _query_blocks(bh: int, T: int):
     """``[(start, stop), ...]`` query blocks for a ``bh``-fold batch of ``T``."""
     key = (bh, T)
-    blocks = _query_blocks_cache.get(key)
+    blocks = _cache_lookup(_query_blocks_cache, key)
     if blocks is not None:
-        _query_blocks_cache.move_to_end(key)
         return blocks
     if T <= 32 or bh <= 0:
         # A zero-row batch has no query rows to block; returning the single
@@ -613,10 +616,8 @@ def _query_blocks(bh: int, T: int):
         # ``max_rows``.
         rows = _balanced_step(T, max_rows)
         blocks = tuple((i, min(i + rows, T)) for i in range(0, T, rows))
-    _query_blocks_cache[key] = blocks
-    if len(_query_blocks_cache) > _QUERY_BLOCKS_CACHE_MAX:
-        _query_blocks_cache.popitem(last=False)
-    return blocks
+    return _cache_store(_query_blocks_cache, key, blocks,
+                        _QUERY_BLOCKS_CACHE_MAX)
 
 
 def _row_entropy(p: torch.Tensor, eps: float,
@@ -1527,6 +1528,30 @@ class Block(nn.Module):
         else:
             self.ls1 = self.ls2 = None
 
+    @staticmethod
+    def _add_residual(x: torch.Tensor, branch: torch.Tensor,
+                      scale: torch.Tensor | None,
+                      grad_on: bool) -> torch.Tensor:
+        """Add ``branch`` to ``x`` with optional LayerScale."""
+        if scale is None:
+            return branch.add_(x)
+        if grad_on:
+            return torch.addcmul(x, branch, scale)
+        return x.addcmul_(branch, scale)
+
+    def _mlp_residual(self, x: torch.Tensor, residual: torch.Tensor,
+                      scale: torch.Tensor | None,
+                      grad_on: bool) -> torch.Tensor:
+        """Apply the MLP to ``x`` and add its output to ``residual``."""
+        if scale is not None:
+            return self._add_residual(residual, self._mlp(x), scale, grad_on)
+        if grad_on:
+            h = x.reshape(-1, x.shape[-1])
+            batch_shape = residual.shape
+            return self._mlp(h).add_(
+                residual.reshape(-1, batch_shape[-1])).view(batch_shape)
+        return self._mlp(x).add_(residual)
+
     def _mlp(self, h: torch.Tensor) -> torch.Tensor:
         if torch.is_grad_enabled():
             return self.mlp(h)
@@ -1562,37 +1587,16 @@ class Block(nn.Module):
         grad_on = torch.is_grad_enabled()
         if self.post:
             a, s = self.attn(x, stat_pos)
-            if ls1 is None:
-                x = a.add_(x)
-            else:
-                x = torch.addcmul(x, a, ls1) if grad_on else x.addcmul_(a, ls1)
+            x = self._add_residual(x, a, ls1, grad_on)
             x = self.ln1(x)
-            if ls2 is not None:
-                m = self._mlp(x)
-                x = torch.addcmul(x, m, ls2) if grad_on else x.addcmul_(m, ls2)
-            elif grad_on:
-                h = x.reshape(-1, x.shape[-1])
-                x = self._mlp(h).add_(h).view_as(x)
-            else:
-                x = self._mlp(x).add_(x)
+            x = self._mlp_residual(x, x, ls2, grad_on)
             x = self.ln2(x)
         else:
             x_norm = self.ln1(x)
             a, s = self.attn(x_norm, stat_pos)
-            if ls1 is None:
-                x = a.add_(x)
-            else:
-                x = torch.addcmul(x, a, ls1) if grad_on else x.addcmul_(a, ls1)
+            x = self._add_residual(x, a, ls1, grad_on)
             x_norm = self.ln2(x)
-            if ls2 is not None:
-                m = self._mlp(x_norm)
-                x = torch.addcmul(x, m, ls2) if grad_on else x.addcmul_(m, ls2)
-            elif grad_on:
-                h = x_norm.reshape(-1, x_norm.shape[-1])
-                x = self._mlp(h).add_(
-                    x.reshape(-1, x.shape[-1])).view_as(x)
-            else:
-                x = self._mlp(x_norm).add_(x)
+            x = self._mlp_residual(x_norm, x, ls2, grad_on)
         return x, s
 
 
