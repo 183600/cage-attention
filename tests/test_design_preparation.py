@@ -23,6 +23,7 @@ from cage.experiments import (
     DesignPlanError,
     Settings,
     _aggregate_runs,
+    _binomial_at_least,
     _calib_cell,
     _controlled_audit,
     _blocked_run_order,
@@ -35,6 +36,7 @@ from cage.experiments import (
     _mean_std,
     _pilot_accuracy_level,
     _pilot_accuracy_sd,
+    _pilot_curve_invalid_rate,
     _pilot_paired_accuracy_sd,
     _power_at_effect,
     _power_z,
@@ -585,6 +587,146 @@ class PairedPilotSdTest(unittest.TestCase):
         level, source = _pilot_accuracy_level(self._verdict(arm_sd=0.01))
         self.assertAlmostEqual(level, 0.9, places=12)
         self.assertIn("2 pilot", source)
+
+
+class AttritionPilotTest(unittest.TestCase):
+    """The plan must not assume every planned seed survives exclusions."""
+
+    def test_largest_observed_curve_invalid_rate_is_used(self):
+        verdict = {"depth_ladder": {"by_depth": {
+            "1": {"accuracy_by_seed": {"0": 0.80, "1": 0.82},
+                  "unmeasured": False},
+            "2": {"accuracy_by_seed": {"0": 0.90}, "unmeasured": False},
+        }}}
+        rate, source, components = _pilot_curve_invalid_rate(verdict, 2)
+        self.assertAlmostEqual(rate, 0.5)
+        self.assertEqual(source, "depth_ladder.d2")
+        self.assertEqual(len(components), 2)
+        self.assertEqual(
+            max(c["invalid_seeds"] for c in components), 1)
+
+    def test_explicit_invalid_seed_list_is_read(self):
+        verdict = {"shallow_none": {
+            "accuracy_by_seed": {"0": 0.9},
+            "curve_invalid_seeds": [1],
+            "unmeasured": False,
+        }}
+        rate, source, _ = _pilot_curve_invalid_rate(verdict, 2)
+        self.assertAlmostEqual(rate, 0.5)
+        self.assertEqual(source, "shallow_none")
+
+    def test_unmeasured_or_malformed_pilots_abstain(self):
+        self.assertTrue(math.isnan(_pilot_curve_invalid_rate({}, 3)[0]))
+        verdict = {"depth_ladder": {"by_depth": {
+            "1": {"accuracy_by_seed": {"0": 0.9}, "unmeasured": True},
+        }}}
+        self.assertTrue(math.isnan(
+            _pilot_curve_invalid_rate(verdict, 3)[0]))
+        self.assertTrue(math.isnan(
+            _pilot_curve_invalid_rate({"shallow_none": {}}, 3)[0]))
+
+    def test_binomial_tail_is_exact_and_validated(self):
+        self.assertAlmostEqual(
+            _binomial_at_least(5, 0.8, 3), 0.94208, places=12)
+        self.assertEqual(_binomial_at_least(5, 0.8, 0), 1.0)
+        self.assertEqual(_binomial_at_least(5, 0.8, 6), 0.0)
+        self.assertTrue(math.isnan(_binomial_at_least(5, 1.5, 3)))
+        self.assertTrue(math.isnan(_binomial_at_least(0, 0.5, 1)))
+
+    def test_attrition_below_claim_floor_is_flagged_before_the_grid(self):
+        settings = Settings(seeds=(0, 1, 2))
+        verdict = {"depth_ladder": {"by_depth": {
+            "2": {"accuracy_by_seed": {"0": 0.90, "1": 0.92},
+                  "unmeasured": False},
+        }}}
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _design_sensitivity_plan(
+                    settings, verdict, pathlib.Path(tmp), "e2")
+        self.assertAlmostEqual(payload["pilot_curve_invalid_rate"], 1.0 / 3.0)
+        self.assertEqual(payload["planned_usable_seeds"], 2)
+        self.assertIs(payload["planned_claim_floor_after_attrition"], False)
+        self.assertIs(
+            payload["all_accuracy_claims_seed_eligible_after_attrition"],
+            False)
+        self.assertIs(
+            payload["all_accuracy_claims_confirmable_after_attrition"],
+            False)
+        self.assertEqual(
+            payload["seeds_for_claim_floor_after_attrition"], 5)
+        self.assertLess(
+            payload["prob_claim_floor_after_attrition"], 0.5)
+
+    def test_attrition_adjusted_power_uses_expected_usable_sample(self):
+        settings = Settings(seeds=(0, 1, 2, 3, 4, 5))
+        verdict = {"depth_ladder": {"by_depth": {
+            "2": {"accuracy_by_seed": {str(seed): 0.9 for seed in range(5)},
+                  "unmeasured": False},
+        }}}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(
+                    experiments, "_pilot_accuracy_sd",
+                    return_value=(0.00618, "test")), \
+                mock.patch.object(
+                    experiments, "_pilot_paired_accuracy_sd",
+                    return_value=(0.00874, "test", [])):
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _design_sensitivity_plan(
+                    settings, verdict, pathlib.Path(tmp), "e2")
+        row = next(r for r in payload["rows"]
+                   if r["metric"] == "accuracy_at_longest")
+        self.assertTrue(row["powered"])
+        self.assertEqual(row["required_seeds"], 6)
+        self.assertEqual(row["attrition_expected_usable_seeds"], 5)
+        self.assertIs(row["attrition_adjusted_powered"], False)
+        self.assertLess(row["attrition_adjusted_power_at_planned"], 0.8)
+        self.assertIs(
+            row["attrition_adjusted_exact_resolution_met"], False)
+        self.assertEqual(
+            row["attrition_adjusted_exact_unfalsifiable_alternatives"],
+            ["two-sided"])
+        # The exact floor is stated in usable seeds; the planning count
+        # must add back the seeds the exclusion rule is expected to consume.
+        self.assertEqual(
+            row["attrition_adjusted_exact_required_seeds"], 8)
+        self.assertEqual(
+            row["attrition_adjusted_exact_resolution"]["two-sided"]
+            ["planned_seeds"], 8)
+        self.assertIn("accuracy_at_longest",
+                      payload["attrition_adjusted_underpowered"])
+        self.assertEqual(
+            payload["attrition_adjusted_accuracy_exact_unfalsifiable"],
+            payload["attrition_adjusted_exact_unfalsifiable"])
+
+    def test_accuracy_claim_scope_ignores_unfalsifiable_mechanism_row(self):
+        registry = {
+            "HACC": {"experiment": "e2",
+                     "sesoi": {"accuracy_at_longest": 0.03},
+                     "direction": {"accuracy_at_longest": "+"}},
+            "HMECH": {"experiment": "e2",
+                      "sesoi": {"gate_margin": 0.02},
+                      "direction": {"gate_margin": None}},
+        }
+        settings = Settings(seeds=(0, 1, 2, 3, 4))
+        verdict = {"depth_ladder": {"by_depth": {
+            "2": {"accuracy_by_seed": {str(seed): 0.9 for seed in range(5)},
+                  "unmeasured": False},
+        }}}
+        with tempfile.TemporaryDirectory() as tmp,                 mock.patch.dict(experiments.HYPOTHESES, registry,
+                                clear=True),                 mock.patch.object(
+                    experiments, "_pilot_accuracy_sd",
+                    return_value=(0.00618, "test")),                 mock.patch.object(
+                    experiments, "_pilot_paired_accuracy_sd",
+                    return_value=(0.00874, "test", [])):
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _design_sensitivity_plan(
+                    settings, verdict, pathlib.Path(tmp), "e2")
+        self.assertIn("gate_margin",
+                      payload["attrition_adjusted_exact_unfalsifiable"])
+        self.assertEqual(
+            payload["attrition_adjusted_accuracy_exact_unfalsifiable"], [])
+        self.assertIs(
+            payload["all_accuracy_claims_confirmable_after_attrition"], True)
 
 
 class ReferenceLrValidationTest(unittest.TestCase):

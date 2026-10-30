@@ -202,6 +202,114 @@ def _pilot_accuracy_level(verdict) -> tuple[float, str | None]:
     return float(mean), f"pooled {len(values)} pilot seed accuracies"
 
 
+def _pilot_curve_invalid_rate(verdict, planned_n) -> tuple[float, str | None,
+                                                           list]:
+    """Empirical curve-invalid rate from the baseline-ladder pilot.
+
+    The prospective power plan assumes every planned training seed yields a
+    usable run.  The grid's fixed exclusion rule (``plateau`` /
+    ``diverging`` / ``numerical_instability`` / ``insufficient_points``)
+    can remove seeds *after* training, and a design that was powered at the
+    full planned N can fall below ``min_seeds_for_claim`` or the exact
+    sign-flip floor once those seeds are gone.  The baseline ladder trains
+    the same recipe on the same seed set, so its per-rung valid-seed count
+    is a prospective attrition pilot.  This helper returns the **largest**
+    observed rate across measured rungs, matching the conservative choice
+    made for the variance pilot: an optimistic attrition estimate would
+    certify a design that loses its claim floor after exclusions.
+
+    ``accuracy_by_seed`` in the stored verdict already contains only
+    curve-valid runs, so the missing count is the attrition count.  A
+    record that also carries an explicit ``curve_invalid_seeds`` list is
+    read from that list instead.  Unmeasured rungs are skipped (their
+    ``accuracy_by_seed`` is empty for a reason unrelated to seed-level
+    attrition), and malformed rows abstain rather than inventing a rate.
+
+    Returns ``(nan, None, [])`` when no measured rung carries usable
+    per-seed evidence.
+    """
+    n = _positive_integer(planned_n)
+    if n is None or not isinstance(verdict, Mapping):
+        return float("nan"), None, []
+    ladder = _pilot_mapping(verdict.get("depth_ladder"))
+    rows = []
+    for depth, row in _pilot_mapping(ladder.get("by_depth")).items():
+        if not isinstance(row, Mapping) or row.get("unmeasured"):
+            continue
+        rows.append((f"depth_ladder.d{depth}", row))
+    shallow = verdict.get("shallow_none")
+    if isinstance(shallow, Mapping) and not shallow.get("unmeasured"):
+        rows.append(("shallow_none", shallow))
+    components = []
+    for source, row in rows:
+        invalid = None
+        raw_invalid = row.get("curve_invalid_seeds")
+        if isinstance(raw_invalid, (list, tuple)):
+            invalid = sum(1 for seed in raw_invalid
+                          if _declared_seed(seed) is not None)
+        else:
+            by_seed = row.get("accuracy_by_seed")
+            if isinstance(by_seed, Mapping):
+                invalid = max(0, n - len(by_seed))
+        if invalid is None:
+            continue
+        invalid = min(int(invalid), n)
+        components.append({
+            "source": source,
+            "planned_n": n,
+            "valid_seeds": n - invalid,
+            "invalid_seeds": invalid,
+            "rate": invalid / n,
+        })
+    if not components:
+        return float("nan"), None, []
+    chosen = max(components, key=lambda item: item["rate"])
+    return float(chosen["rate"]), chosen["source"], components
+
+
+def _binomial_at_least(n, probability, k) -> float:
+    """``P(K >= k)`` for ``K ~ Binomial(n, probability)``.
+
+    Used to report how often a design keeps its pre-registered claim floor
+    when the pilot's curve-invalid rate is applied as an independent
+    per-run attrition probability.  Exact for the small seed counts used
+    here; abstains (NaN) on malformed inputs instead of returning a
+    fabricated retention probability.
+    """
+    n_int = _positive_integer(n)
+    if isinstance(k, bool):
+        return float("nan")
+    try:
+        k_int = operator.index(k)
+    except TypeError:
+        return float("nan")
+    if n_int is None or k_int < 0 or not _finite(probability):
+        return float("nan")
+    p = float(probability)
+    if not 0.0 <= p <= 1.0:
+        return float("nan")
+    if k_int == 0:
+        return 1.0
+    if k_int > n_int:
+        return 0.0
+    if p <= 0.0:
+        return 0.0
+    if p >= 1.0:
+        return 1.0
+    if n_int > 1000:
+        # Seed counts are far below this; a huge binomial sum would only
+        # add floating-point cancellation without changing a planning
+        # decision.
+        return float("nan")
+    try:
+        total = math.fsum(
+            math.comb(n_int, i) * p ** i * (1.0 - p) ** (n_int - i)
+            for i in range(k_int, n_int + 1))
+    except (OverflowError, ValueError):
+        return float("nan")
+    return min(1.0, max(0.0, float(total)))
+
+
 def _pilot_paired_accuracy_sd(verdict) -> tuple[float, str | None, list]:
     """Paired-difference seed SD for the prospective power plan.
 
@@ -712,6 +820,31 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
     paired_sd, paired_source, paired_components = \
         _pilot_paired_accuracy_sd(verdict)
     pilot_acc, pilot_acc_source = _pilot_accuracy_level(verdict)
+    # A design is only as large as the seeds that survive the fixed
+    # exclusion rule.  The baseline ladder is the prospective attrition
+    # pilot: its per-rung valid-seed counts were measured under the same
+    # recipe and seed set as the grid, so the largest observed invalid
+    # fraction is the conservative planning rate.
+    attrition_rate, attrition_source, attrition_components = \
+        _pilot_curve_invalid_rate(verdict, n)
+    attrition_known = bool(
+        _finite(attrition_rate) and 0.0 <= float(attrition_rate) <= 1.0)
+    if attrition_known:
+        retention = 1.0 - float(attrition_rate)
+        expected_usable = n * retention
+        expected_usable_floor = max(
+            0, min(n, int(math.floor(expected_usable + 1e-12))))
+        claim_floor_after_attrition = expected_usable_floor >= floor
+        retention_probability = _binomial_at_least(n, retention, floor)
+        seeds_for_claim_floor_after_attrition = (
+            int(math.ceil(floor / retention)) if retention > 0.0 else None)
+    else:
+        retention = float("nan")
+        expected_usable = float("nan")
+        expected_usable_floor = None
+        claim_floor_after_attrition = None
+        retention_probability = float("nan")
+        seeds_for_claim_floor_after_attrition = None
     planned_items = max(1, int(settings.eval_batch)
                         * int(settings.eval_batches))
     # Worst-case finite-stream floor: if the two arms' per-item errors were
@@ -820,7 +953,70 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
                 else float("nan")),
             "stream_items_for_sesoi": None,
             "stream_limited_worst_case": None,
+            "attrition_expected_usable_seeds": expected_usable_floor,
+            "attrition_adjusted_required_seeds": None,
+            "attrition_adjusted_power_at_planned": None,
+            "attrition_adjusted_powered": None,
+            "attrition_adjusted_exact_resolution": None,
+            "attrition_adjusted_exact_resolution_met": None,
+            "attrition_adjusted_exact_unfalsifiable_alternatives": [],
+            "attrition_adjusted_exact_required_seeds": None,
         })
+        if attrition_known:
+            adjusted_exact = {}
+            for alternative in item.get("exact_alternatives") \
+                    or ["two-sided"]:
+                required_exact = sign_flip_min_units(alternative, fdr_q)
+                planned_exact = (
+                    int(math.ceil(required_exact / retention))
+                    if required_exact is not None and retention > 0.0
+                    else None)
+                if expected_usable_floor is not None \
+                        and expected_usable_floor >= 1:
+                    resolution = sign_flip_resolution(
+                        expected_usable_floor, alternative)
+                    adjusted_exact[alternative] = {
+                        "min_attainable_p": float(
+                            resolution["min_attainable_p"]),
+                        "method": resolution["method"],
+                        "resolved_at_planned_n": bool(
+                            resolution["valid"]
+                            and float(resolution["min_attainable_p"]) <= fdr_q),
+                        "min_seeds": required_exact,
+                        "planned_seeds": planned_exact,
+                    }
+                else:
+                    adjusted_exact[alternative] = {
+                        "min_attainable_p": float("nan"),
+                        "method": "none",
+                        "resolved_at_planned_n": False,
+                        "min_seeds": required_exact,
+                        "planned_seeds": planned_exact,
+                    }
+            adjusted_unfalsifiable = sorted(
+                alternative for alternative, info
+                in adjusted_exact.items()
+                if not info["resolved_at_planned_n"])
+            # ``min_seeds`` above is the usable-unit requirement; the
+            # planning requirement is larger because the fixed exclusion
+            # rule consumes part of the planned seed set.  Report the
+            # planned count needed to retain that many usable seeds.
+            adjusted_required = [info["planned_seeds"]
+                                 for info in adjusted_exact.values()]
+            adjusted_required_seeds = (
+                max(adjusted_required)
+                if adjusted_required and all(value is not None
+                                             for value in adjusted_required)
+                else None)
+            row.update({
+                "attrition_adjusted_exact_resolution": adjusted_exact,
+                "attrition_adjusted_exact_resolution_met":
+                    not adjusted_unfalsifiable,
+                "attrition_adjusted_exact_unfalsifiable_alternatives":
+                    adjusted_unfalsifiable,
+                "attrition_adjusted_exact_required_seeds":
+                    adjusted_required_seeds,
+            })
         # A finite evaluation stream imposes a precision floor that more
         # training seeds cannot remove.  Report the item count that would
         # keep the worst-case independent-arm binomial SE at or below the
@@ -871,6 +1067,22 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
             power_single = _power_at_effect(
                 mode, true_effect, sd_single, n, alpha, bound=bound)
             powered = None if required is None else bool(required <= n)
+            attrition_required = None
+            attrition_power = None
+            attrition_powered = None
+            if attrition_known and expected_usable_floor is not None:
+                if required is not None and retention > 0.0:
+                    try:
+                        attrition_required = int(
+                            math.ceil(required / retention))
+                    except (OverflowError, ValueError):
+                        attrition_required = None
+                attrition_power = _power_at_effect(
+                    mode, true_effect, sd, expected_usable_floor, alpha,
+                    bound=bound)
+                attrition_powered = (
+                    None if required is None
+                    else bool(expected_usable_floor >= required))
             row.update({
                 "required_seeds": required,
                 "required_seeds_single_arm": required_single,
@@ -880,6 +1092,9 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
                 "status": ("powered" if powered
                            else "underpowered" if powered is False
                            else "unpowerable"),
+                "attrition_adjusted_required_seeds": attrition_required,
+                "attrition_adjusted_power_at_planned": attrition_power,
+                "attrition_adjusted_powered": attrition_powered,
             })
         rows.append(row)
     accuracy_rows = [r for r in rows if "accuracy" in r["metric"]
@@ -946,6 +1161,42 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
         # confirmable design.
         all_claims_confirmable = bool(all_powered
                                       and all_accuracy_exact_met)
+    if attrition_known:
+        attrition_underpowered = sorted({
+            r["metric"] for r in accuracy_rows
+            if r.get("attrition_adjusted_powered") is False})
+        attrition_exact_unfalsifiable = sorted({
+            r["metric"] for r in rows
+            if r.get("attrition_adjusted_exact_resolution_met") is False})
+        attrition_exact_unfalsifiable_hypotheses = sorted({
+            hyp for r in rows
+            if r.get("attrition_adjusted_exact_resolution_met") is False
+            for hyp in (r.get("hypotheses") or [])})
+        # The all-metric list is a planning warning; the accuracy-claim
+        # verdict must use the same metric scope as ``all_claims_confirmable``
+        # (accuracy rows only), otherwise an unfalsifiable mechanism row
+        # would veto an otherwise confirmable accuracy claim.
+        attrition_accuracy_exact_unfalsifiable = sorted({
+            r["metric"] for r in accuracy_rows
+            if r.get("attrition_adjusted_exact_resolution_met") is False})
+        if not claim_floor_after_attrition:
+            attrition_claim_seed_eligible = False
+            attrition_claims_confirmable = False
+        elif not accuracy_rows:
+            attrition_claim_seed_eligible = None
+            attrition_claims_confirmable = None
+        else:
+            attrition_claim_seed_eligible = True
+            attrition_claims_confirmable = bool(
+                not attrition_underpowered
+                and not attrition_accuracy_exact_unfalsifiable)
+    else:
+        attrition_underpowered = []
+        attrition_exact_unfalsifiable = []
+        attrition_exact_unfalsifiable_hypotheses = []
+        attrition_accuracy_exact_unfalsifiable = []
+        attrition_claim_seed_eligible = None
+        attrition_claims_confirmable = None
     payload = {
         "experiment": tag,
         "planned_n": n,
@@ -984,6 +1235,33 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
         "pilot_paired_components": paired_components,
         "pilot_accuracy_level": float(p_level),
         "pilot_accuracy_level_source": pilot_acc_source,
+        # Attrition pilot: the planned N is only realisable if the fixed
+        # curve-validity exclusion rule does not remove seeds.  These
+        # fields are companions to the pre-registered full-N decision; they
+        # ask whether the design still clears its claim floor, power target
+        # and exact-test resolution at the expected usable sample.
+        "pilot_curve_invalid_rate": float(attrition_rate),
+        "pilot_curve_invalid_source": attrition_source,
+        "pilot_curve_invalid_components": attrition_components,
+        "planned_usable_seeds_expected": (
+            float(expected_usable) if attrition_known else float("nan")),
+        "planned_usable_seeds": expected_usable_floor,
+        "planned_claim_floor_after_attrition":
+            claim_floor_after_attrition,
+        "prob_claim_floor_after_attrition": float(retention_probability),
+        "seeds_for_claim_floor_after_attrition":
+            seeds_for_claim_floor_after_attrition,
+        "all_accuracy_claims_seed_eligible_after_attrition":
+            attrition_claim_seed_eligible,
+        "all_accuracy_claims_confirmable_after_attrition":
+            attrition_claims_confirmable,
+        "attrition_adjusted_underpowered": attrition_underpowered,
+        "attrition_adjusted_exact_unfalsifiable":
+            attrition_exact_unfalsifiable,
+        "attrition_adjusted_exact_unfalsifiable_hypotheses":
+            attrition_exact_unfalsifiable_hypotheses,
+        "attrition_adjusted_accuracy_exact_unfalsifiable":
+            attrition_accuracy_exact_unfalsifiable,
         "planned_eval_items": int(planned_items),
         "stream_item_variance_floor": float(stream_item_var),
         "stream_item_sd_floor": float(stream_item_sd),
@@ -1019,9 +1297,15 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
             "at n=5 a two-sided exact p-value cannot fall below 0.0625, so "
             "an undirected row is unfalsifiable at q=0.05 however large its "
             "effect; the plan reports the required seed count rather than "
-            "discovering this after the grid.  An underpowered row means a "
-            "null result is uninformative at this N, not that the effect is "
-            "absent."),
+            "discovering this after the grid.  The attrition pilot applies "
+            "the baseline ladder's largest observed curve-invalid rate to "
+            "the planned seed count and reports whether the expected usable "
+            "sample still clears the claim floor, the power target and the "
+            "exact-test resolution; an attrition-limited warning means the "
+            "full-N plan is not robust to the project's own exclusion rule, "
+            "so more seeds or a larger SESOI are needed before the grid.  "
+            "An underpowered row means a null result is uninformative at "
+            "this N, not that the effect is absent."),
         "hypotheses_sha256": _hypotheses_sha(),
         **_stamp(settings),
     }
@@ -1045,6 +1329,34 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
         print(f"  finite-stream floor (worst case, independent arm errors): "
               f"items={planned_items}, p={p_level:.3f}, SE="
               f"{stream_item_sd:.4f}")
+    if attrition_known:
+        print(f"  attrition pilot: {float(attrition_rate):.1%} "
+              f"curve-invalid ({attrition_source or 'n/a'}); expected "
+              f"usable seeds={expected_usable_floor}/{n} "
+              f"(P(usable>={floor})={float(retention_probability):.2f})")
+        if not claim_floor_after_attrition:
+            print(f"  WARNING: at the pilot attrition rate the expected "
+                  f"usable sample ({expected_usable_floor}) is below the "
+                  f"pre-registered min_seeds_for_claim={floor}; the full-N "
+                  f"plan does not survive the project's own curve-validity "
+                  f"exclusion rule.  Pre-register more seeds (about "
+                  f"{seeds_for_claim_floor_after_attrition}) or a larger "
+                  f"SESOI before running the grid.")
+        elif attrition_underpowered:
+            print(f"  WARNING: at the pilot attrition rate the expected "
+                  f"usable sample ({expected_usable_floor}) is below the "
+                  f"paired-variance requirement for "
+                  f"{', '.join(attrition_underpowered)}; the full-N power "
+                  f"certificate is not attrition-robust")
+        if attrition_exact_unfalsifiable:
+            print(f"  WARNING: at the pilot attrition rate the expected "
+                  f"usable sample ({expected_usable_floor}) cannot clear "
+                  f"the exact sign-flip floor at q={fdr_q:g} for "
+                  f"{', '.join(attrition_exact_unfalsifiable)}")
+    else:
+        print("  attrition pilot unavailable: the design plan cannot check "
+              "whether the expected usable sample survives the curve-"
+              "validity exclusion rule; run `--only baselines` first")
     if not meets_floor:
         print(f"  WARNING: planned n={n} is below the pre-registered "
               f"min_seeds_for_claim={floor}; every contrast will be "

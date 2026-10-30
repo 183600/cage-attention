@@ -133,7 +133,12 @@ Design principles
     correlated arms and certify an underpowered design.  The plan also
     reports the finite-evaluation-stream binomial floor separately: more
     training seeds cannot remove it, so a stream-limited warning asks for a
-    wider evaluation stream.  An underpowered plan is
+    wider evaluation stream.  The plan also applies the baseline ladder's
+    largest observed curve-invalid rate to the planned N: the fixed
+    exclusion rule can remove seeds after training, so a design that only
+    clears its claim floor, power target or exact-test resolution when no
+    run is excluded is flagged as attrition-limited before the grid.
+    An underpowered plan is
     flagged at preparation time instead of being discovered as an
     "inconclusive" after the compute is spent.  The plan separately reports
     whether the planned N clears ``Settings.min_seeds_for_claim``: power at
