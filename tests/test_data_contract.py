@@ -265,6 +265,25 @@ class SplitAuditInputTest(unittest.TestCase):
                         heldout_specs={"h": {"seed": 1, "batch": 4,
                                              "batches": 1}})
 
+    def test_unrepresentable_derived_sample_counts_raise_value_error(self):
+        from cage.data import actual_stream_overlap_audit, split_leakage_audit
+
+        with self.assertRaises(ValueError):
+            split_leakage_audit(
+                3, 17, batch=2 ** 40, batches=2 ** 24, train_seeds=(0,))
+        with self.assertRaises(ValueError):
+            actual_stream_overlap_audit(
+                3, 17,
+                train_specs={"t": {"seed": 0, "batch": 2 ** 40,
+                                   "steps": 2 ** 24}},
+                heldout_specs={"h": {"seed": 1, "batch": 1, "batches": 1}})
+        with self.assertRaises(ValueError):
+            actual_stream_overlap_audit(
+                3, 17,
+                train_specs={"t": {"seed": 0, "batch": 1, "steps": 1}},
+                heldout_specs={"h": {"seed": 1, "batch": 2 ** 40,
+                                     "batches": 2 ** 24}})
+
     def test_malformed_stream_spec_containers_raise_value_error(self):
         from cage.data import actual_stream_overlap_audit
 

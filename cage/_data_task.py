@@ -1556,6 +1556,10 @@ def _draw_stream_keys(seed, n_pairs, vocab, device, batch, units):
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     batch = _positive_audit_count(batch, "batch")
     units = _positive_audit_count(units, "units")
+    total = batch * units
+    if total > _MAX_TORCH_INDEX:
+        raise ValueError(
+            f"batch*units={total} exceeds torch's signed 64-bit index range")
     keys, n_rows = set(), 0
     associations, association_set, key_set = [], set(), set()
     for _ in range(units):

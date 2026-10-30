@@ -1281,7 +1281,12 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
     check_data_geometry(n_pairs, vocab)
     batch = _positive_audit_count(batch, "batch")
     batches = _positive_audit_count(batches, "batches")
-    if batch * batches < 2:
+    samples = batch * batches
+    if samples > _MAX_TORCH_INDEX:
+        raise ValueError(
+            f"batch*batches={samples} exceeds torch's signed 64-bit index "
+            "range")
+    if samples < 2:
         raise ValueError(
             "split_leakage_audit needs at least two samples per split to "
             f"estimate a sampling-noise floor, got batch={batch} x "
