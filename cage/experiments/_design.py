@@ -705,12 +705,54 @@ def _linear_slope(xs, ys):
     if len(pairs) < 2:
         return float("nan")
     n = len(pairs)
-    mx = sum(x for x, _ in pairs) / n
-    my = sum(y for _, y in pairs) / n
-    denom = sum((x - mx) ** 2 for x, _ in pairs)
+    # Translate to the first point before centring so a large common offset
+    # does not destroy the differences (``1e308`` and its next float differ
+    # by only ~2e-16 in relative terms).  If the raw differences overflow
+    # (opposite-sign extremes), normalise both axes first and translate
+    # those bounded values instead.
+    x0, y0 = pairs[0]
+    dx = [x - x0 for x, _ in pairs]
+    dy = [y - y0 for _, y in pairs]
+    x_base = y_base = 1.0
+    if not (all(math.isfinite(value) for value in dx)
+            and all(math.isfinite(value) for value in dy)):
+        x_base = max(abs(x) for x, _ in pairs)
+        y_base = max(abs(y) for _, y in pairs)
+        if x_base == 0.0:
+            return float("nan")
+        xs_norm = [x / x_base for x, _ in pairs]
+        ys_norm = ([0.0] * n if y_base == 0.0
+                   else [y / y_base for _, y in pairs])
+        dx = [x - xs_norm[0] for x in xs_norm]
+        dy = [y - ys_norm[0] for y in ys_norm]
+    x_scale = max(abs(value) for value in dx)
+    y_scale = max(abs(value) for value in dy)
+    if x_scale == 0.0:
+        return float("nan")
+    if y_scale == 0.0:
+        return 0.0
+    dx_norm = [value / x_scale for value in dx]
+    dy_norm = [value / y_scale for value in dy]
+    denom = math.fsum(value * value for value in dx_norm)
     if denom <= 0.0:
         return float("nan")
-    return sum((x - mx) * (y - my) for x, y in pairs) / denom
+    slope_norm = math.fsum(
+        x * y for x, y in zip(dx_norm, dy_norm)) / denom
+    if slope_norm == 0.0:
+        return 0.0
+    if not math.isfinite(slope_norm):
+        return math.copysign(float("inf"), slope_norm)
+    m1, e1 = math.frexp(slope_norm)
+    m2, e2 = math.frexp(y_scale)
+    m2b, e2b = math.frexp(y_base)
+    m3, e3 = math.frexp(x_scale)
+    m3b, e3b = math.frexp(x_base)
+    mantissa = (m1 * m2 * m2b) / (m3 * m3b)
+    try:
+        return math.ldexp(
+            mantissa, e1 + e2 + e2b - e3 - e3b)
+    except OverflowError:
+        return math.copysign(float("inf"), slope_norm)
 
 
 def _difficulty_count(value) -> int | None:

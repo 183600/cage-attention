@@ -1274,6 +1274,16 @@ class CoverageMalformedRunTest(unittest.TestCase):
         self.assertEqual(mixed["mean"], 0.0)
         self.assertTrue(math.isfinite(mixed["std"]))
         self.assertTrue(math.isnan(_linear_slope(None, None)))
+        # The slope must survive the same finite-but-huge values: raw
+        # squared deviations overflow even though the true slope is tiny.
+        x0 = 1e308
+        x1 = math.nextafter(x0, math.inf)
+        slope = _linear_slope([x0, x1], [0.0, 1.0])
+        self.assertTrue(math.isfinite(slope))
+        self.assertTrue(math.isclose(
+            slope, 1.0 / (x1 - x0), rel_tol=1e-12))
+        self.assertEqual(_linear_slope([-1e308, 1e308], [0.0, 1.0]),
+                         5e-309)
 
     def test_malformed_or_empty_coverage_declarations_fail_closed(self):
         good = {"seed": 0, "calib_variant": "full",
