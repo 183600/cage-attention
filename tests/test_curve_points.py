@@ -32,6 +32,26 @@ class CurveVerdictSingleCheckTest(unittest.TestCase):
         self.assertEqual(out["val_regression_after_best"], 0.0)
 
 
+class CurveVerdictExtremeLossTest(unittest.TestCase):
+    def test_relative_delta_stays_finite_for_extreme_finite_losses(self):
+        flat = [{"step": 0, "train_loss": 1e308},
+                {"step": 1, "train_loss": 1e308}]
+        out = training_curve_verdict(flat)
+        self.assertEqual(out["train_delta"], 0.0)
+        self.assertEqual(out["verdict"], "plateau")
+
+        falling = [{"step": 0, "train_loss": 1e308},
+                   {"step": 1, "train_loss": 5e307}]
+        out = training_curve_verdict(falling)
+        self.assertAlmostEqual(out["train_delta"], -2.0 / 3.0, places=12)
+
+    def test_relative_delta_stays_correct_for_extreme_finite_steps(self):
+        hist = [{"step": 1e300, "train_loss": 1.0},
+                {"step": 2e300, "train_loss": 2.0}]
+        out = training_curve_verdict(hist)
+        self.assertAlmostEqual(out["train_delta"], 2.0 / 3.0, places=12)
+
+
 class CurvePointsTest(unittest.TestCase):
     def _curve(self, steps, points):
         settings = Settings.quick()

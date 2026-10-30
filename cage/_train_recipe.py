@@ -328,16 +328,28 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
     def rel_delta(points, key):
         xs = [float(p["step"]) for p in points]
         ys = [float(p[key]) for p in points]
-        mean_y = sum(ys) / len(ys)
-        if mean_y == 0.0:
-            return 0.0
         n = len(xs)
-        mx = sum(xs) / n
-        my = mean_y
-        denom = sum((x - mx) ** 2 for x in xs)
+        # The relative delta is invariant to independent positive rescaling
+        # of the step and loss axes.  Normalise before summing so finite
+        # extreme losses (or step values) cannot overflow the raw mean and
+        # square terms into inf/NaN; the scale factors cancel in the ratio.
+        y_scale = max(abs(y) for y in ys)
+        if y_scale == 0.0:
+            return 0.0
+        ys = [y / y_scale for y in ys]
+        my = math.fsum(ys) / n
+        if my == 0.0:
+            return 0.0
+        x_scale = max(abs(x) for x in xs)
+        if x_scale == 0.0:
+            return 0.0
+        xs = [x / x_scale for x in xs]
+        mx = math.fsum(xs) / n
+        denom = math.fsum((x - mx) ** 2 for x in xs)
         if denom == 0.0:
             return 0.0
-        slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / denom
+        slope = math.fsum((x - mx) * (y - my)
+                          for x, y in zip(xs, ys)) / denom
         return slope * (xs[-1] - xs[0]) / abs(my)
 
     out["train_delta"] = rel_delta(finite, "train_loss")
