@@ -527,6 +527,50 @@ def _regularized_incomplete_beta(a: float, b: float, x: float) -> float:
     return 1.0 - front * _beta_continued_fraction(b, a, 1.0 - x) / b
 
 
+def _student_t_tail(t: float, df: float) -> float:
+    """Upper tail ``P(T > |t|)`` without squaring overflow.
+
+    ``x = df / (df + t*t)`` overflows ``t*t`` once ``|t|`` exceeds
+    ``sqrt(float64 max)`` (~1.34e154), which is reachable for heavy tails
+    (``df < 2``) at tiny but valid tail probabilities.  The direct quotient
+    then saturates to zero and a quantile search silently stops at that
+    threshold.  For large ``|t|`` the reciprocal form keeps ``x`` finite
+    (possibly subnormal), and once ``x`` itself underflows the closed-form
+    large-``t`` asymptote ``P(T > t) ~ C t^-df`` is used instead.
+    """
+    if df > 1e150:
+        # The t distribution is normal to machine precision here, and the
+        # continued fraction squares ``df`` (overflowing) for such degrees
+        # of freedom.
+        return 0.5 * math.erfc(abs(t) / math.sqrt(2.0))
+    t2 = t * t
+    ratio = t2 / df if math.isfinite(t2) else float("inf")
+    if math.isfinite(ratio):
+        # ``df + t*t`` itself can overflow when both are large even though
+        # the ratio (and hence x) is perfectly representable.
+        x = 1.0 / (1.0 + ratio)
+    else:
+        inv = 1.0 / abs(t)
+        scaled = df * inv * inv
+        x = scaled / (1.0 + scaled) if scaled > 0.0 else 0.0
+    if x >= 1e-300:
+        return 0.5 * _regularized_incomplete_beta(df / 2.0, 0.5, x)
+    # Large-|t| asymptote: with x = df/(df+t^2) -> 0,
+    # I_x(df/2, 1/2) ~ x^(df/2) / ((df/2) B(df/2, 1/2)), so
+    # sf(t) ~ Gamma((df+1)/2) / (Gamma(df/2) sqrt(pi))
+    #         * df^(df/2 - 1) * t^-df.
+    # The relative error is O(1/t^2), far below float64 resolution here.
+    log_tail = (math.lgamma((df + 1.0) / 2.0) - math.lgamma(df / 2.0)
+                - 0.5 * math.log(math.pi)
+                + (df / 2.0 - 1.0) * math.log(df)
+                - df * math.log(abs(t)))
+    if not math.isfinite(log_tail):
+        # For astronomically large df the two lgamma terms can overflow to
+        # +inf and subtract to NaN even though the true tail is negligible.
+        return 0.0
+    return math.exp(log_tail)
+
+
 def _student_t_cdf(t: float, df: float) -> float:
     """CDF of Student's t with ``df`` degrees of freedom."""
     if math.isnan(t):
@@ -535,8 +579,7 @@ def _student_t_cdf(t: float, df: float) -> float:
         return 0.0 if t < 0.0 else 1.0
     if not (math.isfinite(df) and df > 0.0):
         return float("nan")
-    x = df / (df + t * t)
-    tail = 0.5 * _regularized_incomplete_beta(df / 2.0, 0.5, x)
+    tail = _student_t_tail(t, df)
     return 1.0 - tail if t > 0.0 else tail
 
 
@@ -548,8 +591,7 @@ def _student_t_sf(t: float, df: float) -> float:
         return 0.0 if t > 0.0 else 1.0
     if not (math.isfinite(df) and df > 0.0):
         return float("nan")
-    x = df / (df + t * t)
-    tail = 0.5 * _regularized_incomplete_beta(df / 2.0, 0.5, x)
+    tail = _student_t_tail(t, df)
     return tail if t > 0.0 else 1.0 - tail
 
 

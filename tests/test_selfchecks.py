@@ -769,6 +769,30 @@ class TinyAlphaQuantileTest(unittest.TestCase):
         self.assertTrue(math.isnan(metrics._student_t_cdf(float("nan"), 5)))
         self.assertTrue(math.isnan(metrics._student_t_sf(float("nan"), 5)))
 
+    def test_heavy_tail_quantile_beyond_square_overflow(self):
+        # ``t*t`` overflows above ~1.34e154, which is reachable for df < 2
+        # at tiny tail probabilities.  The quantile must not saturate there.
+        p = 1e-168
+        df = 0.95
+        quantile = metrics._student_t_ppf(p, df)
+        self.assertTrue(math.isfinite(quantile))
+        self.assertLess(quantile, -1e154)
+        self.assertAlmostEqual(
+            metrics._student_t_cdf(quantile, df) / p, 1.0, places=9)
+        # Cauchy quantile for p below the square-overflow threshold is still
+        # finite and equal to -cot(pi*p) ~ -1/(pi*p).
+        p = 1e-300
+        quantile = metrics._student_t_ppf(p, 1.0)
+        self.assertTrue(math.isfinite(quantile))
+        self.assertAlmostEqual(
+            quantile / (-1.0 / (math.pi * p)), 1.0, places=12)
+        # The tail itself must not underflow to zero at |t| > sqrt(max).
+        self.assertAlmostEqual(
+            metrics._student_t_sf(1e200, 1.0) * math.pi * 1e200,
+            1.0, places=12)
+        # A quantile beyond the float64 range is reported as infinity.
+        self.assertTrue(math.isinf(metrics._student_t_ppf(1e-320, 0.5)))
+
 
 class FixedBatchDtypeTest(unittest.TestCase):
     def test_narrow_integer_fixed_batch_is_widened(self):
