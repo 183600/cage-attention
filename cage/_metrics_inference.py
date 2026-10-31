@@ -569,8 +569,11 @@ def _student_t_ppf(p: float, df: float) -> float:
     target = p if p < 0.5 else 1.0 - p
     lo, hi = 0.0, 1.0
     while _student_t_sf(hi, df) > target:
+        # Heavy tails (df <= 2) need a quantile far beyond 1e12 for tiny
+        # but valid tail probabilities; keep doubling until the float64
+        # range itself is exhausted.
         hi *= 2.0
-        if hi > 1e12:
+        if not math.isfinite(hi):
             return sign * float("inf")
     for _ in range(200):
         mid = 0.5 * (lo + hi)

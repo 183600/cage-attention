@@ -757,6 +757,13 @@ class TinyAlphaQuantileTest(unittest.TestCase):
         rep = replication_interval([0.1, 0.2, 0.3, 0.4],
                                    alpha=1e-16)
         self.assertTrue(isinstance(rep["valid"], bool))
+        # The Cauchy (df=1) quantile at a tiny tail probability is finite
+        # and far above the old 1e12 search cap: q = -cot(pi*p).
+        p = 1e-30
+        quantile = metrics._student_t_ppf(p, 1.0)
+        self.assertTrue(math.isfinite(quantile))
+        expected = -1.0 / math.tan(math.pi * p)
+        self.assertAlmostEqual(quantile / expected, 1.0, places=12)
 
 
 class FixedBatchDtypeTest(unittest.TestCase):
