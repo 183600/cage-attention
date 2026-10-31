@@ -129,6 +129,19 @@ class ProvenanceAuditTest(unittest.TestCase):
         self.assertEqual(code, 1, text)
         self.assertIn("invalid JSON", text)
 
+    def test_undecodable_lifecycle_index_fails_closed(self):
+        (self.root / "run_index.jsonl").write_bytes(b"\xff\xfe not utf-8\n")
+        code, text = self._audit()
+        self.assertEqual(code, 1, text)
+        self.assertIn("cannot read", text)
+
+    def test_undecodable_result_file_fails_closed(self):
+        self._write_json("environment.json", self.base)
+        (self.root / "e1_runs.jsonl").write_bytes(b"\xff\xfe not utf-8\n")
+        code, text = self._audit()
+        self.assertEqual(code, 1, text)
+        self.assertIn("cannot read", text)
+
     def test_malformed_source_hash_is_rejected(self):
         record = self._record(source_tree_sha256="not-a-hash")
         self._write_jsonl("e1_runs.jsonl", [record])

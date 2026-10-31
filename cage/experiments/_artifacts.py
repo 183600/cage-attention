@@ -1207,24 +1207,19 @@ def _audit_provenance(out_dir, require_homogeneous: bool = False) -> int:
     run_index_path = root / "run_index.jsonl"
     if run_index_path.is_file():
         relative = run_index_path.name
-        with run_index_path.open(encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, 1):
-                if not line.strip():
-                    continue
-                try:
-                    row = json.loads(line)
-                except (TypeError, ValueError) as exc:
-                    _problem(f"{relative}:{line_number}: invalid JSON "
-                             f"({type(exc).__name__}: {exc})")
-                    continue
-                if not isinstance(row, Mapping):
-                    _problem(f"{relative}:{line_number}: row is not a "
-                             f"JSON object")
-                    continue
-                # A failed environment probe writes a fallback context
-                # with setup_sha256=None; that is an honest failure row,
-                # not a provenance defect in an experiment result.
-                _add_run(row, f"{relative}:{line_number}")
+        try:
+            index_rows = _read_jsonl_objects(run_index_path)
+        except (OSError, UnicodeError) as exc:
+            _problem(f"{relative}: cannot read ({type(exc).__name__}: {exc})")
+            index_rows = []
+        for line_number, row, error in index_rows:
+            if error is not None:
+                _problem(f"{relative}:{line_number}: {error}")
+                continue
+            # A failed environment probe writes a fallback context
+            # with setup_sha256=None; that is an honest failure row,
+            # not a provenance defect in an experiment result.
+            _add_run(row, f"{relative}:{line_number}")
 
     # ---- result files --------------------------------------------------
     # Runs already anchored by environment.json, a manifest or the lifecycle
@@ -1254,47 +1249,40 @@ def _audit_provenance(out_dir, require_homogeneous: bool = False) -> int:
         relative = path.relative_to(root).as_posix()
         file_setups: set[str] = set()
         file_environments: set[str] = set()
-        n_records = 0
         try:
-            handle = path.open(encoding="utf-8")
-        except OSError as exc:
+            rows = _read_jsonl_objects(path)
+        except (OSError, UnicodeError) as exc:
             _problem(f"{relative}: cannot read ({type(exc).__name__}: {exc})")
             continue
-        with handle:
-            for line_number, line in enumerate(handle, 1):
-                if not line.strip():
-                    continue
-                n_records += 1
-                try:
-                    record = json.loads(line)
-                except (TypeError, ValueError) as exc:
-                    _problem(f"{relative}:{line_number}: invalid JSON "
-                             f"({type(exc).__name__}: {exc})")
-                    continue
-                where = f"{relative}:{line_number}"
-                for problem in _provenance_record_errors(record):
-                    _problem(f"{where}: {problem}")
-                if not isinstance(record, Mapping):
-                    continue
-                setup = record.get("setup_sha256")
-                if _is_short_sha(setup):
-                    file_setups.add(setup)
-                environment = record.get("environment")
-                if isinstance(environment, Mapping):
-                    declared = environment.get("environment_sha256")
-                    if _is_short_sha(declared):
-                        file_environments.add(declared)
-                _add_run(record, where)
-                # A compact stamp has no full context of its own; it is only
-                # traceable through the same run's anchor.  Defer the verdict
-                # until every file has been read, so a full row in a later
-                # file still counts as the anchor.
-                run_id = record.get("run_id")
-                if _setup_fingerprint(record) is None:
-                    if isinstance(run_id, str) and run_id:
-                        stamp_rows.append((where, run_id))
-                elif isinstance(run_id, str) and run_id:
-                    anchored_runs.add(run_id)
+        n_records = len(rows)
+        for line_number, record, error in rows:
+            if error is not None:
+                _problem(f"{relative}:{line_number}: {error}")
+                continue
+            where = f"{relative}:{line_number}"
+            for problem in _provenance_record_errors(record):
+                _problem(f"{where}: {problem}")
+            if not isinstance(record, Mapping):
+                continue
+            setup = record.get("setup_sha256")
+            if _is_short_sha(setup):
+                file_setups.add(setup)
+            environment = record.get("environment")
+            if isinstance(environment, Mapping):
+                declared = environment.get("environment_sha256")
+                if _is_short_sha(declared):
+                    file_environments.add(declared)
+            _add_run(record, where)
+            # A compact stamp has no full context of its own; it is only
+            # traceable through the same run's anchor.  Defer the verdict
+            # until every file has been read, so a full row in a later
+            # file still counts as the anchor.
+            run_id = record.get("run_id")
+            if _setup_fingerprint(record) is None:
+                if isinstance(run_id, str) and run_id:
+                    stamp_rows.append((where, run_id))
+            elif isinstance(run_id, str) and run_id:
+                anchored_runs.add(run_id)
         total_records += n_records
         message = None
         if len(file_setups) > 1:
