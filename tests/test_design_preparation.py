@@ -1439,6 +1439,12 @@ class CoverageMalformedRunTest(unittest.TestCase):
         mixed = _mean_std([-1e308, 1e308])
         self.assertEqual(mixed["mean"], 0.0)
         self.assertTrue(math.isfinite(mixed["std"]))
+        # One huge outlier among many modest values makes the raw deviation
+        # overflow even though the true sample SD is finite.
+        outlier = _mean_std([1e308] + [-1e308] * 9)
+        self.assertTrue(math.isfinite(outlier["std"]))
+        self.assertAlmostEqual(
+            outlier["std"] / 1e308, math.sqrt(0.4), places=12)
         for scale in (1e-200, 1e-300):
             with self.subTest(scale=scale):
                 tiny = _mean_std([scale, 2.0 * scale])

@@ -680,7 +680,20 @@ def _mean_std(values):
                               / (len(vals) - 1))
                 std = scale * math.sqrt(scaled_var)
             else:
-                std = float("nan")
+                # The deviation itself can overflow even when the true SD
+                # is representable (one huge outlier among many modest
+                # values).  Rescale the original values instead, which keeps
+                # every deviation bounded and recovers the finite SD.
+                base = max(abs(v) for v in vals)
+                if base > 0.0 and math.isfinite(base):
+                    scaled = [v / base for v in vals]
+                    scaled_mean = math.fsum(scaled) / len(vals)
+                    scaled_var = (
+                        math.fsum((v - scaled_mean) ** 2 for v in scaled)
+                        / (len(vals) - 1))
+                    std = base * math.sqrt(scaled_var)
+                else:
+                    std = float("nan")
         else:
             std = math.sqrt(var)
     else:
