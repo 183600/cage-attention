@@ -941,7 +941,12 @@ def _verify_runs(out_dir) -> int:
                     f"completed={payload.get('completed')!r}")
             else:
                 index_run = payload.get("run_id")
-                if isinstance(index_run, str) and index_run \
+                if "run_id" in payload and (
+                        not isinstance(index_run, str) or not index_run):
+                    problems.append(
+                        "artifact_index.json: run_id must be a non-empty "
+                        "string when present")
+                elif isinstance(index_run, str) and index_run \
                         and index_run not in completed_runs:
                     problems.append(
                         f"artifact_index.json: last run {index_run} has no "

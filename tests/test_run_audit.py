@@ -230,6 +230,17 @@ class RunAuditTest(unittest.TestCase):
         self.assertEqual(code, 1, text)
         self.assertIn("r2 has no completed lifecycle event", text)
 
+    def test_artifact_index_run_id_must_be_a_string_when_present(self):
+        self._write_json("artifact_index.json",
+                         {"completed": True, "run_id": 1})
+        self._write_jsonl("run_index.jsonl", [
+            self._event("r1", "started"),
+            self._event("r1", "completed"),
+        ])
+        code, text = self._audit()
+        self.assertEqual(code, 1, text)
+        self.assertIn("run_id must be a non-empty string", text)
+
     def test_missing_run_log_returns_two(self):
         code, text = self._audit()
         self.assertEqual(code, 2, text)
