@@ -1221,13 +1221,20 @@ _AUDIT_RECIPE_KEYS = (
 # match across the two sides.
 _AUDIT_FACTOR_KEYS = ("gate", "norm", "layer_scale", "calib_variant")
 
+# Every resolved ``Cfg`` switch that manipulates the calibrated gate.  A
+# single-factor contrast may vary exactly one of them; a switch omitted here
+# would be refused as an undeclared model-config difference, so the list is
+# kept beside the cell-factor expansions below and cross-checked in tests.
+_CALIB_ABLATION_FLAGS = ("calib_use_len", "calib_use_ent",
+                         "calib_shuffle_ent", "calib_ent_norm",
+                         "calib_pos_norm")
+
 # The resolved-``Cfg`` keys a contrast is allowed to vary.  When both sides
 # carry the ``model_cfg`` the model was actually built from, every *other*
 # key must match: a difference there is an undeclared confound no matter
 # what the labels say.
-_AUDIT_MODEL_FACTOR_KEYS = ("gate", "norm", "layer_scale",
-                            "calib_use_len", "calib_use_ent",
-                            "calib_shuffle_ent", "calib_ent_norm")
+_AUDIT_MODEL_FACTOR_KEYS = (("gate", "norm", "layer_scale")
+                            + _CALIB_ABLATION_FLAGS)
 
 # Ground truth of the calib gate's additive terms, keyed by the resolved
 # ``(calib_use_len, calib_use_ent, calib_shuffle_ent)`` flags of the model
@@ -1284,6 +1291,14 @@ _CALIB_PLACEBO_CELL = "calib_shuf_ent"
 # only across the length sweep.
 _CALIB_RAW_ENT_CELL = "calib_raw_ent"
 
+# E2 single-factor position-normalisation ablation: the full calib
+# architecture and both additive terms with the registered H/log(T)
+# normalisation, but each causal row divides by its own visible-token count
+# log(max(t+1, 2)) instead of the global log(T).  It is a distinct cell
+# because, unlike the term ablations, the resolved term flags are identical
+# to ``full``; only ``calib_pos_norm`` identifies it.
+_CALIB_POS_NORM_CELL = "calib_pos_norm"
+
 # Factor-vector expansion of a declared ``calib_variant`` cell label.  New
 # records carry the resolved ``model_cfg`` (the ground truth), but pooled or
 # legacy records may carry only the label; expanding the label here keeps the
@@ -1295,12 +1310,18 @@ _CALIB_CELL_FACTORS = {
     cell: {"calib_use_len": bool(flags[0]),
            "calib_use_ent": bool(flags[1]),
            "calib_shuffle_ent": bool(flags[2]),
-           "calib_ent_norm": True}
+           "calib_ent_norm": True,
+           "calib_pos_norm": False}
     for flags, cell in _CALIB_FACTORIAL.items()
 }
 _CALIB_CELL_FACTORS[_CALIB_RAW_ENT_CELL] = {
     "calib_use_len": True, "calib_use_ent": True,
-    "calib_shuffle_ent": False, "calib_ent_norm": False}
+    "calib_shuffle_ent": False, "calib_ent_norm": False,
+    "calib_pos_norm": False}
+_CALIB_CELL_FACTORS[_CALIB_POS_NORM_CELL] = {
+    "calib_use_len": True, "calib_use_ent": True,
+    "calib_shuffle_ent": False, "calib_ent_norm": True,
+    "calib_pos_norm": True}
 
 
 def _calib_cell(run):
@@ -1311,9 +1332,11 @@ def _calib_cell(run):
     flag combined with anything but the full term set is not a declared
     cell: it returns a non-matching name so the label audit fails loudly
     instead of crediting a mis-wired placebo.  Likewise, the raw-entropy
-    normalisation ablation is a declared cell only when both additive terms
-    are on and the entropy is not shuffled (the flags that define H2g's
-    single-factor arm).
+    and visible-token normalisation ablations are declared cells only when
+    both additive terms are on and the entropy is not shuffled (the flags
+    that define their single-factor arms).  Each normalisation switch is
+    checked independently, so a record that flips both cannot be read as
+    either one-factor cell.
     """
     if not isinstance(run, Mapping):
         # A malformed pooled row cannot name a trained cell; reporting it
@@ -1335,14 +1358,20 @@ def _calib_cell(run):
                      cfg.get("calib_use_ent", True),
                      cfg.get("calib_shuffle_ent", False))
         raw_ent_norm = cfg.get("calib_ent_norm", True)
+        raw_pos_norm = cfg.get("calib_pos_norm", False)
         if any(not isinstance(value, bool) for value in raw_flags) \
-                or not isinstance(raw_ent_norm, bool):
+                or not isinstance(raw_ent_norm, bool) \
+                or not isinstance(raw_pos_norm, bool):
             return "model_cfg_malformed"
         flags = raw_flags
         if not raw_ent_norm:
             return (_CALIB_RAW_ENT_CELL
-                    if flags == (True, True, False)
+                    if flags == (True, True, False) and not raw_pos_norm
                     else "calib_raw_ent_undeclared")
+        if raw_pos_norm:
+            return (_CALIB_POS_NORM_CELL
+                    if flags == (True, True, False)
+                    else "calib_pos_norm_undeclared")
         cell = _CALIB_FACTORIAL.get(flags)
         if cell is None and flags[2]:
             return "calib_shuf_ent_undeclared"

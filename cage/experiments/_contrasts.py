@@ -426,8 +426,7 @@ def _controlled_audit(runs_a, runs_b):
                 if all(x is not None for x in fa + fb):
                     factor_keys.discard("calib_variant")
                     audit["varying_factors"].pop("calib_variant", None)
-                    for key in ("calib_use_len", "calib_use_ent",
-                                "calib_shuffle_ent", "calib_ent_norm"):
+                    for key in _CALIB_ABLATION_FLAGS:
                         va = {x[key] for x in fa}
                         vb = {x[key] for x in fb}
                         if va != vb:

@@ -260,6 +260,7 @@ class ControlledAuditProvenanceTest(unittest.TestCase):
         "max_len": 64, "dropout": 0.0, "gate": "calib", "norm": "pre",
         "layer_scale": None, "calib_use_len": True, "calib_use_ent": True,
         "calib_shuffle_ent": False, "calib_ent_norm": True,
+        "calib_pos_norm": False,
     }
 
     def _run(self, **cfg_overrides):
@@ -291,6 +292,54 @@ class ControlledAuditProvenanceTest(unittest.TestCase):
             with self.subTest(raw=raw):
                 run = self._run(calib_ent_norm=raw)
                 self.assertEqual(_calib_cell(run), "model_cfg_malformed")
+
+    def test_visible_token_normalisation_is_one_model_factor(self):
+        # ``calib_pos_norm`` is a documented single-factor ablation but it
+        # leaves every term-combination flag unchanged, so it must be its
+        # own audited model factor and its own cell label rather than being
+        # folded into ``full``.
+        full = self._run(calib_pos_norm=False)
+        visible = self._run(calib_pos_norm=True)
+        visible["calib_variant"] = experiments._CALIB_POS_NORM_CELL
+        self.assertEqual(_calib_cell(full), "full")
+        self.assertEqual(_calib_cell(visible), experiments._CALIB_POS_NORM_CELL)
+        audit = _controlled_audit([full], [visible])
+        self.assertTrue(audit["controlled"], audit["mismatches"])
+        self.assertTrue(audit["single_factor"])
+        self.assertEqual(audit["n_varying_factors"], 1)
+        self.assertEqual(set(audit["model_factor_diffs"]),
+                         {"calib_pos_norm"})
+
+    def test_normalisation_switches_that_flip_together_are_refused(self):
+        # A malformed provenance record could claim both normalisation
+        # ablations at once.  Neither declared one-factor cell describes
+        # that pair, and the audit must count two factors rather than
+        # certifying whichever label happens to be attached.
+        both = self._run(calib_ent_norm=False, calib_pos_norm=True)
+        self.assertEqual(_calib_cell(both),
+                         "calib_raw_ent_undeclared")
+        audit = _controlled_audit([self._run()], [both])
+        self.assertFalse(audit["controlled"])
+        self.assertFalse(audit["single_factor"])
+        self.assertEqual(audit["n_varying_factors"], 2)
+        self.assertEqual(set(audit["model_factor_diffs"]),
+                         {"calib_ent_norm", "calib_pos_norm"})
+
+    def test_every_calib_switch_is_an_auditable_single_factor(self):
+        # The audit whitelist and every legacy cell expansion must cover
+        # all boolean ablation switches on ``Cfg``.  Otherwise a newly
+        # added (or documented) switch would be silently refused as an
+        # undeclared confound instead of being usable in a single-factor
+        # contrast.
+        cfg = experiments.Cfg()
+        switches = {name for name in experiments.Cfg.__dataclass_fields__
+                    if name.startswith("calib_")
+                    and isinstance(getattr(cfg, name), bool)}
+        self.assertEqual(switches, set(experiments._CALIB_ABLATION_FLAGS))
+        self.assertTrue(switches <= set(experiments._AUDIT_MODEL_FACTOR_KEYS))
+        for cell, vector in experiments._CALIB_CELL_FACTORS.items():
+            with self.subTest(cell=cell):
+                self.assertEqual(set(vector), switches)
 
     def test_malformed_training_recipe_cannot_pass_the_recipe_audit(self):
         good = self._run()
