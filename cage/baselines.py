@@ -65,7 +65,13 @@ from .metrics import (
     wilson_ci,
 )
 from .repro import seed_everything, stream_generator
-from .train import _make_adamw, _validated_lr
+from .train import (
+    _ETA_MIN_FACTOR,
+    _GRAD_CLIP_MAX_NORM,
+    _make_adamw,
+    _validated_batch_counts,
+    _validated_lr,
+)
 
 __all__ = [
     "LinearBagProbe",
@@ -92,15 +98,7 @@ def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
     ceiling/floor baselines are measured on the same data contract as the
     learned models.
     """
-    raw_batch, raw_batches = batch, batches
-    batch = _positive_integer(raw_batch)
-    batches = _positive_integer(raw_batches)
-    if batch is None:
-        raise ValueError(
-            f"batch must be a positive integer, got {raw_batch!r}")
-    if batches is None:
-        raise ValueError(
-            f"batches must be a positive integer, got {raw_batches!r}")
+    batch, batches = _validated_batch_counts(batch, batches)
     # Same canonical stream key as ``cage.repro.stream_generator`` and
     # ``stream_fingerprint``: the baseline is scored on the exact
     # realization the run record versions, for aliased seeds too.
@@ -246,7 +244,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     params = list(model.parameters())
     opt = _make_adamw(params, lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-        opt, T_max=steps, eta_min=lr * 0.1)
+        opt, T_max=steps, eta_min=lr * _ETA_MIN_FACTOR)
     sample_every = max(1, steps // 20)
     model.train()
     for step in range(steps):
@@ -261,7 +259,8 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
                                 "nonfinite": True})
             break
         loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(params, 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            params, _GRAD_CLIP_MAX_NORM)
         if not bool(torch.isfinite(grad_norm)):
             if history is not None:
                 history.append({"step": int(step),
@@ -284,15 +283,7 @@ def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
                           batches=4, seed=123):
     """Probe accuracy on a held-out stream, every batch cleaning-gated like
     training."""
-    raw_batch, raw_batches = batch, batches
-    batch = _positive_integer(raw_batch)
-    batches = _positive_integer(raw_batches)
-    if batch is None:
-        raise ValueError(
-            f"batch must be a positive integer, got {raw_batch!r}")
-    if batches is None:
-        raise ValueError(
-            f"batches must be a positive integer, got {raw_batches!r}")
+    batch, batches = _validated_batch_counts(batch, batches)
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     correct = torch.zeros((), dtype=torch.int64, device=device)
     total = 0

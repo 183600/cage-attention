@@ -329,6 +329,16 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     window_loss_sum = 0.0
     window_loss_n = 0
     printed_grad_spike = 0.0
+
+    def _flush_window(target):
+        """Attach the pending window mean and reset the accumulator."""
+        nonlocal window_loss_sum, window_loss_n
+        if not window_loss_n:
+            return
+        target["train_loss_window"] = window_loss_sum / window_loss_n
+        window_loss_sum = 0.0
+        window_loss_n = 0
+
     model.train()
     if disable_regularization:
         info = _disable_dropout(model)
@@ -398,10 +408,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             # reaches eta_min.
             _step_scheduler_on_skip(sched)
             if is_log or do_val:
-                if window_loss_n:
-                    entry["train_loss_window"] = window_loss_sum / window_loss_n
-                    window_loss_sum = 0.0
-                    window_loss_n = 0
+                _flush_window(entry)
             if nonfinite == "raise":
                 raise RuntimeError(
                     f"non-finite training loss {lv} at step {step}; staged "
@@ -425,10 +432,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             # a skipped gradient update must not pause the cosine schedule.
             _step_scheduler_on_skip(sched)
             if is_log or do_val:
-                if window_loss_n:
-                    entry["train_loss_window"] = window_loss_sum / window_loss_n
-                    window_loss_sum = 0.0
-                    window_loss_n = 0
+                _flush_window(entry)
             if nonfinite == "raise":
                 raise RuntimeError(
                     f"non-finite pre-clip gradient norm {gn} at step {step} "
@@ -483,10 +487,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
             else:
                 evals_since_improve += 1
         if is_log or do_val:
-            if window_loss_n:
-                entry["train_loss_window"] = window_loss_sum / window_loss_n
-                window_loss_sum = 0.0
-                window_loss_n = 0
+            _flush_window(entry)
             hist.append(entry)
         if is_log:
             line = f"  step {step:5d}  loss {lv:.4f}"
@@ -530,15 +531,7 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     gate as training, so a reported accuracy can never be computed on
     structurally invalid or label-noisy data.
     """
-    raw_batch, raw_batches = batch, batches
-    batch = _positive_integer(raw_batch)
-    batches = _positive_integer(raw_batches)
-    if batch is None:
-        raise ValueError(
-            f"batch must be a positive integer, got {raw_batch!r}")
-    if batches is None:
-        raise ValueError(
-            f"batches must be a positive integer, got {raw_batches!r}")
+    batch, batches = _validated_batch_counts(batch, batches)
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     training_states = {module: module.training for module in model.modules()}
     try:

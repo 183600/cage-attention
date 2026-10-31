@@ -252,15 +252,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     its reference set is the mapping's key set.  If both references are
     given they must describe the same exact association set.
     """
-    raw_batch, raw_batches = batch, batches
-    batch = _positive_integer(raw_batch)
-    batches = _positive_integer(raw_batches)
-    if batch is None:
-        raise ValueError(
-            f"batch must be a positive integer, got {raw_batch!r}")
-    if batches is None:
-        raise ValueError(
-            f"batches must be a positive integer, got {raw_batches!r}")
+    batch, batches = _validated_batch_counts(batch, batches)
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     # Keep the stratum encoding independent of the current length so the
     # same id means the same relative position across the whole sweep (the

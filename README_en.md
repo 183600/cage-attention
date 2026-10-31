@@ -28,18 +28,28 @@ must respect them.
 | `cage/data.py` | Associative-recall synthetic task and length sweep |
 | `cage/train.py` | Training, evaluation, gate statistics and false-concentration analysis |
 | `cage/metrics.py` | Torch-only statistics and effect-size utilities |
+| `cage/baselines.py` | Rule, linear-probe and depth-ladder baselines |
 | `cage/experiments/` | E1/E2/E3 runners, result records and provenance checks |
 | `tests/` | Standard-library `unittest` suite |
 | `ci_gate.py` | Syntax, design-pin and smoke-test gate |
 | `docs/design_notes.md` | Fixed design decisions and experiment contract |
 
-## Quick start
+## Environment and installation
 
-Install the runtime dependencies:
+Python 3.10+ and PyTorch are required. Install the runtime dependencies:
 
 ```bash
 python3 -m pip install -e .
 ```
+
+To reproduce the pinned CI dependency set only:
+
+```bash
+python3 -m pip install -r requirements-ci.txt \
+  --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+## Quick start
 
 Run the quality gate and tests:
 
@@ -47,6 +57,13 @@ Run the quality gate and tests:
 make check          # ci_gate.py + unittest
 make gate           # design pins and smoke tests only
 make test           # unittest only
+```
+
+The gate can also be invoked directly:
+
+```bash
+python3 ci_gate.py
+python3 -m unittest discover -s tests
 ```
 
 Check the complete pipeline with a tiny configuration:
@@ -62,6 +79,10 @@ python3 -m cage.experiments --only e1 --seeds 5 --out results
 python3 -m cage.experiments --only e2 --seeds 5 --out results
 python3 -m cage.experiments --only e3 --seeds 5 --out results
 ```
+
+`--quick` is a pipeline check only; conclusions should come from the default
+(non-quick) settings with the complete `--out` directory retained. Outputs
+land in `results/` by default, which is git-ignored.
 
 ## Use from Python
 
@@ -98,6 +119,16 @@ configurations can be compared directly.
 | `calib` | Our length- and concentration-calibrated gate, `σ((W_g x − a·log T − c·H̄)/τ)`, where `H̄` is attention entropy normalized by `log T` |
 | `null`  | Explicit null attention / sparse-selection baseline: learnable null KV slots compete with real tokens |
 
+The `calib` ablation switches reproduce the full gate at their defaults; they
+exist only for the single-factor E1/E2 contrasts:
+
+| Option | Default | Effect |
+|---|---|---|
+| `calib_use_len` | `True` | Use the length term `a·log T` |
+| `calib_use_ent` | `True` | Use the concentration term `c·H̄` |
+| `calib_ent_norm` | `True` | Normalize concentration by `log T`; `False` reads raw row-mean entropy |
+| `calib_shuffle_ent` | `False` | Active control: permute only the entropy read by the gate, keeping the same signal distribution |
+
 ## Experiments
 
 - **E1 gate comparison**: associative-recall accuracy; for `query` / `calib`,
@@ -121,7 +152,7 @@ configurations can be compared directly.
 | `gate_vs_entropy` / `gate_vs_maxprob` | Whether the gate genuinely uses attention-distribution information; `query` should not correlate strongly with entropy, while `calib` should |
 | `false_conc_rate` | Error rate among high-max-prob samples |
 | `gate_on_false_conc` vs `gate_on_correct` | Whether the gate closes more often on false concentration |
-| `deep_gate_ratio` | Above 1 means deep layers write more than shallow ones |
+| `gate_depth_ratio` | Above 1 means deep layers write more than shallow ones |
 | `null_mass` | Share of attention weight assigned to the null slot in the `null` variant |
 
 ## Reproducibility and result checks
@@ -147,3 +178,10 @@ python3 -m cage.experiments --check-source --out results
 
 `make verify` runs the environment, artifact, provenance and source checks in
 sequence.
+
+## Design constraints
+
+Code changes must respect the 【固定】 decisions in
+[docs/design_notes.md](docs/design_notes.md). Run `python3 ci_gate.py` before
+submitting any change; changes touching the experiment pipeline should also
+run the full test suite.

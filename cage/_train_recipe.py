@@ -100,6 +100,20 @@ def _validated_lr(value):
 
 
 
+def _validated_batch_counts(batch, batches):
+    """Validate the ``(batch, batches)`` pair used by evaluation helpers."""
+    raw_batch, raw_batches = batch, batches
+    batch = _positive_integer(raw_batch)
+    batches = _positive_integer(raw_batches)
+    if batch is None:
+        raise ValueError(
+            f"batch must be a positive integer, got {raw_batch!r}")
+    if batches is None:
+        raise ValueError(
+            f"batches must be a positive integer, got {raw_batches!r}")
+    return batch, batches
+
+
 def _step_scheduler_on_skip(sched) -> None:
     """Advance the cosine schedule for a skipped (non-finite) iteration.
 

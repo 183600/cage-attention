@@ -22,18 +22,28 @@
 | `cage/data.py` | 联想回忆（associative recall）合成任务与长度扫描 |
 | `cage/train.py` | 训练、评估、门控统计与假集中分析 |
 | `cage/metrics.py` | 仅依赖 torch 的统计与效应量工具 |
+| `cage/baselines.py` | 规则、线性探针与深度阶梯等简单基线 |
 | `cage/experiments/` | E1/E2/E3 实验运行器、结果记录与来源校验 |
 | `tests/` | 标准库 `unittest` 测试套件 |
 | `ci_gate.py` | 语法、设计固定项与冒烟测试门禁 |
 | `docs/design_notes.md` | 固定设计决策与实验契约 |
 
-## 快速开始
+## 环境与安装
 
-安装运行依赖：
+需要 Python 3.10+ 与 PyTorch。安装运行依赖：
 
 ```bash
 python3 -m pip install -e .
 ```
+
+只在 CI 中复现固定依赖时，可使用：
+
+```bash
+python3 -m pip install -r requirements-ci.txt \
+  --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+## 快速开始
 
 运行质量门禁与测试：
 
@@ -41,6 +51,13 @@ python3 -m pip install -e .
 make check          # ci_gate.py + unittest
 make gate           # 只运行设计门禁与冒烟测试
 make test           # 只运行 unittest
+```
+
+也可以直接调用门禁：
+
+```bash
+python3 ci_gate.py
+python3 -m unittest discover -s tests
 ```
 
 先用最小配置检查完整流程：
@@ -56,6 +73,9 @@ python3 -m cage.experiments --only e1 --seeds 5 --out results
 python3 -m cage.experiments --only e2 --seeds 5 --out results
 python3 -m cage.experiments --only e3 --seeds 5 --out results
 ```
+
+`--quick` 只用于流水线检查；正式结论应使用默认（非 quick）设置并保留完整的
+`--out` 目录。实验产物默认写入 `results/`，该目录已加入 `.gitignore`。
 
 ## 直接在代码中调用
 
@@ -91,6 +111,15 @@ print(hist[-1], accuracy, sorted(stats))
 | `calib` | 本项目的长度 + 集中度校准门控，`σ((W_g x − a·log T − c·H̄)/τ)`，其中 `H̄` 为按 `log T` 归一化的注意力熵 |
 | `null`  | 显式空注意力 / 稀疏选择基线：可学习的 null KV 槽位与真实 token 竞争 |
 
+`calib` 的消融开关保持默认值时复现完整门控；它们只用于 E1/E2 的单因素对照：
+
+| 配置项 | 默认 | 作用 |
+|---|---|---|
+| `calib_use_len` | `True` | 是否使用长度项 `a·log T` |
+| `calib_use_ent` | `True` | 是否使用集中度项 `c·H̄` |
+| `calib_ent_norm` | `True` | 集中度按 `log T` 归一化；`False` 表示原始行均值熵 |
+| `calib_shuffle_ent` | `False` | 主动对照：只打乱门控读取的熵位置，保留同分布信号 |
+
 ## 实验设计
 
 - **E1 门控对比**：比较联想回忆准确率；对 `query` / `calib` 报告门控值与
@@ -112,7 +141,7 @@ print(hist[-1], accuracy, sorted(stats))
 | `gate_vs_entropy` / `gate_vs_maxprob` | 门控是否真正使用了注意力分布信息；`query` 不应与熵强相关，`calib` 应显著相关 |
 | `false_conc_rate` | 高 max-prob 样本中的错误率 |
 | `gate_on_false_conc` vs `gate_on_correct` | 门控在错误集中时是否更倾向于关闭 |
-| `deep_gate_ratio` | 大于 1 表示深层比浅层更愿意写内容 |
+| `gate_depth_ratio` | 大于 1 表示深层比浅层更愿意写内容 |
 | `null_mass` | `null` 变体中 null 槽位分走的注意力权重占比 |
 
 ## 复现性与结果校验
@@ -134,3 +163,9 @@ python3 -m cage.experiments --check-source --out results
 ```
 
 `make verify` 会依次执行环境、制品、来源与源码检查。
+
+## 设计约束
+
+代码修改必须遵守 [docs/design_notes.md](docs/design_notes.md) 中的【固定】条目。
+提交前至少运行一次 `python3 ci_gate.py`；涉及实验流程的改动还应运行完整测试
+套件。

@@ -663,7 +663,8 @@ class _CalibAttn(torch.autograd.Function):
     def forward(ctx, qkv, scale: float, eps: float, need_ent: bool = True,
                 ybt: torch.Tensor | None = None):
         ctx.set_materialize_grads(False)
-        if ybt is not None and any(ctx.needs_input_grad):
+        grad_needed = any(ctx.needs_input_grad)
+        if ybt is not None and grad_needed:
             raise RuntimeError("_CalibAttn ybt layout is no-grad only")
         q, k, v = qkv[0], qkv[1], qkv[2]
         bh, T = q.size(0), q.size(1)
@@ -673,7 +674,6 @@ class _CalibAttn(torch.autograd.Function):
         dv = v.size(-1)
         max_rows = max(i1 - i0 for i0, i1 in blocks)
         max_i1 = max(i1 for _, i1 in blocks)
-        grad_needed = any(ctx.needs_input_grad)
         s = _get_scratch(("calib_s",), q.device, q.dtype, bh * max_rows * max_i1)
         if ybt is not None:
             B, _, h, dv = ybt.shape
@@ -698,28 +698,25 @@ class _CalibAttn(torch.autograd.Function):
             ctx.scale = scale
             ctx.eps = eps
             return ybt, ent
-        if any(ctx.needs_input_grad):
+        if grad_needed:
             y = q.new_empty(bh, T, dv)
         else:
             y = _get_scratch(("calib_y",), q.device, q.dtype,
                              bh * T * dv).view(bh, T, dv)
+        ent = None
+        if need_ent:
+            ent = (q.new_empty(bh, T) if grad_needed else
+                   _get_scratch(("calib_ent",), q.device, q.dtype,
+                                bh * T).view(bh, T))
         if len(blocks) == 1:
             p = _softmax_inplace(torch.baddbmm(
                 mask, q, kt, beta=1.0, alpha=scale,
                 out=s[:bh * T * T].view(bh, T, T)))
             torch.bmm(p, v, out=y)
             if need_ent:
-                ent = (q.new_empty(bh, T) if grad_needed else
-                       _get_scratch(("calib_ent",), q.device, q.dtype,
-                                    bh * T).view(bh, T))
                 _row_entropy(p, eps, out=ent,
                              buf=_get_scratch(("calib_f",), q.device, q.dtype, bh * T * T))
-            else:
-                ent = None
         else:
-            ent = (q.new_empty(bh, T) if grad_needed else
-                   _get_scratch(("calib_ent",), q.device, q.dtype,
-                                bh * T).view(bh, T)) if need_ent else None
             # One work buffer serves both the entropy log-term (written
             # before the block output) and the compact block output.
             work_numel = bh * max_rows * (max(max_i1, dv) if need_ent else dv)
@@ -736,7 +733,7 @@ class _CalibAttn(torch.autograd.Function):
                 yb = work[:bh * r * dv].view(bh, r, dv)
                 torch.bmm(p, v[:, :i1], out=yb)
                 y[:, i0:i1].copy_(yb)
-        if any(ctx.needs_input_grad):
+        if grad_needed:
             ctx.save_for_backward(qkv)
         ctx.scale = scale
         ctx.eps = eps
