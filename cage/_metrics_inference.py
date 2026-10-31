@@ -529,6 +529,8 @@ def _regularized_incomplete_beta(a: float, b: float, x: float) -> float:
 
 def _student_t_cdf(t: float, df: float) -> float:
     """CDF of Student's t with ``df`` degrees of freedom."""
+    if math.isnan(t):
+        return float("nan")
     if not math.isfinite(t):
         return 0.0 if t < 0.0 else 1.0
     if not (math.isfinite(df) and df > 0.0):
@@ -540,6 +542,8 @@ def _student_t_cdf(t: float, df: float) -> float:
 
 def _student_t_sf(t: float, df: float) -> float:
     """Survival function of Student's t (the upper tail)."""
+    if math.isnan(t):
+        return float("nan")
     if not math.isfinite(t):
         return 0.0 if t > 0.0 else 1.0
     if not (math.isfinite(df) and df > 0.0):

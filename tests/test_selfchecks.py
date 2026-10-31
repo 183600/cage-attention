@@ -764,6 +764,10 @@ class TinyAlphaQuantileTest(unittest.TestCase):
         self.assertTrue(math.isfinite(quantile))
         expected = -1.0 / math.tan(math.pi * p)
         self.assertAlmostEqual(quantile / expected, 1.0, places=12)
+        # A NaN observation carries no tail probability; do not report the
+        # saturated upper-tail value for it.
+        self.assertTrue(math.isnan(metrics._student_t_cdf(float("nan"), 5)))
+        self.assertTrue(math.isnan(metrics._student_t_sf(float("nan"), 5)))
 
 
 class FixedBatchDtypeTest(unittest.TestCase):
