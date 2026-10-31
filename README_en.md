@@ -260,6 +260,22 @@ drift, so a cited evidence directory contains only completed runs produced
 under one numerical environment. `make verify` runs the environment, artifact,
 provenance, run-completeness and source checks in sequence.
 
+`--replay-manifest` re-runs a frozen recipe in a fresh directory. An E1/E2/E3
+replay inherits the source `baselines_verdict.json` only after checking its
+protocol and source-tree stamps, and records the verdict hash in `replay.json`.
+After the replay, compare the source and replay scientific payloads with:
+
+```bash
+python3 -m cage.experiments --verify-replay results --out results_replay
+```
+
+The comparison covers every JSON/JSONL evidence artifact for that experiment
+and strips only invocation metadata (run id, timestamps, git revision/dirty
+flag, launch `argv`/`cwd`, hash-randomization seeds, and the setup/environment
+fingerprints over those fields). A numeric difference, missing evidence, an
+unfinished replay or an unlinkable `replay.json` returns non-zero.
+`make verify-replay SOURCE=results REPLAY_OUT=results_replay` is equivalent.
+
 ## Design constraints
 
 Code changes must respect the 【固定】 decisions in

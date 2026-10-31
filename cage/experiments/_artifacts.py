@@ -281,21 +281,22 @@ def _fsync_directory(path: pathlib.Path) -> None:
             pass
 
 
-def _atomic_write_text(path: pathlib.Path, text: str) -> None:
-    """Write ``text`` to ``path`` without exposing a half-written file.
+def _atomic_write_bytes(path: pathlib.Path, data: bytes) -> None:
+    """Write exact bytes to ``path`` without exposing a half-written file.
 
     Result and index files are evidence: a crash or full disk in the middle
-    of a plain ``write_text`` leaves a truncated JSON document that looks
-    like a corrupted run.  Writing a sibling temporary file and renaming it
-    over the target makes each artifact appear atomically.  The containing
-    directory is fsynced after the rename, because a rename is only durable
-    once its directory entry is.
+    of a plain write leaves a truncated JSON document that looks like a
+    corrupted run.  Writing a sibling temporary file and renaming it over the
+    target makes each artifact appear atomically.  The containing directory
+    is fsynced after the rename, because a rename is only durable once its
+    directory entry is.  Binary mode also avoids platform newline translation
+    changing an inherited artifact's bytes and therefore its recorded hash.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     try:
-        with tmp.open("w", encoding="utf-8") as fh:
-            fh.write(text)
+        with tmp.open("wb") as fh:
+            fh.write(data)
             fh.flush()
             try:
                 os.fsync(fh.fileno())
@@ -306,6 +307,11 @@ def _atomic_write_text(path: pathlib.Path, text: str) -> None:
     finally:
         with contextlib.suppress(FileNotFoundError):
             tmp.unlink()
+
+
+def _atomic_write_text(path: pathlib.Path, text: str) -> None:
+    """Write UTF-8 ``text`` to ``path`` without exposing a half-written file."""
+    _atomic_write_bytes(path, text.encode("utf-8"))
 
 
 def _write_json(path: pathlib.Path, payload) -> None:

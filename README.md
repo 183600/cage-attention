@@ -225,6 +225,20 @@ python3 -m cage.experiments --check-source --out results
 确保被引用的证据目录只包含已完成且同一数值环境下的运行。
 `make verify` 会依次执行环境、制品、来源、运行完整性与源码检查。
 
+`--replay-manifest` 在全新目录重跑冻结配方；重放 E1/E2/E3 时会从源目录继承
+经协议与源码哈希校验的 `baselines_verdict.json`，并在 `replay.json` 记录其
+哈希。重放完成后可比较源目录与重放目录的科研载荷：
+
+```bash
+python3 -m cage.experiments --verify-replay results --out results_replay
+```
+
+比较覆盖该实验的全部 JSON/JSONL 证据，仅剔除 run id、时间戳、git 修订与
+脏标记、启动 `argv`/`cwd`、哈希随机化种子，以及覆盖这些字段的 setup/环境
+指纹；数值差异、缺失证据、未完成重放或无法关联的 `replay.json` 都会返回
+非零。
+`make verify-replay SOURCE=results REPLAY_OUT=results_replay` 等价。
+
 ## 设计约束
 
 代码修改必须遵守 [docs/design_notes.md](docs/design_notes.md) 中的【固定】条目。

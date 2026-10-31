@@ -291,6 +291,231 @@ class ReplayCliTest(unittest.TestCase):
         self.assertTrue(
             (work / "results_replay_unknown" / "replay.json").is_file())
 
+class ReplayEvidenceComparisonTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+        self.source = self.root / "source"
+        self.source.mkdir()
+        self.replay = self.root / "replay"
+        self.replay.mkdir()
+        self.settings = Settings.quick("cpu")
+        self.manifest = experiments._write_manifest(
+            self.settings, self.source, "sanity")
+        self.manifest_path = self.source / "sanity_manifest.json"
+        self.manifest_sha = hashlib.sha256(
+            self.manifest_path.read_bytes()).hexdigest()
+        self.source_run = self.manifest["run_id"]
+        source_environment = {
+            "run_id": self.source_run,
+            "created_utc": "2026-01-01T00:00:00Z",
+            "environment_sha256": "a" * 16,
+            "environment": {
+                "argv": ["source"],
+                "cwd": "/source",
+                "torch": "2.14.1",
+            },
+        }
+        replay_environment = {
+            "run_id": "replay-run",
+            "created_utc": "2026-01-02T00:00:00Z",
+            "environment_sha256": "b" * 16,
+            "environment": {
+                "argv": ["replay"],
+                "cwd": "/replay",
+                "torch": "2.14.1",
+            },
+        }
+        (self.source / "environment.json").write_text(
+            json.dumps(source_environment), encoding="utf-8")
+        (self.replay / "environment.json").write_text(
+            json.dumps(replay_environment), encoding="utf-8")
+        hypotheses = {"H1a": {"decision": "paired bootstrap"}}
+        for root in (self.source, self.replay):
+            (root / "hypotheses.json").write_text(
+                json.dumps(hypotheses), encoding="utf-8")
+        source_row = {
+            "run_id": self.source_run,
+            "created_utc": "2026-01-01T00:00:01Z",
+            "git_sha": "a" * 40,
+            "git_dirty": True,
+            "setup_sha256": "a" * 16,
+            "accuracy": 0.75,
+            "loss": 1.25,
+            "nested": {"environment_sha256": "a" * 16, "metric": 2.0},
+        }
+        replay_row = {
+            "run_id": "replay-run",
+            "created_utc": "2026-01-02T00:00:01Z",
+            "git_sha": "b" * 40,
+            "git_dirty": False,
+            "setup_sha256": "b" * 16,
+            "accuracy": 0.75,
+            "loss": 1.25,
+            "nested": {"environment_sha256": "b" * 16, "metric": 2.0},
+        }
+        for root, row in ((self.source, source_row),
+                          (self.replay, replay_row)):
+            (root / "sanity_runs.jsonl").write_text(
+                json.dumps(row) + "\n", encoding="utf-8")
+        replay_manifest = json.loads(json.dumps(self.manifest))
+        replay_manifest["run_id"] = "replay-run"
+        replay_manifest["created_utc"] = "2026-01-02T00:00:00Z"
+        replay_manifest["git_sha"] = "b" * 40
+        replay_manifest["git_dirty"] = False
+        replay_manifest["setup_sha256"] = "b" * 16
+        replay_manifest["environment"]["argv"] = ["replay"]
+        replay_manifest["environment"]["cwd"] = "/replay"
+        (self.replay / "sanity_manifest.json").write_text(
+            json.dumps(replay_manifest), encoding="utf-8")
+        (self.replay / "replay.json").write_text(json.dumps({
+            "path": str(self.manifest_path),
+            "manifest_sha256": self.manifest_sha,
+            "source_run_id": self.source_run,
+            "replay_run_id": "replay-run",
+            "schema_version": 1,
+        }), encoding="utf-8")
+        (self.replay / "artifact_index.json").write_text(json.dumps({
+            "experiment": "sanity",
+            "completed": True,
+            "run_id": "replay-run",
+        }), encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _main(self, argv):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = experiments.main(argv)
+        return code, out.getvalue()
+
+    def test_invocation_metadata_is_excluded_from_the_comparison(self):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = experiments._verify_replay(self.source, self.replay)
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("payload-identical", out.getvalue())
+
+    def test_a_numeric_change_is_reported_with_its_path(self):
+        rows = (self.replay / "sanity_runs.jsonl").read_text(
+            encoding="utf-8")
+        (self.replay / "sanity_runs.jsonl").write_text(
+            rows.replace('"loss": 1.25', '"loss": 1.5'), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = experiments._verify_replay(self.source, self.replay)
+        text = out.getvalue()
+        self.assertEqual(code, 1, text)
+        self.assertIn("loss", text)
+        self.assertIn("sanity_runs.jsonl", text)
+
+    def test_missing_source_evidence_is_a_defect(self):
+        (self.replay / "sanity_runs.jsonl").unlink()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = experiments._verify_replay(self.source, self.replay)
+        text = out.getvalue()
+        self.assertEqual(code, 1, text)
+        self.assertIn("missing from replay", text)
+
+    def test_a_directory_without_replay_provenance_is_not_comparable(self):
+        (self.replay / "replay.json").unlink()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = experiments._verify_replay(self.source, self.replay)
+        self.assertEqual(code, 2, out.getvalue())
+
+    def test_cli_runs_the_read_only_comparison(self):
+        code, text = self._main([
+            "--verify-replay", str(self.source), "--out", str(self.replay)])
+        self.assertEqual(code, 0, text)
+        self.assertIn("payload-identical", text)
+
+
+class ReplayBaselineVerdictTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self._tmp.name)
+        self.source = self.root / "source"
+        self.source.mkdir()
+        self._saved_artifacts = experiments._RUN_ARTIFACTS
+        experiments._RUN_ARTIFACTS = set()
+        self.settings = Settings.quick("cpu")
+        self.manifest = experiments._write_manifest(
+            self.settings, self.source, "e1")
+        self.path = self.source / "e1_manifest.json"
+        self.verdict = {
+            "run_id": "baselines-source-run",
+            "protocol_sha256": experiments._protocol_sha256(
+                experiments._run_context(self.settings)),
+            "source_tree_sha256": experiments._run_context(
+                self.settings)["source_tree_sha256"],
+            "hb1_supported": True,
+            "hb3_supported": True,
+            "hb4_supported": True,
+            "hb4_violated": False,
+            "hb4_state": "supported",
+            "hb5_supported": True,
+        }
+        self.verdict_bytes = json.dumps(self.verdict).encode("utf-8")
+        (self.source / "baselines_verdict.json").write_bytes(
+            self.verdict_bytes)
+
+    def tearDown(self):
+        experiments._RUN_ARTIFACTS = self._saved_artifacts
+        self._tmp.cleanup()
+
+    def _main(self, argv):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = experiments.main(argv)
+        return code, out.getvalue()
+
+    def test_replay_inherits_the_exact_source_baseline_verdict(self):
+        out = self.root / "replay"
+        with mock.patch.object(experiments, "run_e1"):
+            code, text = self._main([
+                "--replay-manifest", str(self.path), "--out", str(out)])
+        self.assertEqual(code, 0, text)
+        self.assertEqual((out / "baselines_verdict.json").read_bytes(),
+                         self.verdict_bytes)
+        replay = json.loads((out / "replay.json").read_text(
+            encoding="utf-8"))
+        inherited = replay["inherited_baseline_verdict"]
+        self.assertEqual(inherited["sha256"],
+                         hashlib.sha256(self.verdict_bytes).hexdigest())
+        self.assertEqual(inherited["source_run_id"],
+                         "baselines-source-run")
+        index = json.loads((out / "artifact_index.json").read_text(
+            encoding="utf-8"))
+        self.assertIn("baselines_verdict.json",
+                      [entry["file"] for entry in index["artifacts"]])
+
+    def test_inherited_verdict_passes_the_real_baseline_gate(self):
+        out = self.root / "replay"
+        out.mkdir()
+        settings = experiments._replay_settings(self.manifest["config"])
+        experiments._inherit_replay_baseline_verdict(
+            self.source, out, settings, "e1")
+        experiments._enforce_baseline_verdict(settings, out, "e1")
+        self.assertTrue(settings._baseline_validity["hb1_supported"])
+        self.assertTrue(settings._baseline_validity["hb5_supported"])
+
+    def test_replay_without_a_source_verdict_is_refused(self):
+        (self.source / "baselines_verdict.json").unlink()
+        code, text = self._main([
+            "--replay-manifest", str(self.path),
+            "--out", str(self.root / "replay")])
+        self.assertEqual(code, 2, text)
+        self.assertIn("requires the source baselines_verdict.json", text)
+
+    def test_replay_refuses_a_stale_source_verdict(self):
+        stale = dict(self.verdict, protocol_sha256="0" * 16)
+        (self.source / "baselines_verdict.json").write_text(
+            json.dumps(stale), encoding="utf-8")
+        with mock.patch.object(experiments, "run_e1") as run:
+            code, text = self._main([
+                "--replay-manifest", str(self.path),
+                "--out", str(self.root / "replay")])
+        self.assertEqual(code, 3, text)
+        self.assertIn("cannot certify this replay", text)
+        run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

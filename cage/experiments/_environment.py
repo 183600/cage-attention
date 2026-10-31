@@ -1191,6 +1191,361 @@ def _load_replay_manifest(path, *, allow_environment_drift=False):
     return settings, dict(manifest), drift, hashlib.sha256(raw).hexdigest()
 
 
+_REPLAY_BOOKKEEPING_ARTIFACTS = frozenset({
+    "artifact_index.json", "environment_history.jsonl", "replay.json",
+    "run_index.jsonl",
+})
+
+_REPLAY_GLOBAL_ARTIFACTS = frozenset({
+    "environment.json", "hypotheses.json",
+})
+
+_REPLAY_GATED_ARTIFACTS = frozenset({"e1", "e2", "e3"})
+
+# Everything that necessarily differs between two invocations of the same
+# frozen recipe: run identity, wall-clock stamps, revision/dirty status,
+# launch directory/argv and the ids that hash those launch details.  The
+# scientific payload (config, data fingerprints, metrics, decisions) is
+# compared after removing only these fields.
+_REPLAY_VOLATILE_FIELDS = frozenset({
+    "argv", "created_utc", "cwd", "elapsed_seconds", "environment_sha256",
+    "git_dirty", "git_sha", "hash_randomization", "pythonhashseed",
+    "repo_root", "run_id", "run_started_utc", "setup_sha256",
+})
+
+
+def _inherit_replay_baseline_verdict(source_dir, out_dir, settings,
+                                     experiment):
+    """Carry the source gate verdict into a gated replay directory.
+
+    E1/E2/E3 refuse to train without the protocol-specific
+    ``baselines_verdict.json`` that certified HB1/HB3/HB4/HB5.  A replay
+    directory is new and therefore has no verdict, so ``--replay-manifest``
+    for those experiments could not reach the grid it was supposed to
+    reproduce.  The verdict is evidence from the source invocation, not a
+    new result: copy its exact bytes only after checking that its protocol
+    and source-tree stamps still describe this replay, record its hash in
+    ``replay.json``, and let the normal gate re-validate its contents before
+    any grid trains.
+
+    Returns provenance metadata for the copied verdict, or ``None`` when
+    the experiment does not use the baseline gate.
+    """
+    if experiment not in _REPLAY_GATED_ARTIFACTS:
+        return None
+    source = pathlib.Path(source_dir) / "baselines_verdict.json"
+    try:
+        raw = source.read_bytes()
+        text = raw.decode("utf-8")
+        verdict = json.loads(text)
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        raise BaselineVerdictError(
+            f"replay of {experiment} needs the source "
+            f"baselines_verdict.json at {source}; cannot read it "
+            f"({type(exc).__name__}: {exc})") from exc
+    if not isinstance(verdict, Mapping):
+        raise BaselineVerdictError(
+            f"source baselines_verdict.json at {source} is not a JSON "
+            f"object")
+    stale = _verdict_provenance_note(dict(verdict), settings)
+    if stale:
+        raise BaselineVerdictError(
+            f"source baselines_verdict.json cannot certify this replay: "
+            f"{stale}")
+    target = pathlib.Path(out_dir) / "baselines_verdict.json"
+    if target.exists():
+        try:
+            existing = target.read_bytes()
+        except OSError as exc:
+            raise BaselineVerdictError(
+                f"cannot inspect {target} before inheriting the baseline "
+                f"verdict ({exc})") from exc
+        if existing != raw:
+            raise BaselineVerdictError(
+                f"replay output already contains a different "
+                f"baselines_verdict.json at {target}; choose a fresh --out "
+                f"directory")
+    _atomic_write_bytes(target, raw)
+    _register_artifact(target)
+    digest = hashlib.sha256(raw).hexdigest()
+    print(f"[runner] inherited source baseline verdict "
+          f"{source} (sha256={digest[:12]})")
+    return {
+        "source": str(source.resolve()),
+        "sha256": digest,
+        "source_run_id": verdict.get("run_id"),
+        "protocol_sha256": verdict.get("protocol_sha256"),
+    }
+
+
+def _replay_comparable(value):
+    """Canonical JSON payload with invocation-only metadata removed."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): _replay_comparable(item)
+            for key, item in value.items()
+            if key not in _REPLAY_VOLATILE_FIELDS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_replay_comparable(item) for item in value]
+    if isinstance(value, float):
+        if math.isnan(value):
+            return {"__nonfinite_float__": "nan"}
+        if math.isinf(value):
+            return {"__nonfinite_float__": (
+                "inf" if value > 0.0 else "-inf")}
+    return value
+
+
+def _replay_payload_differences(left, right, path="", out=None, limit=8):
+    """Collect a few human-readable paths where two canonical payloads differ."""
+    differences = [] if out is None else out
+    if len(differences) >= limit:
+        return differences
+    if type(left) is not type(right):
+        differences.append(
+            f"{path or '<root>'}: type {type(left).__name__} != "
+            f"{type(right).__name__}")
+        return differences
+    if isinstance(left, Mapping):
+        for key in sorted(set(left) | set(right)):
+            child = f"{path}/{key}" if path else str(key)
+            if key not in left:
+                differences.append(f"{child}: missing from source")
+            elif key not in right:
+                differences.append(f"{child}: missing from replay")
+            else:
+                _replay_payload_differences(
+                    left[key], right[key], child, differences, limit)
+            if len(differences) >= limit:
+                break
+        return differences
+    if isinstance(left, list):
+        if len(left) != len(right):
+            differences.append(
+                f"{path or '<root>'}: length {len(left)} != {len(right)}")
+        for index, (source_item, replay_item) in enumerate(
+                zip(left, right)):
+            _replay_payload_differences(
+                source_item, replay_item, f"{path}/{index}", differences,
+                limit)
+            if len(differences) >= limit:
+                break
+        return differences
+    if left != right:
+        source_text = json.dumps(left, ensure_ascii=False, default=str)
+        replay_text = json.dumps(right, ensure_ascii=False, default=str)
+        differences.append(
+            f"{path or '<root>'}: {source_text[:120]} != "
+            f"{replay_text[:120]}")
+    return differences
+
+
+def _replay_evidence_paths(root, experiment):
+    """Sorted evidence files relevant to one experiment in ``root``."""
+    paths = []
+    for path in sorted(pathlib.Path(root).iterdir()):
+        if not path.is_file() or path.name in _REPLAY_BOOKKEEPING_ARTIFACTS:
+            continue
+        if path.suffix not in (".json", ".jsonl"):
+            continue
+        if experiment == "all" or path.name in _REPLAY_GLOBAL_ARTIFACTS \
+                or path.name.startswith(f"{experiment}_") \
+                or (experiment in _REPLAY_GATED_ARTIFACTS
+                    and path.name == "baselines_verdict.json"):
+            paths.append(path)
+    return paths
+
+
+def _compare_replay_artifact(source_path, replay_path):
+    """Compare one JSON/JSONL evidence artifact after metadata stripping."""
+    if source_path.suffix == ".jsonl":
+        try:
+            source_rows = _read_jsonl_objects(source_path)
+            replay_rows = _read_jsonl_objects(replay_path)
+        except (OSError, UnicodeError) as exc:
+            return [f"{source_path.name}: unreadable ({exc})"]
+        problems = []
+        for line_number, row, error in source_rows:
+            if error is not None:
+                problems.append(
+                    f"{source_path.name}:{line_number}: source row {error}")
+        for line_number, row, error in replay_rows:
+            if error is not None:
+                problems.append(
+                    f"{source_path.name}:{line_number}: replay row {error}")
+        if problems:
+            return problems
+        if len(source_rows) != len(replay_rows):
+            return [
+                f"{source_path.name}: source has {len(source_rows)} row(s), "
+                f"replay has {len(replay_rows)}"]
+        for index, ((_, source_row, _), (_, replay_row, _)) in enumerate(
+                zip(source_rows, replay_rows)):
+            differences = _replay_payload_differences(
+                _replay_comparable(source_row),
+                _replay_comparable(replay_row))
+            for difference in differences:
+                problems.append(
+                    f"{source_path.name}:row {index + 1}: {difference}")
+        return problems
+    try:
+        source_payload = json.loads(source_path.read_text(encoding="utf-8"))
+        replay_payload = json.loads(replay_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        return [f"{source_path.name}: unreadable ({type(exc).__name__}: {exc})"]
+    return [
+        f"{source_path.name}:{difference}"
+        for difference in _replay_payload_differences(
+            _replay_comparable(source_payload),
+            _replay_comparable(replay_payload))
+    ]
+
+
+def _verify_replay(source_dir, replay_dir) -> int:
+    """Compare a replay's evidence payload with its source run.
+
+    ``--replay-manifest`` proves that a frozen recipe can be re-executed
+    under the recorded code, hypotheses, data streams and environment.  It
+    does not prove that the re-execution produced the same numbers.  This
+    read-only audit joins a replay directory to its source through
+    ``replay.json`` and the source manifest's run id / digest, then compares
+    every experiment-scoped JSON/JSONL artifact present in the source with
+    its replay counterpart after stripping invocation-only metadata
+    (run id, timestamps, git status/revision, launch argv/cwd and the setup
+    hash that covers those launch details).
+
+    Exit codes: 0 = every compared artifact is payload-identical and no
+    source evidence is missing; 1 = a mismatch, missing artifact or
+    malformed record; 2 = missing directories, a replay directory without
+    usable ``replay.json``, or no evidence to compare.
+    """
+    source_root = pathlib.Path(source_dir)
+    replay_root = pathlib.Path(replay_dir)
+    if not source_root.is_dir():
+        print(f"[replay] no source results directory at {source_root}")
+        return 2
+    if not replay_root.is_dir():
+        print(f"[replay] no replay results directory at {replay_root}")
+        return 2
+    if source_root.resolve() == replay_root.resolve():
+        print("[replay] source and replay directories are the same; a replay "
+              "is a separate evidence directory")
+        return 2
+    replay_path = replay_root / "replay.json"
+    try:
+        replay = json.loads(replay_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        print(f"[replay] no usable replay provenance at {replay_path} "
+              f"({type(exc).__name__}: {exc})")
+        return 2
+    if not isinstance(replay, Mapping):
+        print(f"[replay] replay provenance at {replay_path} is not a JSON "
+              f"object")
+        return 2
+    source_run = replay.get("source_run_id")
+    manifest_sha = replay.get("manifest_sha256")
+    if not isinstance(source_run, str) or not source_run:
+        print("[replay] replay provenance has no non-empty source_run_id")
+        return 2
+    if not isinstance(manifest_sha, str) or len(manifest_sha) != 64 \
+            or any(char not in "0123456789abcdef" for char in manifest_sha):
+        print("[replay] replay provenance has no valid manifest_sha256")
+        return 2
+
+    problems = []
+    warnings = []
+    if replay.get("environment_override") \
+            or replay.get("environment_compatible") is False:
+        warnings.append(
+            "replay was run under an environment override; matching "
+            "payloads do not restore environment compatibility")
+    matches = []
+    for path in sorted(source_root.glob("*_manifest.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError, TypeError):
+            continue
+        if isinstance(payload, Mapping) and payload.get("run_id") == source_run:
+            matches.append((path, payload))
+    if not matches:
+        print(f"[replay] FAILED: source run {source_run} has no manifest in "
+              f"{source_root}")
+        return 1
+    digest_matches = [
+        (path, payload) for path, payload in matches
+        if hashlib.sha256(path.read_bytes()).hexdigest() == manifest_sha
+    ]
+    if not digest_matches:
+        problems.append(
+            f"source manifest digest does not match replay provenance "
+            f"(expected {manifest_sha[:12]})")
+    experiment = (digest_matches or matches)[0][1].get("experiment")
+    if experiment not in _REPLAY_EXPERIMENTS:
+        print(f"[replay] FAILED: source manifest names unknown experiment "
+              f"{experiment!r}")
+        return 1
+
+    index_path = replay_root / "artifact_index.json"
+    if index_path.is_file():
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            problems.append(
+                f"replay artifact_index.json is unreadable "
+                f"({type(exc).__name__}: {exc})")
+        else:
+            if not isinstance(index, Mapping):
+                problems.append("replay artifact_index.json is not an object")
+            else:
+                if index.get("completed") is not True:
+                    problems.append(
+                        f"replay artifact index is marked "
+                        f"completed={index.get('completed')!r}")
+                if index.get("experiment") != experiment:
+                    problems.append(
+                        f"replay experiment {index.get('experiment')!r} != "
+                        f"source {experiment!r}")
+    else:
+        warnings.append(
+            "replay has no artifact_index.json; completion is not certified")
+
+    source_evidence = _replay_evidence_paths(source_root, experiment)
+    replay_evidence = _replay_evidence_paths(replay_root, experiment)
+    replay_names = {path.name for path in replay_evidence}
+    source_names = {path.name for path in source_evidence}
+    if not source_evidence:
+        print(f"[replay] no {experiment} evidence artifacts found in "
+              f"{source_root}; nothing to compare")
+        return 2
+    compared = 0
+    for path in source_evidence:
+        if path.name not in replay_names:
+            problems.append(f"{path.name}: missing from replay")
+            continue
+        problems.extend(_compare_replay_artifact(
+            path, replay_root / path.name))
+        compared += 1
+    for path in sorted(replay_names - source_names):
+        warnings.append(f"{path}: present only in replay")
+
+    print(f"[replay] source={source_root} replay={replay_root} "
+          f"run={source_run} experiment={experiment}")
+    if problems:
+        print(f"[replay] FAILED ({len(problems)} issue(s)); "
+              f"{compared} artifact(s) compared:")
+        for problem in problems:
+            print(f"    {problem}")
+        for warning in warnings:
+            print(f"    warning: {warning}")
+        return 1
+    print(f"[replay] ok: {compared} artifact(s) payload-identical after "
+          f"stripping invocation metadata")
+    for warning in warnings:
+        print(f"[replay] warning: {warning}")
+    return 0
+
+
 def _load_baseline_verdict(out_dir: pathlib.Path):
     """The HB1-HB5 verdicts written by ``run_baselines``, if present.
 

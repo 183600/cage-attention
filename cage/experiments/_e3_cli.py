@@ -1061,6 +1061,11 @@ def main(argv=None) -> int:
                              "invocations and the environment history for "
                              "critical drift; exit 0-complete, 1-defect, "
                              "2-no run log; writes nothing")
+    parser.add_argument("--verify-replay", default=None, metavar="SOURCE",
+                        help="compare the evidence in --out with the replay "
+                             "source SOURCE after stripping invocation "
+                             "metadata; exit 0-identical, 1-difference, "
+                             "2-no usable replay; writes nothing")
     parser.add_argument("--require-homogeneous", action="store_true",
                         help="with --verify-provenance: treat a result file "
                              "that mixes setups/environments as an error "
@@ -1079,7 +1084,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     verify_flags = (args.verify_artifacts or args.check_environment
                     or args.check_source or args.verify_provenance
-                    or args.verify_runs)
+                    or args.verify_runs or args.verify_replay is not None)
     if args.replay_manifest is not None and verify_flags:
         print("[runner] --replay-manifest cannot be combined with a "
               "read-only --verify/--check action; aborting")
@@ -1105,6 +1110,8 @@ def main(argv=None) -> int:
             verify_out, require_homogeneous=bool(args.require_homogeneous))
     if args.verify_runs:
         return _verify_runs(verify_out)
+    if args.verify_replay is not None:
+        return _verify_replay(args.verify_replay, verify_out)
     if args.synthesize_results:
         synth_out = pathlib.Path(args.out or "results")
         if not synth_out.is_dir():
@@ -1195,6 +1202,13 @@ def main(argv=None) -> int:
             print("[runner] REPLAY REJECTED: --out must differ from the "
                   "source results directory; a replay is new evidence, not "
                   "an append to the run it is reproducing")
+            return 2
+        if experiment in ("e1", "e2", "e3") and not (
+                manifest_dir / "baselines_verdict.json").is_file():
+            print(f"[runner] REPLAY REJECTED: replaying {experiment} requires "
+                  f"the source baselines_verdict.json in {manifest_dir}; "
+                  f"without it the HB1/HB3/HB4/HB5 gate cannot certify the "
+                  f"grid")
             return 2
         replay = {
             "path": str(pathlib.Path(args.replay_manifest).resolve()),
@@ -1356,12 +1370,16 @@ def main(argv=None) -> int:
                    **replay_event)
         _write_json(out_dir / "environment.json", context)
         if replay is not None:
+            inherited_verdict = _inherit_replay_baseline_verdict(
+                manifest_dir, out_dir, settings, experiment)
             _write_json(out_dir / "replay.json", {
                 **replay,
                 "schema_version": _RECORD_SCHEMA,
                 "replay_run_id": context["run_id"],
                 "created_utc": time.strftime(
                     "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                **({"inherited_baseline_verdict": inherited_verdict}
+                   if inherited_verdict is not None else {}),
             })
         replay_note = (f" replay_of={replay['source_run_id']}"
                        if replay is not None else "")
