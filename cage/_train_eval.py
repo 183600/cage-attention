@@ -1117,17 +1117,30 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
     b = _flat(b).to(a.device)
     n_a, n_b = a.numel(), b.numel()
     observed = float(a.mean() - b.mean()) if n_a and n_b else float("nan")
-    # One observation in a group carries no within-group variance: the
-    # percentile bootstrap would then collapse to a point and report a tiny
-    # p-value from a single row per condition.  Abstain (the wrappers turn
-    # this into ``applicable=False``) until both groups have >= 2 rows.
-    if n_a < 2 or n_b < 2 or not _bootstrap_args_ok(n_boot, alpha):
-        return {"mean": observed, "lo": float("nan"), "hi": float("nan"),
+
+    def _abstain(mean):
+        return {"mean": mean, "lo": float("nan"), "hi": float("nan"),
                 "n": int(n_a + n_b), "n_a": int(n_a), "n_b": int(n_b),
                 "sd": float("nan"), "sd_a": float("nan"),
                 "sd_b": float("nan"), "se": float("nan"),
                 "half_width": float("nan"), "mde80": float("nan"),
                 "p_value": float("nan"), "alpha": alpha}
+
+    # One observation in a group carries no within-group variance: the
+    # percentile bootstrap would then collapse to a point and report a tiny
+    # p-value from a single row per condition.  Abstain (the wrappers turn
+    # this into ``applicable=False``) until both groups have >= 2 rows.
+    if n_a < 2 or n_b < 2 or not _bootstrap_args_ok(n_boot, alpha):
+        return _abstain(observed)
+    # Finite values can still have an unrepresentable mean/SD (several
+    # 1e308 observations, for example).  Resampling such a group can
+    # produce non-finite means and a spurious near-zero p-value from the
+    # all-False comparison against zero, so abstain like the paired
+    # bootstrap does.  The stable-SD helper keeps representable extreme
+    # moments (e.g. +-1e154, whose squares overflow) usable.
+    if not (_finite_moments(a) and _finite_moments(b)):
+        return _abstain(observed if math.isfinite(observed)
+                        else float("nan"))
     n_boot = _positive_integer(n_boot)
     gen = torch.Generator(device=a.device).manual_seed(
         _bootstrap_seed(seed))
@@ -1136,32 +1149,46 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
     idx_b = torch.randint(0, n_b, (n_boot, n_b), generator=gen,
                           device=a.device)
     boot = a[idx_a].mean(dim=1) - b[idx_b].mean(dim=1)
+    if not bool(torch.isfinite(boot).all()):
+        # A resample can overflow even when both group means are finite
+        # (opposite-sign extreme observations); its quantiles and the
+        # sign-based p-value are then not meaningful.
+        return _abstain(observed)
     lo = float(torch.quantile(boot, alpha / 2.0))
     hi = float(torch.quantile(boot, 1.0 - alpha / 2.0))
     p_lo = float((boot <= 0.0).to(torch.float64).mean())
     p_hi = float((boot >= 0.0).to(torch.float64).mean())
     p_value = min(
         1.0, 2.0 * (min(p_lo, p_hi) * int(n_boot) + 1.0) / (int(n_boot) + 1.0))
-    var_a = float(a.var(unbiased=True)) if n_a > 1 else float("nan")
-    var_b = float(b.var(unbiased=True)) if n_b > 1 else float("nan")
-    sd_a = math.sqrt(var_a) if math.isfinite(var_a) else float("nan")
-    sd_b = math.sqrt(var_b) if math.isfinite(var_b) else float("nan")
+    sd_a = _stable_sample_sd(a) if n_a > 1 else float("nan")
+    sd_b = _stable_sample_sd(b) if n_b > 1 else float("nan")
     # A group with one observation contributes no within-group variance,
     # but the pooled variance is still estimable from the other group
     # (its (n-1) term is zero).  Treating that one group as NaN threw away
     # the estimable pooled SD/SE; only the degenerate n_a=n_b=1 case has no
     # variance information at all.
-    var_a_pool = var_a if n_a > 1 else 0.0
-    var_b_pool = var_b if n_b > 1 else 0.0
+    sd_a_pool = sd_a if n_a > 1 else 0.0
+    sd_b_pool = sd_b if n_b > 1 else 0.0
     df = n_a + n_b - 2
-    pooled_var = (((n_a - 1) * var_a_pool
-                   + (n_b - 1) * var_b_pool) / df
-                  if df > 0 else float("nan"))
-    sd = math.sqrt(pooled_var) if math.isfinite(pooled_var) else float("nan")
+    pooled_sd = float("nan")
+    if df > 0:
+        scale = max(sd_a_pool, sd_b_pool)
+        if scale > 0.0:
+            # Combine the SDs before restoring the scale: squaring an
+            # extreme but representable SD can overflow the pooled variance.
+            pooled_sd = scale * math.sqrt(
+                ((n_a - 1) * (sd_a_pool / scale) ** 2
+                 + (n_b - 1) * (sd_b_pool / scale) ** 2) / df)
+        else:
+            pooled_sd = 0.0
+    sd = pooled_sd
     if n_a > 1 and n_b > 1:
-        se = math.sqrt(var_a / n_a + var_b / n_b)
-    elif math.isfinite(pooled_var):
-        se = math.sqrt(pooled_var * (1.0 / n_a + 1.0 / n_b))
+        scale = max(sd_a, sd_b)
+        se = (scale * math.sqrt((sd_a / scale) ** 2 / n_a
+                                + (sd_b / scale) ** 2 / n_b)
+              if scale > 0.0 else 0.0)
+    elif math.isfinite(pooled_sd):
+        se = pooled_sd * math.sqrt(1.0 / n_a + 1.0 / n_b)
     else:
         se = float("nan")
     return {

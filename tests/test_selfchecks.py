@@ -1441,6 +1441,41 @@ class BootstrapOverflowTest(unittest.TestCase):
         ci = paired_bootstrap_ci(tiny, n_boot=100)
         self.assertGreater(ci["sd"], 0.0)
 
+    def test_two_sample_extreme_moments_remain_usable(self):
+        import torch
+
+        from cage.train import _two_sample_bootstrap_ci
+
+        stable = torch.tensor([1e154, -1e154, 1e154, -1e154],
+                              dtype=torch.float64)
+        ci = _two_sample_bootstrap_ci(stable, stable, n_boot=100)
+        self.assertTrue(math.isfinite(ci["sd"]), ci)
+        self.assertTrue(math.isfinite(ci["sd_a"]), ci)
+        self.assertTrue(math.isfinite(ci["se"]), ci)
+        self.assertTrue(math.isfinite(ci["lo"]), ci)
+        self.assertTrue(math.isfinite(ci["hi"]), ci)
+        tiny = torch.tensor([1e-300, 2e-300, 3e-300], dtype=torch.float64)
+        ci = _two_sample_bootstrap_ci(tiny, tiny, n_boot=100)
+        self.assertGreater(ci["sd"], 0.0)
+        self.assertGreater(ci["se"], 0.0)
+
+    def test_two_sample_unrepresentable_moments_abstain(self):
+        import torch
+
+        from cage.train import _two_sample_bootstrap_ci
+
+        huge = torch.full((4,), 1e308, dtype=torch.float64)
+        ci = _two_sample_bootstrap_ci(huge, huge, n_boot=100)
+        for key in ("mean", "lo", "hi", "sd", "se", "p_value"):
+            self.assertTrue(math.isnan(ci[key]), (key, ci))
+        # The full-sample mean and SD are representable, but opposite-sign
+        # extremes overflow a resampled mean difference.
+        mixed = torch.tensor([-1e308, 1e308, 1e308, -1e308],
+                             dtype=torch.float64)
+        ci = _two_sample_bootstrap_ci(mixed, mixed, n_boot=100)
+        self.assertTrue(math.isnan(ci["lo"]), ci)
+        self.assertTrue(math.isnan(ci["p_value"]), ci)
+
     def test_unrepresentable_bootstrap_moments_abstain(self):
         from cage.metrics import (
             bootstrap_upper_p,

@@ -34,8 +34,10 @@ from .data import (
 from .metrics import (
     _bootstrap_args_ok,
     _bootstrap_seed,
+    _finite_moments,
     _float_or_nan,
     _positive_integer,
+    _stable_sample_sd,
     average_ranks,
     auc_paired_bootstrap_ci,
     brier_decomposition,
