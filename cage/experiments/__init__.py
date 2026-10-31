@@ -177,8 +177,12 @@ Design principles
    report groups rows per hypothesis and marks it ``supported`` only when
    every registered directional/null-prediction row supports it, with
    ``partial``/``refuted``/``undirected``/``no_contrast`` as explicit
-   outcomes.  Both are companions: row-level ``supports_hypothesis`` and
-   the BH family are untouched.  See ``docs/results_analysis.md``.
+   outcomes.  Every BH-selected row also carries a false-coverage-rate
+   interval for the selected set (``1 - q*R/m``, with the BY
+   harmonic-factor denominator under arbitrary dependence); a supported
+   row that loses its interval decision is flagged as selection-sensitive.
+   All three are companions: row-level ``supports_hypothesis`` and the BH
+   family are untouched.  See ``docs/results_analysis.md``.
 
 Outputs land in ``results/`` (git-ignored); nothing is written into the
 tracked tree.
@@ -259,6 +263,7 @@ from ..metrics import (
     crossed_cluster_bootstrap_ci,
     equivalence_test,
     evaluation_fold_audit,
+    false_coverage_ci,
     minimum_effect_test,
     noninferiority_test,
     paired_bootstrap_ci,

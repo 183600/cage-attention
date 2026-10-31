@@ -110,6 +110,17 @@ class ContrastLog:
     shows how well the seed-to-seed scale supporting that magnitude read is
     itself estimated.  All three are reading aids; the pre-registered row
     rule and FDR family are unchanged.
+
+    A further reading companion corrects the *interval* for the selection
+    that BH performs: the contrasts that appear in the decision table are
+    exactly the ones that passed a multiplicity screen, so their ordinary
+    95% intervals are conditional on selection.  :meth:`finalize` reports
+    a Benjamini-Yekutieli false-coverage-rate interval at level
+    ``1 - q * R / m`` for the selected set (plus the harmonic-factor
+    variant under arbitrary dependence), and flags a supported row whose
+    claim disappears at the selection-adjusted bounds as
+    *selection-sensitive*.  Like the other companions it never changes
+    ``supports_hypothesis``.
     """
 
     def __init__(self, tag: str, hypotheses=(), min_seeds: int = 3,

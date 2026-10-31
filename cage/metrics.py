@@ -69,6 +69,17 @@ Metric choices (and why)
   decision.  ``simes_test`` gives the corresponding family-wide omnibus
   p-value, and a BH-supported claim that fails the dependence-robust
   companions is flagged rather than presented as assumption-free.
+* Multiplicity control corrects *which* contrasts are selected, but an
+  ordinary 95% interval reported for a selected contrast is still
+  conditional on that selection: the reported set is enriched for large
+  observed effects, so its nominal coverage no longer describes the
+  selected parameter.  ``false_coverage_ci`` reports the
+  Benjamini-Yekutieli false-coverage-rate interval for the BH-selected
+  set (``1 - q * R / m`` for PRDS/independence; the arbitrary-dependence
+  variant divides by the harmonic factor ``H_m``).  It is a reporting
+  companion: a supported row whose selection-adjusted interval no longer
+  clears zero (or its equivalence bound) is flagged as selection-sensitive,
+  while the pre-registered BH verdict is unchanged.
 * Statistical significance is not practical significance: every
   hypothesis pre-registers a **SESOI** (smallest effect size of interest)
   per metric, and ``seeds_for_power`` is the *planning* counterpart of the
@@ -140,6 +151,7 @@ __all__ = [
     "benjamini_yekutieli",
     "holm_bonferroni",
     "simes_test",
+    "false_coverage_ci",
     "roc_auc",
     "pr_auc",
     "roc_auc_ci",
@@ -643,6 +655,34 @@ def _self_test() -> int:
           and simes_test([float("nan")])["m"] == 0)
     check("simes_invalid_alpha_no_claim",
           not simes_test(dep_p, alpha=True)["valid"])
+
+    # FCR: a selected contrast gets a wider interval than the ordinary
+    # 95% interval; selecting the whole family restores the ordinary one.
+    fcr_diffs = [0.10, 0.12, 0.11, 0.09, 0.13]
+    fcr_raw = paired_bootstrap_ci(fcr_diffs, n_boot=4000)
+    fcr_one = false_coverage_ci(fcr_diffs, 1, 10, q=0.05, n_boot=4000)
+    fcr_all = false_coverage_ci(fcr_diffs, 10, 10, q=0.05, n_boot=4000)
+    check("fcr_selection_widens",
+          fcr_one["valid"]
+          and fcr_one["lo"] < fcr_raw["lo"]
+          and fcr_one["hi"] > fcr_raw["hi"]
+          and abs(fcr_one["adjusted_alpha"] - 0.005) < 1e-12)
+    check("fcr_all_selected_matches_raw",
+          fcr_all["valid"]
+          and abs(fcr_all["lo"] - fcr_raw["lo"]) < 1e-12
+          and abs(fcr_all["hi"] - fcr_raw["hi"]) < 1e-12)
+    fcr_by = false_coverage_ci(
+        fcr_diffs, 2, 10, q=0.05, dependence="arbitrary")
+    fcr_prds = false_coverage_ci(fcr_diffs, 2, 10, q=0.05)
+    c10 = sum(1.0 / i for i in range(1, 11))
+    check("fcr_by_harmonic_denominator",
+          fcr_by["valid"]
+          and abs(fcr_by["harmonic_factor"] - c10) < 1e-12
+          and abs(fcr_by["adjusted_alpha"] - 0.05 * 2 / (10 * c10)) < 1e-12
+          and fcr_by["adjusted_alpha"] < fcr_prds["adjusted_alpha"])
+    check("fcr_invalid_no_claim",
+          not false_coverage_ci(fcr_diffs, 0, 10)["valid"]
+          and not false_coverage_ci(fcr_diffs, 1, 10, q=True)["valid"])
 
     # Wilson interval brackets the point estimate, including exact endpoints.
     w = wilson_ci(60, 100)

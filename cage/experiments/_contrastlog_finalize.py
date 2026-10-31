@@ -2,6 +2,32 @@
 # Executed into the cage.experiments namespace by __init__.py;
 # split for readability, sharing the module globals.
 # ruff: noqa: F821, F541
+def _fcr_decision_holds(row, lo, hi) -> bool:
+    """Whether an FCR-adjusted interval still supports the row's prediction.
+
+    The ordinary decision rule is unchanged; this only re-reads the same
+    directional/equivalence/NI predicate at the wider selection-adjusted
+    bounds.  NaN bounds or a malformed row return ``False`` so an
+    unavailable interval can never be counted as support.
+    """
+    if not (_finite(lo) and _finite(hi)):
+        return False
+    test = row.get("test")
+    if test == "equivalence":
+        bound = row.get("equivalence_bound")
+        return bool(_finite(bound) and lo > -float(bound)
+                    and hi < float(bound))
+    if test == "noninferiority":
+        bound = row.get("noninferiority_bound")
+        return bool(_finite(bound) and lo > -float(bound))
+    direction = row.get("direction")
+    if direction == "+":
+        return bool(lo > 0.0)
+    if direction == "-":
+        return bool(hi < 0.0)
+    return bool(lo > 0.0 or hi < 0.0)
+
+
 def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
     # TOST p-values of equivalence rows enter the same BH family as the
     # directional p-values: both answer "is this contrast worth a claim
@@ -9,6 +35,10 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
     adj = benjamini_hochberg([r["p_value"] for r in self.rows], q=q)
     for row, a in zip(self.rows, adj):
         row["p_adj"] = a["p_adj"]
+        # Keep the raw BH selection event separate from the claim gate:
+        # the FCR interval must condition on every BH-selected contrast,
+        # including one later refused because its design audit failed.
+        row["bh_selected"] = bool(a["reject"])
         # A confounded contrast cannot support its hypothesis even if
         # its p-value is small: refuse the claim at the decision point.
         row["fdr_reject"] = bool(a["reject"] and row.get("controlled") is not False)
@@ -341,6 +371,91 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
             and float(exact_row["sign_flip_min_p"]) > q)
     surviving = [r for r in testable if r["fdr_reject"]]
     supporting = [r for r in testable if r["supports_hypothesis"]]
+    # Selection-adjusted (false-coverage-rate) companion.  The BH family
+    # answers "which contrasts may be read as discoveries?"; it does not
+    # repair the *interval* reported for those selected contrasts.  A
+    # selected set is enriched for large observed effects, so its ordinary
+    # 95% intervals under-cover the selected parameters.  The FCR interval
+    # uses the Benjamini-Yekutieli level ``1 - q * R / m`` (and the
+    # harmonic-factor variant under arbitrary dependence), so a supported
+    # row whose claim disappears once selection is accounted for is named
+    # instead of being presented as robust.  This is a companion: the
+    # pre-registered decision above is unchanged.
+    selected = [r for r in testable if r.get("bh_selected")]
+    n_selected = len(selected)
+    n_tests = len(testable)
+    selected_ids = {id(r) for r in selected}
+    fcr_sensitive = []
+    fcr_by_sensitive = []
+    fcr_unavailable = []
+    fcr_by_unavailable = []
+    empty_fcr = {
+        "valid": False, "reason": "not selected by BH",
+        "n": 0, "n_boot": 0, "q": q, "n_selected": n_selected,
+        "n_tests": n_tests, "dependence": "prds",
+        "harmonic_factor": float("nan"), "adjusted_alpha": float("nan"),
+        "confidence_level": float("nan"), "mean": float("nan"),
+        "lo": float("nan"), "hi": float("nan"),
+        "half_width": float("nan"), "excludes_zero": False,
+    }
+    for row in self.rows:
+        is_selected = id(row) in selected_ids
+        row["fcr_selected"] = bool(is_selected)
+        row["fcr_n_selected"] = n_selected
+        row["fcr_n_tests"] = n_tests
+        fcr = dict(empty_fcr)
+        fcr_by = dict(empty_fcr)
+        fcr_by["dependence"] = "arbitrary"
+        if is_selected:
+            fcr = false_coverage_ci(
+                row.get("diffs"), n_selected, n_tests, q=q,
+                dependence="prds")
+            fcr_by = false_coverage_ci(
+                row.get("diffs"), n_selected, n_tests, q=q,
+                dependence="arbitrary")
+        row["fcr"] = fcr
+        row["fcr_by"] = fcr_by
+        row["fcr_lo"] = fcr.get("lo")
+        row["fcr_hi"] = fcr.get("hi")
+        row["fcr_adjusted_alpha"] = fcr.get("adjusted_alpha")
+        row["fcr_confidence_level"] = fcr.get("confidence_level")
+        row["fcr_decision_holds"] = bool(
+            is_selected and _fcr_decision_holds(
+                row, fcr.get("lo"), fcr.get("hi")))
+        row["fcr_supports"] = bool(
+            row["fcr_decision_holds"]
+            and row.get("practically_relevant")
+            and row.get("claim_eligible", True)
+            and row.get("controlled") is not False)
+        row["fcr_disagrees"] = bool(
+            is_selected and bool(row.get("supports_hypothesis"))
+            != row["fcr_supports"])
+        row["fcr_by_lo"] = fcr_by.get("lo")
+        row["fcr_by_hi"] = fcr_by.get("hi")
+        row["fcr_by_adjusted_alpha"] = fcr_by.get("adjusted_alpha")
+        row["fcr_by_confidence_level"] = fcr_by.get("confidence_level")
+        row["fcr_by_decision_holds"] = bool(
+            is_selected and _fcr_decision_holds(
+                row, fcr_by.get("lo"), fcr_by.get("hi")))
+        row["fcr_by_supports"] = bool(
+            row["fcr_by_decision_holds"]
+            and row.get("practically_relevant")
+            and row.get("claim_eligible", True)
+            and row.get("controlled") is not False)
+        row["fcr_by_disagrees"] = bool(
+            is_selected and bool(row.get("supports_hypothesis"))
+            != row["fcr_by_supports"])
+        if is_selected and row.get("supports_hypothesis"):
+            if fcr.get("valid"):
+                if not row["fcr_supports"]:
+                    fcr_sensitive.append(row)
+            else:
+                fcr_unavailable.append(row)
+            if fcr_by.get("valid"):
+                if not row["fcr_by_supports"]:
+                    fcr_by_sensitive.append(row)
+            else:
+                fcr_by_unavailable.append(row)
     # Multiplicity-model sensitivity companions.  BH's FDR guarantee
     # assumes independent or positively dependent tests, but contrasts
     # in one family share training seeds and a sealed evaluation
@@ -920,6 +1035,41 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
               f"so the BH-only support is conditional on an "
               f"independence/PRDS premise; report these as "
               f"multiplicity-model sensitive, not as robust claims")
+    if selected:
+        fcr_level = (1.0 - q * n_selected / n_tests
+                     if n_tests else float("nan"))
+        print(f"[{self.tag}] selection-adjusted (FCR) companion: "
+              f"{n_selected}/{n_tests} BH-selected contrast(s); the "
+              f"PRDS interval level is {fcr_level:.4f} "
+              f"(1 - q*R/m); {len(fcr_sensitive)} supported claim(s) "
+              f"lose their interval decision after selection adjustment "
+              f"and {len(fcr_by_sensitive)} lose it under the "
+              f"arbitrary-dependence (BY) variant")
+    if fcr_unavailable or fcr_by_unavailable:
+        print(f"[{self.tag}] note: {len(fcr_unavailable)} selected "
+              f"contrast(s) have no PRDS FCR interval and "
+              f"{len(fcr_by_unavailable)} have no arbitrary-dependence "
+              f"FCR interval (too few paired seeds or a degenerate "
+              f"bootstrap); their ordinary CI is not selection-adjusted")
+    if fcr_sensitive:
+        names = ", ".join(
+            f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+            for r in fcr_sensitive)
+        print(f"[{self.tag}] WARNING: {len(fcr_sensitive)}/"
+              f"{len(supporting)} supported contrast(s) do NOT keep "
+              f"their interval decision after false-coverage-rate "
+              f"adjustment for the BH-selected set ({names}): their "
+              f"ordinary 95% CI is conditional on selection; report "
+              f"them as selection-sensitive, not as robust effects")
+    if fcr_by_sensitive:
+        names = ", ".join(
+            f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+            for r in fcr_by_sensitive)
+        print(f"[{self.tag}] WARNING: {len(fcr_by_sensitive)}/"
+              f"{len(supporting)} supported contrast(s) lose the "
+              f"interval decision under the arbitrary-dependence FCR "
+              f"variant ({names}); the selected-set interval needs the "
+              f"PRDS premise to clear zero")
     registered = list(self.hypotheses)
     covered = sorted({r["hypothesis"] for r in self.rows})
     uncovered = [h for h in registered if h not in covered]
@@ -1017,6 +1167,18 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
                "n_holm_supporting": len(holm_supporting),
                "n_holm_disagree": len(holm_conflicts),
                "n_dependence_weaker": len(dependence_weaker),
+               "n_fcr_selected": n_selected,
+               "n_fcr_tests": n_tests,
+               "n_fcr_decision_sensitive": len(fcr_sensitive),
+               "n_fcr_by_decision_sensitive": len(fcr_by_sensitive),
+               "n_fcr_unavailable": len(fcr_unavailable),
+               "n_fcr_by_unavailable": len(fcr_by_unavailable),
+               "fcr_decision_sensitive_contrasts": [
+                   f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                   for r in fcr_sensitive],
+               "fcr_by_decision_sensitive_contrasts": [
+                   f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                   for r in fcr_by_sensitive],
                "direction_reversed_contrasts": [
                    f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
                    for r in reversed_effects],

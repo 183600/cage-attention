@@ -952,6 +952,152 @@ def simes_test(p_values, alpha: float = 0.05) -> dict:
             "valid": bool(alpha_ok)}
 
 
+def false_coverage_ci(diffs, n_selected, n_tests, q: float = 0.05,
+                      n_boot: int = 10000, seed: int = 0,
+                      dependence: str = "prds") -> dict:
+    """Selection-adjusted interval for a contrast selected by BH.
+
+    The per-contrast 95% interval is the right uncertainty statement for a
+    *pre-specified* comparison, but a results table reports only the
+    contrasts that survived a multiplicity procedure.  Conditional on that
+    selection the ordinary interval no longer covers the selected effect
+    at its nominal rate: the reported set is biased towards large observed
+    effects (the winner's-curse/selection problem).  Benjamini and
+    Yekutieli's false-coverage-rate (FCR) adjustment repairs the statement
+    for the *selected set*: when ``R`` of ``m`` contrasts are selected at
+    FDR level ``q``, each selected contrast is reported with the
+    ``1 - q * R / m`` interval (for PRDS/independence).  The selected set
+    then has expected false coverage proportion at most ``q``, exactly the
+    error rate the BH decision already targets.
+
+    ``dependence='arbitrary'`` divides the adjusted level by the
+    Benjamini-Yekutieli harmonic factor ``H_m = sum(1/i, i=1..m)``, giving
+    an FCR statement that does not rely on positive dependence - the same
+    companion logic as the BH vs BY multiplicity readouts.  The interval is
+    therefore wider than the pre-registered percentile interval whenever
+    ``R < m``; it equals the ordinary interval only when every tested
+    contrast is selected and ``dependence='prds'``.
+
+    ``diffs`` holds the same paired per-seed differences used by
+    :func:`paired_bootstrap_ci`; the returned percentile interval uses the
+    same bootstrap distribution.  This is a **reporting companion**: it
+    does not change ``supports_hypothesis`` or the pre-registered BH
+    decision.  A supported row whose FCR interval no longer clears zero is
+    flagged as selection-sensitive, not silently presented as robust.
+    Returns ``valid=False`` with NaN fields for an empty/non-finite
+    sample, fewer than two paired units, ``n_selected`` outside
+    ``1..n_tests``, an invalid error level, bootstrap arguments or
+    dependence model, or an adjusted level outside ``(0, 1)``.
+    """
+    q_value = _float_or_nan(q)
+    dep = str(dependence).strip().lower().replace("-", "_")
+    if dep in ("prds", "independent", "positive_dependence"):
+        dep = "prds"
+    elif dep in ("arbitrary", "by", "any"):
+        dep = "arbitrary"
+    out = {
+        "valid": False,
+        "reason": None,
+        "n": 0,
+        "n_boot": 0,
+        "q": q_value,
+        "n_selected": None,
+        "n_tests": None,
+        "dependence": dependence,
+        "harmonic_factor": float("nan"),
+        "adjusted_alpha": float("nan"),
+        "confidence_level": float("nan"),
+        "mean": float("nan"),
+        "lo": float("nan"),
+        "hi": float("nan"),
+        "half_width": float("nan"),
+        "excludes_zero": False,
+    }
+    if dep not in ("prds", "arbitrary"):
+        out["reason"] = f"unknown dependence model {dependence!r}"
+        return out
+    out["dependence"] = dep
+    n_sel = _positive_integer(n_selected)
+    n_tst = _positive_integer(n_tests)
+    out["n_selected"] = n_sel
+    out["n_tests"] = n_tst
+    if n_sel is None:
+        out["reason"] = "n_selected must be a positive integer"
+        return out
+    if n_tst is None:
+        out["reason"] = "n_tests must be a positive integer"
+        return out
+    if n_sel > n_tst:
+        out["reason"] = "n_selected cannot exceed n_tests"
+        return out
+    if not (math.isfinite(q_value) and 0.0 < q_value < 1.0):
+        out["reason"] = "q must lie strictly between 0 and 1"
+        return out
+    n_boot_int = _positive_integer(n_boot)
+    if n_boot_int is None:
+        out["reason"] = "n_boot must be a positive integer"
+        return out
+    try:
+        seed_int = _bootstrap_seed(seed)
+    except ValueError as exc:
+        out["reason"] = str(exc)
+        return out
+    try:
+        d = _flatten_float(diffs)
+    except (TypeError, ValueError, RuntimeError, OverflowError):
+        out["reason"] = "paired differences are not a real numeric sample"
+        return out
+    out["n"] = int(d.numel())
+    if d.numel() < 2:
+        out["reason"] = "fewer than two paired units"
+        return out
+    if not bool(torch.isfinite(d).all()) or not _finite_moments(d):
+        out["reason"] = "non-finite paired difference"
+        return out
+    # ``H_m`` is the BY harmonic factor.  It is only needed for the
+    # arbitrary-dependence variant; the exact sum is used for realistic
+    # family sizes, with the asymptotic form above that to keep a huge
+    # (but representable) n_tests from turning the report into a long loop.
+    if dep == "arbitrary":
+        if n_tst <= 100000:
+            factor = math.fsum(1.0 / i for i in range(1, n_tst + 1))
+        else:
+            factor = math.log(n_tst) + 0.5772156649015329 + 0.5 / n_tst
+        adjusted_alpha = q_value * n_sel / (n_tst * factor)
+    else:
+        factor = 1.0
+        adjusted_alpha = q_value * n_sel / n_tst
+    out["harmonic_factor"] = float(factor)
+    out["adjusted_alpha"] = float(adjusted_alpha)
+    if not (math.isfinite(adjusted_alpha)
+            and 0.0 < adjusted_alpha < 1.0):
+        out["reason"] = (
+            "adjusted alpha leaves no finite interval "
+            f"(q * R / m = {adjusted_alpha:g})")
+        return out
+    out["confidence_level"] = float(1.0 - adjusted_alpha)
+    n_boot_int = int(n_boot_int)
+    out["n_boot"] = n_boot_int
+    means = _bootstrap_means(d, n_boot_int, seed_int)
+    if not bool(torch.isfinite(means).all()):
+        out["reason"] = "bootstrap means overflow float64"
+        return out
+    lo = float(torch.quantile(means, adjusted_alpha / 2.0))
+    hi = float(torch.quantile(means, 1.0 - adjusted_alpha / 2.0))
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        out["reason"] = "adjusted interval is not finite"
+        return out
+    out.update({
+        "valid": True,
+        "mean": float(d.mean()),
+        "lo": lo,
+        "hi": hi,
+        "half_width": (hi - lo) / 2.0,
+        "excludes_zero": bool(lo > 0.0 or hi < 0.0),
+    })
+    return out
+
+
 def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
     """Wilson score interval for a binomial proportion.
 
