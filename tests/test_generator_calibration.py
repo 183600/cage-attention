@@ -164,6 +164,17 @@ class GeneratorCalibrationTest(unittest.TestCase):
                 / expected_three,
                 1.0, places=12)
 
+    def test_repeat_rate_stays_accurate_above_direct_product_threshold(self):
+        vocab = 10**12
+        n_pairs = (1 << 20) + 1
+        selectable = vocab - 2
+        expected = -math.expm1(math.fsum(
+            math.log1p(-index / selectable)
+            for index in range(1, n_pairs)))
+        self.assertAlmostEqual(
+            data._expected_value_repeat_rate(n_pairs, vocab) / expected,
+            1.0, places=12)
+
     def test_split_audit_stamps_generator_calibration(self):
         audit = data.split_leakage_audit(
             3, 17, batch=8, batches=2, train_seeds=(0,))

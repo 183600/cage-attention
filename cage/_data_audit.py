@@ -1396,6 +1396,28 @@ def _categorical_independence_test(left, right, n_left, n_right,
     }
 
 
+def _log_falling_factorial_series(n_pairs, selectable) -> float:
+    """Log falling factorial for a short draw from a large vocabulary.
+
+    Only used when ``n_pairs`` is large but ``n_pairs / selectable`` is
+    small, so the log-product's power-sum expansion converges in a few
+    terms.  Scaling by ``m / selectable`` keeps every intermediate finite
+    even for counts near torch's index limit.
+    """
+    m = float(n_pairs - 1)
+    ratio = m / selectable
+    scaled = m * ratio
+    inv = 1.0 / m
+    t1 = 0.5 * scaled * (1.0 + inv)
+    t2 = (scaled * ratio) * (1.0 + inv) * (2.0 + inv) / 6.0
+    t3 = (scaled * ratio * ratio) * (1.0 + inv) ** 2 / 4.0
+    t4 = ((scaled * ratio ** 3) * (1.0 + inv) * (2.0 + inv)
+          * (3.0 + 3.0 * inv - inv * inv) / 30.0)
+    t5 = ((scaled * ratio ** 4) * (1.0 + inv) ** 2
+          * (2.0 + 2.0 * inv - inv * inv) / 12.0)
+    return -(t1 + t2 / 2.0 + t3 / 3.0 + t4 / 4.0 + t5 / 5.0)
+
+
 def _expected_value_repeat_rate(n_pairs, vocab) -> float:
     """Birthday probability that a row draws at least one repeated value.
 
@@ -1424,9 +1446,10 @@ def _expected_value_repeat_rate(n_pairs, vocab) -> float:
             math.log1p(-index / selectable)
             for index in range(1, n_pairs))
     else:
-        log_distinct = (math.lgamma(selectable + 1.0)
-                        - math.lgamma(selectable - n_pairs + 1.0)
-                        - n_pairs * math.log(selectable))
+        ratio = (n_pairs - 1) / selectable
+        if n_pairs * ratio >= 100.0:
+            return 1.0
+        log_distinct = _log_falling_factorial_series(n_pairs, selectable)
     return min(1.0, max(0.0, -math.expm1(log_distinct)))
 
 
