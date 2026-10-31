@@ -1091,6 +1091,87 @@ def _stamp_linked_length_extension(rec, model, settings, lengths, eval_seed):
     return linked
 
 
+def _stamp_calib_term_knockout(rec, model, settings, lengths, eval_seed):
+    """Add the within-model calibration-term knockout to one run record.
+
+    The retrained E2 term ablations change both the architecture and the
+    optimisation trajectory.  This stamp holds the trained full-calibration
+    weights fixed and zeroes ``calib_a`` / ``calib_c`` at evaluation time
+    on a paired stream, isolating how much of the *learned* correction is
+    used.  The helper is isolated from the runner so the record contract
+    can be unit-tested and malformed sweeps abstain instead of aborting.
+
+    Exploratory companion: the pre-registered H2 decisions still read the
+    retrained-arm contrasts.
+    """
+    if not isinstance(rec, Mapping):
+        return None
+    lengths = list(dict.fromkeys(_positive_lengths(lengths)))
+    if not lengths:
+        rec["calib_term_knockout"] = {
+            "applicable": False,
+            "reason": "empty length list",
+            "lengths": [],
+        }
+        return None
+    terms = ("length", "concentration", "both")
+    by_length = {
+        str(length): calib_term_knockout_eval(
+            model, length, settings.vocab, settings.device,
+            batch=settings.eval_batch, batches=settings.eval_batches,
+            seed=eval_seed, terms=terms)
+        for length in lengths
+    }
+    base_length = lengths[0]
+    longest = lengths[-1]
+
+    def _entry(length):
+        return _length_mapping(by_length, length) or {}
+
+    def _term_field(length, term, field):
+        row = ((_entry(length).get("by_term") or {}).get(term) or {})
+        value = row.get(field)
+        return float(value) if _finite(value) else float("nan")
+
+    def _baseline(length):
+        value = _entry(length).get("baseline")
+        return float(value) if _finite(value) else float("nan")
+
+    for term in terms:
+        for label, length in (("base", base_length),
+                              ("longest", longest)):
+            rec[f"calib_knockout_{term}_accuracy_at_{label}"] = _term_field(
+                length, term, "accuracy")
+            rec[f"calib_knockout_{term}_delta_at_{label}"] = _term_field(
+                length, term, "delta")
+    for label, length in (("base", base_length), ("longest", longest)):
+        rec[f"calib_knockout_baseline_at_{label}"] = _baseline(length)
+    raw_base = _length_entry(rec.get("accuracy_by_length"), base_length)
+    eval_base = _baseline(base_length)
+    matches = bool(
+        _finite(raw_base) and _finite(eval_base)
+        and abs(float(eval_base) - float(raw_base)) <= 1e-12)
+    rec["calib_knockout_base_matches_raw"] = matches
+    if _finite(raw_base) and not matches:
+        print(f"[e2] WARNING: calibration-knockout baseline {eval_base!r} "
+              f"does not reproduce the raw base accuracy {raw_base!r}; the "
+              f"within-model probe is not on the same stream")
+    rec["calib_term_knockout"] = {
+        "applicable": any(entry.get("applicable")
+                          for entry in by_length.values()),
+        "lengths": [int(length) for length in lengths],
+        "base_length": int(base_length),
+        "longest": int(longest),
+        "by_length": by_length,
+        "base_matches_raw": matches,
+        "terms": list(terms),
+        "note": ("within-model coefficient knockout on the same sealed eval "
+                 "stream; exploratory complement to the retrained term "
+                 "ablations, not a pre-registered H2 decision row"),
+    }
+    return rec["calib_term_knockout"]
+
+
 def _materialize_runs(runs):
     """Materialize a run container; a non-iterable one has no records."""
     try:

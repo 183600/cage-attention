@@ -661,3 +661,108 @@ def layer_knockout_eval(model, n_pairs, vocab, device, batch=256, batches=4,
                  "deep-layer readouts; same sealed eval stream for the "
                  "baseline and every knockout"),
     }
+
+
+def _calib_term_tensors(model, term):
+    """The learned tensors that implement one additive calibration term."""
+    tensors = []
+    for block in getattr(model, "blocks", ()):
+        attn = getattr(block, "attn", None)
+        if getattr(attn, "gate_kind", None) != "calib":
+            continue
+        if term in ("length", "both") and getattr(attn, "calib_a", None) is not None:
+            tensors.append(attn.calib_a)
+        if (term in ("concentration", "both")
+                and getattr(attn, "calib_c", None) is not None):
+            tensors.append(attn.calib_c)
+    return tensors
+
+
+def calib_term_knockout_eval(model, n_pairs, vocab, device, batch=256,
+                             batches=4, seed=VAL_SEED,
+                             terms=("length", "concentration", "both")):
+    """Accuracy with the trained calibration terms temporarily zeroed.
+
+    E1/E2 *retrained* term ablations remove a term and then re-optimise, so
+    the accuracy change mixes the term's contribution with a different
+    training trajectory.  This probe is the complementary within-model
+    intervention: hold the trained weights fixed, zero only the chosen
+    additive coefficient(s), and re-score the same sealed evaluation
+    stream.  ``length`` zeroes ``calib_a`` (the ``-a*log(T)`` term),
+    ``concentration`` zeroes ``calib_c`` (the ``-c*scale*Hbar`` term), and
+    ``both`` zeroes every calibration coefficient.  Parameters are restored
+    exactly, including on error, and baseline/knockout rows are paired on
+    identical items.
+
+    The probe is exploratory; the pre-registered E2 decisions remain the
+    retrained-arm contrasts.  Returns an ``applicable=False`` payload for
+    models without a calibrated gate, and a per-term ``applicable=False``
+    row when the requested term is not present in the architecture.
+    """
+    if isinstance(terms, (str, bytes)) or isinstance(terms, Mapping):
+        raise ValueError(f"terms must be an iterable of term names, got {terms!r}")
+    try:
+        iterator = iter(terms)
+    except TypeError as exc:
+        raise ValueError(
+            f"terms must be an iterable of term names, got {terms!r}") from exc
+    requested = []
+    for raw in iterator:
+        if raw not in ("length", "concentration", "both"):
+            raise ValueError(
+                f"unknown calibration term {raw!r}; expected one of "
+                f"'length', 'concentration', 'both'")
+        if raw not in requested:
+            requested.append(raw)
+    modules = []
+    for block in getattr(model, "blocks", ()):
+        attn = getattr(block, "attn", None)
+        if getattr(attn, "gate_kind", None) == "calib":
+            modules.append(attn)
+    if not modules:
+        return {
+            "applicable": False,
+            "reason": "model has no calibrated gate",
+            "terms": requested,
+            "n_pairs": int(n_pairs),
+            "seed": seed,
+        }
+    baseline = eval_accuracy(model, n_pairs, vocab, device, batch=batch,
+                             batches=batches, seed=seed)
+    by_term = {}
+    for term in requested:
+        parameters = _calib_term_tensors(model, term)
+        if not parameters:
+            by_term[term] = {
+                "applicable": False,
+                "reason": f"model has no {term} calibration coefficient",
+            }
+            continue
+        with torch.no_grad():
+            saved = [parameter.detach().clone() for parameter in parameters]
+            try:
+                for parameter in parameters:
+                    parameter.zero_()
+                accuracy = eval_accuracy(model, n_pairs, vocab, device,
+                                         batch=batch, batches=batches,
+                                         seed=seed)
+            finally:
+                for parameter, value in zip(parameters, saved):
+                    parameter.copy_(value)
+        by_term[term] = {
+            "applicable": True,
+            "accuracy": accuracy,
+            "delta": accuracy - baseline,
+            "n_parameters": len(parameters),
+        }
+    return {
+        "applicable": True,
+        "baseline": baseline,
+        "by_term": by_term,
+        "terms": requested,
+        "n_pairs": int(n_pairs),
+        "seed": seed,
+        "note": ("within-model coefficient knockout on the same sealed eval "
+                 "stream; exploratory complement to the retrained E1/E2 term "
+                 "ablations"),
+    }

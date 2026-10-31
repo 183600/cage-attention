@@ -313,6 +313,121 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
     return payload
 
 
+def _e2_term_knockout_companion(by_variant: dict, lengths: list) -> dict:
+    """Aggregate the within-model calibration-term knockout.
+
+    The E2 grid measures the length and concentration terms by *retraining*
+    ablated architectures.  This companion reads the paired within-model
+    probe (zero the trained ``calib_a`` / ``calib_c`` on the same stream) at
+    the training length and the longest sweep length, so "the learned
+    correction is load-bearing" can be checked without a second training
+    trajectory.  It is exploratory and never enters the H2 FDR family.
+    """
+    lengths = _positive_lengths(lengths)
+    if not lengths:
+        return {"applicable": False, "reason": "empty length list"}
+    selected = []
+    for length in (lengths[0], lengths[-1]):
+        if length not in selected:
+            selected.append(length)
+
+    def _term_agg(entries, term, field):
+        values = []
+        for entry in entries:
+            row = ((entry.get("by_term") or {}).get(term) or {})
+            values.append(row.get(field))
+        return _mean_std(values)
+
+    arms = {}
+    for label in ("calib", _CALIB_RAW_ENT_CELL):
+        rows = _mapping_runs(by_variant.get(label, []))
+        by_length = {}
+        for length in selected:
+            entries = [
+                _length_mapping(
+                    (run.get("calib_term_knockout") or {}).get("by_length"),
+                    length)
+                for run in rows]
+            entries = [entry for entry in entries
+                       if entry and entry.get("applicable")]
+            if not entries:
+                continue
+            by_length[str(length)] = {
+                "n": len(entries),
+                "baseline": _mean_std([
+                    entry.get("baseline") for entry in entries]),
+                "by_term": {
+                    term: {
+                        "accuracy": _term_agg(entries, term, "accuracy"),
+                        "delta": _term_agg(entries, term, "delta"),
+                    }
+                    for term in ("length", "concentration", "both")
+                },
+            }
+        if by_length:
+            arms[label] = {"by_length": by_length}
+
+    retrained = {}
+    for reference in ("calib_len_only", "calib_ent_only", "calib_no_terms"):
+        rows = _mapping_runs(by_variant.get(reference, []))
+        retrained[reference] = {
+            str(length): _mean_std([
+                _length_entry(run.get("accuracy_by_length"), length)
+                for run in rows])
+            for length in selected}
+    payload = {
+        "applicable": bool(arms),
+        "lengths": [int(length) for length in selected],
+        "arms": arms,
+        "retrained_references": retrained,
+        "note": ("exploratory within-model coefficient knockout (trained "
+                 "weights fixed); the pre-registered H2 decisions remain the "
+                 "retrained-arm contrasts"),
+    }
+    if not arms:
+        print("\n[e2] within-model calibration-term knockout: n/a (no "
+              "full-calibration run carried the probe)")
+    else:
+        print("\n[e2] within-model calibration-term knockout (zero the "
+              "trained coefficient on the same sealed stream, weights "
+              "otherwise fixed; mean±std over seeds, negative delta = "
+              "accuracy cost when the learned term is removed).  This is the "
+              "interventional counterpart to the retrained term ablations, "
+              "not a new H2 decision rule:")
+        print(f"{'arm':>16} {'L':>5} {'baseline':>17} "
+              f"{'-length':>17} {'-concentration':>17} {'-both':>17} "
+              f"{'n':>4}")
+        for label, arm in arms.items():
+            for length in selected:
+                entry = (arm.get("by_length") or {}).get(str(length))
+                if not entry:
+                    continue
+
+                def _delta(term):
+                    agg = (entry.get("by_term") or {}).get(term, {}).get(
+                        "delta", {})
+                    if not _finite(agg.get("mean")):
+                        return "n/a"
+                    return f"{agg['mean']:+.3f}±{agg['std']:.3f}"
+
+                base = entry.get("baseline") or {}
+                base_s = (f"{base['mean']:.3f}±{base['std']:.3f}"
+                          if _finite(base.get("mean")) else "n/a")
+                print(f"{label:>16} {length:>5} {base_s:>17} "
+                      f"{_delta('length'):>17} "
+                      f"{_delta('concentration'):>17} "
+                      f"{_delta('both'):>17} {entry.get('n', 0):>4}")
+        for reference, rows in retrained.items():
+            if not rows:
+                continue
+            agg = rows.get(str(selected[-1])) or {}
+            if _finite(agg.get("mean")):
+                print(f"  retrained {reference} @L={selected[-1]}: "
+                      f"{agg['mean']:.3f}±{agg['std']:.3f} (reference point, "
+                      f"not subtraction target)")
+    return payload
+
+
 def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                            reference_lr: float, reference_runs: dict,
                            lengths: list) -> dict:

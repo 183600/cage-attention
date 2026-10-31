@@ -240,6 +240,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         rec["calib_coefficients"] = coefficients
         rec["concentration_signal"] = coefficients.get(
             "concentration_signal")
+        if label in ("calib", _CALIB_RAW_ENT_CELL):
+            _stamp_calib_term_knockout(
+                rec, model, settings, [settings.n_pairs, lengths[-1]],
+                eval_seed)
         # Top-level scalar coefficients: H2f is a one-sample contrast
         # across training seeds, so the per-run values have to be
         # readable by ``_one_sample_contrast`` (the nested per-layer
@@ -1018,6 +1022,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         settings, out_dir, by_variant, lengths)
     endpoint_companions = _e2_endpoint_class_companions(by_variant, lengths)
     difficulty_companions = _e2_difficulty_companions(by_variant, lengths)
+    term_knockout = _e2_term_knockout_companion(by_variant, lengths)
+    _write_json(out_dir / "e2_term_knockout.json", term_knockout)
     per_variant_tuning = _e2_per_variant_tuning(
         settings, out_dir, lr, by_variant, lengths)
     length_efficiency = _length_efficiency_companion(
@@ -1070,6 +1076,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     e2_summary["_efficiency"] = length_efficiency
     e2_summary["_class_frequency_companions"] = endpoint_companions
     e2_summary["_difficulty_companions"] = difficulty_companions
+    e2_summary["_term_knockout"] = term_knockout
     e2_summary["_difficulty_standardized"] = {
         label: {
             str(L): _mean_std([

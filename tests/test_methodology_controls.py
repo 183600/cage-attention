@@ -13,7 +13,10 @@ readouts:
   gate-decile companions;
 * the eval-time position-extrapolation control (``fold`` / ``zero``) and
   its E2 stamping helper;
-* the E1 record's learned-coefficient stamping.
+* the E1 record's learned-coefficient stamping;
+* ``calib_term_knockout_eval`` - the within-model coefficient knockout
+  that complements the retrained E1/E2 term ablations, plus its E2
+  stamping/reporting helpers.
 """
 
 import math
@@ -23,8 +26,8 @@ import torch
 
 from cage.data import make_batch
 from cage.model import Cfg, build
-from cage.train import (collect_stats, eval_accuracy,
-                        false_concentration_analysis,
+from cage.train import (calib_term_knockout_eval, collect_stats,
+                        eval_accuracy, false_concentration_analysis,
                         false_concentration_sweep, layer_knockout_eval,
                         train_model)
 
@@ -410,6 +413,170 @@ class InitialGateOpennessTest(unittest.TestCase):
         self.assertTrue(0.5 < q_open < 0.99)
         self.assertTrue(0.5 < c_open < 0.99)
         self.assertLess(abs(q_open - c_open), 0.2)
+
+
+class CalibTermKnockoutTest(unittest.TestCase):
+    def test_non_calib_abstains_and_validation(self):
+        torch.manual_seed(20)
+        plain = build(_TINY)
+        out = calib_term_knockout_eval(
+            plain, 4, 64, "cpu", batch=4, batches=1)
+        self.assertFalse(out["applicable"])
+        self.assertEqual(out["n_pairs"], 4)
+
+        for bad_terms in ("length", ("bogus",), 3):
+            with self.subTest(bad_terms=bad_terms):
+                with self.assertRaises(ValueError):
+                    calib_term_knockout_eval(
+                        plain, 4, 64, "cpu", batch=4, batches=1,
+                        terms=bad_terms)
+
+        torch.manual_seed(21)
+        len_only = build({**_TINY, "gate": "calib", "calib_use_ent": False})
+        out = calib_term_knockout_eval(
+            len_only, 4, 64, "cpu", batch=4, batches=1,
+            terms=("length", "concentration"))
+        self.assertTrue(out["applicable"])
+        self.assertTrue(out["by_term"]["length"]["applicable"])
+        self.assertFalse(out["by_term"]["concentration"]["applicable"])
+
+    def test_matches_manual_zeroing_and_restores_exactly(self):
+        model = _trained_calib(steps=4)
+        parameters = [
+            parameter for block in model.blocks
+            for parameter in (block.attn.calib_a, block.attn.calib_c)
+            if parameter is not None]
+        before = [parameter.detach().clone() for parameter in parameters]
+        out = calib_term_knockout_eval(
+            model, 6, 64, "cpu", batch=4, batches=2, seed=123)
+        self.assertTrue(out["applicable"])
+        for term in ("length", "concentration", "both"):
+            self.assertTrue(out["by_term"][term]["applicable"])
+            self.assertTrue(0.0 <= out["by_term"][term]["accuracy"] <= 1.0)
+        for parameter, value in zip(parameters, before):
+            self.assertTrue(torch.equal(parameter.detach(), value))
+
+        for term, selector in (
+            ("length", lambda attn: attn.calib_a),
+            ("concentration", lambda attn: attn.calib_c),
+        ):
+            selected = [selector(block.attn) for block in model.blocks
+                        if selector(block.attn) is not None]
+            saved = [parameter.detach().clone() for parameter in selected]
+            with torch.no_grad():
+                for parameter in selected:
+                    parameter.zero_()
+                manual = eval_accuracy(
+                    model, 6, 64, "cpu", batch=4, batches=2, seed=123)
+                for parameter, value in zip(selected, saved):
+                    parameter.copy_(value)
+            self.assertAlmostEqual(
+                out["by_term"][term]["accuracy"], manual, places=12)
+            self.assertAlmostEqual(
+                out["by_term"][term]["delta"], manual - out["baseline"],
+                places=12)
+
+    def test_stamp_helper_records_base_and_longest(self):
+        from cage.experiments import Settings
+        from cage.experiments import _stamp_calib_term_knockout
+
+        torch.manual_seed(22)
+        settings = Settings(device="cpu", d_model=32, n_heads=4,
+                            n_layers=2, max_len=128, vocab=64, batch=4,
+                            n_pairs=4, steps=3, seeds=(0,),
+                            eval_batch=4, eval_batches=1, stats_batch=4,
+                            stats_batches=1)
+        model = build({**_TINY, "gate": "calib"})
+        train_model(model, steps=3, batch=4, n_pairs=4, vocab=64,
+                    log_every=0)
+        before = [
+            parameter.detach().clone()
+            for block in model.blocks
+            for parameter in (block.attn.calib_a, block.attn.calib_c)
+            if parameter is not None]
+        lengths = [4, 8]
+        rec = {"accuracy_by_length": {
+            length: eval_accuracy(model, length, 64, "cpu", batch=4,
+                                  batches=1)
+            for length in lengths}}
+        _stamp_calib_term_knockout(rec, model, settings, lengths,
+                                   eval_seed=123)
+        payload = rec["calib_term_knockout"]
+        self.assertTrue(payload["applicable"])
+        self.assertEqual(payload["base_length"], 4)
+        self.assertEqual(payload["longest"], 8)
+        self.assertEqual(sorted(int(k) for k in payload["by_length"]),
+                         [4, 8])
+        self.assertTrue(rec["calib_knockout_base_matches_raw"])
+        for term in ("length", "concentration", "both"):
+            for label in ("base", "longest"):
+                self.assertIn(
+                    f"calib_knockout_{term}_accuracy_at_{label}", rec)
+                self.assertIn(f"calib_knockout_{term}_delta_at_{label}", rec)
+        after = [
+            parameter.detach().clone()
+            for block in model.blocks
+            for parameter in (block.attn.calib_a, block.attn.calib_c)
+            if parameter is not None]
+        for parameter, value in zip(after, before):
+            self.assertTrue(torch.equal(parameter, value))
+
+        empty = {}
+        self.assertIsNone(
+            _stamp_calib_term_knockout(empty, model, settings, [],
+                                       eval_seed=123))
+        self.assertFalse(empty["calib_term_knockout"]["applicable"])
+
+    def test_companion_aggregates_probe_and_retrained_references(self):
+        from cage.experiments import _e2_term_knockout_companion
+
+        def _record(base_acc, deltas):
+            def _entry(length, baseline):
+                return {
+                    "applicable": True,
+                    "baseline": baseline,
+                    "by_term": {
+                        term: {
+                            "accuracy": baseline + deltas[term],
+                            "delta": deltas[term],
+                        }
+                        for term in ("length", "concentration", "both")
+                    },
+                }
+            return {
+                "accuracy_by_length": {4: base_acc, 8: base_acc - 0.1},
+                "calib_term_knockout": {
+                    "applicable": True,
+                    "by_length": {
+                        "4": _entry(4, base_acc),
+                        "8": _entry(8, base_acc - 0.1),
+                    },
+                },
+            }
+
+        by_variant = {
+            "calib": [_record(0.8, {"length": -0.05,
+                                    "concentration": -0.02,
+                                    "both": -0.07})],
+            "calib_raw_ent": [_record(0.7, {"length": -0.01,
+                                            "concentration": -0.03,
+                                            "both": -0.04})],
+            "calib_len_only": [{"accuracy_by_length": {4: 0.6, 8: 0.5}}],
+            "calib_ent_only": [{"accuracy_by_length": {4: 0.6, 8: 0.45}}],
+            "calib_no_terms": [{"accuracy_by_length": {4: 0.5, 8: 0.4}}],
+        }
+        payload = _e2_term_knockout_companion(by_variant, [4, 8])
+        self.assertTrue(payload["applicable"])
+        self.assertEqual(payload["lengths"], [4, 8])
+        self.assertEqual(set(payload["arms"]), {"calib", "calib_raw_ent"})
+        calib_long = payload["arms"]["calib"]["by_length"]["8"]
+        self.assertAlmostEqual(
+            calib_long["by_term"]["both"]["delta"]["mean"], -0.07)
+        self.assertAlmostEqual(
+            payload["retrained_references"]["calib_len_only"]["8"]["mean"],
+            0.5)
+        empty = _e2_term_knockout_companion({}, [4, 8])
+        self.assertFalse(empty["applicable"])
 
 
 if __name__ == "__main__":
