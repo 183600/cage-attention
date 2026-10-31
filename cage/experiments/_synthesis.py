@@ -561,7 +561,7 @@ def _fmt_ci(ci) -> str:
             f"n={ci['n']} {p_s}{verdict}")
 
 
-def _row_is_refutation(row) -> bool:
+def _row_is_refutation(row, reject_key="fdr_reject") -> bool:
     """Is this row a pre-registered prediction *refuted* by its own test?
 
     Mirrors the decision branch in :meth:`ContrastLog.finalize`: a
@@ -573,6 +573,10 @@ def _row_is_refutation(row) -> bool:
     interval is far outside the bound, so the CI rule - not that p-value -
     decides a null refutation; using the TOST p here would make a large
     violation look "non-significant".
+
+    ``reject_key`` lets the project-level synthesis read its pooled
+    ``project_fdr_reject`` flag instead of the source family's ``fdr_reject``;
+    the default preserves the within-family reading.
     """
     if row.get("controlled") is False or not row.get("claim_eligible", True):
         return False
@@ -587,7 +591,7 @@ def _row_is_refutation(row) -> bool:
                         and (row["lo"] > float(bound)
                              or row["hi"] < -float(bound)))
         return bool(_finite(row.get("hi")) and row["hi"] < -float(bound))
-    return bool(row.get("fdr_reject") and row.get("direction_reversed"))
+    return bool(row.get(reject_key) and row.get("direction_reversed"))
 
 
 def _registered_decision_keys(hyp) -> list[str]:
@@ -696,7 +700,9 @@ def _hypothesis_conjunction_p(rows, hyp) -> dict:
     }
 
 
-def _hypothesis_evidence_synthesis(rows, hypotheses, q: float = 0.05) -> dict:
+def _hypothesis_evidence_synthesis(rows, hypotheses, q: float = 0.05,
+                                   support_key="supports_hypothesis",
+                                   reject_key="fdr_reject") -> dict:
     """Fold a family of contrast rows into a per-hypothesis claim status.
 
     The pre-registered hypotheses are *conjunctions* ("A and B and C"), but
@@ -725,6 +731,13 @@ def _hypothesis_evidence_synthesis(rows, hypotheses, q: float = 0.05) -> dict:
     does not change ``supports_hypothesis`` or the FDR family.  A
     ``partial`` or ``refuted`` status is what the report warns about so a
     multi-row hypothesis is not credited on one surviving row.
+
+    ``support_key`` and ``reject_key`` select which row-level decision the
+    conjunction reads.  Within an experiment they default to
+    ``supports_hypothesis`` / ``fdr_reject``.  The project-level synthesis
+    passes ``project_supports`` / ``project_fdr_reject`` so a hypothesis
+    cannot remain "supported" on the strength of source-family decisions
+    that did not survive the pooled multiplicity screen.
     """
     # This is a report companion: a pooled/legacy result row that is not a
     # mapping (or a non-iterable container) cannot name a hypothesis and must
@@ -739,8 +752,12 @@ def _hypothesis_evidence_synthesis(rows, hypotheses, q: float = 0.05) -> dict:
         required = [r for r in hrows
                     if r.get("direction") in ("+", "-")
                     or r.get("test") in ("equivalence", "noninferiority")]
-        confirmed = [r for r in required if r.get("supports_hypothesis")]
-        refuted = [r for r in required if _row_is_refutation(r)]
+        confirmed = [r for r in required if r.get(support_key)]
+        refuted = [r for r in required if _row_is_refutation(r, reject_key)]
+        family_confirmed = [r for r in required
+                            if r.get("supports_hypothesis")]
+        family_refuted = [r for r in required
+                          if _row_is_refutation(r, "fdr_reject")]
         confirmed_ids = {id(r) for r in confirmed}
         refuted_ids = {id(r) for r in refuted}
         inconclusive = [r for r in required
@@ -748,8 +765,7 @@ def _hypothesis_evidence_synthesis(rows, hypotheses, q: float = 0.05) -> dict:
                         and id(r) not in refuted_ids]
         required_ids = {id(r) for r in required}
         descriptive = [r for r in hrows if id(r) not in required_ids]
-        descriptive_support = [r for r in descriptive
-                               if r.get("supports_hypothesis")]
+        descriptive_support = [r for r in descriptive if r.get(support_key)]
         if not hrows:
             status = "no_contrast"
         elif not required:
@@ -780,11 +796,15 @@ def _hypothesis_evidence_synthesis(rows, hypotheses, q: float = 0.05) -> dict:
 
         out[hyp] = {
             "status": status,
+            "support_basis": support_key,
+            "refutation_basis": reject_key,
             "n_rows": len(hrows),
             "n_required": len(required),
             "n_confirmed": len(confirmed),
             "n_refuted": len(refuted),
             "n_inconclusive": len(inconclusive),
+            "n_source_family_confirmed": len(family_confirmed),
+            "n_source_family_refuted": len(family_refuted),
             "n_descriptive": len(descriptive),
             "n_descriptive_supporting": len(descriptive_support),
             "n_replication_uncertain": len(rep_uncertain),
@@ -892,11 +912,26 @@ def _project_evidence_synthesis(out_dir, tags=("e1", "e2", "e3"),
                 "present": True, "valid": False,
                 "error": "payload has no 'rows' list"}
             continue
+        recorded_tag = payload.get("tag")
+        if recorded_tag is not None and str(recorded_tag) != str(tag):
+            sources[str(tag)] = {
+                "present": True, "valid": False,
+                "error": (f"payload tag {recorded_tag!r} does not match "
+                          f"file tag {str(tag)!r}")}
+            continue
+        recorded_q = payload.get("q")
+        q_valid = bool(_finite(recorded_q)
+                       and 0.0 < float(recorded_q) < 1.0)
+        q_matches = (None if recorded_q is None else
+                     bool(q_valid and math.isclose(
+                         float(recorded_q), q, rel_tol=0.0, abs_tol=1e-12)))
         sources[str(tag)] = {
             "present": True, "valid": True,
             "sha256": hashlib.sha256(data).hexdigest(),
             "bytes": len(data),
-            "q": payload.get("q"),
+            "q": recorded_q,
+            "q_valid": q_valid,
+            "q_matches_request": q_matches,
             "n_rows": len(payload.get("rows") or []),
         }
         _register_artifact(path)
@@ -951,8 +986,9 @@ def _project_evidence_synthesis(out_dir, tags=("e1", "e2", "e3"),
                      and row["project_holm_reject"]))
     hypotheses = sorted({row.get("hypothesis") for row in rows
                          if isinstance(row.get("hypothesis"), str)})
-    hypothesis_payload = _hypothesis_evidence_synthesis(rows, hypotheses,
-                                                        q=q)
+    hypothesis_payload = _hypothesis_evidence_synthesis(
+        rows, hypotheses, q=q, support_key="project_supports",
+        reject_key="project_fdr_reject")
     for hyp, entry in hypothesis_payload.items():
         entry["experiment"] = (HYPOTHESES.get(hyp) or {}).get("experiment")
     family_supporting = [row for row in rows
@@ -968,10 +1004,22 @@ def _project_evidence_synthesis(out_dir, tags=("e1", "e2", "e3"),
         if entry.get("registry_complete") is False]
     claim_level = [hyp for hyp, entry in hypothesis_payload.items()
                    if entry.get("claim_level_supported")]
+    invalid_sources = [
+        tag for tag, info in sources.items()
+        if info.get("present") and info.get("valid") is False]
+    q_mismatches = [
+        tag for tag, info in sources.items()
+        if info.get("q_matches_request") is False]
+    valid_source_q = {str(info.get("q")) for info in sources.values()
+                      if info.get("q_valid")}
+    mixed_source_q = len(valid_source_q) > 1
     payload = {
         "q": q,
         "tags": list(tags),
         "sources": sources,
+        "invalid_sources": invalid_sources,
+        "source_q_mismatches": q_mismatches,
+        "mixed_source_q": mixed_source_q,
         "n_rows": len(rows),
         "n_testable": len(testable_indices),
         "n_family_supporting": len(family_supporting),
@@ -1010,6 +1058,21 @@ def _project_evidence_synthesis(out_dir, tags=("e1", "e2", "e3"),
           f"{len(claim_level)}/{len(hypothesis_payload)} hypothesis(es) "
           f"reach claim-level support with complete registered-metric "
           f"coverage")
+    if invalid_sources:
+        print(f"[project] WARNING: source family(ies) "
+              f"{', '.join(invalid_sources)} are unusable and were excluded "
+              f"from the pooled ledger")
+    if q_mismatches:
+        print(f"[project] WARNING: source family(ies) "
+              f"{', '.join(q_mismatches)} were finalized at a different q "
+              f"than the requested project q={q:g}; the pooled p-values are "
+              f"recomputed at q={q:g}, but source-family support flags are "
+              f"not directly comparable")
+    if mixed_source_q:
+        print(f"[project] WARNING: sources were finalized at mixed q levels "
+              f"({', '.join(sorted(valid_source_q))}); the project ledger "
+              f"records this instead of treating the families as one "
+              f"pre-specified family")
     if registry_incomplete:
         print(f"[project] WARNING: {len(registry_incomplete)} "
               f"hypothesis(es) have missing registered decision metrics: "

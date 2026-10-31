@@ -186,6 +186,51 @@ class ProjectEvidenceSynthesisTest(unittest.TestCase):
             self.assertTrue(
                 (pathlib.Path(tmp) / "project_evidence.json").is_file())
 
+    def test_mislabeled_source_is_excluded_from_the_pool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pathlib.Path(tmp, "e1_contrasts.json").write_text(json.dumps({
+                "tag": "e2", "q": 0.05,
+                "rows": [_row("H1a", "accuracy", 0.001)]}))
+            _write_family(tmp, "e2",
+                          [_row("H2a", "accuracy_at_longest", 0.01)])
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _project_evidence_synthesis(tmp)
+            self.assertEqual(payload["invalid_sources"], ["e1"])
+            self.assertFalse(payload["sources"]["e1"]["valid"])
+            self.assertIn("does not match file tag",
+                          payload["sources"]["e1"]["error"])
+            self.assertEqual(payload["n_rows"], 1)
+            self.assertEqual(payload["sources"]["e2"]["q_matches_request"],
+                             True)
+
+    def test_mixed_source_q_levels_are_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_family(tmp, "e1",
+                          [_row("H1a", "accuracy", 0.001)], q=0.10)
+            _write_family(tmp, "e2",
+                          [_row("H2a", "accuracy_at_longest", 0.01)],
+                          q=0.05)
+            with contextlib.redirect_stdout(io.StringIO()) as captured:
+                payload = _project_evidence_synthesis(tmp)
+            self.assertEqual(payload["source_q_mismatches"], ["e1"])
+            self.assertTrue(payload["mixed_source_q"])
+            self.assertIn("mixed q levels", captured.getvalue())
+
+    def test_project_hypothesis_status_reads_project_level_support(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_family(tmp, "e2", _h2a_rows(0.06), q=0.10)
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _project_evidence_synthesis(tmp)
+            entry = payload["hypothesis_synthesis"]["H2a"]
+            self.assertEqual(entry["support_basis"], "project_supports")
+            self.assertEqual(entry["refutation_basis"],
+                             "project_fdr_reject")
+            self.assertEqual(entry["n_source_family_confirmed"], 3)
+            self.assertEqual(entry["n_confirmed"], 0)
+            self.assertEqual(entry["status"], "inconclusive")
+            self.assertFalse(entry["claim_level_supported"])
+            self.assertEqual(payload["n_hypotheses_supported"], 0)
+
     def test_no_usable_family_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             _write_family(tmp, "e1", [])
