@@ -69,7 +69,15 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     ablation_flat = [r for rs in ablation_runs.values() for r in rs]
     _report_realized_run_order(
         out_dir, "e1", runs + ablation_flat, e1_order, e1_cells,
-        settings.seeds, _e1_cell_of)
+        settings.seeds, _e1_cell_of,
+        metrics={
+            "accuracy": lambda run: run.get("accuracy"),
+            "abs_gate_vs_entropy": lambda run: run.get(
+                "abs_gate_vs_entropy"),
+            "gate_margin": lambda run: run.get("gate_margin"),
+        },
+        permutation_seed=settings.run_order_seed,
+        q=settings.fdr_q)
     by_gate = {g: [r for r in runs if r["gate"] == g] for g in GATES}
     table = {g: _aggregate_runs(rs) for g, rs in by_gate.items()}
     ablation_coverage = _report_ablation_coverage(

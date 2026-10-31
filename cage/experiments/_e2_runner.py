@@ -300,7 +300,14 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         runs.append(rec)
     _report_realized_run_order(
         out_dir, "e2", runs, order, cells, settings.seeds,
-        lambda run: run.get("variant"))
+        lambda run: run.get("variant"),
+        metrics={
+            "accuracy": lambda run: run.get("accuracy"),
+            "accuracy_at_longest": lambda run: run.get(
+                "accuracy_at_longest"),
+        },
+        permutation_seed=settings.run_order_seed,
+        q=settings.fdr_q)
 
     by_variant = {label: [r for r in runs if r["variant"] == label]
                   for label, *_ in _E2_VARIANTS}

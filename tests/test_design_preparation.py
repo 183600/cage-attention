@@ -38,6 +38,8 @@ from cage.experiments import (
     _pilot_accuracy_sd,
     _pilot_curve_invalid_rate,
     _pilot_paired_accuracy_sd,
+    _pooled_within_block_slope,
+    _position_effect_audit,
     _power_at_effect,
     _power_z,
     _realized_order_audit,
@@ -1805,7 +1807,127 @@ class RealizedRunOrderAuditTest(unittest.TestCase):
                     encoding="utf-8"))
         self.assertIs(payload["matches_schedule"], True)
         self.assertEqual(stored["matches_schedule"], True)
+        self.assertNotIn("position_effect", payload)
         self.assertIn("matches the frozen", printed.getvalue())
+
+
+class PositionEffectAuditTest(unittest.TestCase):
+    CELLS = ("none", "query", "calib", "null")
+    SEEDS = (0, 1, 2, 3, 4)
+
+    def _records(self, order, value):
+        return [{"cell": cell, "seed": seed, "run_block": block,
+                 "run_position": position,
+                 "accuracy": value(cell, position)}
+                for cell, seed, block, position in order]
+
+    def test_within_block_slope_ignores_between_block_levels(self):
+        slope = _pooled_within_block_slope([
+            ([0, 1], [0.0, 1.0]),
+            ([0, 1], [10.0, 11.0]),
+        ])
+        self.assertAlmostEqual(slope, 1.0)
+
+    def test_detects_a_position_effect_that_survives_randomisation(self):
+        order = _blocked_run_order(self.CELLS, self.SEEDS, 7)
+        runs = self._records(order, lambda _cell, position: 0.2 + 0.1 * position)
+        audit = _position_effect_audit(
+            runs, lambda run: run["cell"],
+            {"accuracy": lambda run: run["accuracy"]},
+            n_permutations=1000, permutation_seed=7)
+        self.assertTrue(audit["applicable"])
+        row = audit["metrics"]["accuracy"]
+        self.assertGreater(row["slope_per_position"], 0.09)
+        self.assertLess(row["p_adj"], 0.05)
+        self.assertIs(audit["order_effect_detected"], True)
+        self.assertEqual(audit["flagged_metrics"], ["accuracy"])
+
+    def test_balanced_cell_effects_do_not_trip_the_diagnostic(self):
+        order = _blocked_run_order(self.CELLS, self.SEEDS, 7)
+        values = {"none": 0.2, "query": 0.3, "calib": 0.4, "null": 0.5}
+        runs = self._records(order, lambda cell, _position: values[cell])
+        audit = _position_effect_audit(
+            runs, lambda run: run["cell"],
+            {"accuracy": lambda run: run["accuracy"]},
+            n_permutations=1000, permutation_seed=7)
+        self.assertTrue(audit["applicable"])
+        self.assertIs(audit["order_effect_detected"], False)
+        self.assertGreater(audit["metrics"]["accuracy"]["p_adj"], 0.05)
+
+    def test_small_design_reports_its_resolution_floor(self):
+        order = _blocked_run_order(("a", "b"), (0, 1), 7)
+        runs = self._records(
+            order, lambda _cell, position: 0.2 + 0.1 * position)
+        audit = _position_effect_audit(
+            runs, lambda run: run["cell"],
+            {"accuracy": lambda run: run["accuracy"]},
+            n_permutations=500, permutation_seed=7)
+        row = audit["metrics"]["accuracy"]
+        self.assertTrue(audit["applicable"])
+        self.assertIs(row["powered_at_q"], False)
+        self.assertGreater(row["min_attainable_p_two_sided"], 0.05)
+        self.assertEqual(audit["unpowered_metrics"], ["accuracy"])
+        self.assertIs(audit["order_effect_detected"], False)
+
+    def test_duplicate_slot_excludes_the_block_instead_of_overwriting(self):
+        order = _blocked_run_order(("a", "b", "c"), (0, 1, 2), 7)
+        runs = self._records(
+            order, lambda _cell, position: 0.2 + 0.1 * position)
+        runs.append(dict(runs[0]))
+        audit = _position_effect_audit(
+            runs, lambda run: run["cell"],
+            {"accuracy": lambda run: run["accuracy"]},
+            n_permutations=500, permutation_seed=7)
+        row = audit["metrics"]["accuracy"]
+        self.assertTrue(audit["applicable"])
+        self.assertEqual(row["n_blocks"], 2)
+        self.assertEqual(row["excluded_blocks"][0]["block"], 0)
+        self.assertIn("duplicate", row["excluded_blocks"][0]["reason"])
+
+    def test_malformed_or_degenerate_input_abstains(self):
+        no_runs = _position_effect_audit(
+            [], lambda run: run.get("cell"),
+            {"accuracy": lambda run: run.get("accuracy")})
+        self.assertIs(no_runs["applicable"], False)
+        self.assertIn("two usable complete blocks", no_runs["reason"])
+
+        no_metrics = _position_effect_audit(
+            [], lambda run: run.get("cell"), None)
+        self.assertIs(no_metrics["applicable"], False)
+        self.assertIn("no metrics", no_metrics["reason"])
+
+        malformed = [
+            {"run_block": True, "run_position": 0, "cell": "a",
+             "accuracy": 0.1},
+            {"run_block": 0, "run_position": 1.5, "cell": "b",
+             "accuracy": 0.2},
+        ]
+        audit = _position_effect_audit(
+            malformed, lambda run: run["cell"],
+            {"accuracy": lambda run: run["accuracy"]})
+        self.assertIs(audit["applicable"], False)
+        self.assertEqual(audit["n_invalid_runs"], 2)
+
+    def test_report_persists_the_position_effect_and_warns(self):
+        order = _blocked_run_order(self.CELLS, self.SEEDS, 7)
+        runs = self._records(
+            order, lambda _cell, position: 0.2 + 0.1 * position)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                payload = _report_realized_run_order(
+                    out, "e1", runs, order, self.CELLS, self.SEEDS,
+                    lambda run: run["cell"],
+                    metrics={"accuracy": lambda run: run["accuracy"]},
+                    n_permutations=500, permutation_seed=7)
+            stored = json.loads(
+                (out / "e1_run_order_realized.json").read_text(
+                    encoding="utf-8"))
+        self.assertIs(payload["position_effect"]["order_effect_detected"],
+                      True)
+        self.assertIs(stored["position_effect"]["order_effect_detected"],
+                      True)
+        self.assertIn("order effect", printed.getvalue())
 
 
 class PowerArgumentValidationTest(unittest.TestCase):

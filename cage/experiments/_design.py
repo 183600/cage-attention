@@ -624,10 +624,325 @@ def _realized_order_audit(runs, order, cells, seeds, cell_of) -> dict:
     }
 
 
+def _pooled_within_block_slope(blocks) -> float:
+    """Pooled OLS slope of ``value`` on within-block slot position.
+
+    ``blocks`` is an iterable of ``(positions, values)`` pairs.  Both axes
+    are centred inside each block, so the block level cannot contribute to
+    the slope and the statistic is a fixed-effects within-block trend.
+    """
+    numerator = []
+    denominator = []
+    for positions, values in blocks:
+        n = len(positions)
+        if n < 2 or len(values) != n:
+            continue
+        p_mean = sum(positions) / n
+        v_mean = sum(values) / n
+        for position, value in zip(positions, values):
+            delta = position - p_mean
+            numerator.append(delta * (value - v_mean))
+            denominator.append(delta * delta)
+    den = math.fsum(denominator)
+    if not (math.isfinite(den) and den > 0.0):
+        return float("nan")
+    try:
+        slope = math.fsum(numerator) / den
+    except (OverflowError, ValueError):
+        return float("nan")
+    return float(slope) if math.isfinite(slope) else float("nan")
+
+
+def _position_effect_audit(runs, cell_of, metrics, *,
+                           n_permutations: int = 2000,
+                           permutation_seed=0, q: float = 0.05) -> dict:
+    """Randomization test for a within-block run-order (period) effect.
+
+    The complete-block schedule randomises the slot in which each cell runs
+    inside every training-seed block.  That balances treatment against slow
+    machine drift *in expectation*, but it does not certify that the one
+    realised schedule is free of an order effect: if a metric drifts with
+    the within-block slot, a treatment contrast can still be biased in this
+    particular run.  This audit makes the assumption checkable.
+
+    Under the sharp null that a run's metric does not depend on its slot,
+    the metric values are exchangeable across slots within a block (each
+    cell appears once per block).  The test statistic is the pooled
+    within-block OLS slope of the metric on slot position; its null
+    distribution is obtained by permuting slot positions within each block.
+    The reported p-value is the two-sided randomization p-value, and
+    ``p_greater`` / ``p_less`` give the one-sided reads.  With several
+    metrics, BH adjustment is applied across the metric family.
+
+    This is an exploratory design diagnostic, not a new decision rule: it
+    never changes a pre-registered contrast or its FDR family.  A detected
+    position effect is a warning that the realised schedule may still alias
+    treatment with time, so the affected readouts should be interpreted with
+    that limitation.  Malformed rows, missing metrics and degenerate blocks
+    abstain with a reason instead of fabricating a p-value.
+
+    ``metrics`` maps a display name to an extractor ``callable(run)``.
+    ``permutation_seed`` seeds a local ``random.Random`` derived from the
+    metric name, so the audit is deterministic and never touches the global
+    RNG or the data/dropout streams.
+    """
+    if not isinstance(metrics, Mapping) or not metrics:
+        return {"applicable": False,
+                "reason": "no metrics selected for the order-effect audit",
+                "metrics": {}}
+    q_ok = _finite(q) and 0.0 < float(q) < 1.0
+    if not q_ok:
+        return {"applicable": False,
+                "reason": f"q must lie in (0, 1), got {q!r}",
+                "metrics": {}}
+    q = float(q)
+    requested_permutations = n_permutations
+    n_permutations = _positive_integer(n_permutations)
+    if n_permutations is None:
+        return {"applicable": False,
+                "reason": ("n_permutations must be a positive integer, "
+                           f"got {requested_permutations!r}"),
+                "metrics": {}}
+    try:
+        runs = list(runs)
+    except TypeError:
+        return {"applicable": False,
+                "reason": "realised run records are not iterable",
+                "metrics": {}}
+
+    records = []
+    invalid = []
+    for index, run in enumerate(runs):
+        if not isinstance(run, Mapping):
+            invalid.append({"run_index": index,
+                            "reason": "record is not a JSON object"})
+            continue
+        block = _declared_seed(run.get("run_block"))
+        position = _declared_seed(run.get("run_position"))
+        if block is None or position is None:
+            invalid.append({
+                "run_index": index,
+                "reason": "missing or non-integral block/position",
+                "block": repr(run.get("run_block")),
+                "position": repr(run.get("run_position")),
+            })
+            continue
+        try:
+            cell = cell_of(run)
+        except Exception as exc:  # noqa: BLE001 - report malformed records
+            invalid.append({
+                "run_index": index,
+                "reason": f"cell extractor raised: {exc}"})
+            continue
+        if cell is None:
+            invalid.append({"run_index": index,
+                            "reason": "cell extractor returned None"})
+            continue
+        records.append({
+            "run_index": index, "block": block, "position": position,
+            "cell": cell, "run": run,
+        })
+
+    metric_rows = {}
+    for name, extractor in metrics.items():
+        label = str(name)
+        if not callable(extractor):
+            metric_rows[label] = {
+                "applicable": False,
+                "reason": "metric extractor is not callable",
+            }
+            continue
+        by_block = {}
+        skipped = []
+        duplicate_blocks = set()
+        for record in records:
+            try:
+                value = extractor(record["run"])
+            except Exception as exc:  # noqa: BLE001 - metric may abstain
+                skipped.append({"run_index": record["run_index"],
+                                "reason": f"extractor raised: {exc}"})
+                continue
+            if not _finite(value):
+                skipped.append({"run_index": record["run_index"],
+                                "reason": "metric is not finite"})
+                continue
+            block = record["block"]
+            slot = record["position"]
+            slots = by_block.setdefault(block, {})
+            if slot in slots:
+                # A duplicated slot is not a complete block: the
+                # randomisation distribution for that block is unknown, so
+                # exclude it rather than silently overwriting a run.
+                duplicate_blocks.add(block)
+                continue
+            slots[slot] = float(value)
+        blocks = []
+        excluded = []
+        for block in sorted(by_block):
+            if block in duplicate_blocks:
+                excluded.append({"block": block,
+                                 "reason": "duplicate within-block slot"})
+                continue
+            items = sorted(by_block[block].items())
+            if len(items) < 2:
+                excluded.append({"block": block,
+                                 "reason": "fewer than two usable slots"})
+                continue
+            blocks.append(([slot for slot, _ in items],
+                           [value for _, value in items]))
+        if len(blocks) < 2:
+            metric_rows[label] = {
+                "applicable": False,
+                "reason": ("fewer than two usable complete blocks"),
+                "n_blocks": len(blocks),
+                "n_skipped": len(skipped),
+                "skipped": skipped[:10],
+                "excluded_blocks": excluded,
+            }
+            continue
+        observed = _pooled_within_block_slope(blocks)
+        if not math.isfinite(observed):
+            metric_rows[label] = {
+                "applicable": False,
+                "reason": "observed within-block slope is not finite",
+                "n_blocks": len(blocks),
+                "n_skipped": len(skipped),
+                "skipped": skipped[:10],
+                "excluded_blocks": excluded,
+            }
+            continue
+        rng = random.Random(f"{permutation_seed!r}:{label}:{n_permutations}")
+        greater = less = two_sided = valid = 0
+        for _ in range(n_permutations):
+            permuted = []
+            for positions, values in blocks:
+                shuffled = list(positions)
+                rng.shuffle(shuffled)
+                permuted.append((shuffled, values))
+            value = _pooled_within_block_slope(permuted)
+            if not math.isfinite(value):
+                continue
+            valid += 1
+            if value >= observed:
+                greater += 1
+            if value <= observed:
+                less += 1
+            if abs(value) >= abs(observed):
+                two_sided += 1
+        if not valid:
+            metric_rows[label] = {
+                "applicable": False,
+                "reason": "no finite permutation statistic",
+                "n_blocks": len(blocks),
+                "n_skipped": len(skipped),
+                "skipped": skipped[:10],
+                "excluded_blocks": excluded,
+            }
+            continue
+        block_slopes = [
+            _pooled_within_block_slope([block]) for block in blocks]
+        # The Monte Carlo p-value cannot resolve below 1/(n_perm+1), and
+        # the exact randomisation cannot resolve below 2/N_assignments
+        # (the observed assignment plus its within-block reversal).  Report
+        # that resolution floor: a "no effect detected" read from a design
+        # whose floor exceeds q is underpowered, not evidence of no effect.
+        n_assignments = 1
+        for positions, _ in blocks:
+            n_assignments *= math.factorial(len(positions))
+        try:
+            exact_floor = 2.0 / n_assignments
+        except OverflowError:
+            exact_floor = 0.0
+        resolution = min(1.0, max(exact_floor, 1.0 / (valid + 1.0)))
+        powered = bool(resolution <= q)
+        metric_rows[label] = {
+            "applicable": True,
+            "n_blocks": len(blocks),
+            "n_runs": sum(len(values) for _, values in blocks),
+            "n_skipped": len(skipped),
+            "skipped": skipped[:10],
+            "excluded_blocks": excluded,
+            "slope_per_position": observed,
+            "p_two_sided": (two_sided + 1.0) / (valid + 1.0),
+            "p_greater": (greater + 1.0) / (valid + 1.0),
+            "p_less": (less + 1.0) / (valid + 1.0),
+            "block_slopes": block_slopes,
+            "n_permutations": int(n_permutations),
+            "n_valid_permutations": int(valid),
+            "n_assignments": int(n_assignments),
+            "min_attainable_p_two_sided": resolution,
+            "powered_at_q": powered,
+            "permutation_method": "monte-carlo",
+            "permutation_seed": repr(permutation_seed),
+            "q": q,
+            "p_adj": float("nan"),
+            "significant_after_bh": False,
+            "note": ("randomization test of the sharp null that the metric "
+                     "does not depend on the within-block slot; a warning "
+                     "here does not alter any pre-registered contrast"),
+        }
+    testable = [(label, row) for label, row in metric_rows.items()
+                if row.get("applicable") is True
+                and _finite(row.get("p_two_sided"))]
+    if testable:
+        adjusted = benjamini_hochberg(
+            [float(row["p_two_sided"]) for _, row in testable], q=q)
+        for (label, row), bh_row in zip(testable, adjusted):
+            row["p_adj"] = bh_row["p_adj"]
+            row["significant_after_bh"] = bool(bh_row["reject"])
+    applicable = any(row.get("applicable") is True
+                     for row in metric_rows.values())
+    flagged = sorted(label for label, row in metric_rows.items()
+                     if row.get("significant_after_bh"))
+    unpowered = sorted(label for label, row in metric_rows.items()
+                       if row.get("applicable") is True
+                       and row.get("powered_at_q") is False)
+    return {
+        "applicable": applicable,
+        "reason": (None if applicable
+                   else "no metric had at least two usable complete blocks"),
+        "metrics": metric_rows,
+        "flagged_metrics": flagged,
+        "unpowered_metrics": unpowered,
+        "powered_at_q": any(row.get("powered_at_q") is True
+                            for row in metric_rows.values()
+                            if row.get("applicable") is True),
+        "order_effect_detected": bool(flagged),
+        "n_invalid_runs": len(invalid),
+        "invalid_runs": invalid[:10],
+        "note": ("exploratory within-block period-effect diagnostic; "
+                 "randomisation distribution is generated by permuting "
+                 "slots within blocks and never touches the global RNG"),
+    }
+
+
 def _report_realized_run_order(out_dir: pathlib.Path, tag: str, runs,
-                               order, cells, seeds, cell_of) -> dict:
-    """Persist and warn about the realised schedule audit."""
+                               order, cells, seeds, cell_of, *,
+                               metrics=None, permutation_seed=0,
+                               n_permutations: int = 2000,
+                               q: float = 0.05) -> dict:
+    """Persist and warn about the realised schedule audit.
+
+    ``metrics`` optionally maps display names to metric extractors; when
+    supplied, the realised rows are also checked for a within-block
+    run-order effect with :func:`_position_effect_audit`.  That diagnostic
+    is exploratory and is stored in the same payload, so the claim that the
+    complete-block schedule removed time-order confounding can be audited
+    from the artifact rather than assumed.
+    """
+    # Materialize once: the schedule audit consumes the iterable and the
+    # position-effect audit must see the same rows, not an exhausted
+    # generator.
+    try:
+        runs = list(runs)
+    except TypeError:
+        pass
     audit = _realized_order_audit(runs, order, cells, seeds, cell_of)
+    if metrics is not None:
+        audit["position_effect"] = _position_effect_audit(
+            runs, cell_of, metrics,
+            n_permutations=n_permutations,
+            permutation_seed=permutation_seed, q=q)
     payload = {"experiment": tag, **audit}
     _write_json(pathlib.Path(out_dir) / f"{tag}_run_order_realized.json",
                 payload)
@@ -643,6 +958,38 @@ def _report_realized_run_order(out_dir: pathlib.Path, tag: str, runs,
     else:
         print(f"[{tag}] realised run order matches the frozen complete-block "
               f"schedule ({audit['n_observed']} runs)")
+    position_effect = audit.get("position_effect")
+    if isinstance(position_effect, Mapping):
+        rows = position_effect.get("metrics") or {}
+        usable = [(label, row) for label, row in rows.items()
+                  if row.get("applicable") is True]
+        if usable:
+            detail = ", ".join(
+                f"{label} slope={float(row['slope_per_position']):+.4g} "
+                f"BH p={float(row['p_adj']):.4g}"
+                for label, row in usable
+                if _finite(row.get("p_adj")))
+            if position_effect.get("order_effect_detected"):
+                flagged = ", ".join(position_effect["flagged_metrics"])
+                print(f"[{tag}] WARNING: within-block run position is "
+                      f"associated with {flagged} "
+                      f"after BH control (q={float(q):g}): {detail}.  The "
+                      f"realised complete-block schedule still shows an "
+                      f"order effect, so treatment contrasts may be "
+                      f"time-confounded in this run")
+            elif position_effect.get("unpowered_metrics"):
+                underpowered = ", ".join(
+                    position_effect["unpowered_metrics"])
+                print(f"[{tag}] WARNING: the order-effect diagnostic is "
+                      f"underpowered for {underpowered} at q={float(q):g}; "
+                      f"no association was detected, but this schedule "
+                      f"cannot rule one out")
+            else:
+                print(f"[{tag}] order-effect diagnostic: no within-block "
+                      f"position association detected ({detail})")
+        elif metrics is not None:
+            print(f"[{tag}] order-effect diagnostic unavailable: "
+                  f"{position_effect.get('reason')}")
     return payload
 
 

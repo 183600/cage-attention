@@ -684,7 +684,13 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     _report_realized_run_order(
         out_dir, "e3", runs, order, cells, settings.seeds,
         lambda run: (run.get("gate"), run.get("norm"),
-                     run.get("layer_scale")))
+                     run.get("layer_scale")),
+        metrics={
+            "accuracy": lambda run: run.get("accuracy"),
+            "gate_depth_ratio": lambda run: run.get("gate_depth_ratio"),
+        },
+        permutation_seed=settings.run_order_seed,
+        q=settings.fdr_q)
 
     print(f"\n[e3] {'gate':>5} {'norm':>9} {'ls':>5} {'accuracy':>16} "
           f"{'bal_acc':>16} "
