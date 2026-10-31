@@ -990,6 +990,7 @@ def run_all(settings: Settings, out_dir: pathlib.Path) -> None:
     run_e1(settings, out_dir)
     run_e2(settings, out_dir)
     run_e3(settings, out_dir)
+    _project_evidence_synthesis(out_dir, q=settings.fdr_q)
 
 
 def main(argv=None) -> int:
@@ -1064,12 +1065,23 @@ def main(argv=None) -> int:
                              "--out differs from the current one in a "
                              "critical (software/numerical) field; the "
                              "default is to record and warn")
+    parser.add_argument("--synthesize-results", action="store_true",
+                        help="combine the finalized e1/e2/e3 contrast "
+                             "families in --out into project_evidence.json "
+                             "(pooled multiplicity, hypothesis-level "
+                             "conjunction and registered-metric coverage) "
+                             "and exit")
     args = parser.parse_args(argv)
     verify_flags = (args.verify_artifacts or args.check_environment
                     or args.check_source or args.verify_provenance)
     if args.replay_manifest is not None and verify_flags:
         print("[runner] --replay-manifest cannot be combined with a "
               "read-only --verify/--check action; aborting")
+        return 2
+    if args.synthesize_results and (verify_flags
+                                    or args.replay_manifest is not None):
+        print("[runner] --synthesize-results cannot be combined with "
+              "--verify/--check or --replay-manifest; aborting")
         return 2
     if args.allow_environment_drift and args.replay_manifest is None:
         print("[runner] --allow-environment-drift only applies to "
@@ -1085,6 +1097,47 @@ def main(argv=None) -> int:
     if args.verify_provenance:
         return _audit_provenance(
             verify_out, require_homogeneous=bool(args.require_homogeneous))
+    if args.synthesize_results:
+        synth_out = pathlib.Path(args.out or "results")
+        if not synth_out.is_dir():
+            print(f"[runner] --synthesize-results: no results directory at "
+                  f"{synth_out}; aborting")
+            return 2
+        synth_q = 0.05 if args.fdr_q is None else args.fdr_q
+        if not (math.isfinite(synth_q) and 0.0 < synth_q < 1.0):
+            print("[runner] --fdr-q must lie strictly between 0 and 1; "
+                  "aborting")
+            return 2
+        index_path = synth_out / "artifact_index.json"
+        if index_path.exists() and _verify_artifacts(synth_out) != 0:
+            print(f"[runner] ABORTED: existing results in {synth_out} do "
+                  f"not match their artifact_index.json; refusing to mix "
+                  f"a synthesis into a broken chain of custody")
+            return ARTIFACT_INTEGRITY_EXIT_CODE
+        lock = ResultsLock(synth_out)
+        try:
+            lock.acquire()
+        except ResultsLockError as exc:
+            print(f"[runner] ABORTED: {exc}")
+            return LOCK_EXIT_CODE
+        except OSError as exc:
+            lock.release()
+            print(f"[runner] ABORTED: cannot lock {synth_out} "
+                  f"({type(exc).__name__}: {exc})")
+            return LOCK_EXIT_CODE
+        started = time.monotonic()
+        try:
+            payload = _project_evidence_synthesis(synth_out, q=synth_q)
+            if payload is None:
+                return 2
+            settings = Settings(device=args.device or "cpu",
+                                out_dir=synth_out, fdr_q=synth_q)
+            _write_artifact_index(
+                synth_out, settings, "synthesis", completed=True,
+                elapsed_seconds=time.monotonic() - started)
+        finally:
+            lock.release()
+        return 0
 
     replay = None
     if args.replay_manifest is not None:

@@ -202,7 +202,7 @@ class ContrastLog:
                 f"{sorted(set(malformed))}")
 
     def print(self, rule, hyp, metric, ci, warn="",
-              direction_key=None) -> None:
+              direction_key=None, registry_key=None) -> None:
         """Register one computed contrast in the family.
 
         ``metric`` is the display/registry key used for the SESOI lookup.
@@ -243,6 +243,10 @@ class ContrastLog:
                 f"{sorted(direction_map)}")
         direction = direction_map.get(
             metric if direction_key is None else direction_key)
+        registry_keys = ({metric} if registry_key is None
+                         else {registry_key})
+        if direction_key is not None:
+            registry_keys.add(direction_key)
         # Replication companion: what a same-size repeat would plausibly
         # show, not just the precision of the current mean.  Computed here
         # because the registered direction (and the null-prediction bound)
@@ -288,6 +292,10 @@ class ContrastLog:
                                     "two-sided")
         self.rows.append({
             "rule": rule, "hypothesis": hyp, "metric": metric,
+            "registry_key": (registry_key if registry_key is not None
+                             else direction_key if direction_key is not None
+                             else metric),
+            "registry_keys": sorted(str(key) for key in registry_keys),
             "mean": ci.get("mean"), "lo": ci.get("lo"), "hi": ci.get("hi"),
             "n": ci.get("n"), "p_value": ci.get("p_value"),
             "mde80": ci.get("mde80"), "sd": ci.get("sd"),
@@ -596,9 +604,11 @@ class ContrastLog:
         # prediction registered through this helper would otherwise always
         # report "no paired differences supplied".
         ci["diffs"] = list(diffs)
-        self.print_equivalence_ci(rule, hyp, metric, ci, warn=warn)
+        self.print_equivalence_ci(rule, hyp, metric, ci, warn=warn,
+                                  registry_key=key)
 
-    def print_equivalence_ci(self, rule, hyp, metric, ci, warn="") -> None:
+    def print_equivalence_ci(self, rule, hyp, metric, ci, warn="",
+                             registry_key=None) -> None:
         """Register an already-computed equivalence/non-inferiority CI.
 
         The two-arm reverse check needs the same paired-seed accounting and
@@ -612,4 +622,5 @@ class ContrastLog:
                 f"{hyp}/{metric}: print_equivalence_ci needs a CI from "
                 f"equivalence_test or noninferiority_test "
                 f"(got test={ci.get('test')!r})")
-        self.print(rule, hyp, metric, ci, warn=warn)
+        self.print(rule, hyp, metric, ci, warn=warn,
+                   registry_key=registry_key)

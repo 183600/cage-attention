@@ -754,6 +754,7 @@ HYPOTHESES = {
                     "reported for context and is not a decision criterion",
         "sesoi": {"resid_norm_last_over_first": 0.05,
                   "gate_depth_ratio": 0.05},
+        "context_metrics": ("gate_depth_ratio",),
     },
     "H3c": {
         "experiment": "e3",

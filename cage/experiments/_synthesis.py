@@ -590,7 +590,113 @@ def _row_is_refutation(row) -> bool:
     return bool(row.get("fdr_reject") and row.get("direction_reversed"))
 
 
-def _hypothesis_evidence_synthesis(rows, hypotheses) -> dict:
+def _registered_decision_keys(hyp) -> list[str]:
+    """Registry keys that a hypothesis pre-registers as a decision.
+
+    A hypothesis is only fully evaluated when every metric carrying a
+    registered smallest effect size, null-prediction bound, or directional
+    sign has a corresponding contrast row.  The union is used because the
+    display metric and the registry key can differ: H2e's concentration
+    main effect is displayed on ``accuracy_at_longest`` but registered under
+    ``concentration_accuracy_at_longest``, and H2c's reverse check displays
+    an accuracy metric while registering a separate equivalence-bound key.
+    Metrics explicitly marked ``context_metrics`` carry a SESOI annotation
+    but are not decision criteria (H3b's secondary gate-depth readout), so
+    they are excluded from the required set.
+    """
+    entry = HYPOTHESES.get(hyp)
+    if not isinstance(entry, Mapping):
+        return []
+    keys = set()
+    for field in ("sesoi", "sesoi_test"):
+        value = entry.get(field)
+        if isinstance(value, Mapping):
+            keys.update(str(key) for key in value)
+    direction = entry.get("direction")
+    if isinstance(direction, Mapping):
+        keys.update(str(key) for key, sign in direction.items()
+                    if sign in ("+", "-"))
+    context = entry.get("context_metrics")
+    if isinstance(context, (list, tuple, set, frozenset)):
+        keys.difference_update(str(key) for key in context)
+    return sorted(keys)
+
+
+def _row_registry_keys(row) -> set[str]:
+    """All pre-registration keys a contrast row can satisfy."""
+    keys = set()
+    values = row.get("registry_keys")
+    if isinstance(values, (list, tuple, set, frozenset)):
+        keys.update(str(key) for key in values if isinstance(key, str))
+    single = row.get("registry_key")
+    if isinstance(single, str):
+        keys.add(single)
+    if not keys:
+        metric = row.get("metric")
+        if isinstance(metric, str):
+            keys.add(metric)
+    return keys
+
+
+def _hypothesis_registry_coverage(rows, hyp) -> dict:
+    """Check whether every registered decision metric was actually run.
+
+    Within-hypothesis selective omission is the smallest reporting degree of
+    freedom: a conjunction can look fully supported when one registered
+    outcome was never printed at all.  The family-level coverage audit in
+    :meth:`ContrastLog.finalize` only checks hypothesis ids, so this
+    companion checks the registered metric set.  It never changes the
+    row-level decision; a missing key makes ``complete`` false so the
+    claim-level readout can be withheld.
+    """
+    hrows = [row for row in _mapping_runs(rows)
+             if row.get("hypothesis") == hyp]
+    registered = _registered_decision_keys(hyp)
+    covered = set()
+    for row in hrows:
+        covered.update(_row_registry_keys(row))
+    missing = [key for key in registered if key not in covered]
+    known = isinstance(HYPOTHESES.get(hyp), Mapping)
+    return {
+        "known": known,
+        "registered": registered,
+        "covered": sorted(covered),
+        "missing": missing,
+        "complete": (True if known and not missing else
+                     False if known else None),
+    }
+
+
+def _hypothesis_conjunction_p(rows, hyp) -> dict:
+    """Intersection-union p-value for a conjunctive hypothesis.
+
+    A hypothesis claims every registered prediction holds.  Under the
+    intersection-union logic the conjunction's p-value is the maximum of its
+    component p-values: rejecting it means at least one component's null is
+    rejected, so the test is valid without an independence assumption.  A
+    component with a non-finite p-value leaves the conjunction undecided
+    rather than silently dropping that prediction from the conjunction.
+    """
+    required = [row for row in _mapping_runs(rows)
+                if row.get("hypothesis") == hyp
+                and (row.get("direction") in ("+", "-")
+                     or row.get("test") in ("equivalence",
+                                            "noninferiority"))]
+    p_values = []
+    for row in required:
+        p_value = row.get("p_value")
+        if _finite(p_value) and 0.0 <= float(p_value) <= 1.0:
+            p_values.append(float(p_value))
+    complete = bool(required) and len(p_values) == len(required)
+    return {
+        "p": max(p_values) if complete else None,
+        "n_required": len(required),
+        "n_finite": len(p_values),
+        "complete": complete,
+    }
+
+
+def _hypothesis_evidence_synthesis(rows, hypotheses, q: float = 0.05) -> dict:
     """Fold a family of contrast rows into a per-hypothesis claim status.
 
     The pre-registered hypotheses are *conjunctions* ("A and B and C"), but
@@ -666,6 +772,8 @@ def _hypothesis_evidence_synthesis(rows, hypotheses) -> dict:
                          if r.get("replication_uncertain")]
         provisional = [r for r in confirmed
                        if r.get("sesoi_point_estimate_only")]
+        coverage = _hypothesis_registry_coverage(hrows, hyp)
+        conjunction = _hypothesis_conjunction_p(hrows, hyp)
 
         def _label(r):
             return f"{r.get('rule')} ({r.get('metric')})"
@@ -687,8 +795,241 @@ def _hypothesis_evidence_synthesis(rows, hypotheses) -> dict:
                                                 for r in rep_uncertain],
             "practically_provisional_contrasts": [_label(r)
                                                   for r in provisional],
+            "registry_known": coverage["known"],
+            "registered_registry_keys": coverage["registered"],
+            "covered_registry_keys": coverage["covered"],
+            "missing_registry_keys": coverage["missing"],
+            "registry_complete": coverage["complete"],
+            "conjunction_p": conjunction["p"],
+            "conjunction_n_required": conjunction["n_required"],
+            "conjunction_n_finite": conjunction["n_finite"],
+            "conjunction_complete": conjunction["complete"],
+            "conjunction_p_adj": float("nan"),
+            "conjunction_fdr_reject": False,
+            "conjunction_by_p_adj": float("nan"),
+            "conjunction_by_reject": False,
+            "conjunction_holm_p_adj": float("nan"),
+            "conjunction_holm_reject": False,
+            "claim_level_supported": False,
+            "claim_level_status": status,
         }
+    finite = [(hyp, entry["conjunction_p"]) for hyp, entry in out.items()
+              if _finite(entry.get("conjunction_p"))]
+    if finite:
+        family_p = [float(p_value) for _, p_value in finite]
+        bh = benjamini_hochberg(family_p, q=q)
+        by = benjamini_yekutieli(family_p, q=q)
+        holm = holm_bonferroni(family_p, q=q)
+        for (hyp, _), bh_row, by_row, holm_row in zip(finite, bh, by, holm):
+            entry = out[hyp]
+            entry["conjunction_p_adj"] = bh_row["p_adj"]
+            entry["conjunction_fdr_reject"] = bool(bh_row["reject"])
+            entry["conjunction_by_p_adj"] = by_row["p_adj"]
+            entry["conjunction_by_reject"] = bool(by_row["reject"])
+            entry["conjunction_holm_p_adj"] = holm_row["p_adj"]
+            entry["conjunction_holm_reject"] = bool(holm_row["reject"])
+    for entry in out.values():
+        if entry["status"] != "supported":
+            entry["claim_level_status"] = entry["status"]
+            continue
+        if entry["registry_complete"] is not True:
+            entry["claim_level_status"] = "partial_registry"
+            continue
+        if not entry["conjunction_fdr_reject"]:
+            entry["claim_level_status"] = "not_family_significant"
+            continue
+        entry["claim_level_status"] = "supported"
+        entry["claim_level_supported"] = True
     return out
+
+
+def _project_evidence_synthesis(out_dir, tags=("e1", "e2", "e3"),
+                               q: float = 0.05):
+    """Combine finalized experiment families into one project-level ledger.
+
+    Each experiment controls its own pre-registered contrast family with BH.
+    Those guarantees do not automatically compose: E1, E2 and E3 each at
+    q=0.05 does not make the union of their reported discoveries an FDR-0.05
+    set.  This function reads the already-written ``<tag>_contrasts.json``
+    files from one results directory, applies BH (plus BY and Holm as
+    dependence-robust companions) to the pooled family, and records which
+    within-family claims survive the project-level correction.  It also
+    re-runs the hypotheses' intersection-union correction across the pooled
+    hypothesis set and reports registered-metric coverage.
+
+    The operation is a reporting companion: it never rewrites a source
+    family's pre-registered decisions.  Source files are hashed and their
+    recorded q levels are kept, so a mixed-Q or stale ledger is visible
+    rather than silently pooled.  Returns ``None`` when no contrast file is
+    usable; otherwise writes ``project_evidence.json`` and returns its
+    payload.
+    """
+    try:
+        q = float(q)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"q must be a finite number in (0, 1), got {q!r}") \
+            from exc
+    if not (math.isfinite(q) and 0.0 < q < 1.0):
+        raise ValueError(f"q must be a finite number in (0, 1), got {q!r}")
+    root = pathlib.Path(out_dir)
+    sources = {}
+    rows = []
+    for tag in tags:
+        path = root / f"{tag}_contrasts.json"
+        if not path.is_file():
+            sources[str(tag)] = {"present": False}
+            continue
+        try:
+            data = path.read_bytes()
+            payload = json.loads(data.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            sources[str(tag)] = {"present": True, "valid": False,
+                                 "error": f"{type(exc).__name__}: {exc}"}
+            continue
+        if not isinstance(payload, Mapping) \
+                or not isinstance(payload.get("rows"), list):
+            sources[str(tag)] = {
+                "present": True, "valid": False,
+                "error": "payload has no 'rows' list"}
+            continue
+        sources[str(tag)] = {
+            "present": True, "valid": True,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+            "q": payload.get("q"),
+            "n_rows": len(payload.get("rows") or []),
+        }
+        _register_artifact(path)
+        for row in payload.get("rows") or []:
+            if isinstance(row, Mapping):
+                copied = dict(row)
+                copied["experiment"] = str(tag)
+                rows.append(copied)
+    if not rows:
+        print(f"[project] no usable contrast rows in {root}; nothing to "
+              f"synthesize")
+        return None
+    p_values = []
+    testable_indices = []
+    for index, row in enumerate(rows):
+        p_value = row.get("p_value")
+        if _finite(p_value) and 0.0 <= float(p_value) <= 1.0:
+            testable_indices.append(index)
+            p_values.append(float(p_value))
+    bh = benjamini_hochberg(p_values, q=q)
+    by = benjamini_yekutieli(p_values, q=q)
+    holm = holm_bonferroni(p_values, q=q)
+    for row in rows:
+        row["project_p_adj"] = float("nan")
+        row["project_fdr_reject"] = False
+        row["project_by_p_adj"] = float("nan")
+        row["project_by_reject"] = False
+        row["project_holm_p_adj"] = float("nan")
+        row["project_holm_reject"] = False
+        row["project_supports"] = False
+        row["project_family_support_lost"] = False
+    for index, bh_row, by_row, holm_row in zip(
+            testable_indices, bh, by, holm):
+        row = rows[index]
+        eligible = (row.get("controlled") is not False
+                    and row.get("claim_eligible", True) is not False)
+        row["project_p_adj"] = bh_row["p_adj"]
+        row["project_fdr_reject"] = bool(bh_row["reject"] and eligible)
+        row["project_by_p_adj"] = by_row["p_adj"]
+        row["project_by_reject"] = bool(by_row["reject"] and eligible)
+        row["project_holm_p_adj"] = holm_row["p_adj"]
+        row["project_holm_reject"] = bool(holm_row["reject"] and eligible)
+        family_support = bool(row.get("supports_hypothesis"))
+        row["project_supports"] = bool(family_support
+                                       and row["project_fdr_reject"])
+        row["project_family_support_lost"] = bool(family_support
+                                                  and not row[
+                                                      "project_supports"])
+        row["project_multiplicity_model_sensitive"] = bool(
+            row["project_supports"]
+            and not (row["project_by_reject"]
+                     and row["project_holm_reject"]))
+    hypotheses = sorted({row.get("hypothesis") for row in rows
+                         if isinstance(row.get("hypothesis"), str)})
+    hypothesis_payload = _hypothesis_evidence_synthesis(rows, hypotheses,
+                                                        q=q)
+    for hyp, entry in hypothesis_payload.items():
+        entry["experiment"] = (HYPOTHESES.get(hyp) or {}).get("experiment")
+    family_supporting = [row for row in rows
+                         if row.get("supports_hypothesis")]
+    project_supporting = [row for row in rows if row.get("project_supports")]
+    lost = [row for row in rows if row.get("project_family_support_lost")]
+    by_rejecting = [row for row in rows if row.get("project_by_reject")]
+    holm_rejecting = [row for row in rows if row.get("project_holm_reject")]
+    model_sensitive = [row for row in rows
+                       if row.get("project_multiplicity_model_sensitive")]
+    registry_incomplete = [
+        hyp for hyp, entry in hypothesis_payload.items()
+        if entry.get("registry_complete") is False]
+    claim_level = [hyp for hyp, entry in hypothesis_payload.items()
+                   if entry.get("claim_level_supported")]
+    payload = {
+        "q": q,
+        "tags": list(tags),
+        "sources": sources,
+        "n_rows": len(rows),
+        "n_testable": len(testable_indices),
+        "n_family_supporting": len(family_supporting),
+        "n_project_supporting": len(project_supporting),
+        "n_family_support_lost_globally": len(lost),
+        "n_project_by_reject": len(by_rejecting),
+        "n_project_holm_reject": len(holm_rejecting),
+        "n_project_multiplicity_model_sensitive": len(model_sensitive),
+        "family_support_lost_globally_contrasts": [
+            f"{row.get('experiment')}/{row.get('hypothesis')}/"
+            f"{row.get('rule')} ({row.get('metric')})" for row in lost],
+        "n_hypotheses": len(hypothesis_payload),
+        "n_hypotheses_supported": sum(
+            1 for entry in hypothesis_payload.values()
+            if entry.get("status") == "supported"),
+        "n_hypotheses_registry_incomplete": len(registry_incomplete),
+        "hypotheses_registry_incomplete": registry_incomplete,
+        "n_hypotheses_claim_level_supported": len(claim_level),
+        "hypotheses_claim_level_supported": claim_level,
+        "hypothesis_synthesis": hypothesis_payload,
+        "rows": rows,
+        "note": ("Project-level multiplicity and hypothesis-conjunction "
+                 "companion over the already-finalized per-experiment "
+                 "families. Source-family decisions are unchanged; a "
+                 "within-family claim that does not survive the pooled BH "
+                 "screen is reported as project-level uncertain, not "
+                 "erased."),
+    }
+    _write_json(root / "project_evidence.json", payload)
+    print(f"\n[project] cross-experiment evidence synthesis "
+          f"(q={q:g}, tags={','.join(str(tag) for tag in tags)}): "
+          f"{len(family_supporting)}/{len(testable_indices)} testable "
+          f"within-family row(s) support a pre-registered decision; "
+          f"{len(project_supporting)} survive the pooled BH family, "
+          f"{len(lost)} are project-level uncertain; "
+          f"{len(claim_level)}/{len(hypothesis_payload)} hypothesis(es) "
+          f"reach claim-level support with complete registered-metric "
+          f"coverage")
+    if registry_incomplete:
+        print(f"[project] WARNING: {len(registry_incomplete)} "
+              f"hypothesis(es) have missing registered decision metrics: "
+              f"{', '.join(registry_incomplete)}; their support is partial "
+              f"on the executed rows and is not counted as claim-level")
+    if lost:
+        shown = ", ".join(
+            f"{row.get('experiment')}/{row.get('hypothesis')}/"
+            f"{row.get('metric')}" for row in lost[:5])
+        if len(lost) > 5:
+            shown += f", ... (+{len(lost) - 5})"
+        print(f"[project] WARNING: {len(lost)} within-family claim(s) do "
+              f"not survive the pooled BH family ({shown}): report them as "
+              f"project-level uncertain rather than portable discoveries")
+    if model_sensitive:
+        print(f"[project] WARNING: {len(model_sensitive)} project-level "
+              f"claim(s) fail at least one dependence-robust companion "
+              f"(BY/Holm); the pooled family reuses seeds and streams, so "
+              f"their support is multiplicity-model sensitive")
+    return payload
 
 
 # Metrics that are raw accuracy (or an accuracy difference) and therefore

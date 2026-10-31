@@ -918,7 +918,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             HYPOTHESES["H2c"]["sesoi"][bound_key])
         clog.print_equivalence_ci(
             "calib - calib_len_only (reverse check)", "H2c", metric, ci,
-            warn=reverse_warn)
+            warn=reverse_warn, registry_key=bound_key)
     # Full-factorial companion: the length term's effect averaged over both
     # concentration-term levels, on the long-length level and on the
     # base-to-long drop.  The LOO rows above are conditional on the

@@ -311,7 +311,7 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
     synthesis_order = list(self.hypotheses) + [
         h for h in cited_hypotheses if h not in self.hypotheses]
     synthesis = _hypothesis_evidence_synthesis(self.rows,
-                                               synthesis_order)
+                                               synthesis_order, q=q)
     synth_supported = [h for h, v in synthesis.items()
                        if v["status"] == "supported"]
     synth_partial = [h for h, v in synthesis.items()
@@ -331,6 +331,22 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
     synth_provisional = [
         h for h, v in synthesis.items()
         if v["n_practically_provisional"]]
+    synth_partial_registry = [
+        h for h, v in synthesis.items()
+        if v["status"] == "supported"
+        and v.get("registry_complete") is False]
+    synth_not_family_significant = [
+        h for h, v in synthesis.items()
+        if v["status"] == "supported"
+        and not v.get("conjunction_fdr_reject")]
+    synth_claim_level = [
+        h for h, v in synthesis.items()
+        if v.get("claim_level_supported")]
+    synth_dependence_sensitive = [
+        h for h, v in synthesis.items()
+        if v.get("claim_level_supported")
+        and not (v.get("conjunction_by_reject")
+                 and v.get("conjunction_holm_reject"))]
     # Parallel exact-test family: the same BH correction applied to the
     # paired sign-flip p-values.  This is a companion, not a replacement
     # for the pre-registered bootstrap decision; it answers "could this
@@ -801,6 +817,33 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
               f"size is only point-estimate level ({names}); their "
               f"practical significance remains provisional even where "
               f"the conjunction is otherwise supported)")
+    if synth_partial_registry:
+        names = ", ".join(synth_partial_registry)
+        print(f"[{self.tag}] WARNING: {len(synth_partial_registry)} "
+              f"hypothesis(es) are supported on the executed rows but "
+              f"have at least one registered decision metric with no "
+              f"contrast at all ({names}); report them as partial-registry "
+              f"support, not as a complete pre-registered conjunction")
+    if synth_not_family_significant:
+        names = ", ".join(synth_not_family_significant)
+        print(f"[{self.tag}] WARNING: {len(synth_not_family_significant)} "
+              f"hypothesis(es) have every executed row supported, but the "
+              f"hypothesis-level intersection-union test does not survive "
+              f"the hypothesis family correction ({names}); treat them as "
+              f"not claim-level significant")
+    if synth_claim_level:
+        print(f"[{self.tag}] hypothesis-level multiplicity companion: "
+              f"{len(synth_claim_level)}/{len(synthesis)} "
+              f"hypothesis(es) pass the conjunction test, complete "
+              f"registered-metric coverage and the hypothesis-family FDR "
+              f"screen; the row-level pre-registered decision remains the "
+              f"decision unit")
+    if synth_dependence_sensitive:
+        names = ", ".join(synth_dependence_sensitive)
+        print(f"[{self.tag}] WARNING: {len(synth_dependence_sensitive)} "
+              f"claim-level hypothesis(es) fail at least one "
+              f"dependence-robust companion ({names}); their conjunction "
+              f"support is multiplicity-model sensitive")
     if equiv_rows:
         print(f"[{self.tag}] equivalence (null-prediction) tests: "
               f"{len(equivalent)}/{len(equiv_rows)} have their 95% CI "
@@ -1123,6 +1166,20 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
                "n_hypotheses_no_contrast": len(synth_no_contrast),
                "n_hypotheses_replication_uncertain":
                    len(synth_rep_uncertain),
+               "n_hypotheses_partial_registry":
+                   len(synth_partial_registry),
+               "partial_registry_hypotheses": synth_partial_registry,
+               "n_hypotheses_not_family_significant":
+                   len(synth_not_family_significant),
+               "not_family_significant_hypotheses":
+                   synth_not_family_significant,
+               "n_hypotheses_claim_level_supported":
+                   len(synth_claim_level),
+               "claim_level_supported_hypotheses": synth_claim_level,
+               "n_hypotheses_dependence_sensitive":
+                   len(synth_dependence_sensitive),
+               "dependence_sensitive_hypotheses":
+                   synth_dependence_sensitive,
                "partial_hypotheses": synth_partial,
                "refuted_hypotheses": synth_refuted,
                "replication_uncertain_hypotheses": synth_rep_uncertain,
