@@ -250,11 +250,15 @@ claim, so results are not over-read relative to the controlled design.
 python3 -m cage.experiments --verify-artifacts --out results
 python3 -m cage.experiments --check-environment --out results
 python3 -m cage.experiments --verify-provenance --out results
+python3 -m cage.experiments --verify-runs --out results
 python3 -m cage.experiments --check-source --out results
 ```
 
-`make verify` runs the environment, artifact, provenance and source checks in
-sequence.
+`--verify-runs` rejects a results directory that contains an unfinished
+(aborted/failed/interrupted) invocation or a history of critical environment
+drift, so a cited evidence directory contains only completed runs produced
+under one numerical environment. `make verify` runs the environment, artifact,
+provenance, run-completeness and source checks in sequence.
 
 ## Design constraints
 

@@ -718,6 +718,210 @@ def _verify_artifacts(out_dir) -> int:
     return 0
 
 
+_TERMINAL_RUN_EVENTS = frozenset({"completed", "aborted", "failed"})
+
+
+def _read_jsonl_objects(path: pathlib.Path):
+    """Read ``path`` as JSONL objects, pairing each row with its line number."""
+    rows = []
+    with path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except (TypeError, ValueError) as exc:
+                rows.append((line_number, None,
+                             f"invalid JSON ({type(exc).__name__}: {exc})"))
+                continue
+            if not isinstance(row, Mapping):
+                rows.append((line_number, None,
+                             f"row is not a JSON object "
+                             f"({type(row).__name__})"))
+                continue
+            rows.append((line_number, row, None))
+    return rows
+
+
+def _verify_runs(out_dir) -> int:
+    """Check that a results directory holds only completed, homogeneous runs.
+
+    ``--verify-artifacts`` proves the bytes have not changed since they were
+    certified, and ``--verify-provenance`` proves each row is internally
+    joinable to its setup.  Neither answers the evidence question: was every
+    invocation in this directory actually *completed*, and was the whole
+    directory produced under one critical software/numerical environment?
+
+    ``run_index.jsonl`` records the started/terminal lifecycle of each
+    invocation and ``environment_history.jsonl`` records every drift verdict
+    against the previous environment.  This audit reads both:
+
+    * every ``started`` run must have exactly one terminal event, and only a
+      ``completed`` terminal event can be cited as evidence; an ``aborted``
+      or ``failed`` invocation is reported as a defect rather than hidden
+      behind a passing artifact hash;
+    * a critical (software/numerical) environment drift in the history makes
+      the directory non-homogeneous, because its rows were not all produced
+      by one numerical recipe; advisory hardware drift is reported as a
+      warning;
+    * a malformed or truncated lifecycle/history line fails closed;
+    * when ``artifact_index.json`` exists, its last run must also be marked
+      ``completed``.
+
+    Exit codes: 0 = every run completed under a compatible environment,
+    1 = incomplete/non-homogeneous evidence, 2 = no results directory or no
+    usable run lifecycle log.  The check is read-only.
+    """
+    root = pathlib.Path(out_dir)
+    if not root.is_dir():
+        print(f"[runs] no results directory at {root}; nothing to check")
+        return 2
+    run_log = root / "run_index.jsonl"
+    if not run_log.is_file():
+        print(f"[runs] no run lifecycle log at {run_log}; nothing to check")
+        return 2
+    try:
+        rows = _read_jsonl_objects(run_log)
+    except (OSError, UnicodeError) as exc:
+        print(f"[runs] cannot read {run_log}: {exc}")
+        return 2
+    if not rows:
+        print(f"[runs] run lifecycle log {run_log} is empty; nothing to check")
+        return 2
+
+    problems: list[str] = []
+    warnings: list[str] = []
+    events_by_run: dict[str, list[tuple[int, str, Mapping]]] = {}
+    for line_number, row, error in rows:
+        if error is not None:
+            problems.append(f"run_index.jsonl:{line_number}: {error}")
+            continue
+        run_id = row.get("run_id")
+        event = row.get("event")
+        if not isinstance(run_id, str) or not run_id:
+            problems.append(
+                f"run_index.jsonl:{line_number}: run_id must be a non-empty "
+                f"string")
+            continue
+        if not isinstance(event, str) or not event:
+            problems.append(
+                f"run_index.jsonl:{line_number}: event must be a non-empty "
+                f"string")
+            continue
+        events_by_run.setdefault(run_id, []).append(
+            (line_number, event, row))
+
+    completed_runs = set()
+    for run_id in sorted(events_by_run):
+        events = events_by_run[run_id]
+        started = [(line, row) for line, event, row in events
+                   if event == "started"]
+        terminals = [(line, event, row) for line, event, row in events
+                     if event in _TERMINAL_RUN_EVENTS]
+        if not started:
+            problems.append(
+                f"run {run_id}: terminal event without a started event")
+        elif len(started) > 1:
+            problems.append(
+                f"run {run_id}: {len(started)} started events "
+                f"(first at run_index.jsonl:{started[0][0]})")
+        if not terminals:
+            first = started[0][0] if started else events[0][0]
+            problems.append(
+                f"run {run_id}: started at run_index.jsonl:{first} but has "
+                f"no completed/aborted/failed terminal event")
+            continue
+        if started and terminals[0][0] < started[0][0]:
+            problems.append(
+                f"run {run_id}: terminal event at "
+                f"run_index.jsonl:{terminals[0][0]} precedes its started "
+                f"event at run_index.jsonl:{started[0][0]}")
+        if len(terminals) > 1:
+            problems.append(
+                f"run {run_id}: {len(terminals)} terminal events "
+                f"(first at run_index.jsonl:{terminals[0][0]})")
+        for line_number, event, row in terminals:
+            if event == "completed":
+                completed_runs.add(run_id)
+                continue
+            reason = row.get("reason") or row.get("error")
+            detail = f": {reason}" if reason else ""
+            problems.append(
+                f"run {run_id}: {event} at run_index.jsonl:{line_number}"
+                f"{detail}; a non-completed invocation cannot be cited as "
+                f"evidence")
+
+    if not completed_runs:
+        problems.append("run_index.jsonl contains no completed run")
+
+    history_path = root / "environment_history.jsonl"
+    history_rows = 0
+    if history_path.is_file():
+        try:
+            history = _read_jsonl_objects(history_path)
+        except (OSError, UnicodeError) as exc:
+            problems.append(f"cannot read environment_history.jsonl: {exc}")
+            history = []
+        for line_number, row, error in history:
+            where = f"environment_history.jsonl:{line_number}"
+            if error is not None:
+                problems.append(f"{where}: {error}")
+                continue
+            history_rows += 1
+            compatible = row.get("compatible")
+            run_id = row.get("run_id")
+            if compatible is False:
+                reason = row.get("reason") or "critical environment drift"
+                problems.append(
+                    f"{where}: run {run_id} was produced under a "
+                    f"non-compatible environment ({reason})")
+            elif compatible not in (True, False, None):
+                problems.append(
+                    f"{where}: compatible must be true, false or null")
+            elif compatible is True and row.get("differences"):
+                warnings.append(
+                    f"{where}: advisory environment drift for run {run_id} "
+                    f"({row.get('reason') or 'differences recorded'})")
+    else:
+        warnings.append(
+            "environment_history.jsonl is missing; the directory predates "
+            "the environment-compatibility contract")
+
+    index_path = root / "artifact_index.json"
+    if index_path.is_file():
+        try:
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            problems.append(
+                f"artifact_index.json: unreadable "
+                f"({type(exc).__name__}: {exc})")
+        else:
+            if not isinstance(payload, Mapping):
+                problems.append("artifact_index.json: not a JSON object")
+            elif payload.get("completed") is not True:
+                problems.append(
+                    f"artifact_index.json: last run "
+                    f"{payload.get('run_id')} is marked "
+                    f"completed={payload.get('completed')!r}")
+    else:
+        warnings.append(
+            "artifact_index.json is missing; artifact integrity is not "
+            "certified")
+
+    if problems:
+        print(f"[runs] FAILED ({len(problems)} issue(s)) in {root}:")
+        for problem in problems:
+            print(f"    {problem}")
+        for warning in warnings:
+            print(f"    warning: {warning}")
+        return 1
+    print(f"[runs] ok: {len(completed_runs)} completed run(s) cite a "
+          f"compatible environment ({history_rows} history row(s) checked)")
+    for warning in warnings:
+        print(f"[runs] warning: {warning}")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Record-level provenance audit
 # ---------------------------------------------------------------------------

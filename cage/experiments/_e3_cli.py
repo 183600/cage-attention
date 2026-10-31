@@ -1056,6 +1056,11 @@ def main(argv=None) -> int:
                              "hashes and check that one run_id never names "
                              "two protocols; exit 0-consistent, 1-defect, "
                              "2-no result records; writes nothing")
+    parser.add_argument("--verify-runs", action="store_true",
+                        help="check the run lifecycle log for uncompleted "
+                             "invocations and the environment history for "
+                             "critical drift; exit 0-complete, 1-defect, "
+                             "2-no run log; writes nothing")
     parser.add_argument("--require-homogeneous", action="store_true",
                         help="with --verify-provenance: treat a result file "
                              "that mixes setups/environments as an error "
@@ -1073,7 +1078,8 @@ def main(argv=None) -> int:
                              "and exit")
     args = parser.parse_args(argv)
     verify_flags = (args.verify_artifacts or args.check_environment
-                    or args.check_source or args.verify_provenance)
+                    or args.check_source or args.verify_provenance
+                    or args.verify_runs)
     if args.replay_manifest is not None and verify_flags:
         print("[runner] --replay-manifest cannot be combined with a "
               "read-only --verify/--check action; aborting")
@@ -1097,6 +1103,8 @@ def main(argv=None) -> int:
     if args.verify_provenance:
         return _audit_provenance(
             verify_out, require_homogeneous=bool(args.require_homogeneous))
+    if args.verify_runs:
+        return _verify_runs(verify_out)
     if args.synthesize_results:
         synth_out = pathlib.Path(args.out or "results")
         if not synth_out.is_dir():

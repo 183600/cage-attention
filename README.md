@@ -217,10 +217,13 @@ print(hist[-1], accuracy, sorted(stats))
 python3 -m cage.experiments --verify-artifacts --out results
 python3 -m cage.experiments --check-environment --out results
 python3 -m cage.experiments --verify-provenance --out results
+python3 -m cage.experiments --verify-runs --out results
 python3 -m cage.experiments --check-source --out results
 ```
 
-`make verify` 会依次执行环境、制品、来源与源码检查。
+`--verify-runs` 拒绝含未完成（aborted/failed/中断）运行或关键环境漂移历史的结果目录，
+确保被引用的证据目录只包含已完成且同一数值环境下的运行。
+`make verify` 会依次执行环境、制品、来源、运行完整性与源码检查。
 
 ## 设计约束
 
