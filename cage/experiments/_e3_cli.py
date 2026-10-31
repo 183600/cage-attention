@@ -283,6 +283,15 @@ def _e3_capacity_matched_pre_reference(settings: Settings,
             batch=settings.stats_batch, batches=settings.stats_batches,
             seed=STATS_SEED, max_cases=0)
         resid = stats["resid_norm"].mean(dim=0)
+        # Cross-scheme write companions: resid_norm is read after the
+        # block's final LayerNorm in post-norm blocks but on the raw
+        # residual stream in pre/seednorm blocks, so its level is not
+        # comparable across normalisation schemes.  The relative branch
+        # writes are (see Block._stamp_write_ratio).
+        awr = stats.get("attn_write_ratio")
+        mwr = stats.get("mlp_write_ratio")
+        awr_mean = None if awr is None else awr.mean(dim=0)
+        mwr_mean = None if mwr is None else mwr.mean(dim=0)
         rec = {
             "experiment": "e3_capacity_control",
             "hypotheses": ["H3a"],
@@ -299,6 +308,13 @@ def _e3_capacity_matched_pre_reference(settings: Settings,
             "resid_norm_by_layer": resid.tolist(),
             "resid_norm_last_over_first": float(
                 resid[-1] / resid[0].clamp_min(1e-12)),
+            "attn_write_ratio_by_layer": (None if awr_mean is None
+                                          else awr_mean.tolist()),
+            "mlp_write_ratio_by_layer": (None if mwr_mean is None
+                                         else mwr_mean.tolist()),
+            "mlp_write_ratio_last_over_first": (
+                float("nan") if mwr_mean is None else float(
+                    mwr_mean[-1] / mwr_mean[0].clamp_min(1e-12))),
             **{f"err_{k}": v for k, v in errors["summary"].items()},
             **_training_record(settings, lr),
             **_run_context(settings),
@@ -616,6 +632,13 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
             batches=settings.stats_batches, seed=stats_seed,
             max_cases=settings.max_error_cases)
         resid = stats["resid_norm"].mean(dim=0)
+        # Cross-scheme write companions (see the capacity-control site for
+        # the rationale): the relative branch writes are comparable between
+        # pre/post/mix/seednorm blocks, unlike the raw resid_norm levels.
+        awr = stats.get("attn_write_ratio")
+        mwr = stats.get("mlp_write_ratio")
+        awr_mean = None if awr is None else awr.mean(dim=0)
+        mwr_mean = None if mwr is None else mwr.mean(dim=0)
         cell = (gate, norm, layer_scale)
         if cell not in examples or \
                 errors["summary"]["n_errors"] > examples[cell][0]:
@@ -643,6 +666,13 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
             "resid_norm_by_layer": resid.tolist(),
             "resid_norm_last_over_first": float(
                 resid[-1] / resid[0].clamp_min(1e-12)),
+            "attn_write_ratio_by_layer": (None if awr_mean is None
+                                          else awr_mean.tolist()),
+            "mlp_write_ratio_by_layer": (None if mwr_mean is None
+                                         else mwr_mean.tolist()),
+            "mlp_write_ratio_last_over_first": (
+                float("nan") if mwr_mean is None else float(
+                    mwr_mean[-1] / mwr_mean[0].clamp_min(1e-12))),
             **{f"err_{k}": v
                for k, v in errors["summary"].items()},
             **_training_record(settings, lr),

@@ -14,6 +14,18 @@ Gate variants
                  The gate therefore depends on the query *and* on how
                  concentrated the attention distribution actually is,
                  corrected for sequence length (entropy grows with log T).
+                 Only the *product* ``c * calib_scale`` enters the gate, so
+                 ``calib_scale`` is a fixed (non-learnable) hyperparameter:
+                 a second free scalar next to ``calib_c`` would be
+                 unidentifiable (any split of one effective coefficient
+                 fits equally well).
+                 Note on the divisor: every row is normalised by log(T) of
+                 the full sequence, although causal row ``t`` can only see
+                 ``t+1`` keys (entropy ceiling log(t+1)).  The task and all
+                 collected statistics read the *final* query row, where the
+                 visible-key count equals T and the global divisor is exact;
+                 the forward-time behaviour on non-final rows can be
+                 ablated with ``Cfg.calib_pos_norm``.
                  ``Cfg.calib_use_len`` / ``Cfg.calib_use_ent`` switch one
                  term off at a time for the E1/E2 ablation arms; their
                  defaults (True/True) reproduce the full gate exactly.
@@ -33,6 +45,13 @@ Gate variants
                  ``Hbar = H / log T``, while the architecture, parameter
                  count, computation and length term are unchanged.  The
                  default reproduces the full gate exactly.
+                 ``Cfg.calib_pos_norm`` (default False) is the
+                 position-conflation ablation: with True the divisor (and
+                 the length term) use each row's visible-token length
+                 ``log(max(t+1, 2))`` instead of the global ``log T``.  On
+                 the final query row the two are identical, so all
+                 registered readouts are unchanged; only non-final rows
+                 differ.  The default reproduces the full gate exactly.
 - ``null``     : explicit null-attention / sparse selection baseline
                  (a learnable "null" key-value slot competes with real
                  tokens; choosing null suppresses the attention write).
@@ -135,6 +154,19 @@ class Cfg:
     # what makes the concentration signal length-stable.  The length term,
     # parameter count and computation are identical either way.
     calib_ent_norm: bool = True
+    # Ablation switch for *which* length normalises each query row.  The
+    # registered gate divides every row's head-mean entropy by log(T) of
+    # the full sequence; causal row ``t`` can only attend to ``t+1`` keys,
+    # so its entropy ceiling is log(t+1) and the global divisor mixes the
+    # row's position into its measured concentration on non-final rows.
+    # The supervised/statistics row is always the final query row (visible
+    # keys = T), where the global divisor is exact; this switch exists so
+    # the forward-time behaviour on the other rows can be tested: with
+    # True, both the concentration divisor and the length term use
+    # log(max(t+1, 2)) per row (visible-token calibration).  Requires the
+    # concentration term and its log-length normalisation to be on;
+    # default False reproduces the registered gate exactly.
+    calib_pos_norm: bool = False
     use_gradient_checkpointing: bool = False
 
     def __post_init__(self):
@@ -146,7 +178,8 @@ class Cfg:
         # ``"False"`` is truthy and would silently enable/disable the wrong
         # term (or gradient checkpointing).  Validate them at the boundary.
         for name in ("calib_use_len", "calib_use_ent", "calib_shuffle_ent",
-                     "calib_ent_norm", "use_gradient_checkpointing"):
+                     "calib_ent_norm", "calib_pos_norm",
+                     "use_gradient_checkpointing"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(
                     f"{name} must be a bool, got {getattr(self, name)!r}")
@@ -262,6 +295,15 @@ class Cfg:
                 "calib_ent_norm=False is an ablation of the concentration "
                 "term's log-T normalisation; it requires gate='calib' and "
                 "calib_use_ent=True"
+            )
+        if self.calib_pos_norm and (self.gate != "calib"
+                                    or not self.calib_use_ent
+                                    or not self.calib_ent_norm):
+            raise ValueError(
+                "calib_pos_norm is an ablation of the concentration term's "
+                "length normalisation (per-row visible-token divisors); it "
+                "requires gate='calib', calib_use_ent=True and "
+                "calib_ent_norm=True"
             )
 
 
@@ -1114,18 +1156,33 @@ class Attention(nn.Module):
                             if cfg.calib_use_ent else None)
             tau_init = math.log(math.expm1(cfg.calib_tau_init))
             self.calib_tau = nn.Parameter(torch.tensor(tau_init))
-            self.calib_scale = nn.Parameter(torch.tensor(float(cfg.calib_scale)))
+            # Only the product ``calib_c * calib_scale`` enters the gate, so
+            # a second *learnable* scalar would be unidentifiable next to
+            # ``calib_c`` (any split of one effective coefficient fits
+            # equally well).  The output scale is therefore a fixed
+            # hyperparameter recorded as a buffer, and ``calib_c`` carries
+            # the whole learnable concentration coefficient
+            # (``c_effective = calib_c * calib_scale``).
+            self.register_buffer(
+                "calib_scale", torch.tensor(float(cfg.calib_scale)))
             self._log_len_cache: dict[int, float] = {}
+            self._log_vis_cache: dict[tuple, torch.Tensor] = {}
             self._ent_perm_cache: dict | None = (
                 {} if cfg.calib_shuffle_ent else None)
             # True = registered gate (Hbar = H / log T); False = raw-entropy
             # ablation arm (E2/H2g).  Only read when calc_ent is true.
             self.calib_ent_norm = bool(cfg.calib_ent_norm)
+            # True = per-row visible-token divisors log(max(t+1, 2))
+            # instead of the global log T (position-conflation ablation).
+            # Only read when calc_ent is true.
+            self.calib_pos_norm = bool(cfg.calib_pos_norm)
         else:
             self.calib_a = self.calib_c = self.calib_tau = self.calib_scale = None
             self._log_len_cache = None
+            self._log_vis_cache = None
             self._ent_perm_cache = None
             self.calib_ent_norm = True
+            self.calib_pos_norm = False
         if cfg.gate == "null":
             self.null_k = nn.Parameter(torch.zeros(self.h, self.dk))
             self.null_v = nn.Parameter(torch.zeros(self.h, self.dk))
@@ -1176,6 +1233,27 @@ class Attention(nn.Module):
                 perm = torch.randperm(T, generator=gen).to(device)
             self._ent_perm_cache[key] = perm
         return perm
+
+    def _log_vis_vec(self, T: int, device: torch.device,
+                     dtype: torch.dtype) -> torch.Tensor:
+        """Per-row visible-token divisor ``log(max(t+1, 2))``.
+
+        Causal row ``t`` attends to ``t+1`` keys, so its entropy ceiling is
+        ``log(t+1)``; the ``max(., 2)`` clamp mirrors the registered gate's
+        ``log(max(T, 2))`` so the single-key first row stays finite (its
+        entropy is exactly 0, so its normalised value is 0 either way).
+        Used only by the ``calib_pos_norm`` ablation.  Cached per
+        ``(T, device, dtype)`` and built outside inference mode so both
+        the gradient and the no-grad paths can read it.
+        """
+        key = (T, device, dtype)
+        vec = self._log_vis_cache.get(key)
+        if vec is None:
+            with torch.inference_mode(False):
+                t = torch.arange(1, T + 1, device=device, dtype=dtype)
+                vec = t.log().clamp_min(math.log(2.0))
+            self._log_vis_cache[key] = vec
+        return vec
 
     def _gate_proj(self, x: torch.Tensor, B: int, T: int, C: int,
                    grad_on: bool) -> torch.Tensor:
@@ -1409,20 +1487,31 @@ class Attention(nn.Module):
                 # arm uses the same row-mean entropy without that division.
                 # Everything else (parameters, length term, kernel) is
                 # identical, so the contrast is single-factor.
+                #
+                # Position-conflation ablation: the registered gate divides
+                # *every* row by the global log T, although row t's entropy
+                # ceiling is log(t+1); with calib_pos_norm the divisor (and
+                # the length term below) use the per-row visible-token
+                # length instead.  On the final query row the two divisors
+                # coincide, so registered readouts are unchanged.
+                if self.calib_pos_norm:
+                    log_div = self._log_vis_vec(T, x.device, ent_gate.dtype)
+                else:
+                    log_div = log_len
                 if grad_on:
                     shift = ent_gate.mean(dim=1)
                     if self.calib_ent_norm:
-                        shift = shift.div_(log_len)
+                        shift = shift.div_(log_div)
                     shift.mul_(calib_cs)
                 else:
                     shift = _get_scratch(("calib_conc",), x.device,
                                          x.dtype, B * T)[:B * T].view(B, T)
                     torch.mean(ent_gate, dim=1, out=shift)
                     if self.calib_ent_norm:
-                        shift.div_(log_len)
+                        shift.div_(log_div)
                     shift.mul_(calib_cs)
                 if calc_len:
-                    shift.add_(self.calib_a * log_len)
+                    shift.add_(self.calib_a * log_div)
                 gate_val.sub_(shift.reshape(B * T, 1) if grad_on
                               else shift.unsqueeze(-1))
             elif calc_len:
@@ -1579,30 +1668,81 @@ class Block(nn.Module):
             _release_scratch("mlp_up")
         return m
 
+    @staticmethod
+    def _stamp_write_ratio(stats, key, branch, stream, scale):
+        """Record ``||scale * branch|| / ||stream||`` into ``stats``.
+
+        E3's ``resid_norm`` is read *after* the block's final LayerNorm in
+        post-norm blocks but on the raw residual stream in pre/seednorm
+        blocks, so its level is not comparable across normalisation
+        schemes.  The relative branch write is: each branch is measured
+        against the stream it is actually added to, before any
+        normalisation is applied to the sum, which makes the ratio a
+        cross-scheme comparable "how much did this layer write" readout.
+        Statistics-only (detached); must be called before the in-place
+        residual add consumes ``branch``.
+        """
+        if stats is None:
+            return
+        with torch.no_grad():
+            write = branch.detach()
+            if scale is not None:
+                write = write * scale.detach()
+            num = write.norm(dim=-1).mean(-1)
+            den = stream.detach().norm(dim=-1).mean(-1).clamp_min(1e-12)
+            stats[key] = num / den
+
     def forward(self, x, stat_pos=None):
         ls1, ls2 = self.ls1, self.ls2
         grad_on = torch.is_grad_enabled()
+        # The write ratios are statistics-only companions: compute them
+        # exactly when the per-layer stats dict is being requested.
+        want_writes = stat_pos is not None
         if self.post:
             a, s = self.attn(x, stat_pos)
+            if want_writes:
+                self._stamp_write_ratio(s, "attn_write_ratio", a, x, ls1)
             x = self._add_residual(x, a, ls1, grad_on)
             x = self.ln1(x)
-            x = self._mlp_residual(x, x, ls2, grad_on)
+            if want_writes:
+                m = self._mlp(x)
+                self._stamp_write_ratio(s, "mlp_write_ratio", m, x, ls2)
+                x = self._add_residual(x, m, ls2, grad_on)
+            else:
+                x = self._mlp_residual(x, x, ls2, grad_on)
             x = self.ln2(x)
         else:
             x_norm = self.ln1(x)
             a, s = self.attn(x_norm, stat_pos)
+            if want_writes:
+                self._stamp_write_ratio(s, "attn_write_ratio", a, x, ls1)
             x = self._add_residual(x, a, ls1, grad_on)
             x_norm = self.ln2(x)
-            x = self._mlp_residual(x_norm, x, ls2, grad_on)
+            if want_writes:
+                m = self._mlp(x_norm)
+                self._stamp_write_ratio(s, "mlp_write_ratio", m, x, ls2)
+                x = self._add_residual(x, m, ls2, grad_on)
+            else:
+                x = self._mlp_residual(x_norm, x, ls2, grad_on)
         return x, s
 
 
 class CAGE(nn.Module):
+    _POS_EXTRAPOLATION_MODES = ("learned", "fold", "zero")
+
     def __init__(self, cfg: Cfg):
         super().__init__()
         self.cfg = cfg
         self.tok = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.pos = nn.Embedding(cfg.max_len, cfg.d_model)
+        # Eval-time position-extrapolation control (E2 confound audit).
+        # "learned" (default) is the registered behaviour: positions are
+        # indexed directly, including any position beyond the trained
+        # length whose embedding has never been updated by training.
+        # "fold" / "zero" remap / remove those untrained rows; see
+        # ``set_pos_extrapolation``.
+        self.pos_extrapolation = "learned"
+        self.pos_extrapolation_from = None
         self.drop = nn.Dropout(cfg.dropout, inplace=True)
         self.blocks = nn.ModuleList([Block(cfg, i) for i in range(cfg.n_layers)])
         self.ln_f = make_norm(cfg.norm, cfg.d_model)
@@ -1623,6 +1763,66 @@ class CAGE(nn.Module):
                 nn.init.zeros_(m.bias)
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, std=0.02)
+
+    def set_pos_extrapolation(self, mode, trained_len=None):
+        """Select the eval-time handling of untrained position rows.
+
+        E2 trains at a fixed length ``T_train`` and then evaluates longer
+        sequences; with learned absolute position embeddings every position
+        ``>= T_train`` carries an embedding that was never updated by
+        training, so a length-sweep accuracy drop mixes the mechanism under
+        test with untrained position vectors.  This control changes only
+        how those rows are read at evaluation time:
+
+        - ``"learned"`` (default, the registered behaviour): index the
+          embedding table directly.
+        - ``"fold"``: map position ``p >= trained_len`` to
+          ``p % trained_len`` - extrapolated rows reuse *trained*
+          embeddings (position folding).
+        - ``"zero"``: drop the position signal for extrapolated rows
+          (their embedding term is replaced by zeros).
+
+        If folding (or zeroing) recovers most of the accuracy drop, the
+        degradation is attributable to position-vector extrapolation
+        rather than to attention/gate behaviour at longer ranges.
+        ``trained_len`` is required (a positive int) for the control modes
+        and ignored for ``"learned"``.
+        """
+        if mode not in self._POS_EXTRAPOLATION_MODES:
+            raise ValueError(
+                f"pos extrapolation mode must be one of "
+                f"{list(self._POS_EXTRAPOLATION_MODES)}, got {mode!r}")
+        if mode == "learned":
+            self.pos_extrapolation_from = None
+            self.pos_extrapolation = mode
+            return
+        if isinstance(trained_len, bool) or \
+                not isinstance(trained_len, int):
+            raise ValueError(
+                f"trained_len must be a positive int for mode {mode!r}, "
+                f"got {trained_len!r}")
+        if trained_len < 1:
+            raise ValueError(
+                f"trained_len must be a positive int for mode {mode!r}, "
+                f"got {trained_len!r}")
+        self.pos_extrapolation_from = trained_len
+        self.pos_extrapolation = mode
+
+    def _pos_rows(self, T: int) -> torch.Tensor:
+        """The ``(T, C)`` position rows added to the token embeddings."""
+        mode = self.pos_extrapolation
+        if mode == "learned":
+            return self.pos.weight[:T]
+        start = self.pos_extrapolation_from
+        weight = self.pos.weight
+        if start is None or T <= start:
+            return weight[:T]
+        idx = _arange(T, weight.device)
+        if mode == "fold":
+            folded = torch.where(idx >= start, idx % start, idx)
+            return weight.index_select(0, folded)
+        keep = (idx < start).to(weight.dtype).unsqueeze(1)
+        return weight[:T] * keep
 
     def forward(self, idx, targets=None, stat_pos=None, sup_pos=None):
         """``(logits, loss, layer_stats)``.
@@ -1689,7 +1889,7 @@ class CAGE(nn.Module):
                                                  self.cfg.d_model)
             torch.index_select(self.tok.weight, 0, idx.reshape(-1),
                                out=x.view(n, self.cfg.d_model))
-        x.add_(self.pos.weight[:T])
+        x.add_(self._pos_rows(T))
         x = self.drop(x)
         layer_stats = [] if stat_pos is not None else None
         for blk in self.blocks:

@@ -749,6 +749,13 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
     # finite diagnostic stream resolves the levels within one run.
     fc_gate_boot = (false_concentration_gate_test(stats)
                     if gate in ("query", "calib") else None)
+    # Learned calibration coefficients, stamped with the same readout E2
+    # uses (``_calibration_coefficients``): at the fixed training length
+    # the mechanism claim is about the gate's coefficients (a > 0,
+    # c_effective > 0), so the E1 record carries them too instead of
+    # leaving the manipulation check E2-only.  Readout, not a new decision
+    # rule - the pre-registered H1 contrasts are unchanged.
+    coefficients = _calibration_coefficients(model)
     rec = {
         "experiment": "e1",
         "hypotheses": ["H1a", "H1b", "H1c", "H1d", "H1e", "H1f",
@@ -766,6 +773,12 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
         **_run_context(settings),
         **curve, **record_extra,
     }
+    rec["calib_coefficients"] = coefficients
+    for coeff_key in ("a_mean", "c_mean", "c_effective_mean",
+                      "scale_mean", "tau_effective_mean"):
+        value = coefficients.get(coeff_key)
+        if _finite(value):
+            rec[coeff_key] = float(value)
     if _finite(rec.get("gate_vs_entropy")):
         rec["abs_gate_vs_entropy"] = abs(rec["gate_vs_entropy"])
     if _finite(rec.get("gate_vs_maxprob")):

@@ -565,3 +565,99 @@ def collect_stats(model, n_pairs, vocab, device, batch=128, batches=4,
     stats, _ = collect_stats_and_errors(
         model, n_pairs, vocab, device, batch=batch, batches=batches, seed=seed)
     return stats
+
+
+class _KnockoutIdentity(nn.Module):
+    """Identity stand-in used by :func:`layer_knockout_eval`.
+
+    Matches :meth:`cage.model.Block.forward`'s ``(x, stats)`` contract so a
+    knocked-out block is a true no-op on the residual stream (no attention,
+    no MLP, no normalisation) rather than a zero write.
+    """
+
+    def forward(self, x, stat_pos=None):
+        return x, None
+
+
+@torch.inference_mode()
+def layer_knockout_eval(model, n_pairs, vocab, device, batch=256, batches=4,
+                        seed=VAL_SEED, layers=None):
+    """Recall accuracy with each block independently replaced by identity.
+
+    E3's deep-layer readouts (residual growth, ``gate_depth_ratio``,
+    per-layer key mass) are *observational*: they show what a deep layer
+    does, not whether what it writes is actually used.  This probe supplies
+    the interventional complement: knock out one block at a time and read
+    the accuracy cost, so "deep layers write effective content" becomes a
+    causal, per-layer testable claim instead of an inference from gate
+    ratios.  The same sealed evaluation stream (fixed ``seed``) is used for
+    the baseline and for every knockout, so the per-layer deltas are paired
+    readouts on identical data.
+
+    ``layers`` selects which blocks to probe (default: all).  Returns a
+    dict with the baseline accuracy, ``by_layer`` accuracies and paired
+    deltas, and - when every block is probed - an ``embedding_only`` arm
+    with *all* blocks knocked out (the no-transformer floor for the same
+    stream, i.e. what the raw embedding + final readout alone achieve).
+    The model is restored even on error and its parameters are never
+    modified, so the probe can run on a trained model without disturbing
+    it.
+    """
+    n_layers = len(model.blocks)
+    if layers is None:
+        probe = list(range(n_layers))
+    else:
+        if isinstance(layers, (str, bytes)) or isinstance(layers, Mapping):
+            raise ValueError(
+                f"layers must be an iterable of block indices, got "
+                f"{layers!r}")
+        probe = []
+        for raw in layers:
+            if isinstance(raw, bool):
+                raise ValueError(f"layer ids must be ints, got {raw!r}")
+            try:
+                i = operator.index(raw)
+            except TypeError as exc:
+                raise ValueError(
+                    f"layer ids must be ints, got {raw!r}") from exc
+            if not 0 <= i < n_layers:
+                raise ValueError(
+                    f"layer id {i} out of range for {n_layers} blocks")
+            if i not in probe:
+                probe.append(i)
+    blocks = model.blocks
+    baseline = eval_accuracy(model, n_pairs, vocab, device,
+                             batch=batch, batches=batches, seed=seed)
+    by_layer = {}
+    for i in probe:
+        original = blocks[i]
+        blocks[i] = _KnockoutIdentity()
+        try:
+            acc = eval_accuracy(model, n_pairs, vocab, device,
+                                batch=batch, batches=batches, seed=seed)
+        finally:
+            blocks[i] = original
+        by_layer[i] = {"accuracy": acc, "delta": acc - baseline}
+    embedding_only = None
+    if probe and len(probe) == n_layers:
+        originals = {i: blocks[i] for i in probe}
+        try:
+            for i in probe:
+                blocks[i] = _KnockoutIdentity()
+            embedding_only = eval_accuracy(model, n_pairs, vocab, device,
+                                           batch=batch, batches=batches,
+                                           seed=seed)
+        finally:
+            for i, original in originals.items():
+                blocks[i] = original
+    return {
+        "n_layers": n_layers,
+        "layers": list(probe),
+        "baseline": baseline,
+        "by_layer": by_layer,
+        "embedding_only": embedding_only,
+        "seed": seed,
+        "note": ("interventional companion to E3's observational "
+                 "deep-layer readouts; same sealed eval stream for the "
+                 "baseline and every knockout"),
+    }

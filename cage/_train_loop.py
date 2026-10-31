@@ -135,7 +135,8 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
 
     # Per-batch mechanism statistics (``collect_stats``).
     stats_out = {"gate": [], "entropy": [], "maxprob": [], "null_mass": [],
-                 "correct": [], "resid_norm": []}
+                 "correct": [], "resid_norm": [],
+                 "attn_write_ratio": [], "mlp_write_ratio": []}
 
     per_layer_mass: dict[int, torch.Tensor] = {}
     state: dict = {"meta": None}
@@ -213,6 +214,7 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
             pred_stats = logits.squeeze(1).argmax(-1)
             stats_out["correct"].append((pred_stats == meta["answer"]).float())
             ents, maxps, nulls, gates, rns = [], [], [], [], []
+            awrs, mwrs = [], []
             for s in layer_stats:
                 ents.append(s["entropy"].mean(1))
                 maxps.append(s["maxprob"].max(1)[0])
@@ -221,9 +223,21 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
                     gates.append(s["gate"].mean(-1))
                 if s["null_mass"] is not None:
                     nulls.append(s["null_mass"].mean(1))
+                # Cross-scheme "layer write" companions: unlike resid_norm
+                # these are comparable between pre/post normalisation
+                # blocks (see Block._stamp_write_ratio).  Guarded so a
+                # stats payload without them keeps collecting unchanged.
+                if s.get("attn_write_ratio") is not None:
+                    awrs.append(s["attn_write_ratio"])
+                if s.get("mlp_write_ratio") is not None:
+                    mwrs.append(s["mlp_write_ratio"])
             stats_out["entropy"].append(torch.stack(ents, 1))
             stats_out["maxprob"].append(torch.stack(maxps, 1))
             stats_out["resid_norm"].append(torch.stack(rns, 1))
+            if awrs:
+                stats_out["attn_write_ratio"].append(torch.stack(awrs, 1))
+            if mwrs:
+                stats_out["mlp_write_ratio"].append(torch.stack(mwrs, 1))
             if gates:
                 stats_out["gate"].append(torch.stack(gates, 1))
             if nulls:

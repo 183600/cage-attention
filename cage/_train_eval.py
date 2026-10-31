@@ -802,6 +802,30 @@ def _false_concentration_vectors(stats):
     return mp.max(dim=1)[0], corr
 
 
+def _null_aware_maxprob(stats):
+    """Full-distribution max-prob / mean null mass, or ``(None, None)``.
+
+    The null variant's recorded ``maxprob`` is the real-token maximum
+    *conditional on not choosing null* (the null column is removed and the
+    remainder renormalised, see ``Attention._row_stats``).  A row can
+    therefore look "concentrated" while most of its attention mass sits
+    on the null slot - the conditional readout alone cannot distinguish
+    "writes confidently to the wrong key" from "writes almost nothing,
+    and whatever it does write is wrong".  The full-distribution maximum
+    is ``max(null_mass, (1 - null_mass) * maxprob)`` per layer, maximised
+    over layers exactly like the conditional readout, so the two splits
+    can be compared row for row on the same stream.
+    """
+    nm = _stats_layer_matrix(stats, "null_mass")
+    if nm is None:
+        return None, None
+    mp = _stats_layer_matrix(stats, "maxprob", nm.size(0))
+    if mp is None or mp.shape != nm.shape:
+        return None, None
+    full = torch.maximum(nm, (1.0 - nm) * mp)
+    return full.max(dim=1)[0], nm.mean(dim=1)
+
+
 def _per_sample_layer_mean(stats, key, n_rows):
     """Mean over layers of a per-sample statistic matrix, or ``None``.
 
@@ -845,7 +869,8 @@ def _validated_maxprob_thresh(value):
     return threshold
 
 
-def _false_concentration_at(mp, corr, gm, maxprob_thresh):
+def _false_concentration_at(mp, corr, gm, maxprob_thresh, full_mp=None,
+                            null_mass=None):
     """Threshold-specific readout over precomputed per-sample vectors.
 
     ``false_conc_rate`` is a binomial error share over the confident rows,
@@ -855,6 +880,13 @@ def _false_concentration_at(mp, corr, gm, maxprob_thresh):
     measurement.  The interval is on the *within-stream* sample; training-
     seed variance is a separate uncertainty carried by the paired
     contrast layer.
+
+    ``full_mp`` / ``null_mass`` are the null-variant companions: the
+    same split computed on the *full* distribution (null slot included)
+    and the mean null mass on the conditionally-confident rows.  They are
+    reported next to the pre-registered readouts, never instead of them,
+    so the null arm's "false concentration" cannot be read off the
+    conditional split alone.
     """
     high = mp > maxprob_thresh
     r = {
@@ -875,6 +907,34 @@ def _false_concentration_at(mp, corr, gm, maxprob_thresh):
         r["n_correct_high_gate"] = int(cc.sum())
         r["gate_on_false_conc"] = gm[fc].mean().item() if fc.any() else float("nan")
         r["gate_on_correct"] = gm[cc].mean().item() if cc.any() else float("nan")
+        # Threshold-free distribution readouts for the "cost of wrongly
+        # closing correct answers" question: a mean gate can hide a
+        # bimodal split (most correct answers kept open, a subset shut),
+        # so the deciles of the gate on each split are reported next to
+        # the means.  No new decision rule - the H1b/H1c contrasts keep
+        # reading the mean-based keys above.
+        for split_name, mask in (("false_conc", fc), ("correct", cc)):
+            if bool(mask.any()):
+                qs = torch.quantile(
+                    gm[mask].float().flatten(),
+                    torch.tensor([0.1, 0.5, 0.9]))
+                r[f"gate_on_{split_name}_q10"] = float(qs[0])
+                r[f"gate_on_{split_name}_q50"] = float(qs[1])
+                r[f"gate_on_{split_name}_q90"] = float(qs[2])
+    if full_mp is not None:
+        high_full = full_mp > maxprob_thresh
+        r["n_high_maxprob_full"] = int(high_full.sum())
+        if bool(high_full.any()):
+            n_false_full = int((high_full & ~corr).sum())
+            r["n_false_conc_full"] = n_false_full
+            r["false_conc_rate_full"] = (
+                1.0 - corr[high_full].float().mean().item())
+            ci_full = wilson_ci(n_false_full, int(high_full.sum()))
+            r["false_conc_rate_full_lo"] = ci_full["lo"]
+            r["false_conc_rate_full_hi"] = ci_full["hi"]
+        if null_mass is not None and bool(high.any()):
+            r["mean_null_mass_on_high"] = (
+                null_mass[high].float().mean().item())
     return r
 
 
@@ -894,7 +954,9 @@ def false_concentration_analysis(stats, maxprob_thresh=0.5):
         return {}
     mp, corr = vectors
     gm = _per_sample_layer_mean(stats, "gate", mp.size(0))
-    return _false_concentration_at(mp, corr, gm, threshold)
+    full_mp, null_mass = _null_aware_maxprob(stats)
+    return _false_concentration_at(mp, corr, gm, threshold,
+                                    full_mp=full_mp, null_mass=null_mass)
 
 
 def false_concentration_sweep(stats, thresholds=(0.3, 0.5, 0.7, 0.9)) -> dict:
@@ -921,12 +983,14 @@ def false_concentration_sweep(stats, thresholds=(0.3, 0.5, 0.7, 0.9)) -> dict:
         return {}
     mp, corr = vectors
     gm = _per_sample_layer_mean(stats, "gate", mp.size(0))
+    full_mp, null_mass = _null_aware_maxprob(stats)
     out = {}
     for candidate in candidates:
         threshold = _validated_maxprob_thresh(candidate)
         if threshold is None:
             continue
-        out[threshold] = _false_concentration_at(mp, corr, gm, threshold)
+        out[threshold] = _false_concentration_at(
+            mp, corr, gm, threshold, full_mp=full_mp, null_mass=null_mass)
     return out
 
 

@@ -2,6 +2,63 @@
 # Executed into the cage.experiments namespace by __init__.py;
 # split for readability, sharing the module globals.
 # ruff: noqa: F821, F541
+def _stamp_position_extrapolation_control(rec, model, settings, lengths,
+                                          eval_seed):
+    """Eval-only control separating position-vector extrapolation from
+    length effects (exploratory companion; the H2 decisions read the raw
+    sweep).
+
+    The model uses learned absolute position embeddings and E2 trains at a
+    fixed length, so every sweep position beyond the trained sequence
+    length carries an embedding that was never updated by training.  A
+    length-related accuracy drop therefore mixes (a) attention/gate
+    behaviour at longer ranges with (b) untrained position vectors.  This
+    control re-evaluates the same sealed stream with the extrapolated
+    positions folded back into the trained range (``fold``) or removed
+    (``zero``): if folding recovers most of the drop, the degradation is
+    mostly (b) - a position-encoding confound - rather than the mechanism
+    under test.
+    """
+    trained_len = 2 * settings.n_pairs + 2
+    by_length = {}
+    for length in lengths:
+        seq_len = 2 * length + 2
+        if seq_len <= trained_len:
+            continue
+        learned = rec["accuracy_by_length"].get(length)
+        entry = {"seq_len": seq_len, "learned": learned}
+        for mode in ("fold", "zero"):
+            model.set_pos_extrapolation(mode, trained_len)
+            try:
+                entry[mode] = eval_accuracy(
+                    model, length, settings.vocab, settings.device,
+                    batch=settings.eval_batch,
+                    batches=settings.eval_batches, seed=eval_seed)
+            finally:
+                model.set_pos_extrapolation("learned", None)
+            entry[f"{mode}_minus_learned"] = (
+                entry[mode] - learned
+                if _finite(learned) and _finite(entry[mode])
+                else float("nan"))
+        by_length[length] = entry
+    if not by_length:
+        return
+    longest = max(by_length)
+    rec["pos_extrapolation_control"] = {
+        "trained_seq_len": trained_len,
+        "by_length": {str(k): v for k, v in by_length.items()},
+        "longest": longest,
+        "fold_recovery_at_longest": by_length[longest].get(
+            "fold_minus_learned"),
+        "zero_recovery_at_longest": by_length[longest].get(
+            "zero_minus_learned"),
+        "modes": ("learned", "fold", "zero"),
+        "note": ("exploratory companion: same sealed eval stream, "
+                 "eval-time position handling only; the pre-registered "
+                 "H2 decision rows remain the raw sweep readouts"),
+    }
+
+
 def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H2a", "H2b", "H2c", "H2d", "H2e", "H2f", "H2g"))
     # HB1/HB3/HB4/HB5 hard gate (see run_e1).
@@ -169,6 +226,12 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         # the pre-registered H2 decision rows remain the raw readouts.
         _stamp_difficulty_standardization(
             rec, settings.n_pairs, lengths)
+        # Position-embedding extrapolation control: untrained position
+        # vectors beyond the training length are a confound of the raw
+        # length sweep; the fold/zero re-evaluations quantify how much of
+        # the drop they explain (exploratory companion, same stream).
+        _stamp_position_extrapolation_control(
+            rec, model, settings, lengths, eval_seed)
         # Mechanism manipulation check for H2b (no new run/grid point):
         # the trained length and concentration coefficients say whether
         # the gate actually implements the explicit log-T / entropy

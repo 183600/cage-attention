@@ -146,7 +146,13 @@ class CounterfactualEditTest(unittest.TestCase):
         bad = self.idx.to(torch.uint64)
         pair = int(self.meta["key_pos"][0]) // 2
         distractor_value = 2 * ((pair + 1) % self.n_pairs) + 1
-        bad[0, distractor_value] = 2 ** 63
+        # Assign through a uint64 tensor: assigning the bare Python int
+        # raises "Overflow when unpacking long" on torch >= 2.6 before the
+        # validation under test is ever reached (the value does not fit a
+        # signed int64), while older torch builds accepted it and relied on
+        # the ValueError below.  Both versions must exercise the same
+        # validation path.
+        bad[0, distractor_value] = torch.tensor(2 ** 63, dtype=torch.uint64)
         with self.assertRaises(ValueError):
             _counterfactual_edits(bad, self.meta, self.n_pairs, self.vocab)
 
