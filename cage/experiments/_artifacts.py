@@ -868,17 +868,53 @@ def _verify_runs(out_dir) -> int:
                 problems.append(f"{where}: {error}")
                 continue
             history_rows += 1
-            compatible = row.get("compatible")
             run_id = row.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                problems.append(
+                    f"{where}: run_id must be a non-empty string")
+            if "compatible" not in row:
+                problems.append(
+                    f"{where}: missing compatible verdict; a history row "
+                    f"must state true, false or null explicitly")
+                continue
+            compatible = row["compatible"]
+            if compatible is not None and not isinstance(compatible, bool):
+                problems.append(
+                    f"{where}: compatible must be true, false or null")
+                continue
+            differences = row.get("differences")
+            if not isinstance(differences, list):
+                problems.append(
+                    f"{where}: differences must be a list")
+                continue
+            critical = [difference for difference in differences
+                        if isinstance(difference, Mapping)
+                        and difference.get("severity") == "critical"]
+            malformed = [difference for difference in differences
+                         if not isinstance(difference, Mapping)
+                         or difference.get("severity") not in
+                         ("critical", "advisory")]
+            if malformed:
+                problems.append(
+                    f"{where}: every difference must be an object with "
+                    f"severity critical or advisory")
+                continue
             if compatible is False:
                 reason = row.get("reason") or "critical environment drift"
                 problems.append(
                     f"{where}: run {run_id} was produced under a "
                     f"non-compatible environment ({reason})")
-            elif compatible not in (True, False, None):
+            elif compatible is None and differences:
                 problems.append(
-                    f"{where}: compatible must be true, false or null")
-            elif compatible is True and row.get("differences"):
+                    f"{where}: a first-run null verdict cannot carry "
+                    f"environment differences")
+            elif compatible is True and critical:
+                fields = ", ".join(
+                    str(difference.get("field")) for difference in critical)
+                problems.append(
+                    f"{where}: compatible=true contradicts recorded critical "
+                    f"difference(s) ({fields})")
+            elif compatible is True and differences:
                 warnings.append(
                     f"{where}: advisory environment drift for run {run_id} "
                     f"({row.get('reason') or 'differences recorded'})")
@@ -903,6 +939,13 @@ def _verify_runs(out_dir) -> int:
                     f"artifact_index.json: last run "
                     f"{payload.get('run_id')} is marked "
                     f"completed={payload.get('completed')!r}")
+            else:
+                index_run = payload.get("run_id")
+                if isinstance(index_run, str) and index_run \
+                        and index_run not in completed_runs:
+                    problems.append(
+                        f"artifact_index.json: last run {index_run} has no "
+                        f"completed lifecycle event in run_index.jsonl")
     else:
         warnings.append(
             "artifact_index.json is missing; artifact integrity is not "
