@@ -1378,8 +1378,9 @@ def _categorical_independence_test(left, right, n_left, n_right,
         col = table.sum(dim=0, keepdim=True)
         expected = row.mul(col).div_(float(n))
         nonzero = table > 0
-        return float((table[nonzero]
-                      * torch.log(table[nonzero] / expected[nonzero])).sum())
+        return 2.0 * float((table[nonzero]
+                            * torch.log(
+                                table[nonzero] / expected[nonzero])).sum())
 
     observed = statistic(right_ids)
     gen = torch.Generator().manual_seed(seed)
