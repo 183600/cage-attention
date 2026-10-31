@@ -1250,12 +1250,19 @@ def _bca_bounds(d: torch.Tensor, means: torch.Tensor,
         z0 = 6.0
     else:
         z0 = nd.inv_cdf(n_less / b)
-    loo = _jackknife_means(d)
     # Standard BCa acceleration: the third central moment of
     # ``theta_bar - theta_(i)`` over the leave-one-out estimates, where
     # ``theta_bar`` is their mean (equal to the observed mean for the
     # jackknife).  The sign matters - using the LOO-minus-mean direction
-    # flips ``a`` and therefore the corrected endpoints.
+    # flips ``a`` and therefore the corrected endpoints.  The acceleration
+    # is invariant to the scale of ``d``; dividing by the largest magnitude
+    # first keeps the third moment representable when a finite sample has a
+    # large-but-finite spread (e.g. values near 1e153, whose cubes overflow
+    # even though their SD does not).
+    scale = float(d.abs().max())
+    if scale > 0.0 and math.isfinite(scale):
+        d = d / scale
+    loo = _jackknife_means(d)
     dev = loo.mean() - loo
     try:
         den = 6.0 * float(dev.pow(2).sum()) ** 1.5
