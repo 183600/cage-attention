@@ -1415,6 +1415,32 @@ class CorrectMaskInputTest(unittest.TestCase):
 
 
 class BootstrapOverflowTest(unittest.TestCase):
+    def test_representable_extreme_moments_remain_usable(self):
+        from cage.metrics import paired_bootstrap_ci, replication_interval
+
+        # Squaring these values overflows float64 even though both the
+        # mean and unbiased SD are representable.  They must not be
+        # mistaken for unrepresentable moments.
+        stable = [1e154, -1e154, 1e154, -1e154]
+        rep = replication_interval(stable, direction="+")
+        self.assertTrue(rep["valid"], rep)
+        self.assertTrue(math.isfinite(rep["sd"]))
+        self.assertGreater(rep["sd"], 1e154)
+        self.assertTrue(math.isfinite(rep["lo"]))
+        self.assertTrue(math.isfinite(rep["hi"]))
+        ci = paired_bootstrap_ci(stable, n_boot=100)
+        self.assertTrue(math.isfinite(ci["sd"]))
+        self.assertTrue(math.isfinite(ci["lo"]))
+
+        # The opposite failure mode: a direct variance can underflow to
+        # zero for a sample whose nonzero SD is still representable.
+        tiny = [1e-300, 2e-300, 3e-300]
+        rep = replication_interval(tiny, direction="+")
+        self.assertTrue(rep["valid"], rep)
+        self.assertGreater(rep["sd"], 0.0)
+        ci = paired_bootstrap_ci(tiny, n_boot=100)
+        self.assertGreater(ci["sd"], 0.0)
+
     def test_unrepresentable_bootstrap_moments_abstain(self):
         from cage.metrics import (
             bootstrap_upper_p,

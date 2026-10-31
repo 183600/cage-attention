@@ -751,7 +751,7 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
     n = int(d.numel())
     df = float(n - 1)
     mean = float(d.mean())
-    sd = float(d.std(unbiased=True))
+    sd = _stable_sample_sd(d)
     t_crit = -_student_t_ppf(alpha / 2.0, df)
     out.update({"valid": True, "n": n, "df": df, "mean": mean, "sd": sd,
                 "t_crit": t_crit})
@@ -770,16 +770,25 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
     out["lo"], out["hi"] = mean - rep_half, mean + rep_half
     out["lo_single"] = mean - single_half
     out["hi_single"] = mean + single_half
+    interval_fields = ("lo", "hi", "lo_single", "hi_single")
+    if not all(math.isfinite(out[key]) for key in interval_fields):
+        for key in interval_fields:
+            out[key] = float("nan")
+        out["reason"] = "replication interval is not representable"
+        out["valid"] = False
+        return out
 
     def _prob(direction_sign, variance_factor):
         if sd == 0.0:
             if mean == 0.0:
                 return 0.5
             return 1.0 if (mean > 0.0) == (direction_sign > 0) else 0.0
-        scale = sd * math.sqrt(variance_factor)
+        # Normalise by the SD first so a representable ratio does not
+        # overflow merely because ``sd * sqrt(factor)`` does.
+        ratio = (mean / sd) / math.sqrt(variance_factor)
         if direction_sign > 0:
-            return _student_t_cdf(mean / scale, df)
-        return _student_t_cdf(-mean / scale, df)
+            return _student_t_cdf(ratio, df)
+        return _student_t_cdf(-ratio, df)
 
     if direction == "+":
         out["prob_replicates"] = _prob(1.0, 2.0 / n)

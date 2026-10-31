@@ -1147,18 +1147,46 @@ def _bootstrap_means(d: torch.Tensor, n_boot: int,
     return d[idx].mean(dim=1)
 
 
+def _stable_sample_sd(d: torch.Tensor) -> float:
+    """Unbiased sample SD without squaring the raw input magnitudes.
+
+    A direct ``torch.std`` squares the centered values.  Finite samples
+    whose true SD is representable can still overflow that intermediate
+    (e.g. ``[1e154, -1e154, ...]``), while tiny samples can underflow it
+    to zero.  Rescaling by the largest absolute value before the SD makes
+    both ends of the float64 range usable; the scale is restored only
+    when the result is finite.
+    """
+    n = int(d.numel())
+    if n < 2:
+        return float("nan")
+    try:
+        scale = float(d.abs().max())
+        if not math.isfinite(scale):
+            return float("nan")
+        if scale == 0.0:
+            return 0.0
+        scaled_sd = float((d / scale).std(unbiased=True))
+    except (RuntimeError, ValueError, OverflowError):
+        return float("nan")
+    sd = scaled_sd * scale
+    return sd if math.isfinite(sd) else float("nan")
+
+
 def _finite_moments(d: torch.Tensor) -> bool:
     """Whether the sample mean and SD are representable in float64.
 
     Finite inputs can still overflow their sum (e.g. several ``1e308``
     differences), and a finite mean with a non-finite SD cannot produce a
-    meaningful interval either.  Callers use this to abstain instead of
-    reporting an infinite effect with a spuriously small bootstrap p-value.
+    meaningful interval either.  The SD is computed with rescaling so a
+    representable SD is not discarded merely because its square overflows.
+    Callers use this to abstain instead of reporting an infinite effect
+    with a spuriously small bootstrap p-value.
     """
     try:
         if not math.isfinite(float(d.mean())):
             return False
-        if d.numel() > 1 and not math.isfinite(float(d.std(unbiased=True))):
+        if d.numel() > 1 and not math.isfinite(_stable_sample_sd(d)):
             return False
     except (RuntimeError, ValueError, OverflowError):
         return False
@@ -1174,7 +1202,7 @@ def _bootstrap_summary(d: torch.Tensor, means: torch.Tensor,
     # The sample SD (and therefore the MDE) is not estimable from a single
     # paired unit.  Reporting 0.0 there would make the design look
     # infinitely powered: ``mde80 == 0`` claims every effect is resolvable.
-    sd = float(d.std(unbiased=True)) if n > 1 else float("nan")
+    sd = _stable_sample_sd(d) if n > 1 else float("nan")
     return {
         "mean": float(d.mean()),
         "lo": lo,
