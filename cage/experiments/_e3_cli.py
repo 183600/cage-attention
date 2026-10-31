@@ -966,11 +966,13 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Hypothesis-driven runners for E1/E2/E3 "
                     "(see cage/experiments/ for the registry).")
-    parser.add_argument("--only", default="baselines",
-                        choices=["baselines", "sanity", "e1", "e2", "e3", "all"])
+    parser.add_argument("--only", default=None,
+                        choices=["baselines", "sanity", "e1", "e2", "e3", "all"],
+                        help="experiment to run (default: baselines)")
     parser.add_argument("--quick", action="store_true",
                         help="tiny pipeline-check configuration")
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default=None,
+                        help="torch device (default: cpu)")
     parser.add_argument("--seeds", type=int, default=None,
                         help="number of training seeds (0..n-1)")
     parser.add_argument("--steps", type=int, default=None)
@@ -978,9 +980,10 @@ def main(argv=None) -> int:
                         help="skip recipe tuning and use this lr directly")
     parser.add_argument("--d-model", type=int, default=None)
     parser.add_argument("--n-layers", type=int, default=None)
-    parser.add_argument("--fdr-q", type=float, default=0.05,
+    parser.add_argument("--fdr-q", type=float, default=None,
                         help="Benjamini-Hochberg FDR level for the "
-                             "pre-registered contrast families")
+                             "pre-registered contrast families "
+                             "(default: 0.05)")
     parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction,
                         default=None,
                         help="force deterministic torch kernels on/off "
@@ -993,7 +996,18 @@ def main(argv=None) -> int:
                              "a separate fairness benchmark (default: on; "
                              "the same-recipe controlled families are "
                              "unchanged)")
-    parser.add_argument("--out", default="results")
+    parser.add_argument("--out", default=None,
+                        help="results directory (default: results)")
+    parser.add_argument("--replay-manifest", default=None, metavar="PATH",
+                        help="re-run the frozen recipe recorded in a run "
+                             "manifest; the source tree, hypothesis registry "
+                             "and data-stream fingerprints must match, and "
+                             "--out must be a new directory")
+    parser.add_argument("--allow-environment-drift", action="store_true",
+                        help="with --replay-manifest: permit a replay under "
+                             "a different critical software/numerical "
+                             "environment and record the drift instead of "
+                             "refusing")
     parser.add_argument("--verify-artifacts", action="store_true",
                         help="check files in --out against artifact_index.json "
                              "and exit")
@@ -1021,66 +1035,140 @@ def main(argv=None) -> int:
                              "critical (software/numerical) field; the "
                              "default is to record and warn")
     args = parser.parse_args(argv)
+    verify_flags = (args.verify_artifacts or args.check_environment
+                    or args.check_source or args.verify_provenance)
+    if args.replay_manifest is not None and verify_flags:
+        print("[runner] --replay-manifest cannot be combined with a "
+              "read-only --verify/--check action; aborting")
+        return 2
+    if args.allow_environment_drift and args.replay_manifest is None:
+        print("[runner] --allow-environment-drift only applies to "
+              "--replay-manifest; aborting")
+        return 2
+    verify_out = args.out or "results"
     if args.verify_artifacts:
-        return _verify_artifacts(args.out)
+        return _verify_artifacts(verify_out)
     if args.check_environment:
-        return _check_environment(args.out)
+        return _check_environment(verify_out)
     if args.check_source:
-        return _check_source(args.out)
+        return _check_source(verify_out)
     if args.verify_provenance:
         return _audit_provenance(
-            args.out, require_homogeneous=bool(args.require_homogeneous))
+            verify_out, require_homogeneous=bool(args.require_homogeneous))
 
-    settings = Settings.quick(args.device) if args.quick else Settings(
-        device=args.device)
-    if args.deterministic is not None:
-        settings.deterministic = bool(args.deterministic)
-    if args.per_variant_tuning is not None:
-        settings.per_variant_tuning = bool(args.per_variant_tuning)
-    if args.seeds is not None:
-        if args.seeds < 1:
-            print("[runner] --seeds must be a positive integer; aborting")
+    replay = None
+    if args.replay_manifest is not None:
+        conflicts = []
+        if args.quick:
+            conflicts.append("--quick")
+        for name, flag in (
+                ("only", "--only"), ("device", "--device"),
+                ("seeds", "--seeds"), ("steps", "--steps"), ("lr", "--lr"),
+                ("d_model", "--d-model"), ("n_layers", "--n-layers"),
+                ("fdr_q", "--fdr-q"),
+                ("deterministic", "--deterministic/--no-deterministic"),
+                ("per_variant_tuning",
+                 "--per-variant-tuning/--no-per-variant-tuning")):
+            if getattr(args, name) is not None:
+                conflicts.append(flag)
+        if conflicts:
+            print(f"[runner] REPLAY REJECTED: the manifest freezes the "
+                  f"recipe, so {', '.join(conflicts)} cannot be overridden; "
+                  f"only --out and --allow-environment-drift are accepted")
             return 2
-        requested = tuple(range(args.seeds))
-        dropped = tuple(s for s in requested if s in RESERVED_EVAL_SEEDS)
-        settings.seeds = tuple(s for s in requested
-                               if s not in RESERVED_EVAL_SEEDS)
-        if dropped:
-            print(f"[runner] WARNING: dropping training seeds {dropped}: "
-                  f"they are reserved held-out evaluation streams "
-                  f"{RESERVED_EVAL_SEEDS}; training on them would fit the "
-                  f"model on validation/test data")
-        if not settings.seeds:
-            print("[runner] no training seed left after excluding reserved "
-                  "evaluation streams; aborting")
+        try:
+            settings, manifest, manifest_drift, manifest_sha = (
+                _load_replay_manifest(
+                    args.replay_manifest,
+                    allow_environment_drift=bool(
+                        args.allow_environment_drift)))
+        except ReplayManifestError as exc:
+            print(f"[runner] REPLAY REJECTED: {exc}")
             return 2
-    if args.steps is not None:
-        settings.steps = args.steps
-    if args.lr is not None:
-        settings.lr = args.lr
-    if args.d_model is not None:
-        settings.d_model = args.d_model
-    if args.n_layers is not None:
-        settings.n_layers = args.n_layers
-    settings.fdr_q = args.fdr_q
-    if settings.steps < 1:
-        print("[runner] --steps must be a positive integer; aborting")
-        return 2
-    if settings.lr is not None and (
-            not math.isfinite(settings.lr) or settings.lr <= 0.0):
-        print("[runner] --lr must be a finite positive number; aborting")
-        return 2
-    if not 0.0 < settings.fdr_q < 1.0:
-        print("[runner] --fdr-q must lie strictly between 0 and 1; aborting")
-        return 2
-    if settings.d_model < 1 or settings.d_model % settings.n_heads:
-        print(f"[runner] --d-model must be a positive multiple of n_heads="
-              f"{settings.n_heads}; aborting")
-        return 2
-    if settings.n_layers < 1:
-        print("[runner] --n-layers must be a positive integer; aborting")
-        return 2
-    out_dir = pathlib.Path(args.out)
+        except Exception as exc:  # noqa: BLE001 - a failed probe is a refusal
+            print(f"[runner] REPLAY REJECTED: cannot verify manifest "
+                  f"({type(exc).__name__}: {exc})")
+            return 2
+        experiment = manifest["experiment"]
+        source_run = manifest.get("run_id")
+        safe_run = (source_run
+                    if isinstance(source_run, str) and source_run
+                    and all(ch.isalnum() or ch in "._-"
+                            for ch in source_run)
+                    else "unknown")
+        out_dir = pathlib.Path(
+            args.out if args.out is not None
+            else f"results_replay_{safe_run}")
+        manifest_dir = pathlib.Path(args.replay_manifest).resolve().parent
+        if out_dir.resolve() == manifest_dir:
+            print("[runner] REPLAY REJECTED: --out must differ from the "
+                  "source results directory; a replay is new evidence, not "
+                  "an append to the run it is reproducing")
+            return 2
+        replay = {
+            "path": str(pathlib.Path(args.replay_manifest).resolve()),
+            "manifest_sha256": manifest_sha,
+            "source_run_id": source_run,
+            "source_setup_sha256": manifest.get("setup_sha256"),
+            "source_tree_sha256": manifest.get("source_tree_sha256"),
+            "environment_compatible": manifest_drift.get("compatible"),
+            "environment_identical": manifest_drift.get("identical"),
+            "environment_override": bool(args.allow_environment_drift),
+        }
+    else:
+        settings = Settings.quick(args.device or "cpu") if args.quick else (
+            Settings(device=args.device or "cpu"))
+        if args.deterministic is not None:
+            settings.deterministic = bool(args.deterministic)
+        if args.per_variant_tuning is not None:
+            settings.per_variant_tuning = bool(args.per_variant_tuning)
+        if args.seeds is not None:
+            if args.seeds < 1:
+                print("[runner] --seeds must be a positive integer; aborting")
+                return 2
+            requested = tuple(range(args.seeds))
+            dropped = tuple(s for s in requested if s in RESERVED_EVAL_SEEDS)
+            settings.seeds = tuple(s for s in requested
+                                   if s not in RESERVED_EVAL_SEEDS)
+            if dropped:
+                print(f"[runner] WARNING: dropping training seeds {dropped}: "
+                      f"they are reserved held-out evaluation streams "
+                      f"{RESERVED_EVAL_SEEDS}; training on them would fit the "
+                      f"model on validation/test data")
+            if not settings.seeds:
+                print("[runner] no training seed left after excluding "
+                      "reserved evaluation streams; aborting")
+                return 2
+        if args.steps is not None:
+            settings.steps = args.steps
+        if args.lr is not None:
+            settings.lr = args.lr
+        if args.d_model is not None:
+            settings.d_model = args.d_model
+        if args.n_layers is not None:
+            settings.n_layers = args.n_layers
+        if args.fdr_q is not None:
+            settings.fdr_q = args.fdr_q
+        if settings.steps < 1:
+            print("[runner] --steps must be a positive integer; aborting")
+            return 2
+        if settings.lr is not None and (
+                not math.isfinite(settings.lr) or settings.lr <= 0.0):
+            print("[runner] --lr must be a finite positive number; aborting")
+            return 2
+        if not 0.0 < settings.fdr_q < 1.0:
+            print("[runner] --fdr-q must lie strictly between 0 and 1; "
+                  "aborting")
+            return 2
+        if settings.d_model < 1 or settings.d_model % settings.n_heads:
+            print(f"[runner] --d-model must be a positive multiple of n_heads="
+                  f"{settings.n_heads}; aborting")
+            return 2
+        if settings.n_layers < 1:
+            print("[runner] --n-layers must be a positive integer; aborting")
+            return 2
+        experiment = args.only or "baselines"
+        out_dir = pathlib.Path(args.out or "results")
     out_dir.mkdir(parents=True, exist_ok=True)
     settings.out_dir = out_dir
     # One writer per results directory: the append-only JSONL files, the
@@ -1142,7 +1230,7 @@ def main(argv=None) -> int:
                 status = "aborted"
                 print("[runner] ABORTED: --strict-environment requested and "
                       "the recorded environment is not compatible")
-                _run_event(settings, args.only, "aborted",
+                _run_event(settings, experiment, "aborted",
                            error="EnvironmentMismatch",
                            reason=drift.get("reason"),
                            critical_fields=critical_fields,
@@ -1156,7 +1244,16 @@ def main(argv=None) -> int:
         elif drift.get("compatible") is None:
             print(f"[runner] environment history: {drift.get('reason')}")
         _write_json(out_dir / "hypotheses.json", HYPOTHESES)
-        _run_event(settings, args.only, "started", quick=bool(args.quick),
+        replay_event = {}
+        if replay is not None:
+            replay_event = {
+                "replay_of": replay["source_run_id"],
+                "replay_manifest": replay["path"],
+                "replay_manifest_sha256": replay["manifest_sha256"],
+                "replay_environment_override": replay[
+                    "environment_override"],
+            }
+        _run_event(settings, experiment, "started", quick=bool(args.quick),
                    seeds=list(settings.seeds), steps=settings.steps,
                    lr=settings.lr, device=settings.device,
                    fdr_q=settings.fdr_q,
@@ -1164,22 +1261,33 @@ def main(argv=None) -> int:
                    environment_compatible=drift.get("compatible"),
                    environment_identical=drift.get("identical"),
                    environment_critical_fields=critical_fields,
-                   environment_advisory_fields=advisory_fields)
+                   environment_advisory_fields=advisory_fields,
+                   **replay_event)
         _write_json(out_dir / "environment.json", context)
-        print(f"[runner] only={args.only} quick={args.quick} "
+        if replay is not None:
+            _write_json(out_dir / "replay.json", {
+                **replay,
+                "schema_version": _RECORD_SCHEMA,
+                "replay_run_id": context["run_id"],
+                "created_utc": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            })
+        replay_note = (f" replay_of={replay['source_run_id']}"
+                       if replay is not None else "")
+        print(f"[runner] only={experiment} quick={bool(args.quick)} "
               f"seeds={settings.seeds} steps={settings.steps} "
               f"lr={settings.lr if settings.lr is not None else 'tuned'} "
               f"fdr_q={settings.fdr_q:g} "
-              f"device={settings.device} out={out_dir}")
-        if args.only == "baselines":
+              f"device={settings.device} out={out_dir}{replay_note}")
+        if experiment == "baselines":
             run_baselines(settings, out_dir)
-        elif args.only == "sanity":
+        elif experiment == "sanity":
             run_sanity(settings, out_dir)
-        elif args.only == "e1":
+        elif experiment == "e1":
             run_e1(settings, out_dir)
-        elif args.only == "e2":
+        elif experiment == "e2":
             run_e2(settings, out_dir)
-        elif args.only == "e3":
+        elif experiment == "e3":
             run_e3(settings, out_dir)
         else:
             run_all(settings, out_dir)
@@ -1187,24 +1295,24 @@ def main(argv=None) -> int:
             SplitAuditError, BaselineVerdictError) as e:
         status = "aborted"
         print(f"[runner] ABORTED before grid training: {e}")
-        _run_event(settings, args.only, "aborted",
+        _run_event(settings, experiment, "aborted",
                    error=type(e).__name__, reason=str(e),
                    elapsed_seconds=round(time.monotonic() - started, 3))
         return 3
     except Exception as e:
-        _run_event(settings, args.only, "failed",
+        _run_event(settings, experiment, "failed",
                    error=type(e).__name__, reason=str(e),
                    elapsed_seconds=round(time.monotonic() - started, 3))
         raise
     else:
         status = "completed"
-        _run_event(settings, args.only, "completed",
+        _run_event(settings, experiment, "completed",
                    elapsed_seconds=round(time.monotonic() - started, 3))
         print(f"\n[runner] done; records in {out_dir}/")
         return 0
     finally:
         try:
-            _write_artifact_index(out_dir, settings, args.only,
+            _write_artifact_index(out_dir, settings, experiment,
                                   completed=(status == "completed"),
                                   elapsed_seconds=time.monotonic() - started)
         except Exception as e:  # noqa: BLE001 - index failure is a warning

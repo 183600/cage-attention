@@ -2,8 +2,8 @@
 # Executed into the cage.experiments namespace by __init__.py;
 # split for readability, sharing the module globals.
 # ruff: noqa: F821, F541
-def _source_tree_sha256() -> str:
-    """Content hash of the training package (cage/**/*.py).
+def _source_tree_sha256(root=None) -> str:
+    """Content hash of the training package (``cage/**/*.py``).
 
     ``git_sha`` identifies the committed revision, but a run from a dirty
     tree is not rebuildable from that revision alone and the dirty flag does
@@ -11,16 +11,35 @@ def _source_tree_sha256() -> str:
     record a content-addressed code version that survives uncommitted
     edits, so two runs can be compared (and a stale baseline verdict can be
     refused) even when both report the same ``git_sha``.
+
+    Each file contributes its **relative POSIX path** as well as its bytes.
+    The earlier implementation hashed only ``path.name``, so two checkouts
+    whose modules were moved between subpackages - but kept the same
+    basenames and contents - produced the same code id.  A source fingerprint
+    must identify the tree, not just the multiset of file contents.
+
+    ``root`` is an optional test hook; production callers use the package
+    directory.  Only the production result is cached, so a test tree cannot
+    poison the process-wide fingerprint.
     """
     global _SOURCE_TREE_SHA
-    if _SOURCE_TREE_SHA is None:
-        h = hashlib.sha256()
-        for path in sorted(pathlib.Path(__file__).resolve().parent.parent.rglob("*.py")):
-            h.update(path.name.encode("utf-8") + b"\0")
-            h.update(path.read_bytes())
-            h.update(b"\0")
-        _SOURCE_TREE_SHA = h.hexdigest()[:16]
-    return _SOURCE_TREE_SHA
+    base = (pathlib.Path(__file__).resolve().parent.parent
+            if root is None else pathlib.Path(root))
+    if root is None and _SOURCE_TREE_SHA is not None:
+        return _SOURCE_TREE_SHA
+    h = hashlib.sha256()
+    excluded = {"__pycache__", ".git", ".venv", "venv"}
+    for path in sorted(base.rglob("*.py")):
+        relative = path.relative_to(base)
+        if any(part in excluded for part in relative.parts):
+            continue
+        h.update(relative.as_posix().encode("utf-8") + b"\0")
+        h.update(path.read_bytes())
+        h.update(b"\0")
+    digest = h.hexdigest()[:16]
+    if root is None:
+        _SOURCE_TREE_SHA = digest
+    return digest
 
 
 def _run_identity() -> tuple[str, str]:
@@ -1037,6 +1056,139 @@ def _write_manifest(settings: Settings, out_dir: pathlib.Path, tag: str) -> dict
     }
     _write_json(out_dir / f"{tag}_manifest.json", manifest)
     return manifest
+
+
+class ReplayManifestError(RuntimeError):
+    """A run manifest cannot be replayed faithfully under this checkout."""
+
+
+_REPLAY_EXPERIMENTS = ("baselines", "sanity", "e1", "e2", "e3")
+
+
+def _replay_settings(config) -> Settings:
+    """Rebuild the frozen ``Settings`` recipe stored in a manifest.
+
+    The config block is written by ``_run_context`` as every ``Settings``
+    field except ``out_dir``.  Requiring the exact field set (instead of
+    filling missing keys with defaults) is deliberate: a partial config
+    cannot define the recipe that produced the archived numbers, and an
+    unknown key means the manifest was written by a different schema.
+    """
+    if not isinstance(config, Mapping):
+        raise ReplayManifestError("manifest config must be a JSON object")
+    fields = {name for name in Settings.__dataclass_fields__
+              if name != "out_dir"}
+    unknown = sorted(set(config) - fields)
+    missing = sorted(fields - set(config))
+    if unknown:
+        raise ReplayManifestError(
+            f"manifest config has unknown field(s) {unknown}; this checkout's "
+            f"Settings schema is different")
+    if missing:
+        raise ReplayManifestError(
+            f"manifest config is missing field(s) {missing}; a partial "
+            f"manifest cannot define the frozen recipe")
+    try:
+        return Settings(**dict(config))
+    except (TypeError, ValueError) as exc:
+        raise ReplayManifestError(
+            f"manifest config is not a valid Settings recipe: {exc}") from exc
+
+
+def _load_replay_manifest(path, *, allow_environment_drift=False):
+    """Load and verify a run manifest as an executable reproduction plan.
+
+    A manifest is only descriptive unless something can consume it.  This
+    helper turns it into the exact ``Settings`` recipe and refuses the
+    replay when the code, pre-registered hypothesis registry or data
+    streams changed.  The git revision is intentionally not compared: a
+    later commit with byte-identical source is the same code for
+    reproduction.  A critical software/numerical environment drift is
+    refused by default; ``allow_environment_drift`` permits a non-identical
+    replay and the override is written to the replay provenance artifact
+    instead of being silently ignored.
+
+    Returns ``(settings, manifest, drift, manifest_sha256)``.
+    """
+    path = pathlib.Path(path)
+    try:
+        raw = path.read_bytes()
+        manifest = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        raise ReplayManifestError(
+            f"cannot read manifest {path}: {type(exc).__name__}: {exc}"
+        ) from exc
+    if not isinstance(manifest, Mapping):
+        raise ReplayManifestError(f"manifest {path} is not a JSON object")
+    experiment = manifest.get("experiment")
+    if experiment not in _REPLAY_EXPERIMENTS:
+        raise ReplayManifestError(
+            f"manifest {path} names experiment {experiment!r}; expected one "
+            f"of {list(_REPLAY_EXPERIMENTS)}")
+    settings = _replay_settings(manifest.get("config"))
+    # A manifest is evidence, not just a config file: its own setup id must
+    # match the fields it carries.  Without this check a corrupted `steps`
+    # or `lr` would replay a different recipe while the rest of the
+    # provenance still looked valid.
+    recorded_setup = manifest.get("setup_sha256")
+    if not _is_short_sha(recorded_setup):
+        raise ReplayManifestError("manifest has no valid setup_sha256")
+    if _setup_fingerprint(manifest) != recorded_setup:
+        raise ReplayManifestError(
+            "manifest setup_sha256 does not match its own code/config/data "
+            "fields; the manifest was edited or corrupted")
+    # Use the same builder that stamped the original run.  Comparing its
+    # components catches a changed config, data geometry, source tree or
+    # hypothesis registry in one place, and caches the context that the
+    # caller will reuse.
+    context = _run_context(settings)
+    recorded_config = json.dumps(
+        manifest["config"], ensure_ascii=False, sort_keys=True, default=str)
+    current_config = json.dumps(
+        context["config"], ensure_ascii=False, sort_keys=True, default=str)
+    if recorded_config != current_config:
+        raise ReplayManifestError(
+            "manifest config does not round-trip to this checkout's Settings; "
+            "the frozen recipe cannot be reconstructed exactly")
+    recorded_source = manifest.get("source_tree_sha256")
+    if not _is_short_sha(recorded_source):
+        raise ReplayManifestError("manifest has no valid source_tree_sha256")
+    if recorded_source != context["source_tree_sha256"]:
+        raise ReplayManifestError(
+            f"manifest was produced by source {recorded_source}, current "
+            f"source is {context['source_tree_sha256']}; replaying it would "
+            f"not reproduce the recorded code - check out the recorded "
+            f"revision or rebuild the manifest")
+    recorded_hypotheses = manifest.get("hypotheses_sha256")
+    if not _is_short_sha(recorded_hypotheses):
+        raise ReplayManifestError("manifest has no valid hypotheses_sha256")
+    if recorded_hypotheses != context["hypotheses_sha256"]:
+        raise ReplayManifestError(
+            f"manifest hypothesis registry {recorded_hypotheses} != current "
+            f"{context['hypotheses_sha256']}; the pre-registered decision "
+            f"rules changed")
+    recorded_fingerprints = manifest.get("data_fingerprints")
+    if not isinstance(recorded_fingerprints, Mapping):
+        raise ReplayManifestError(
+            "manifest has no data_fingerprints mapping")
+    if recorded_fingerprints != context["data_fingerprints"]:
+        raise ReplayManifestError(
+            "manifest data-stream fingerprints differ from this checkout's "
+            "streams; the replay would train on different data")
+    environment = manifest.get("environment")
+    if not isinstance(environment, Mapping):
+        raise ReplayManifestError(
+            "manifest has no environment block; cannot certify the replay "
+            "environment")
+    drift = _environment_drift(environment, context["environment"])
+    if not drift["compatible"] and not allow_environment_drift:
+        fields = ", ".join(
+            str(item.get("field")) for item in drift["critical_differences"])
+        raise ReplayManifestError(
+            f"manifest environment is not compatible with this process "
+            f"(critical: {fields or drift.get('reason')}); pass "
+            f"--allow-environment-drift to run a non-identical replay")
+    return settings, dict(manifest), drift, hashlib.sha256(raw).hexdigest()
 
 
 def _load_baseline_verdict(out_dir: pathlib.Path):
