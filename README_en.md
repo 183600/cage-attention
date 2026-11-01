@@ -145,7 +145,13 @@ exist only for the single-factor E1/E2 contrasts:
   the `log T` entropy growth and should degrade more slowly. Accuracy at each
   length plus entropy, max-prob and gate drift are reported, together with a
   position-embedding extrapolation control (`pos_extrapolation_control`, see
-  Methodological boundaries below).
+  Methodological boundaries below) and a fixed-weight calibration dose/sign
+  intervention (`calib_term_dose_response`): the learned coefficients are
+  scaled by `0 / 0.5 / 1 / 2 / -1`, giving paired accuracy responses for
+  removal, half dose, over-correction and sign reversal. This companion
+  separates "the signed calibration correction does the work" from "any gate
+  perturbation hurts equally"; it is exploratory and outside the
+  pre-registered FDR family.
 - **E3 normalization/activation co-design**: `query` / `calib` × `pre` /
   `post` / `mix` / `seednorm` × LayerScale (none / `1e-2`). Per-layer residual
   norms and `gate_depth_ratio` (mean deep gate / mean shallow gate), plus the

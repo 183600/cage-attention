@@ -132,7 +132,11 @@ print(hist[-1], accuracy, sorted(stats))
 - **E2 长度泛化**：固定训练长度，在按 2 倍间隔扩展的长度扫描上评估；校准门控
   显式修正 `log T` 引起的熵增长，因此预期退化更慢。报告各长度准确率以及
   熵、max-prob、门控值的漂移；附带位置编码外推控制
-  （`pos_extrapolation_control`，见下方方法学边界）。
+  （`pos_extrapolation_control`，见下方方法学边界）。另报固定权重的
+  校准项剂量/反向干预（`calib_term_dose_response`）：将学得系数缩放为
+  `0 / 0.5 / 1 / 2 / -1`，检查去除、半剂量、过剂量与反向校正的配对准确率
+  响应；该伴随用于区分“有符号的标定机制在起作用”与“任何门控扰动都会
+  同样伤害”，属探索性证据，不进入预注册 FDR 家族。
 - **E3 归一化/激活协同**：`query` / `calib` × `pre` / `post` / `mix` /
   `seednorm` × LayerScale（无 / `1e-2`）。报告逐层残差范数与
   `gate_depth_ratio`（深层门控均值 / 浅层门控均值）；另报跨归一化方案

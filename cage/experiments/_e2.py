@@ -428,6 +428,236 @@ def _e2_term_knockout_companion(by_variant: dict, lengths: list) -> dict:
     return payload
 
 
+def _dose_response_flags(by_scale: dict, baseline_accuracy) -> dict:
+    """Describe the shape of one within-model calibration response curve.
+
+    All comparisons are on the mean curve and purely descriptive: the
+    companion exists to expose a *graded / direction-specific* pattern, not
+    to add another significance test to the ablation family.
+    """
+    def _mean_delta(scale):
+        row = by_scale.get(_calib_scale_key(scale)) or {}
+        value = (row.get("delta") or {}).get("mean")
+        return float(value) if _finite(value) else float("nan")
+
+    def _mean_accuracy(scale):
+        if scale == 1.0:
+            value = baseline_accuracy
+        else:
+            row = by_scale.get(_calib_scale_key(scale)) or {}
+            value = (row.get("accuracy") or {}).get("mean")
+        return float(value) if _finite(value) else float("nan")
+
+    resolved = sorted(
+        {float(row.get("scale")) for row in by_scale.values()
+         if isinstance(row, Mapping) and _finite(row.get("scale"))})
+    accuracies = {scale: _mean_accuracy(scale) for scale in resolved}
+    trained = _mean_accuracy(1.0)
+    others = [value for scale, value in accuracies.items()
+              if scale != 1.0 and _finite(value)]
+    knockout = _mean_delta(0.0)
+    reversed_ = _mean_delta(-1.0)
+    half = _mean_delta(0.5)
+    double = _mean_delta(2.0)
+    acc_zero = _mean_accuracy(0.0)
+    acc_half = _mean_accuracy(0.5)
+    acc_double = _mean_accuracy(2.0)
+    flags = {
+        "knockout_hurts": bool(_finite(knockout) and knockout < 0.0),
+        "reversal_worse_than_knockout": bool(
+            _finite(knockout) and _finite(reversed_)
+            and reversed_ < knockout),
+        "trained_scale_is_peak": bool(
+            _finite(trained) and all(trained >= value for value in others)),
+        "half_dose_between": bool(
+            _finite(acc_zero) and _finite(acc_half) and _finite(trained)
+            and ((acc_zero < acc_half < trained)
+                 or (acc_zero > acc_half > trained))),
+        "double_dose_hurts": bool(
+            _finite(acc_double) and _finite(trained)
+            and acc_double < trained),
+        "half_delta": half,
+        "double_delta": double,
+    }
+    flags["direction_specific"] = bool(
+        flags["knockout_hurts"] and flags["reversal_worse_than_knockout"])
+    flags["graded"] = bool(
+        flags["direction_specific"] and flags["trained_scale_is_peak"]
+        and (flags["half_dose_between"] or flags["double_dose_hurts"]))
+    return flags
+
+
+def _e2_term_dose_response_companion(by_variant: dict, lengths: list) -> dict:
+    """Aggregate the within-model calibration dose-response intervention.
+
+    The retrained term ablations answer whether an arm trained without a
+    component performs worse; the on/off knockout answers whether the learned
+    coefficient is load-bearing at fixed weights.  Neither can distinguish a
+    signed correction from a generic gate perturbation.  This companion reads
+    the graded intervention (trained coefficient x {0, 0.5, 1, 2, -1}) and
+    reports each scale's paired accuracy change against the trained gate,
+    with a bootstrap CI over training seeds.  It is exploratory and never
+    enters the H2 FDR family.
+    """
+    lengths = _positive_lengths(lengths)
+    if not lengths:
+        return {"applicable": False, "reason": "empty length list"}
+    selected = []
+    for length in (lengths[0], lengths[-1]):
+        if length not in selected:
+            selected.append(length)
+
+    def _entry(run, length):
+        payload = run.get("calib_term_dose_response")
+        if not isinstance(payload, Mapping):
+            return None
+        entry = _length_mapping(payload.get("by_length"), length)
+        return entry if isinstance(entry, Mapping) else None
+
+    def _scale_row(entry, term, scale):
+        term_row = (entry.get("by_term") or {}).get(term) or {}
+        by_scale = term_row.get("by_scale") or {}
+        row = by_scale.get(_calib_scale_key(scale))
+        if isinstance(row, Mapping):
+            return row
+        # Records are JSON provenance; match on the numeric field if the
+        # string formatting ever changes between writers.
+        for candidate in by_scale.values():
+            if (isinstance(candidate, Mapping)
+                    and _finite(candidate.get("scale"))
+                    and float(candidate["scale"]) == float(scale)):
+                return candidate
+        return None
+
+    arms = {}
+    for label in ("calib", _CALIB_RAW_ENT_CELL):
+        rows = _mapping_runs(by_variant.get(label, []))
+        by_length = {}
+        for length in selected:
+            entries = []
+            for run in rows:
+                entry = _entry(run, length)
+                if entry and entry.get("applicable"):
+                    entries.append((run, entry))
+            if not entries:
+                continue
+            baseline = _mean_std([
+                entry.get("baseline") for _, entry in entries])
+            by_term = {}
+            for term in ("length", "concentration", "both"):
+                by_scale = {}
+                for scale in _CALIB_DOSE_SCALES:
+                    records = []
+                    levels = []
+                    for run, entry in entries:
+                        row = _scale_row(entry, term, scale)
+                        seed = _paired_seed(run)
+                        if row is None or seed is None:
+                            continue
+                        if _finite(row.get("delta")):
+                            records.append({
+                                "seed": seed,
+                                "delta": float(row["delta"]),
+                            })
+                        if _finite(row.get("accuracy")):
+                            levels.append(float(row["accuracy"]))
+                    if not records:
+                        continue
+                    ci = _one_sample_contrast(records, "delta")
+                    by_scale[_calib_scale_key(scale)] = {
+                        "scale": float(scale),
+                        "accuracy": _mean_std(levels),
+                        "delta": {
+                            key: ci.get(key) for key in
+                            ("mean", "sd", "lo", "hi", "p_value", "n",
+                             "mde80", "sign_consistency", "seeds_used",
+                             "seeds_dropped", "sign_flip_p_greater",
+                             "sign_flip_p_less", "sign_flip_p_two_sided",
+                             "sign_flip_min_p_two_sided")
+                        },
+                        "n": len(records),
+                    }
+                if by_scale:
+                    by_term[term] = {
+                        "by_scale": by_scale,
+                        **_dose_response_flags(
+                            by_scale,
+                            (baseline or {}).get("mean")),
+                    }
+            if by_term:
+                by_length[str(length)] = {
+                    "n": len(entries),
+                    "baseline": baseline,
+                    "by_term": by_term,
+                }
+        if by_length:
+            arms[label] = {"by_length": by_length}
+
+    payload = {
+        "applicable": bool(arms),
+        "lengths": [int(length) for length in selected],
+        "scales": [float(scale) for scale in _CALIB_DOSE_SCALES],
+        "arms": arms,
+        "note": ("exploratory within-model graded coefficient intervention "
+                 "(1=trained, 0=knockout, -1=sign reversal, 0.5/2=half/double "
+                 "dose), paired over training seeds on the same sealed "
+                 "stream; the pre-registered H2 decisions remain the "
+                 "retrained-arm contrasts"),
+    }
+    if not arms:
+        print("\n[e2] within-model calibration-term dose response: n/a (no "
+              "full-calibration run carried the probe)")
+        return payload
+
+    print("\n[e2] within-model calibration-term dose response (coefficient "
+          "x scale; 1=trained gate, 0=knockout, -1=sign reversal, "
+          "0.5/2=half/double dose; paired delta vs trained scale with 95% "
+          "CI over training seeds).  Direction-specific means removing the "
+          "term hurts AND reversing it hurts more; graded additionally "
+          "requires the trained scale to be the curve's peak with a "
+          "half/double-dose penalty.  Exploratory, outside the FDR family:")
+
+    def _delta_text(entry, term, scale):
+        row = ((entry.get("by_term") or {}).get(term) or {}).get(
+            "by_scale", {}).get(_calib_scale_key(scale)) or {}
+        ci = row.get("delta") or {}
+        mean, lo, hi = ci.get("mean"), ci.get("lo"), ci.get("hi")
+        if not all(_finite(value) for value in (mean, lo, hi)):
+            return "n/a"
+        return f"{mean:+.3f}[{lo:+.3f},{hi:+.3f}]"
+
+    print(f"{'arm':>16} {'L':>5} {'term':>14} {'acc@1':>15} "
+          f"{'delta0':>23} {'delta-1':>23} {'delta0.5':>23} "
+          f"{'delta2':>23} {'pattern':>17}")
+    for label, arm in arms.items():
+        for length in selected:
+            entry = (arm.get("by_length") or {}).get(str(length))
+            if not entry:
+                continue
+            for term in ("length", "concentration", "both"):
+                term_row = (entry.get("by_term") or {}).get(term)
+                if not term_row:
+                    continue
+                base = entry.get("baseline") or {}
+                base_s = (f"{base['mean']:.3f}±{base['std']:.3f}"
+                          if _finite(base.get("mean")) else "n/a")
+                if term_row.get("graded"):
+                    pattern = "directional+graded"
+                elif term_row.get("direction_specific"):
+                    pattern = "direction-specific"
+                elif term_row.get("knockout_hurts"):
+                    pattern = "load-bearing"
+                else:
+                    pattern = "no-dose-signal"
+                print(f"{label:>16} {length:>5} {term:>14} {base_s:>15} "
+                      f"{_delta_text(entry, term, 0.0):>23} "
+                      f"{_delta_text(entry, term, -1.0):>23} "
+                      f"{_delta_text(entry, term, 0.5):>23} "
+                      f"{_delta_text(entry, term, 2.0):>23} "
+                      f"{pattern:>17}")
+    return payload
+
+
 def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                            reference_lr: float, reference_runs: dict,
                            lengths: list) -> dict:

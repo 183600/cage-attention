@@ -280,6 +280,8 @@ from ..train import (
     _ERROR_TYPES,
     _stats_correct_vector,
     _stats_layer_matrix,
+    _calib_scale_key,
+    calib_term_dose_response_eval,
     calib_term_knockout_eval,
     decode_correct_mask,
     collect_stats,

@@ -1532,6 +1532,68 @@ def _stamp_calib_term_knockout(rec, model, settings, lengths, eval_seed):
     return rec["calib_term_knockout"]
 
 
+def _stamp_calib_term_dose_response(rec, model, settings, lengths, eval_seed):
+    """Add the within-model calibration-term dose-response companion.
+
+    The on/off knockout answers "is the learned coefficient load-bearing?";
+    it cannot say whether the *signed, graded* correction matters or whether
+    any perturbation of the gate would cost the same accuracy.  This stamp
+    scales the trained coefficient(s) by ``_CALIB_DOSE_SCALES`` on the same
+    sealed stream and records the response curve at the training and longest
+    sweep lengths.  It is an exploratory ablation companion and never enters
+    the pre-registered H2 decision family.
+    """
+    if not isinstance(rec, Mapping):
+        return None
+    lengths = list(dict.fromkeys(_positive_lengths(lengths)))
+    if not lengths:
+        rec["calib_term_dose_response"] = {
+            "applicable": False,
+            "reason": "empty length list",
+            "lengths": [],
+        }
+        return None
+    terms = ("length", "concentration", "both")
+    by_length = {
+        str(length): calib_term_dose_response_eval(
+            model, length, settings.vocab, settings.device,
+            batch=settings.eval_batch, batches=settings.eval_batches,
+            seed=eval_seed, terms=terms, scales=_CALIB_DOSE_SCALES)
+        for length in lengths
+    }
+    base_length = lengths[0]
+    longest = lengths[-1]
+    base_entry = _length_mapping(by_length, base_length) or {}
+    baseline = base_entry.get("baseline")
+    raw_base = _length_entry(rec.get("accuracy_by_length"), base_length)
+    matches = bool(
+        _finite(raw_base) and _finite(baseline)
+        and abs(float(baseline) - float(raw_base)) <= 1e-12)
+    if _finite(raw_base) and not matches:
+        print(f"[e2] WARNING: calibration dose-response baseline "
+              f"{baseline!r} does not reproduce the raw base accuracy "
+              f"{raw_base!r}; the within-model probe is not on the same "
+              f"stream")
+    payload = {
+        "applicable": any(entry.get("applicable")
+                          for entry in by_length.values()),
+        "lengths": [int(length) for length in lengths],
+        "base_length": int(base_length),
+        "longest": int(longest),
+        "by_length": by_length,
+        "base_matches_raw": matches,
+        "terms": list(terms),
+        "scales": [float(scale) for scale in _CALIB_DOSE_SCALES],
+        "note": ("within-model graded coefficient intervention (1=trained, "
+                 "0=knockout, -1=sign reversal, 0.5/2=half/double dose) on "
+                 "the same sealed eval stream; exploratory complement to the "
+                 "retrained term ablations, not a pre-registered H2 "
+                 "decision row"),
+    }
+    rec["calib_term_dose_response"] = payload
+    return payload
+
+
 def _materialize_runs(runs):
     """Materialize a run container; a non-iterable one has no records."""
     try:
@@ -1645,6 +1707,12 @@ _CALIB_RAW_ENT_CELL = "calib_raw_ent"
 # because, unlike the term ablations, the resolved term flags are identical
 # to ``full``; only ``calib_pos_norm`` identifies it.
 _CALIB_POS_NORM_CELL = "calib_pos_norm"
+
+# Coefficient multipliers used by the within-model dose-response companion.
+# 1 is the trained gate (the reference), 0 the ordinary knockout, 0.5/2 a
+# graded dose, and -1 the sign-reversed (anti-correction) control.  Kept
+# beside the ablation cells so the stamp and the aggregator cannot drift.
+_CALIB_DOSE_SCALES = (0.0, 0.5, 2.0, -1.0)
 
 # Factor-vector expansion of a declared ``calib_variant`` cell label.  New
 # records carry the resolved ``model_cfg`` (the ground truth), but pooled or

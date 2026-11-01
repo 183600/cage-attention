@@ -241,9 +241,14 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         rec["concentration_signal"] = coefficients.get(
             "concentration_signal")
         if label in ("calib", _CALIB_RAW_ENT_CELL):
+            probe_lengths = [settings.n_pairs, lengths[-1]]
             _stamp_calib_term_knockout(
-                rec, model, settings, [settings.n_pairs, lengths[-1]],
-                eval_seed)
+                rec, model, settings, probe_lengths, eval_seed)
+            # Graded / sign-reversed counterpart to the on-off knockout:
+            # does the *direction* and *dose* of the learned correction
+            # matter, or would any perturbation of the gate cost the same?
+            _stamp_calib_term_dose_response(
+                rec, model, settings, probe_lengths, eval_seed)
         # Top-level scalar coefficients: H2f is a one-sample contrast
         # across training seeds, so the per-run values have to be
         # readable by ``_one_sample_contrast`` (the nested per-layer
@@ -1031,6 +1036,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     difficulty_companions = _e2_difficulty_companions(by_variant, lengths)
     term_knockout = _e2_term_knockout_companion(by_variant, lengths)
     _write_json(out_dir / "e2_term_knockout.json", term_knockout)
+    dose_response = _e2_term_dose_response_companion(by_variant, lengths)
+    _write_json(out_dir / "e2_term_dose_response.json", dose_response)
     per_variant_tuning = _e2_per_variant_tuning(
         settings, out_dir, lr, by_variant, lengths)
     length_efficiency = _length_efficiency_companion(
@@ -1084,6 +1091,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     e2_summary["_class_frequency_companions"] = endpoint_companions
     e2_summary["_difficulty_companions"] = difficulty_companions
     e2_summary["_term_knockout"] = term_knockout
+    e2_summary["_term_dose_response"] = dose_response
     e2_summary["_difficulty_standardized"] = {
         label: {
             str(L): _mean_std([

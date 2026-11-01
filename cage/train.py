@@ -768,3 +768,152 @@ def calib_term_knockout_eval(model, n_pairs, vocab, device, batch=256,
                  "stream; exploratory complement to the retrained E1/E2 term "
                  "ablations"),
     }
+
+
+def _calib_dose_scales(scales):
+    """Validate and de-duplicate the coefficient multipliers of the probe."""
+    if isinstance(scales, (str, bytes)) or isinstance(scales, Mapping):
+        raise ValueError(
+            f"scales must be an iterable of finite numbers, got {scales!r}")
+    try:
+        iterator = iter(scales)
+    except TypeError as exc:
+        raise ValueError(
+            f"scales must be an iterable of finite numbers, got {scales!r}"
+        ) from exc
+    validated = []
+    for raw in iterator:
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            raise ValueError(
+                f"calibration scale must be a finite number, got {raw!r}")
+        value = float(raw)
+        if not math.isfinite(value):
+            raise ValueError(
+                f"calibration scale must be finite, got {raw!r}")
+        if value == 0.0:
+            value = 0.0
+        if value not in validated:
+            validated.append(value)
+    return tuple(validated)
+
+
+def _calib_scale_key(scale):
+    """JSON-safe stable key for a coefficient multiplier."""
+    return f"{float(scale):.12g}"
+
+
+def calib_term_dose_response_eval(model, n_pairs, vocab, device, batch=256,
+                                  batches=4, seed=VAL_SEED,
+                                  terms=("length", "concentration", "both"),
+                                  scales=(0.0, 0.5, 2.0, -1.0)):
+    """Accuracy under graded scaling / sign reversal of calibration terms.
+
+    The ordinary ablation compares a retrained arm with a term *removed*.
+    That on/off contrast cannot distinguish a load-bearing correction from
+    a term whose only role is to perturb the gate: zeroing a coefficient
+    changes one point of the response curve, not its shape or direction.
+    This within-model intervention holds the trained weights fixed and
+    multiplies the chosen coefficient(s) by each requested scale:
+
+    * ``0`` is the knockout already reported by
+      :func:`calib_term_knockout_eval`;
+    * ``1`` is the trained gate (the reference, evaluated once);
+    * ``0.5`` / ``2`` test a graded dose-response (does performance move
+      monotonically with the learned correction, or is any perturbation
+      equally harmful?);
+    * ``-1`` reverses the correction's direction - the specificity control
+      for "the *signed* correction does the work", complementing the
+      shuffled-entropy placebo (same information, wrong row) and the
+      removal contrast (no information).
+
+    Baseline and every intervention are scored on the same sealed
+    evaluation stream, and all parameters are restored exactly, including
+    on error.  The probe is exploratory: it never changes the
+    pre-registered E1/E2 decisions.  Returns ``applicable=False`` for
+    models without a calibrated gate.
+
+    ``terms`` accepts ``"length"`` (``calib_a``), ``"concentration"``
+    (``calib_c``) and ``"both"``.  ``scales`` must be finite numbers; a
+    scale of exactly ``1`` reuses the baseline instead of re-scoring.
+    """
+    if isinstance(terms, (str, bytes)) or isinstance(terms, Mapping):
+        raise ValueError(
+            f"terms must be an iterable of term names, got {terms!r}")
+    try:
+        iterator = iter(terms)
+    except TypeError as exc:
+        raise ValueError(
+            f"terms must be an iterable of term names, got {terms!r}") from exc
+    requested = []
+    for raw in iterator:
+        if raw not in ("length", "concentration", "both"):
+            raise ValueError(
+                f"unknown calibration term {raw!r}; expected one of "
+                f"'length', 'concentration', 'both'")
+        if raw not in requested:
+            requested.append(raw)
+    scales = _calib_dose_scales(scales)
+    modules = []
+    for block in getattr(model, "blocks", ()):
+        attn = getattr(block, "attn", None)
+        if getattr(attn, "gate_kind", None) == "calib":
+            modules.append(attn)
+    if not modules:
+        return {
+            "applicable": False,
+            "reason": "model has no calibrated gate",
+            "terms": requested,
+            "scales": [float(scale) for scale in scales],
+            "n_pairs": int(n_pairs),
+            "seed": seed,
+        }
+    baseline = eval_accuracy(model, n_pairs, vocab, device, batch=batch,
+                             batches=batches, seed=seed)
+    by_term = {}
+    for term in requested:
+        parameters = _calib_term_tensors(model, term)
+        if not parameters:
+            by_term[term] = {
+                "applicable": False,
+                "reason": f"model has no {term} calibration coefficient",
+            }
+            continue
+        by_scale = {}
+        with torch.no_grad():
+            saved = [parameter.detach().clone() for parameter in parameters]
+            try:
+                for scale in scales:
+                    if scale == 1.0:
+                        accuracy = baseline
+                    else:
+                        for parameter, value in zip(parameters, saved):
+                            parameter.copy_(value).mul_(scale)
+                        accuracy = eval_accuracy(
+                            model, n_pairs, vocab, device, batch=batch,
+                            batches=batches, seed=seed)
+                    by_scale[_calib_scale_key(scale)] = {
+                        "scale": float(scale),
+                        "accuracy": accuracy,
+                        "delta": accuracy - baseline,
+                    }
+            finally:
+                for parameter, value in zip(parameters, saved):
+                    parameter.copy_(value)
+        by_term[term] = {
+            "applicable": True,
+            "n_parameters": len(parameters),
+            "by_scale": by_scale,
+        }
+    return {
+        "applicable": True,
+        "baseline": baseline,
+        "by_term": by_term,
+        "terms": requested,
+        "scales": [float(scale) for scale in scales],
+        "n_pairs": int(n_pairs),
+        "seed": seed,
+        "note": ("within-model graded coefficient intervention on the same "
+                 "sealed eval stream; exploratory companion to the retrained "
+                 "term ablations and the on/off knockout, never a "
+                 "pre-registered decision row"),
+    }
