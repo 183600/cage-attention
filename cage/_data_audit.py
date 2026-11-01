@@ -886,6 +886,8 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
             ref_sim.sum(1, keepdim=True) + _AUDIT_SMOOTH * k)
         expected_sim = h_sim.sum(1, keepdim=True) * probs_sim
         chi2_sim = (((h_sim - expected_sim) ** 2) / expected_sim).sum(1)
+        chi2_sim = torch.where(h_sim.sum(1) == 0,
+                               torch.zeros_like(chi2_sim), chi2_sim)
         p_value = float((1.0 + (chi2_sim >= chi2).to(torch.float64).sum())
                         / (n_sim + 1.0))
     except (TypeError, RuntimeError, ValueError, OverflowError):

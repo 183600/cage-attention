@@ -208,6 +208,13 @@ class AuditCountInputTest(unittest.TestCase):
                 self.assertTrue(p != p)
                 self.assertTrue(chi2 != chi2)
 
+    def test_zero_heldout_simulation_counts_do_not_shrink_p_value(self):
+        from cage.data import _distribution_shift_p
+
+        p_value, chi2 = _distribution_shift_p([1], [5], n_sim=1000, seed=0)
+        self.assertEqual(chi2, 0.0)
+        self.assertEqual(p_value, 1.0)
+
     def test_malformed_shift_count_containers_raise_value_error(self):
         from cage.data import _distribution_shift_p
 
