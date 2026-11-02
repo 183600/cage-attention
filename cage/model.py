@@ -507,7 +507,7 @@ class _RowEntropy(torch.autograd.Function):
         torch.clamp_min(p, ctx.eps, out=d)
         d.log_()
         d.add_(1.0)
-        torch.where(p > ctx.eps, d, _zero_scalar(p.device, p.dtype), out=d)
+        torch.where(p > ctx.eps, d, -math.log(ctx.eps) * torch.ones_like(p).detach(), out=d)
         d.mul_(grad_out.unsqueeze(-1))
         d.neg_()
         return d, None
