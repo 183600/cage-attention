@@ -181,6 +181,8 @@ __all__ = [
     "hedges_g_paired",
     "paired_effect_size_ci",
     "mcnemar_test",
+    "decision_rule_calibration",
+    "decision_rule_calibration_ladder",
 ]
 
 _FLOAT_MAX = sys.float_info.max
@@ -198,6 +200,7 @@ _FRAGMENTS = (
     "_metrics_ranking.py",
     "_metrics_inference.py",
     "_metrics_robustness.py",
+    "_metrics_calibration.py",
 )
 load_fragments(globals(), _FRAGMENTS)
 del _FRAGMENTS
@@ -851,6 +854,38 @@ def _self_test() -> int:
           not standardized_proportion([1, 1], [2, 2], [-1, 1])["valid"]
           and not standardized_proportion([1, 1], [2, 2], [0, 0])["valid"]
           and not standardized_proportion([1, 1], [2, 2], [1])["valid"])
+
+    # Decision-rule calibration: the pre-registered chain (bootstrap
+    # p-value -> BH at q -> direction -> SESOI -> seed floor) has to be
+    # measured, not assumed.  At five seeds the percentile bootstrap
+    # p-value is not nominal under the null, while the exact sign-flip
+    # companion is, and the calibration must see both.
+    cal = decision_rule_calibration(
+        5, family_sizes=(1, 16), sd=1.0, sesoi=0.5, effect=0.5, q=0.05,
+        direction="greater", n_replicates=200, n_boot=1000, n_random=1000,
+        correlation=0.5, seed=0, min_seeds=3)
+    check("calibration_valid", cal["valid"])
+    boot_null = cal["rules"]["bootstrap"]["null"]
+    flip_null = cal["rules"]["sign_flip"]["null"]
+    check("calibration_bootstrap_null_inflated",
+          boot_null["per_row_rejection_rate"] > 0.05)
+    check("calibration_sign_flip_null_conservative",
+          flip_null["per_row_rejection_rate"] <= 0.05)
+    check("calibration_family_fdr_reported",
+          boot_null["families"]["16"]["claim_fdr"] >= 0.0
+          and boot_null["families"]["16"]["family_size"] == 16)
+    check("calibration_seed_floor_blocks_claim",
+          decision_rule_calibration(
+              2, family_sizes=(1,), sd=1.0, sesoi=0.5, effect=0.5, q=0.05,
+              direction="greater", n_replicates=40, n_boot=200, n_random=200,
+              seed=0, min_seeds=3)["rules"]["bootstrap"]["null"][
+                  "per_row_claim_rate"] == 0.0)
+    check("calibration_malformed_no_claim",
+          not decision_rule_calibration(0)["valid"]
+          and not decision_rule_calibration(5, sd=0.0)["valid"]
+          and not decision_rule_calibration(5, q=1.5)["valid"]
+          and not decision_rule_calibration(5, correlation=2.0)["valid"]
+          and not decision_rule_calibration(5, rules=("nope",))["valid"])
 
     for label, kwargs in (
             ("alpha", {"sd": 1.0, "effect": 0.5, "alpha": 1.5}),
