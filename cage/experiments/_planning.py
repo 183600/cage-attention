@@ -1067,35 +1067,77 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
             power_single = _power_at_effect(
                 mode, true_effect, sd_single, n, alpha, bound=bound)
             powered = None if required is None else bool(required <= n)
-            attrition_required = None
-            attrition_power = None
-            attrition_powered = None
-            if attrition_known and expected_usable_floor is not None:
+            # BCa interval construction sensitivity: if the minimum-effect
+            # conclusion (beyond SESOI) flips when using the bias-corrected
+            # accelerated interval instead of the percentile interval, the
+            # effective power is lower because the claim is not robust to
+            # the interval construction choice.
+            bca_agrees = row.get("minimum_effect_bca_agrees")
+            bca_disagrees = row.get("minimum_effect_bca_disagrees")
+            row["minimum_effect_bca_agrees"] = bca_agrees
+            row["minimum_effect_bca_disagrees"] = bca_disagrees
+            if bca_disagrees:
+                # When BCa disagrees, the SESOI claim is interval-sensitive;
+                # reduce effective power by flagging and inflating the required
+                # seeds so the designer sees the robustness cost.
+                powered = None if required is None else bool(
+                    required <= n and bca_agrees is not False)
+                row["powered"] = powered
+                row["bca_sensitivity_flag"] = True
+                row["bca_agrees"] = bool(bca_agrees) if _finite(
+                    bca_agrees) else None
+                row["bca_disagrees"] = bool(bca_disagrees) if _finite(
+                    bca_disagrees) else None
+                # Inflated required seeds to retain BCa-supported conclusion
                 if required is not None and retention > 0.0:
                     try:
-                        attrition_required = int(
+                        bca_required = int(
                             math.ceil(required / retention))
                     except (OverflowError, ValueError):
-                        attrition_required = None
-                attrition_power = _power_at_effect(
-                    mode, true_effect, sd, expected_usable_floor, alpha,
-                    bound=bound)
-                attrition_powered = (
-                    None if required is None
-                    else bool(expected_usable_floor >= required))
-            row.update({
-                "required_seeds": required,
-                "required_seeds_single_arm": required_single,
-                "power_at_planned": power_at,
-                "power_at_planned_single_arm": power_single,
-                "powered": powered,
-                "status": ("powered" if powered
-                           else "underpowered" if powered is False
-                           else "unpowerable"),
-                "attrition_adjusted_required_seeds": attrition_required,
-                "attrition_adjusted_power_at_planned": attrition_power,
-                "attrition_adjusted_powered": attrition_powered,
-            })
+                        bca_required = None
+                else:
+                    bca_required = None
+                row["bca_adjusted_required_seeds"] = bca_required
+                row["bca_adjusted_power_at_planned"] = None
+                row["bca_adjusted_powered"] = None
+            else:
+                row["bca_sensitivity_flag"] = False
+                row["bca_agrees"] = bool(bca_agrees) if _finite(
+                    bca_agrees) else None
+                row["bca_disagrees"] = bool(bca_disagrees) if _finite(
+                    bca_disagrees) else None
+                # Standard attrition adjustment when BCa is agreeable
+                attrition_required = None
+                attrition_power = None
+                attrition_powered = None
+                if attrition_known and expected_usable_floor is not None:
+                    if required is not None and retention > 0.0:
+                        try:
+                            attrition_required = int(
+                                math.ceil(required / retention))
+                        except (OverflowError, ValueError):
+                            attrition_required = None
+                        attrition_power = _power_at_effect(
+                            mode, true_effect, sd, expected_usable_floor,
+                            alpha, bound=bound)
+                        attrition_powered = (
+                            None if required is None
+                            else bool(expected_usable_floor >= required))
+                    else:
+                        attrition_power = None
+                row.update({
+                    "required_seeds": required,
+                    "required_seeds_single_arm": required_single,
+                    "power_at_planned": power_at,
+                    "power_at_planned_single_arm": power_single,
+                    "powered": powered,
+                    "status": ("powered" if powered
+                               else "underpowered" if powered is False
+                               else "unpowerable"),
+                    "attrition_adjusted_required_seeds": attrition_required,
+                    "attrition_adjusted_power_at_planned": attrition_power,
+                    "attrition_adjusted_powered": attrition_powered,
+                })
         rows.append(row)
     accuracy_rows = [r for r in rows if "accuracy" in r["metric"]
                      and r["status"] in ("powered", "underpowered",

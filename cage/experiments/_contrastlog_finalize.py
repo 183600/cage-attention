@@ -259,7 +259,10 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
     # (that rule is pre-registered); a supported row that fails it is
     # instead reported as "SESOI point-estimate only", so a claim is not
     # read as practically established when the data are also compatible
-    # with an effect below the practical floor.
+    # with an effect below the practical floor.  The BCa companion asks
+    # whether the same conclusion holds when the bias-corrected accelerated
+    # interval is used: if BCa disagrees, the SESOI claim is
+    # interval-construction-sensitive and should be reported as provisional.
     for row in self.rows:
         direction = row.get("direction")
         sesoi = row.get("sesoi")
@@ -281,6 +284,14 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
             row["minimum_effect_bca_agrees"] = met.get("bca_agrees")
             row["minimum_effect_established"] = bool(
                 met.get("beyond_sesoi"))
+        # BCa agreement flag: if the minimum-effect conclusion flips
+        # when using the BCa interval instead of the percentile interval,
+        # the SESOI conclusion is interval-construction-sensitive.
+        if row.get("minimum_effect_bca_agrees") is not None:
+            row["minimum_effect_bca_disagrees"] = (
+                row["minimum_effect_bca_agrees"] is False)
+        else:
+            row["minimum_effect_bca_disagrees"] = False
     met_adj = benjamini_hochberg(
         [r.get("minimum_effect_p") for r in self.rows], q=q)
     for row, met_a in zip(self.rows, met_adj):
@@ -347,7 +358,7 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
         if v.get("claim_level_supported")
         and not (v.get("conjunction_by_reject")
                  and v.get("conjunction_holm_reject"))]
-    # Parallel exact-test family: the same BH correction applied to the
+# Parallel exact-test family: the same BH correction applied to the
     # paired sign-flip p-values.  This is a companion, not a replacement
     # for the pre-registered bootstrap decision; it answers "could this
     # design have produced this p at all?".  It runs after every row has
@@ -355,7 +366,8 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
     # compared on the same eligible sample.
     exact_adj = benjamini_hochberg(
         [r.get("sign_flip_p") for r in self.rows], q=q)
-    for row, exact_a in zip(self.rows, exact_adj):
+    testable = [r for r in self.rows if math.isfinite(r["p_adj"])]
+    for row, exact_a in zip(testable, exact_adj):
         row["sign_flip_p_adj"] = exact_a["p_adj"]
         row["sign_flip_fdr_reject"] = bool(
             exact_a["reject"]
@@ -373,7 +385,21 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
         row["sign_flip_cannot_reject"] = bool(
             _finite(row.get("sign_flip_min_p"))
             and float(row["sign_flip_min_p"]) > q)
-    testable = [r for r in self.rows if math.isfinite(r["p_adj"])]
+        # Exact test resolution detail: the sign-flip minimum p-value
+        # (attainable floor under the exact permutation distribution) and
+        # its relationship to the bootstrap p-value.  When the bootstrap
+        # p-value is below the exact floor, the design's resolution is
+        # overstated - the bootstrap moment assumptions exceed what the
+        # seed count can actually support.
+        if _finite(row.get("sign_flip_min_p")):
+            row["sign_flip_exact_floor"] = float(row["sign_flip_min_p"])
+            row["sign_flip_bootstrap_floor_overstated"] = bool(
+                _finite(row.get("p_value"))
+                and _finite(row.get("sign_flip_min_p"))
+                and float(row["p_value"]) < float(row["sign_flip_min_p"]))
+        else:
+            row["sign_flip_exact_floor"] = None
+            row["sign_flip_bootstrap_floor_overstated"] = False
     # A contrast is unfalsifiable by the exact test when even its
     # smallest attainable p is above ``q``.  The per-row BH threshold is
     # at most ``q`` (a row with p <= q can reject when it is compared at
@@ -518,6 +544,14 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
         r for r in supporting
         if r.get("claim_eligible", True)
         and r.get("minimum_effect_established")]
+    met_agrees = [
+        r for r in supporting
+        if r.get("claim_eligible", True)
+        and r.get("minimum_effect_bca_agrees") is True]
+    met_disagrees = [
+        r for r in supporting
+        if r.get("claim_eligible", True)
+        and r.get("minimum_effect_bca_disagrees")]
     sesoi_point_only = [
         r for r in supporting if r.get("sesoi_point_estimate_only")]
     replication_uncertain = [
@@ -1205,8 +1239,10 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
                "n_seed_undefined": len(undefined_rows),
                "min_seeds_for_claim": self.min_seeds,
                "n_loo_flip_decision": len(loo_flips),
-               "n_bca_disagree": len(bca_differs),
-               "n_low_resolution": len(low_resolution),
+"n_bca_disagree": len(bca_differs),
+                "n_minimum_effect_bca_agrees": len(met_agrees),
+                "n_minimum_effect_bca_disagrees": len(met_disagrees),
+                "n_low_resolution": len(low_resolution),
                "n_stream_fold_fragile": len(stream_fold_fragile),
                "n_stream_crossed_stream_limited":
                    len(stream_crossed_limited),

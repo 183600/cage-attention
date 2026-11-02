@@ -809,6 +809,12 @@ def _hypothesis_evidence_synthesis(rows, hypotheses, q: float = 0.05,
             "n_descriptive_supporting": len(descriptive_support),
             "n_replication_uncertain": len(rep_uncertain),
             "n_practically_provisional": len(provisional),
+            "n_minimum_effect_bca_agrees": sum(
+                1 for r in confirmed + descriptive_support
+                if r.get("minimum_effect_bca_agrees") is True),
+            "n_minimum_effect_bca_disagrees": sum(
+                1 for r in confirmed + descriptive_support
+                if r.get("minimum_effect_bca_disagrees")),
             "refuted_contrasts": [_label(r) for r in refuted],
             "unconfirmed_contrasts": [_label(r) for r in inconclusive],
             "replication_uncertain_contrasts": [_label(r)
