@@ -89,7 +89,7 @@ def _make_adamw(params, lr):
     kw = dict(lr=lr, weight_decay=_ADAMW_WEIGHT_DECAY, betas=_ADAMW_BETAS)
     if any(p.is_cuda for p in params):
         try:
-            return torch.optim.AdamW(params, foreach=False, fused=True, **kw)
+            return torch.optim.AdamW(params, fused=True, **kw)
         except (TypeError, RuntimeError, ValueError):
             pass
     try:
