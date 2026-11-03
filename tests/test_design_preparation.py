@@ -749,6 +749,58 @@ class AttritionPilotTest(unittest.TestCase):
             payload["attrition_adjusted_accuracy_exact_unfalsifiable"],
             payload["attrition_adjusted_exact_unfalsifiable"])
 
+    def test_total_attrition_is_reported_as_a_verdict_not_as_missing(self):
+        # A measured 100% curve-invalid rate leaves no usable seed.  That
+        # is a verdict on the plan (it is not attrition-robust), not a
+        # missing measurement, so the attrition companions must still carry
+        # it instead of abstaining.
+        settings = Settings(seeds=(0, 1, 2, 3, 4, 5))
+        verdict = {"depth_ladder": {"by_depth": {
+            "2": {"accuracy_by_seed": {str(seed): 0.9 for seed in range(5)},
+                  "curve_invalid_seeds": [0, 1, 2, 3, 4, 5],
+                  "unmeasured": False},
+        }}}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(
+                    experiments, "_pilot_accuracy_sd",
+                    return_value=(0.00618, "test")), \
+                mock.patch.object(
+                    experiments, "_pilot_paired_accuracy_sd",
+                    return_value=(0.00874, "test", [])):
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _design_sensitivity_plan(
+                    settings, verdict, pathlib.Path(tmp), "e2")
+        self.assertEqual(payload["pilot_curve_invalid_rate"], 1.0)
+        self.assertEqual(payload["planned_usable_seeds"], 0)
+        row = next(r for r in payload["rows"]
+                   if r["metric"] == "accuracy_at_longest")
+        self.assertIs(row["attrition_adjusted_powered"], False)
+        self.assertIn("accuracy_at_longest",
+                      payload["attrition_adjusted_underpowered"])
+        self.assertIs(
+            payload["all_accuracy_claims_confirmable_after_attrition"],
+            False)
+
+    def test_every_plan_row_carries_the_decision_fields(self):
+        # The published rows are consumed by the report writers, which read
+        # these fields unconditionally: a row that reaches the summary
+        # without them is a crash, so every row must carry them whatever
+        # the optional companions report.
+        settings = Settings(seeds=(0, 1, 2))
+        verdict = {"depth_ladder": {"by_depth": {
+            "2": {"accuracy_by_seed": {"0": 0.90, "1": 0.92},
+                  "unmeasured": False},
+        }}}
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _design_sensitivity_plan(
+                    settings, verdict, pathlib.Path(tmp), "e2")
+        self.assertTrue(payload["rows"])
+        for row in payload["rows"]:
+            for field in ("status", "required_seeds", "power_at_planned",
+                          "powered", "attrition_adjusted_powered"):
+                self.assertIn(field, row)
+
     def test_accuracy_claim_scope_ignores_unfalsifiable_mechanism_row(self):
         registry = {
             "HACC": {"experiment": "e2",
