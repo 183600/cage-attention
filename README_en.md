@@ -20,6 +20,19 @@ The design boundary and experiment contract live in
 numerical path consistent across implementations and commits; code changes
 must respect them.
 
+## Table of Contents
+
+- [Layout](#layout)
+- [Environment and installation](#environment-and-installation)
+- [Quick start](#quick-start)
+- [Use from Python](#use-from-python)
+- [E1: the four strictly compared variants](#e1-the-four-strictly-compared-variants)
+- [Experiments](#experiments)
+- [Key metrics](#key-metrics)
+- [Methodological boundaries](#methodological-boundaries)
+- [Reproducibility and result checks](#reproducibility-and-result-checks)
+- [Design constraints](#design-constraints)
+
 ## Layout
 
 | Path | Purpose |

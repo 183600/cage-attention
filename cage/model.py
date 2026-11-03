@@ -584,25 +584,25 @@ def _release_scratch(*names: str) -> None:
         del _scratch_cache[key]
 
 
-def _balanced_step(n: int, cap: int) -> int:
-    """Balanced chunk size covering ``n`` units in ``ceil(n/cap)`` chunks.
+def _balanced_step(total_items: int, max_chunk: int) -> int:
+    """Balanced chunk size covering ``total_items`` units in ``ceil(total_items/max_chunk)`` chunks.
 
-    Every chunk stays within ``cap`` and all chunks have the same size
+    Every chunk stays within ``max_chunk`` and all chunks have the same size
     (within one unit), including the tail chunk.
     """
-    if n <= cap:
-        return n
-    n_chunks = -(-n // cap)
-    return max(1, min(cap, -(-n // n_chunks)))
+    if total_items <= max_chunk:
+        return total_items
+    n_chunks = -(-total_items // max_chunk)
+    return max(1, min(max_chunk, -(-total_items // n_chunks)))
 
 
-def _qkv_step(B: int, T: int, C: int) -> int:
+def _qkv_step(batch_size: int, seq_len: int, embed_dim: int) -> int:
     """Batch chunk size for the staged QKV projection."""
-    rows = max(1, _QKV_CHUNK_ELEMS // max(1, T * 3 * C))
+    rows = max(1, _QKV_CHUNK_ELEMS // max(1, seq_len * 3 * embed_dim))
     # A zero-row batch still has to yield a legal range() step; the loops
     # below then correctly execute zero chunks.  Returning 0 would abort an
     # otherwise valid empty forward pass.
-    return max(1, _balanced_step(B, rows))
+    return max(1, _balanced_step(batch_size, rows))
 
 
 def _linear_into(x: torch.Tensor, weight: torch.Tensor,
