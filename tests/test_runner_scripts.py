@@ -33,6 +33,31 @@ import capture_environment  # noqa: E402
 import run_experiment  # noqa: E402
 
 
+def _passing_verdict() -> dict:
+    """A verdict whose blocking baseline gates all passed."""
+    return {
+        "hb1_supported": True,
+        "hb2_state": "certified",
+        "hb3_supported": True,
+        "hb4_state": "supported",
+        "hb4_supported": True,
+        "hb4_violated": False,
+        "hb5_supported": True,
+        "hb6_supported": True,
+        "hb7_depth_required": False,
+    }
+
+
+def _runner(out_dir, **overrides):
+    args = argparse.Namespace(
+        out=str(out_dir), seeds=3, experiment="e1", deterministic=False,
+        fdr_q=0.05, quick=True, verify=False, skip_gate=True,
+        skip_tests=True, skip_baselines=False, replay=None)
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return run_experiment.ExperimentRunner(args)
+
+
 class CaptureEnvironmentTest(unittest.TestCase):
     """The environment record must describe this checkout."""
 
@@ -49,6 +74,32 @@ class CaptureEnvironmentTest(unittest.TestCase):
         for rel in ("pyproject.toml", "requirements-ci.txt", "README.md",
                     "docs/design_notes.md"):
             self.assertIn(rel, env["dependency_manifest"])
+
+class SourceTreeStampTest(unittest.TestCase):
+    """The provenance stamps must describe the repository, not the CWD."""
+
+    def test_source_tree_hash_ignores_the_working_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = _runner(pathlib.Path(tmp))
+            here = runner._get_source_tree_sha256()
+            cwd = os.getcwd()
+            try:
+                os.chdir(tmp)
+                elsewhere = runner._get_source_tree_sha256()
+            finally:
+                os.chdir(cwd)
+            self.assertEqual(here, elsewhere)
+            self.assertEqual(len(here), 16)
+
+    def test_git_sha_is_read_from_the_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = _runner(pathlib.Path(tmp))
+            sha = runner._get_git_sha()
+            self.assertNotEqual(sha, "unknown")
+            expected = subprocess.run(
+                ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(sha, expected)
 
 
 

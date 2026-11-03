@@ -30,6 +30,12 @@ from datetime import datetime
 from typing import Any
 
 
+# The repository this runner belongs to.  Provenance stamps (git sha, source
+# tree hash) must describe *this* checkout, not whatever directory the
+# runner happened to be started from.
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent
+
+
 class ExperimentRunner:
     """Orchestrates experiment execution with full provenance."""
     
@@ -128,7 +134,7 @@ class ExperimentRunner:
                 with open(verdict_path) as f:
                     verdict = json.load(f)
                 print(f"[BASELINES] Verdict: {verdict.get('overall', 'unknown')}")
-                if verdict.get("overall") == "pass":
+                if verdict.get('overall') == "pass":
                     return True
                 else:
                     print("[BASELINES] FAILED: Baseline gates not passed")
@@ -329,16 +335,23 @@ class ExperimentRunner:
     def _get_git_sha(self) -> str:
         try:
             return subprocess.run(
-                ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+                ["git", "-C", str(_REPO_ROOT), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True
             ).stdout.strip()
         except Exception:
             return "unknown"
     
     def _get_source_tree_sha256(self) -> str:
-        """Compute SHA256 of source tree (Python files only)."""
+        """Compute SHA256 of source tree (Python files only).
+
+        The tree is the *repository* the runner lives in, not the current
+        working directory: hashing ``Path(".")`` would stamp a different
+        (or empty) tree whenever the runner is invoked from another
+        directory, and the stamp is what a replay is matched against.
+        """
         import hashlib
         hasher = hashlib.sha256()
-        for py_file in sorted(pathlib.Path(".").rglob("*.py")):
+        for py_file in sorted(_REPO_ROOT.rglob("*.py")):
             if any(part in (".git", "__pycache__", ".venv", "venv") for part in py_file.parts):
                 continue
             hasher.update(py_file.read_bytes())
