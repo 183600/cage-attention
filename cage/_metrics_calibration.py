@@ -222,19 +222,25 @@ def _calibration_claims(values: torch.Tensor, reject: torch.Tensor,
 
 
 def _calibration_family_report(reject: torch.Tensor, claims: torch.Tensor,
-                                target: torch.Tensor, m: int) -> dict:
+                                target, m: int) -> dict:
     """Operating characteristics of one family size inside one scenario.
 
     ``reject`` and ``claims`` are per-row boolean matrices of shape
     ``(replicates, family)``; ``target`` marks the rows that carry a true
-    effect (empty in the null scenario).  The false-discovery rate is
-    the usual ``E[V] / E[max(1, R)]`` with ``V`` the false discoveries
-    and ``R`` the total discoveries, so a family that never rejects
-    contributes zero rather than an undefined ratio.
+    effect (``None`` when the scenario has no true effect, e.g. the null
+    scenario or an alternative scenario without a shifted row).  The
+    false-discovery rate is the usual ``E[V] / E[max(1, R)]`` with ``V``
+    the false discoveries and ``R`` the total discoveries, so a family
+    that never rejects contributes zero rather than an undefined ratio.
     """
     selected = reject[:, :m]
     supported = claims[:, :m]
-    true_rows = target[:, :m]
+    if target is None:
+        # No row carries a true effect: every selection and every claim
+        # is a false discovery.
+        true_rows = torch.zeros_like(selected)
+    else:
+        true_rows = target[:, :m]
     false_selected = selected & ~true_rows
     false_supported = supported & ~true_rows
     n_selected = selected.sum(dim=1).to(torch.float64)
@@ -244,7 +250,9 @@ def _calibration_family_report(reject: torch.Tensor, claims: torch.Tensor,
     denom_selected = torch.clamp(n_selected, min=1.0)
     denom_supported = torch.clamp(n_supported, min=1.0)
     target_claim = None
-    if target.numel():
+    if target is not None:
+        # The power of the claim gate on the row that carries the effect.
+        # Without a target row there is nothing to report.
         target_claim = float(supported[:, 0].to(torch.float64).mean())
     return {
         "family_size": int(m),
@@ -263,12 +271,13 @@ def _calibration_scenario(values: torch.Tensor, rule: str, q: float,
                           direction: str, sesoi, min_seeds: int,
                           family_sizes, n_boot: int, n_random: int,
                           max_exact: int, seed: int,
-                          target: torch.Tensor) -> dict:
+                          target) -> dict:
     """Operating characteristics of one scenario (null or alternative).
 
-    ``target`` marks the rows that carry a true effect; it is empty for
-    the null scenario, where every rejection and every claim is a false
-    discovery.
+    ``target`` marks the rows that carry a true effect; it is ``None``
+    when the scenario has none (the null scenario, or an alternative
+    scenario whose row was not shifted), and then every rejection and
+    every claim is a false discovery.
     """
     replicates, n_rows, n_units = values.shape
     generator = _calibration_generator(seed)
@@ -470,15 +479,21 @@ def decision_rule_calibration(
                                       None, generator)
     alternative_values = _calibration_values(n, max_rows, replicates, sd_value,
                                               rho, effect_value, generator)
-    empty_target = torch.zeros((replicates, max_rows), dtype=torch.bool)
-    target = torch.zeros((replicates, max_rows), dtype=torch.bool)
-    target[:, 0] = True
+    # The null scenario has no true effect at all, and the alternative
+    # scenario only has one when its first row was actually shifted.  A
+    # row that carries no effect must not be booked as a true discovery:
+    # that would hide its claims from the false-discovery count and
+    # understate the family FDR.
+    target = None
+    if effect_value is not None and float(effect_value) != 0.0:
+        target = torch.zeros((replicates, max_rows), dtype=torch.bool)
+        target[:, 0] = True
     rules_out = {}
     for rule in selected_rules:
         rules_out[rule] = {
             "null": _calibration_scenario(
                 null_values, rule, q_value, alt, sesoi_value, floor, sizes,
-                boots, randoms, exact, seed_int, empty_target),
+                boots, randoms, exact, seed_int, None),
             "alternative": _calibration_scenario(
                 alternative_values, rule, q_value, alt, sesoi_value, floor,
                 sizes, boots, randoms, exact, seed_int, target),

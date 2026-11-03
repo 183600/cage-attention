@@ -874,6 +874,24 @@ def _self_test() -> int:
     check("calibration_family_fdr_reported",
           boot_null["families"]["16"]["claim_fdr"] >= 0.0
           and boot_null["families"]["16"]["family_size"] == 16)
+    # The null scenario has no row with a true effect, so it must not
+    # report a target-claim rate: that field is the power of the claim
+    # gate on the row that carries the effect, and under the null the
+    # same number is a false-claim rate.
+    check("calibration_null_has_no_target_claim",
+          boot_null["families"]["16"]["target_claim_rate"] is None)
+    # An alternative scenario without a shifted row has no true effect
+    # either: booking its first row as a true discovery would hide that
+    # row's claims from the false-discovery count.
+    cal_no_effect = decision_rule_calibration(
+        5, family_sizes=(1, 16), sd=1.0, sesoi=0.5, effect=None, q=0.05,
+        direction="greater", n_replicates=200, n_boot=1000, n_random=1000,
+        correlation=0.5, seed=0, min_seeds=3)
+    check("calibration_without_effect_has_no_target_row",
+          cal_no_effect["rules"]["bootstrap"]["alternative"]["families"][
+              "16"]["target_claim_rate"] is None
+          and cal_no_effect["rules"]["bootstrap"]["null"]["families"][
+              "16"]["target_claim_rate"] is None)
     check("calibration_seed_floor_blocks_claim",
           decision_rule_calibration(
               2, family_sizes=(1,), sd=1.0, sesoi=0.5, effect=0.5, q=0.05,
