@@ -1104,6 +1104,16 @@ def main(argv=None) -> int:
         print("[runner] --allow-environment-drift only applies to "
               "--replay-manifest; aborting")
         return 2
+    if args.device is not None:
+        # An unparsable device string used to escape as a raw torch
+        # RuntimeError from deep inside the first training step, so the
+        # operator saw a traceback instead of a refusal.
+        try:
+            torch.device(args.device)
+        except (RuntimeError, ValueError, TypeError):
+            print(f"[runner] --device must be a valid torch device string, "
+                  f"got {args.device!r}; aborting")
+            return 2
     verify_out = args.out or "results"
     if args.verify_artifacts:
         return _verify_artifacts(verify_out)
