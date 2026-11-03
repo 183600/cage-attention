@@ -407,6 +407,51 @@ class ReplayEvidenceComparisonTest(unittest.TestCase):
         self.assertIn("loss", text)
         self.assertIn("sanity_runs.jsonl", text)
 
+    def test_wall_clock_cost_measurements_are_not_a_replay_defect(self):
+        # The cost companion measures latency on the machine that runs the
+        # replay, so its numbers differ from the source run's on every
+        # replay.  Comparing them would report every faithful replay as a
+        # defect; the analytic cost stays in the comparison.
+        cost = {
+            "cells": {
+                "none": {
+                    "params": 118560,
+                    "analytic_matmul_gflops": 0.0033,
+                    "latency_ms_median": 1.85,
+                    "latency_ms_min": 1.81,
+                    "latency_ms_p90": 1.89,
+                    "throughput_sequences_per_s": 539.05,
+                },
+            },
+        }
+        replay_cost = json.loads(json.dumps(cost))
+        replay_cost["cells"]["none"].update({
+            "latency_ms_median": 1.83,
+            "latency_ms_min": 1.77,
+            "latency_ms_p90": 1.86,
+            "throughput_sequences_per_s": 545.73,
+        })
+        for root, payload in ((self.source, cost), (self.replay, replay_cost)):
+            (root / "sanity_cost.json").write_text(
+                json.dumps(payload), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = experiments._verify_replay(self.source, self.replay)
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertIn("payload-identical", out.getvalue())
+
+    def test_a_changed_analytic_cost_is_still_a_replay_defect(self):
+        cost = {"cells": {"none": {"params": 118560,
+                                   "analytic_matmul_gflops": 0.0033}}}
+        replay_cost = {"cells": {"none": {"params": 118560,
+                                          "analytic_matmul_gflops": 0.0034}}}
+        for root, payload in ((self.source, cost), (self.replay, replay_cost)):
+            (root / "sanity_cost.json").write_text(
+                json.dumps(payload), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = experiments._verify_replay(self.source, self.replay)
+        self.assertEqual(code, 1, out.getvalue())
+        self.assertIn("analytic_matmul_gflops", out.getvalue())
+
     def test_missing_source_evidence_is_a_defect(self):
         (self.replay / "sanity_runs.jsonl").unlink()
         with contextlib.redirect_stdout(io.StringIO()) as out:

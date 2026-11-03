@@ -194,6 +194,9 @@ make verify-replay SOURCE=results REPLAY_OUT=results_replay
 **重放比较范围**：覆盖该实验的全部 JSON/JSONL 证据，仅剔除：
 - run_id、时间戳、git 修订与脏标记、启动 argv/cwd、哈希随机化种子
 - 覆盖这些字段的 setup/环境指纹
+- 成本伴随读出的墙钟测量（`latency_ms_*` / `throughput_sequences_per_s`）：
+  它们测量的是执行重放的那台机器，每次重放都会有几个百分点的差异，不是科研载荷；
+  解析成本（FLOPs、参数量）仍在比较范围内
 - 数值差异、缺失证据、未完成重放、无法关联的 replay.json 均返回非零
 
 ---

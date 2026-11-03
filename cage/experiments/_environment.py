@@ -1213,6 +1213,20 @@ _REPLAY_VOLATILE_FIELDS = frozenset({
     "repo_root", "run_id", "run_started_utc", "setup_sha256",
 })
 
+# Wall-clock *measurements* of the cost companion.  They are not part of
+# the scientific payload: the replay runs the same frozen recipe, but the
+# machine it runs on is not the machine that produced the source run, so
+# the measured latency and throughput differ by a few percent every time.
+# Comparing them would report every faithful replay as a defect and train
+# the reader to ignore the comparison.  The analytic cost (FLOPs, parameter
+# count) stays in the comparison: it is reproducible.
+_REPLAY_MEASUREMENT_FIELDS = frozenset({
+    "latency_ms_median", "latency_ms_min", "latency_ms_p90",
+    "throughput_sequences_per_s",
+})
+
+_REPLAY_EXCLUDED_FIELDS = _REPLAY_VOLATILE_FIELDS | _REPLAY_MEASUREMENT_FIELDS
+
 
 def _inherit_replay_baseline_verdict(source_dir, out_dir, settings,
                                      experiment):
@@ -1284,7 +1298,7 @@ def _replay_comparable(value):
         return {
             str(key): _replay_comparable(item)
             for key, item in value.items()
-            if key not in _REPLAY_VOLATILE_FIELDS
+            if key not in _REPLAY_EXCLUDED_FIELDS
         }
     if isinstance(value, (list, tuple)):
         return [_replay_comparable(item) for item in value]
