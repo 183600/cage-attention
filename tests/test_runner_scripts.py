@@ -168,6 +168,67 @@ class BaselineVerdictTest(unittest.TestCase):
                 returncode=0, stdout="", stderr="")
             self.assertFalse(runner.run_baselines())
 
+class ReplayOptionTest(unittest.TestCase):
+    """``--replay`` must reach the experiment CLI."""
+
+    def test_replay_is_forwarded_to_the_experiment_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = pathlib.Path(tmp) / "e1_manifest.json"
+            manifest.write_text(json.dumps({"experiment": "e1"}),
+                                encoding="utf-8")
+            out = pathlib.Path(tmp) / "replay_out"
+            runner = _runner(out, replay=str(manifest))
+            calls = []
+
+            def fake_run_command(cmd, capture=True, check=True, env=None):
+                calls.append(cmd)
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            runner.run_command = fake_run_command
+            self.assertTrue(runner.run_replay())
+            self.assertEqual(len(calls), 1)
+            cmd = calls[0]
+            self.assertIn("--replay-manifest", cmd)
+            self.assertIn(str(manifest), cmd)
+            self.assertIn(str(out), cmd)
+            # The manifest freezes the recipe: the runner's own recipe
+            # switches must not be forwarded (the experiment CLI rejects
+            # them in replay mode).
+            for forbidden in ("--seeds", "--quick", "--fdr-q", "--deterministic"):
+                self.assertNotIn(forbidden, cmd)
+            self.assertEqual(runner.replayed_experiment, "e1")
+
+    def test_replay_mode_skips_the_baseline_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = pathlib.Path(tmp) / "e1_manifest.json"
+            manifest.write_text(json.dumps({"experiment": "e1"}),
+                                encoding="utf-8")
+            out = pathlib.Path(tmp) / "replay_out"
+            runner = _runner(out, replay=str(manifest))
+            seen = []
+            runner.capture_environment = lambda: {}
+            runner.run_gate_checks = lambda: True
+            runner.run_unit_tests = lambda: True
+            runner.run_baselines = lambda: seen.append("baselines") or True
+            runner.run_replay = lambda: seen.append("replay") or True
+            runner.run_experiment = lambda exp: seen.append(exp) or True
+            runner.run_verification = lambda: True
+            runner.generate_summary_report = lambda: {}
+            runner.create_replication_package = lambda: pathlib.Path(tmp)
+            runner.run_command = lambda *a, **k: types.SimpleNamespace(
+                returncode=0, stdout="", stderr="")
+            runner.run()
+            self.assertNotIn("baselines", seen)
+            self.assertIn("replay", seen)
+
+    def test_missing_replay_manifest_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = _runner(pathlib.Path(tmp) / "out",
+                             replay=str(pathlib.Path(tmp) / "nope.json"))
+            runner.run_command = lambda *a, **k: types.SimpleNamespace(
+                returncode=0, stdout="", stderr="")
+            self.assertFalse(runner.run_replay())
+
 
 
 if __name__ == "__main__":
