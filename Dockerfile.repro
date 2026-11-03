@@ -1,0 +1,48 @@
+# CAGE-Attention 可复现性容器
+# 
+# 构建：
+#   docker build -f Dockerfile.repro -t cage-attention:repro .
+#
+# 运行（结果挂载到宿主机）：
+#   docker run --rm -v $(pwd)/results:/work/results cage-attention:repro \
+#     --only e1 --seeds 5 --out results
+#
+# 交互式调试：
+#   docker run --rm -it -v $(pwd):/work cage-attention:repro bash
+
+FROM pytorch/pytorch:2.3.0-cuda11.8-cudnn8-runtime
+
+# 固定系统包版本（避免基础镜像更新导致的漂移）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git=1:2.39.2-1.1 \
+    ca-certificates=20230311 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 设置工作目录
+WORKDIR /work
+
+# 复制依赖文件并安装精确版本
+COPY requirements-ci.txt .
+RUN pip install --no-cache-dir -r requirements-ci.txt \
+    --extra-index-url https://download.pytorch.org/whl/cu118
+
+# 复制源码并以可编辑模式安装
+COPY . .
+RUN pip install --no-cache-dir -e .
+
+# 固定数值环境变量（消除 BLAS/OpenMP 线程数变化带来的非确定性）
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV OPENBLAS_NUM_THREADS=1
+ENV NUMEXPR_NUM_THREADS=1
+ENV CUBLAS_WORKSPACE_CONFIG=:4096:8
+ENV PYTHONHASHSEED=0
+
+# 设置确定性算法（运行时由 seed_everything 控制，此处仅预置）
+ENV TORCH_DETERMINISTIC=1
+
+# 默认入口点
+ENTRYPOINT ["python3", "-m", "cage.experiments"]
+
+# 默认参数（可被覆盖）
+CMD ["--help"]

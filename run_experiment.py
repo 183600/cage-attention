@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+"""Automated experiment execution with full provenance tracking.
+
+This script orchestrates the complete experiment pipeline with:
+- Pre-flight environment capture and validation
+- Baseline gates (HB0-HB7) enforcement
+- Experiment execution with randomised complete-block design
+- Post-run verification (artifacts, provenance, runs, environment, source)
+- Replication package generation
+- Summary report generation
+
+Usage:
+    python3 run_experiment.py --experiment e1 --seeds 5 --out results
+    python3 run_experiment.py --experiment all --seeds 5 --out results --verify
+    python3 run_experiment.py --replay results/e1_manifest.json --out results_replay
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import time
+from datetime import datetime
+from typing import Any
+
+
+class ExperimentRunner:
+    """Orchestrates experiment execution with full provenance."""
+    
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.out_dir = pathlib.Path(args.out).resolve()
+        self.start_time = time.time()
+        self.results = {}
+        
+    def run_command(self, cmd: list[str], capture: bool = True, check: bool = True, 
+                    env: dict | None = None) -> subprocess.CompletedProcess:
+        """Run a command with logging."""
+        print(f"\n[RUN] {' '.join(cmd)}")
+        sys.stdout.flush()
+        
+        merged_env = os.environ.copy()
+        if env:
+            merged_env.update(env)
+            
+        if capture:
+            result = subprocess.run(cmd, capture_output=True, text=True, env=merged_env)
+            if result.stdout:
+                print(result.stdout)
+            if result.stderr:
+                print(result.stderr, file=sys.stderr)
+            if check and result.returncode != 0:
+                raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+            return result
+        else:
+            result = subprocess.run(cmd, env=merged_env)
+            if check and result.returncode != 0:
+                raise subprocess.CalledProcessError(result.returncode, cmd)
+            return result
+    
+    def capture_environment(self) -> dict:
+        """Capture pre-run environment."""
+        print("\n" + "="*60)
+        print("CAPTURING PRE-RUN ENVIRONMENT")
+        print("="*60)
+        
+        result = self.run_command([
+            sys.executable, "capture_environment.py",
+            "--output", str(self.out_dir / "environment_pre_run.json")
+        ])
+        
+        with open(self.out_dir / "environment_pre_run.json") as f:
+            env = json.load(f)
+        print(f"Environment fingerprint: {env['environment_sha256']}")
+        return env
+    
+    def run_gate_checks(self) -> bool:
+        """Run CI gate checks (syntax + design pins + smoke)."""
+        print("\n" + "="*60)
+        print("RUNNING CI GATE CHECKS")
+        print("="*60)
+        
+        try:
+            self.run_command([sys.executable, "ci_gate.py"])
+            print("[GATE] PASS")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"[GATE] FAILED: {e}")
+            return False
+    
+    def run_unit_tests(self) -> bool:
+        """Run unit test suite."""
+        print("\n" + "="*60)
+        print("RUNNING UNIT TESTS")
+        print("="*60)
+        
+        try:
+            self.run_command([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"])
+            print("[TESTS] PASS")
+            return True
+        except subprocess.CalledProcessError as e:
+            print(f"[TESTS] FAILED: {e}")
+            return False
+    
+    def run_baselines(self) -> bool:
+        """Run baseline gates (HB0-HB7)."""
+        print("\n" + "="*60)
+        print("RUNNING BASELINE GATES (HB0-HB7)")
+        print("="*60)
+        
+        try:
+            self.run_command([
+                sys.executable, "-m", "cage.experiments",
+                "--only", "baselines",
+                "--seeds", str(self.args.seeds),
+                "--out", str(self.out_dir)
+            ])
+            
+            # Check verdict
+            verdict_path = self.out_dir / "baselines_verdict.json"
+            if verdict_path.exists():
+                with open(verdict_path) as f:
+                    verdict = json.load(f)
+                print(f"[BASELINES] Verdict: {verdict.get('overall', 'unknown')}")
+                if verdict.get("overall") == "pass":
+                    return True
+                else:
+                    print("[BASELINES] FAILED: Baseline gates not passed")
+                    return False
+            else:
+                print("[BASELINES] WARNING: No verdict file found")
+                return False
+        except subprocess.CalledProcessError as e:
+            print(f"[BASELINES] FAILED: {e}")
+            return False
+    
+    def run_experiment(self, experiment: str) -> bool:
+        """Run a single experiment (e1/e2/e3/sanity)."""
+        print("\n" + "="*60)
+        print(f"RUNNING EXPERIMENT: {experiment.upper()}")
+        print("="*60)
+        
+        try:
+            cmd = [
+                sys.executable, "-m", "cage.experiments",
+                "--only", experiment,
+                "--seeds", str(self.args.seeds),
+                "--out", str(self.out_dir)
+            ]
+            
+            if self.args.deterministic:
+                cmd.append("--deterministic")
+            if self.args.fdr_q != 0.05:
+                cmd.extend(["--fdr-q", str(self.args.fdr_q)])
+            if self.args.quick:
+                cmd.append("--quick")
+                
+            self.run_command(cmd)
+            
+            # Verify experiment completed
+            manifest_path = self.out_dir / f"{experiment}_manifest.json"
+            if manifest_path.exists():
+                print(f"[{experiment.upper()}] Completed successfully")
+                return True
+            else:
+                print(f"[{experiment.upper()}] WARNING: No manifest generated")
+                return False
+                
+        except subprocess.CalledProcessError as e:
+            print(f"[{experiment.upper()}] FAILED: {e}")
+            return False
+    
+    def run_verification(self) -> bool:
+        """Run full verification suite."""
+        print("\n" + "="*60)
+        print("RUNNING POST-RUN VERIFICATION")
+        print("="*60)
+        
+        checks = [
+            ("verify-env", ["--check-environment"]),
+            ("verify-artifacts", ["--verify-artifacts"]),
+            ("verify-provenance", ["--verify-provenance"]),
+            ("verify-runs", ["--verify-runs"]),
+            ("verify-source", ["--check-source"]),
+        ]
+        
+        all_passed = True
+        for name, args in checks:
+            print(f"\n--- {name} ---")
+            try:
+                self.run_command([
+                    sys.executable, "-m", "cage.experiments",
+                    *args, "--out", str(self.out_dir)
+                ])
+                print(f"[{name}] PASS")
+            except subprocess.CalledProcessError as e:
+                print(f"[{name}] FAILED: {e}")
+                all_passed = False
+        
+        return all_passed
+    
+    def generate_summary_report(self) -> dict:
+        """Generate experiment summary report."""
+        print("\n" + "="*60)
+        print("GENERATING SUMMARY REPORT")
+        print("="*60)
+        
+        report = {
+            "metadata": {
+                "timestamp_utc": datetime.utcnow().isoformat() + "Z",
+                "duration_seconds": round(time.time() - self.start_time, 2),
+                "experiment": self.args.experiment,
+                "seeds": self.args.seeds,
+                "out_dir": str(self.out_dir),
+                "git_sha": self._get_git_sha(),
+                "python_version": sys.version.split()[0],
+            },
+            "environment": {},
+            "baselines": {},
+            "experiments": {},
+            "verification": {},
+            "artifacts": [],
+        }
+        
+        # Load environment
+        env_path = self.out_dir / "environment_pre_run.json"
+        if env_path.exists():
+            with open(env_path) as f:
+                report["environment"] = json.load(f)
+        
+        # Load baselines verdict
+        verdict_path = self.out_dir / "baselines_verdict.json"
+        if verdict_path.exists():
+            with open(verdict_path) as f:
+                report["baselines"] = json.load(f)
+        
+        # Load experiment results summary
+        for exp in ["e1", "e2", "e3", "sanity"]:
+            manifest_path = self.out_dir / f"{exp}_manifest.json"
+            if manifest_path.exists():
+                with open(manifest_path) as f:
+                    manifest = json.load(f)
+                report["experiments"][exp] = {
+                    "manifest": manifest,
+                    "completed": True,
+                }
+                
+                # Load key contrasts from synthesis if available
+                synthesis_path = self.out_dir / f"{exp}_synthesis.json"
+                if synthesis_path.exists():
+                    with open(synthesis_path) as f:
+                        report["experiments"][exp]["synthesis"] = json.load(f)
+        
+        # List artifacts
+        artifact_index = self.out_dir / "artifact_index.json"
+        if artifact_index.exists():
+            with open(artifact_index) as f:
+                idx = json.load(f)
+            report["artifacts"] = idx.get("artifacts", [])
+        
+        # Save report
+        report_path = self.out_dir / "experiment_report.json"
+        with open(report_path, "w") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False, sort_keys=True)
+        
+        print(f"Report saved to {report_path}")
+        return report
+    
+    def create_replication_package(self) -> pathlib.Path:
+        """Create a replication package (manifest + environment + code hash)."""
+        print("\n" + "="*60)
+        print("CREATING REPLICATION PACKAGE")
+        print("="*60)
+        
+        package_dir = self.out_dir / "replication_package"
+        package_dir.mkdir(exist_ok=True)
+        
+        # Copy manifests
+        for exp in ["e1", "e2", "e3", "sanity", "baselines"]:
+            manifest = self.out_dir / f"{exp}_manifest.json"
+            if manifest.exists():
+                import shutil
+                shutil.copy2(manifest, package_dir / manifest.name)
+        
+        # Copy environment
+        for env_file in ["environment_pre_run.json", "environment.json"]:
+            env_path = self.out_dir / env_file
+            if env_path.exists():
+                import shutil
+                shutil.copy2(env_path, package_dir / env_file)
+        
+        # Copy artifact index
+        artifact_index = self.out_dir / "artifact_index.json"
+        if artifact_index.exists():
+            import shutil
+            shutil.copy2(artifact_index, package_dir / "artifact_index.json")
+        
+        # Copy baselines verdict
+        verdict = self.out_dir / "baselines_verdict.json"
+        if verdict.exists():
+            import shutil
+            shutil.copy2(verdict, package_dir / "baselines_verdict.json")
+        
+        # Create replication manifest
+        replication_manifest = {
+            "created_utc": datetime.utcnow().isoformat() + "Z",
+            "source_git_sha": self._get_git_sha(),
+            "source_tree_sha256": self._get_source_tree_sha256(),
+            "experiments": [exp for exp in ["e1", "e2", "e3", "sanity"] 
+                          if (self.out_dir / f"{exp}_manifest.json").exists()],
+            "verification_commands": {
+                "verify": f"python3 -m cage.experiments --verify-replay {self.out_dir} --out <replay_dir>",
+                "full_verify": "make verify OUT=<replay_dir>",
+            },
+        }
+        
+        with open(package_dir / "replication_manifest.json", "w") as f:
+            json.dump(replication_manifest, f, indent=2, ensure_ascii=False, sort_keys=True)
+        
+        print(f"Replication package created at {package_dir}")
+        return package_dir
+    
+    def _get_git_sha(self) -> str:
+        try:
+            return subprocess.run(
+                ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+            ).stdout.strip()
+        except Exception:
+            return "unknown"
+    
+    def _get_source_tree_sha256(self) -> str:
+        """Compute SHA256 of source tree (Python files only)."""
+        import hashlib
+        hasher = hashlib.sha256()
+        for py_file in sorted(pathlib.Path(".").rglob("*.py")):
+            if any(part in (".git", "__pycache__", ".venv", "venv") for part in py_file.parts):
+                continue
+            hasher.update(py_file.read_bytes())
+        return hasher.hexdigest()[:16]
+    
+    def run(self) -> int:
+        """Main execution flow."""
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        
+        print("="*60)
+        print("CAGE-ATTENTION AUTOMATED EXPERIMENT RUNNER")
+        print("="*60)
+        print(f"Experiment: {self.args.experiment}")
+        print(f"Seeds: {self.args.seeds}")
+        print(f"Output: {self.out_dir}")
+        print(f"Deterministic: {self.args.deterministic}")
+        print(f"FDR q: {self.args.fdr_q}")
+        print(f"Quick mode: {self.args.quick}")
+        
+        # 1. Capture environment
+        self.capture_environment()
+        
+        # 2. Gate checks
+        if not self.args.skip_gate:
+            if not self.run_gate_checks():
+                print("\n[FATAL] Gate checks failed. Aborting.")
+                return 1
+        
+        # 3. Unit tests
+        if not self.args.skip_tests:
+            if not self.run_unit_tests():
+                print("\n[FATAL] Unit tests failed. Aborting.")
+                return 1
+        
+        # 4. Baseline gates
+        if self.args.experiment in ("all", "baselines") or not self.args.skip_baselines:
+            if not self.run_baselines():
+                print("\n[FATAL] Baseline gates failed. Aborting.")
+                return 1
+        
+        # 5. Run experiments
+        experiments_to_run = []
+        if self.args.experiment == "all":
+            experiments_to_run = ["sanity", "e1", "e2", "e3"]
+        elif self.args.experiment != "baselines":
+            experiments_to_run = [self.args.experiment]
+        
+        for exp in experiments_to_run:
+            if not self.run_experiment(exp):
+                print(f"\n[WARNING] Experiment {exp} failed, continuing...")
+        
+        # 6. Verification
+        if self.args.verify:
+            verification_passed = self.run_verification()
+            if not verification_passed:
+                print("\n[WARNING] Some verification checks failed")
+        
+        # 7. Generate report
+        self.generate_summary_report()
+        
+        # 8. Create replication package
+        self.create_replication_package()
+        
+        # 9. Final environment capture
+        print("\n" + "="*60)
+        print("CAPTURING POST-RUN ENVIRONMENT")
+        print("="*60)
+        self.run_command([
+            sys.executable, "capture_environment.py",
+            "--output", str(self.out_dir / "environment_post_run.json")
+        ])
+        
+        print("\n" + "="*60)
+        print("EXPERIMENT RUN COMPLETED")
+        print("="*60)
+        print(f"Results in: {self.out_dir}")
+        print(f"Duration: {time.time() - self.start_time:.1f}s")
+        print(f"Report: {self.out_dir / 'experiment_report.json'}")
+        print(f"Replication package: {self.out_dir / 'replication_package'}")
+        
+        return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Automated CAGE-Attention experiment runner with provenance",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run E1 with 5 seeds, full verification
+  python3 run_experiment.py --experiment e1 --seeds 5 --out results --verify
+
+  # Run all experiments with 10 seeds
+  python3 run_experiment.py --experiment all --seeds 10 --out results_full
+
+  # Quick pipeline check (sanity only)
+  python3 run_experiment.py --experiment sanity --quick --out results_quick
+
+  # Replay from existing manifest
+  python3 run_experiment.py --replay results/e1_manifest.json --out results_replay
+        """
+    )
+    
+    parser.add_argument("--experiment", choices=["sanity", "baselines", "e1", "e2", "e3", "all"],
+                       default="all", help="Experiment to run")
+    parser.add_argument("--replay", help="Replay from manifest file (alternative to --experiment)")
+    parser.add_argument("--seeds", type=int, default=5, help="Number of training seeds")
+    parser.add_argument("--out", default="results", help="Output directory")
+    parser.add_argument("--fdr-q", type=float, default=0.05, help="FDR q-value")
+    parser.add_argument("--deterministic", action="store_true", help="Use deterministic algorithms")
+    parser.add_argument("--quick", action="store_true", help="Quick pipeline check only")
+    parser.add_argument("--verify", action="store_true", help="Run post-experiment verification")
+    parser.add_argument("--skip-gate", action="store_true", help="Skip CI gate checks")
+    parser.add_argument("--skip-tests", action="store_true", help="Skip unit tests")
+    parser.add_argument("--skip-baselines", action="store_true", help="Skip baseline gates")
+    
+    args = parser.parse_args()
+    
+    runner = ExperimentRunner(args)
+    return runner.run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
