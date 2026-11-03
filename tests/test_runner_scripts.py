@@ -101,6 +101,73 @@ class SourceTreeStampTest(unittest.TestCase):
                 capture_output=True, text=True, check=True).stdout.strip()
             self.assertEqual(sha, expected)
 
+class BaselineVerdictTest(unittest.TestCase):
+    """``run_baselines`` must accept a passing verdict and reject a
+    failing one, using the real per-gate marks."""
+
+    def test_passing_verdict_has_no_failures(self):
+        self.assertEqual(
+            run_experiment.baseline_verdict_failures(_passing_verdict()), [])
+
+    def test_failing_gates_are_reported(self):
+        verdict = _passing_verdict()
+        verdict["hb3_supported"] = False
+        verdict["hb4_state"] = "violated"
+        failures = run_experiment.baseline_verdict_failures(verdict)
+        self.assertTrue(any("hb3_supported" in f for f in failures))
+        self.assertTrue(any("HB4" in f for f in failures))
+
+    def test_unknown_hb4_state_fails_closed(self):
+        verdict = _passing_verdict()
+        verdict["hb4_state"] = "banana"
+        self.assertTrue(
+            run_experiment.baseline_verdict_failures(verdict))
+
+    def test_inconclusive_hb4_does_not_block(self):
+        verdict = _passing_verdict()
+        verdict["hb4_state"] = "inconclusive"
+        verdict["hb4_supported"] = False
+        self.assertEqual(
+            run_experiment.baseline_verdict_failures(verdict), [])
+
+    def test_non_dict_verdict_fails_closed(self):
+        self.assertTrue(run_experiment.baseline_verdict_failures([]))
+
+    def test_run_baselines_accepts_passing_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            (out / "baselines_verdict.json").write_text(
+                json.dumps(_passing_verdict()), encoding="utf-8")
+            runner = _runner(out)
+            calls = []
+
+            def fake_run_command(cmd, capture=True, check=True, env=None):
+                calls.append(cmd)
+                return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            runner.run_command = fake_run_command
+            self.assertTrue(runner.run_baselines())
+            self.assertEqual(len(calls), 1)
+
+    def test_run_baselines_rejects_failing_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            verdict = _passing_verdict()
+            verdict["hb5_supported"] = False
+            (out / "baselines_verdict.json").write_text(
+                json.dumps(verdict), encoding="utf-8")
+            runner = _runner(out)
+            runner.run_command = lambda *a, **k: types.SimpleNamespace(
+                returncode=0, stdout="", stderr="")
+            self.assertFalse(runner.run_baselines())
+
+    def test_run_baselines_rejects_missing_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = _runner(pathlib.Path(tmp))
+            runner.run_command = lambda *a, **k: types.SimpleNamespace(
+                returncode=0, stdout="", stderr="")
+            self.assertFalse(runner.run_baselines())
+
 
 
 if __name__ == "__main__":

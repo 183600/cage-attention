@@ -36,6 +36,55 @@ from typing import Any
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent
 
 
+# The baseline gates whose failure invalidates every grid result.  These
+# are the same marks ``cage.experiments._gates._enforce_baseline_verdict``
+# blocks on (HB1 task construction, HB3 split disjointness, HB5 training
+# loop); HB2 and HB6/HB7 are stamped but do not block the grid, and HB4 is
+# three-state (only a *violated* negative control blocks).
+_BLOCKING_BASELINE_GATES = ("hb1_supported", "hb3_supported",
+                            "hb5_supported")
+
+
+def baseline_verdict_failures(verdict: Any) -> list[str]:
+    """The blocking baseline gates that did not pass in ``verdict``.
+
+    ``baselines_verdict.json`` has no single "overall" field: it carries one
+    mark per pre-registered gate (HB1..HB7).  Reading a non-existent
+    aggregate key would report every *passing* baseline run as a failure and
+    abort the whole pipeline, so the marks are evaluated here with the
+    pre-registered semantics of the canonical gate in
+    ``cage.experiments._gates``:
+
+    * HB1 / HB3 / HB5 block when they are not certified (a literal
+      ``True`` - a missing or hand-edited truthy string is not a pass);
+    * HB4 is three-state: only a *violated* control (or an unusable /
+      malformed state) blocks, while an inconclusive interval is stamped
+      rather than read as leakage.
+    """
+    if not isinstance(verdict, dict):
+        return ["baselines_verdict.json is not a verdict record"]
+    failures = [key for key in _BLOCKING_BASELINE_GATES
+                if verdict.get(key) is not True]
+    state = verdict.get("hb4_state")
+    if state is None:
+        # Legacy verdict without the three-state field: the supported
+        # boolean is the only signal available.
+        if verdict.get("hb4_supported") is not True:
+            failures.append("HB4 (missing/not certified)")
+    elif state == "violated":
+        failures.append("HB4 (violated: control interval above tolerance)")
+    elif state == "untestable":
+        failures.append("HB4 (untestable)")
+    elif state not in ("supported", "inconclusive"):
+        # An unknown state must fail closed: treating it as a pass would
+        # let a hand-edited verdict bypass the negative-control gate.
+        failures.append(f"HB4 (unrecognised state {state!r})")
+    elif state == "supported" and verdict.get("hb4_supported") is not True:
+        failures.append(
+            "HB4 (state says supported but the supported boolean is not true)")
+    return failures
+
+
 class ExperimentRunner:
     """Orchestrates experiment execution with full provenance."""
     
@@ -44,6 +93,11 @@ class ExperimentRunner:
         self.out_dir = pathlib.Path(args.out).resolve()
         self.start_time = time.time()
         self.results = {}
+        # ``--replay`` freezes the recipe of a recorded manifest; the
+        # experiment CLI rejects the runner's own recipe switches in that
+        # mode, so the replay path never forwards them.
+        self.replay_manifest = getattr(args, "replay", None)
+        self.replayed_experiment = None
         
     def run_command(self, cmd: list[str], capture: bool = True, check: bool = True, 
                     env: dict | None = None) -> subprocess.CompletedProcess:
@@ -128,17 +182,21 @@ class ExperimentRunner:
                 "--out", str(self.out_dir)
             ])
             
-            # Check verdict
+            # Check verdict.  The file carries one mark per pre-registered
+            # baseline gate (HB1..HB7), not a single aggregate field, so the
+            # blocking gates are evaluated individually.
             verdict_path = self.out_dir / "baselines_verdict.json"
             if verdict_path.exists():
                 with open(verdict_path) as f:
                     verdict = json.load(f)
-                print(f"[BASELINES] Verdict: {verdict.get('overall', 'unknown')}")
-                if verdict.get('overall') == "pass":
-                    return True
-                else:
+                failures = baseline_verdict_failures(verdict)
+                if failures:
+                    print(f"[BASELINES] Verdict: failed "
+                          f"({', '.join(failures)})")
                     print("[BASELINES] FAILED: Baseline gates not passed")
                     return False
+                print("[BASELINES] Verdict: pass")
+                return True
             else:
                 print("[BASELINES] WARNING: No verdict file found")
                 return False
@@ -182,6 +240,37 @@ class ExperimentRunner:
             print(f"[{experiment.upper()}] FAILED: {e}")
             return False
     
+    def run_replay(self) -> bool:
+        """Replay a frozen manifest as *new* evidence.
+
+        The manifest freezes the recipe, so the replay is delegated to
+        ``cage.experiments --replay-manifest``; the runner's own recipe
+        switches (``--seeds`` / ``--quick`` / ``--fdr-q`` /
+        ``--deterministic``) are deliberately *not* forwarded, because the
+        experiment CLI rejects them in replay mode (overriding the frozen
+        recipe would no longer be a replay of the recorded run).  The
+        source run's baseline verdict is inherited by the replay itself,
+        so the separate baseline step is skipped in this mode.
+        """
+        manifest = pathlib.Path(self.replay_manifest)
+        if not manifest.is_file():
+            print(f"[REPLAY] FAILED: manifest not found: {manifest}")
+            return False
+        cmd = [sys.executable, "-m", "cage.experiments",
+               "--replay-manifest", str(manifest), "--out", str(self.out_dir)]
+        try:
+            self.run_command(cmd)
+        except subprocess.CalledProcessError as e:
+            print(f"[REPLAY] FAILED: {e}")
+            return False
+        self.replayed_experiment = manifest.stem
+        if self.replayed_experiment.endswith("_manifest"):
+            self.replayed_experiment = self.replayed_experiment[:-len(
+                "_manifest")]
+        print(f"[REPLAY] Completed successfully "
+              f"(experiment: {self.replayed_experiment})")
+        return True
+
     def run_verification(self) -> bool:
         """Run full verification suite."""
         print("\n" + "="*60)
@@ -221,7 +310,9 @@ class ExperimentRunner:
             "metadata": {
                 "timestamp_utc": datetime.utcnow().isoformat() + "Z",
                 "duration_seconds": round(time.time() - self.start_time, 2),
-                "experiment": self.args.experiment,
+                "experiment": (self.replayed_experiment
+                               if self.replayed_experiment is not None
+                               else self.args.experiment),
                 "seeds": self.args.seeds,
                 "out_dir": str(self.out_dir),
                 "git_sha": self._get_git_sha(),
@@ -233,6 +324,8 @@ class ExperimentRunner:
             "verification": {},
             "artifacts": [],
         }
+        if self.replay_manifest is not None:
+            report["metadata"]["replay_manifest"] = str(self.replay_manifest)
         
         # Load environment
         env_path = self.out_dir / "environment_pre_run.json"
@@ -370,6 +463,8 @@ class ExperimentRunner:
         print(f"Deterministic: {self.args.deterministic}")
         print(f"FDR q: {self.args.fdr_q}")
         print(f"Quick mode: {self.args.quick}")
+        if self.replay_manifest is not None:
+            print(f"Replay manifest: {self.replay_manifest}")
         
         # 1. Capture environment
         self.capture_environment()
@@ -386,15 +481,22 @@ class ExperimentRunner:
                 print("\n[FATAL] Unit tests failed. Aborting.")
                 return 1
         
-        # 4. Baseline gates
-        if self.args.experiment in ("all", "baselines") or not self.args.skip_baselines:
+        # 4. Baseline gates.  A replay inherits the source run's certified
+        # baseline verdict (the experiment CLI copies it into the replay
+        # directory), so the baseline step is skipped in replay mode.
+        if self.replay_manifest is None and (
+                self.args.experiment in ("all", "baselines")
+                or not self.args.skip_baselines):
             if not self.run_baselines():
                 print("\n[FATAL] Baseline gates failed. Aborting.")
                 return 1
         
         # 5. Run experiments
         experiments_to_run = []
-        if self.args.experiment == "all":
+        if self.replay_manifest is not None:
+            if not self.run_replay():
+                print("\n[WARNING] Replay failed, continuing...")
+        elif self.args.experiment == "all":
             experiments_to_run = ["sanity", "e1", "e2", "e3"]
         elif self.args.experiment != "baselines":
             experiments_to_run = [self.args.experiment]
