@@ -368,6 +368,18 @@ class ContrastLog:
                                   else audit.get("n_varying_factors")),
             "varying_factors": ({} if audit is None
                                 else audit.get("varying_factors")),
+            # The declared label differences are kept apart from the
+            # independent factors: a cell label such as ``calib_variant``
+            # names a whole flag vector, so counting it as a factor would
+            # make a one-flag ablation look like a two-factor contrast.
+            "declared_label_diffs": ({} if audit is None
+                                     else audit.get("declared_label_diffs")),
+            # Rows that are not pairwise one-factor contrasts declare
+            # themselves as aggregates (factorial main effect, grid-level
+            # main effect, interaction); the decision layer refuses any
+            # other controlled row that lacks a single-factor certificate.
+            "aggregate": (None if audit is None
+                          else audit.get("aggregate")),
             "control_mismatches": ([] if audit is None
                                    else audit.get("mismatches", [])),
             # The parameter counts the two sides actually trained (with the
@@ -459,8 +471,18 @@ class ContrastLog:
         line = f"  [{hyp}] {rule} ({metric}): {_fmt_ci(ci)}"
         if audit is not None:
             factors = ",".join(sorted(audit.get("varying_factors", {}))) or "n/a"
+            single = audit.get("single_factor")
+            if single is True:
+                sf_s = "yes"
+            elif single is False:
+                sf_s = "NO"
+            else:
+                sf_s = "n/a"
+            aggregate = audit.get("aggregate")
+            if aggregate:
+                sf_s = f"n/a ({aggregate} row)"
             line += (f"  [control: {'ok' if audit['controlled'] else 'FAILED'}"
-                     f", varies={factors}]")
+                     f", varies={factors}, single-factor={sf_s}]")
             cap = audit.get("capacity")
             if cap and not cap["matched"]:
                 line += (f"  [capacity: {cap['a']} vs {cap['b']} params, "

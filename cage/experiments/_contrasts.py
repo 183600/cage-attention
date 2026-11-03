@@ -121,7 +121,16 @@ def _controlled_audit(runs_a, runs_b):
         "n_b": len(runs_b),
         "seeds_a": sorted((r.get("seed") for r in runs_a), key=_seed_key),
         "seeds_b": sorted((r.get("seed") for r in runs_b), key=_seed_key),
+        # ``varying_factors`` holds the *independent factors* the contrast
+        # manipulates - one entry per factor a reader could name (a model
+        # flag, a gate, a norm level).  The declared label differences are
+        # kept separately in ``declared_label_diffs`` because a cell label
+        # such as ``calib_variant`` names a whole flag vector, not one
+        # factor: mixing the two made an ordinary one-flag ablation look
+        # like a two-factor contrast to any consumer that counted
+        # ``varying_factors``.
         "varying_factors": {},
+        "declared_label_diffs": {},
         "model_factor_diffs": {},
         "n_varying_factors": None,
         "single_factor": None,
@@ -284,7 +293,7 @@ def _controlled_audit(runs_a, runs_b):
             set_a = {str(r.get(key)) for r in runs_a}
             set_b = {str(r.get(key)) for r in runs_b}
             if set_a != set_b:
-                audit["varying_factors"][key] = {
+                audit["declared_label_diffs"][key] = {
                     "a": sorted(set_a), "b": sorted(set_b)}
         # Ground truth of the trained model: check the resolved configs
         # directly rather than the hand-attached labels.
@@ -371,7 +380,12 @@ def _controlled_audit(runs_a, runs_b):
                     f"({sorted(cells_a)}): the contrast does not actually "
                     f"vary the mechanism")
             if audit["model_factor_diffs"]:
-                audit["varying_factors"].update(audit["model_factor_diffs"])
+                # The resolved config is ground truth for *which* factor
+                # varies.  The declared label differences (including the
+                # ``calib_variant`` cell label) stay in
+                # ``declared_label_diffs`` so a cell label can never be
+                # counted as an independent factor.
+                audit["varying_factors"] = dict(audit["model_factor_diffs"])
             # H1f's active control is registered as the identical calib
             # architecture / parameter count / computation, differing only
             # in the shuffled entropy signal.  When the resolved configs
@@ -397,8 +411,11 @@ def _controlled_audit(runs_a, runs_b):
         # labels are the only evidence available.  ``calib_variant`` is a
         # *cell* label, not an independent factor: counting it alongside the
         # resolved flags would make an ordinary one-flag ablation look like
-        # a two-factor contrast, so only the resolved diffs are counted when
-        # the model config is present.
+        # a two-factor contrast, so the cell label is expanded into the flag
+        # vector it names and the resolved diffs are counted when the model
+        # config is present.  ``varying_factors`` therefore holds only the
+        # independent factors, and the declared label differences stay in
+        # ``declared_label_diffs`` for the reader.
         unresolved_cell = False
         if audit.get("model_cfg") is not None:
             factor_keys = set(audit["model_factor_diffs"])
@@ -411,12 +428,20 @@ def _controlled_audit(runs_a, runs_b):
                 audit["mismatches"].append(
                     "legacy record(s) carry a non-string calib_variant "
                     "label; the ablation cannot be identified")
+            # A declared label difference names an independent factor only
+            # for the design factors (gate/norm/layer_scale); the
+            # ``calib_variant`` cell label names a whole flag vector and is
+            # expanded into that vector below.
+            audit["varying_factors"] = {
+                key: value for key, value
+                in audit["declared_label_diffs"].items()
+                if key != "calib_variant"}
             factor_keys = set(audit["varying_factors"])
             # Expand a label-only ``calib_variant`` difference into the
             # factor vector it names, so a legacy record cannot pass a
             # two-term manipulation (e.g. full vs both-terms-off) as one
             # factor merely because only the cell label was stamped.
-            if "calib_variant" in factor_keys:
+            if "calib_variant" in audit["declared_label_diffs"]:
                 fa = [_CALIB_CELL_FACTORS.get(r.get("calib_variant"))
                       if isinstance(r.get("calib_variant"), str) else None
                       for r in runs_a]
@@ -424,8 +449,6 @@ def _controlled_audit(runs_a, runs_b):
                       if isinstance(r.get("calib_variant"), str) else None
                       for r in runs_b]
                 if all(x is not None for x in fa + fb):
-                    factor_keys.discard("calib_variant")
-                    audit["varying_factors"].pop("calib_variant", None)
                     for key in _CALIB_ABLATION_FLAGS:
                         va = {x[key] for x in fa}
                         vb = {x[key] for x in fb}
@@ -454,16 +477,24 @@ def _controlled_audit(runs_a, runs_b):
                         "cannot be identified; a cell label is not one "
                         "independent factor and the contrast is not "
                         "certified as single-factor")
-        audit["n_varying_factors"] = len(factor_keys)
+        # An unresolved cell leaves the number of manipulated factors
+        # unknown, not zero: report it as undetermined so no reader counts
+        # the cell label as the one factor.
+        audit["n_varying_factors"] = (None if unresolved_cell
+                                      else len(factor_keys))
         audit["single_factor"] = (len(factor_keys) == 1
                                   and not unresolved_cell and not side_pooled)
         if not factor_keys:
-            if audit.get("model_cfg") is not None:
+            if unresolved_cell:
+                # The cell-expansion mismatch above already states why the
+                # manipulation cannot be identified.
+                pass
+            elif audit.get("model_cfg") is not None:
                 # A stale declared label difference does not make an
                 # identical-config pair a controlled contrast.  This check
                 # is separate from the label-only fallback because
-                # ``varying_factors`` still contains the declared labels
-                # even when the resolved configs are identical.
+                # ``declared_label_diffs`` still contains the declared
+                # labels even when the resolved configs are identical.
                 audit["mismatches"].append(
                     "the resolved model config is identical on both sides "
                     "(no model factor differs), so the declared label "
@@ -1028,6 +1059,8 @@ def _one_sample_contrast(runs, metric, bound=None):
                 f"one-sample contrast repeats training stream(s) "
                 f"{aliases}: aliased seeds are not independent units"],
             "varying_factors": {},
+            "single_factor": None,
+            "n_varying_factors": None,
         }
     return ci
 
@@ -1035,16 +1068,16 @@ def _one_sample_contrast(runs, metric, bound=None):
 def _interaction_manipulation(audit: dict) -> dict:
     """The factor a controlled contrast actually varies, in comparable form.
 
-    ``_controlled_audit`` reports two descriptions: ``varying_factors``
-    from the declared labels (always present) and ``model_factor_diffs``
-    from the resolved ``model_cfg`` (present when the records carry it).
-    The resolved one is ground truth for *which* factor a contrast varies,
-    but the label description mixes genuine factors with the
-    ``calib_variant`` cell label: two legitimate interaction marginals like
+    ``_controlled_audit`` reports two descriptions: ``varying_factors`` -
+    the independent factors the contrast manipulates - and
+    ``model_factor_diffs`` from the resolved ``model_cfg`` (present when the
+    records carry it).  The resolved one is ground truth for *which* factor a
+    contrast varies, but the label description may carry a ``calib_variant``
+    cell label for legacy records: two legitimate interaction marginals like
     full-vs-ent_only and len_only-vs-no_terms manipulate the same
     ``calib_use_len`` flag while carrying different cell labels, so
     comparing the label sets would refuse a valid factorial contrast.
-    Prefer the resolved diffs; fall back to the labels only for records
+    Prefer the resolved diffs; fall back to the factors only for records
     that predate ``model_cfg``.
     """
     if not isinstance(audit, Mapping):
@@ -1148,6 +1181,16 @@ def _class_frequency_companions(rules, title):
                 "sign_disagrees_with_accuracy": sign_disagrees,
                 "uncertainty_disagrees_with_accuracy": (
                     uncertainty_disagrees),
+                # The companion keeps the controlled-variable verdict of the
+                # contrast it mirrors, so a robustness readout can never be
+                # read as a one-factor check when it is not one.
+                "controlled": (ci.get("controlled") or {}).get("controlled"),
+                "single_factor": (ci.get("controlled") or {}).get(
+                    "single_factor"),
+                "n_varying_factors": (ci.get("controlled") or {}).get(
+                    "n_varying_factors"),
+                "varying_factors": (ci.get("controlled") or {}).get(
+                    "varying_factors") or {},
             })
     return {
         "title": title,
@@ -1302,9 +1345,16 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     factors = {}
     for audit in audits:
         factors.update(audit.get("varying_factors", {}))
+    # An interaction row is not a single-factor pairwise contrast: it
+    # differences two marginal effects across two contexts, so the
+    # single-factor verdict is deliberately undefined and the row declares
+    # itself as an aggregate.
     ci["controlled"] = {"controlled": not mismatches,
                         "mismatches": mismatches,
-                        "varying_factors": factors}
+                        "varying_factors": factors,
+                        "single_factor": None,
+                        "n_varying_factors": None,
+                        "aggregate": "interaction"}
     return ci
 
 

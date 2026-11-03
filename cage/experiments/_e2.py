@@ -228,12 +228,15 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
             }
             rule_rows.append(row)
             factors = ",".join(sorted(row["varying_factors"])) or "n/a"
+            single = audit.get("single_factor")
+            sf_s = ("yes" if single is True
+                    else "NO" if single is False else "n/a")
             print(f"{rule:>18} {length:>7} "
                   f"{row['a_mean'] if _finite(row['a_mean']) else float('nan'):>9.4f} "
                   f"{row['b_mean'] if _finite(row['b_mean']) else float('nan'):>9.4f} "
                   f"{_fmt_ci(ci):>28} {ci.get('n', 0):>6} "
                   f"{'ok' if audit.get('controlled') else 'FAILED':>9}"
-                  f"  [varies={factors}]")
+                  f"  [varies={factors}, single-factor={sf_s}]")
         endpoint = rule_rows[-1]
         direct = _paired_diff(runs_a, runs_b, "accuracy_at_longest")
         recompute = {
@@ -1044,6 +1047,18 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
             controlled_columns.setdefault(name, {})[metric] = {
                 "mean": controlled.get("mean"), "lo": controlled.get("lo"),
                 "hi": controlled.get("hi"), "n": controlled.get("n"),
+                # The single-factor verdict travels with the frozen-recipe
+                # column: this column is the controlled one, so the reader
+                # must see that it really is a one-factor contrast and
+                # which factor varies.
+                "controlled": (controlled.get("controlled") or {}).get(
+                    "controlled"),
+                "single_factor": (controlled.get("controlled") or {}).get(
+                    "single_factor"),
+                "n_varying_factors": (controlled.get("controlled") or {}).get(
+                    "n_varying_factors"),
+                "varying_factors": (controlled.get("controlled") or {}).get(
+                    "varying_factors") or {},
             }
             ctl_s = (f"{controlled.get('mean', float('nan')):+.4f} "
                      f"[{controlled.get('lo', float('nan')):+.4f},"

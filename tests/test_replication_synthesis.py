@@ -40,6 +40,8 @@ def _ci(diffs):
         "controlled": True,
         "mismatches": [],
         "varying_factors": {"gate": {"a": ["calib"], "b": ["query"]}},
+        "single_factor": True,
+        "n_varying_factors": 1,
         "capacity": {"matched": True, "a": 10, "b": 10,
                      "delta_b_minus_a": 0},
     }
@@ -209,10 +211,8 @@ class ContrastReplicationAuditTest(unittest.TestCase):
     def test_null_prediction_replication_uses_the_bound(self):
         ci = equivalence_test([0.01, -0.01, 0.02, -0.02, 0.0], 0.05)
         ci["diffs"] = [0.01, -0.01, 0.02, -0.02, 0.0]
-        ci["controlled"] = {
-            "controlled": True, "mismatches": [],
-            "varying_factors": {}, "capacity": {
-                "matched": True, "a": 10, "b": 10, "delta_b_minus_a": 0}}
+        # A one-sample drift row ("vs 0") has no pairwise contrast to
+        # audit, so it carries no controlled-variable verdict at all.
         log = ContrastLog("e2", hypotheses=("H2b",), min_seeds=3)
         with contextlib.redirect_stdout(io.StringIO()):
             log.print_equivalence_ci("drift", "H2b", "entropy_norm_drift", ci)
@@ -311,10 +311,8 @@ class HypothesisSynthesisTest(unittest.TestCase):
     def test_null_prediction_refutation_is_counted(self):
         ci = equivalence_test([0.20, 0.19, 0.21, 0.18, 0.22], 0.05)
         ci["diffs"] = [0.20, 0.19, 0.21, 0.18, 0.22]
-        ci["controlled"] = {
-            "controlled": True, "mismatches": [],
-            "varying_factors": {}, "capacity": {
-                "matched": True, "a": 10, "b": 10, "delta_b_minus_a": 0}}
+        # A one-sample drift row ("vs 0") has no pairwise contrast to
+        # audit, so it carries no controlled-variable verdict at all.
         log = ContrastLog("e2", hypotheses=("H2b",), min_seeds=3)
         with contextlib.redirect_stdout(io.StringIO()):
             log.print_equivalence_ci("drift", "H2b", "entropy_norm_drift", ci)

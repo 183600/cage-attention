@@ -413,25 +413,30 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
         for baseline in ("none", "query", "null"):
             if baseline not in reference_runs:
                 continue
+            pairs = {
+                metric: _paired_diff(
+                    reference_runs["calib"], reference_runs[baseline], metric)
+                for metric in ("accuracy", "abs_gate_vs_entropy",
+                               "abs_gate_vs_maxprob", "gate_margin")
+            }
             controlled[f"calib - {baseline}"] = {
                 metric: {
                     "mean": ci.get("mean"), "lo": ci.get("lo"),
                     "hi": ci.get("hi"), "n": ci.get("n"),
+                    # The single-factor verdict travels with the frozen-
+                    # recipe column: this column is the controlled one, so
+                    # the reader must see that it really is a one-factor
+                    # contrast and which factor varies.
+                    "controlled": (ci.get("controlled") or {}).get(
+                        "controlled"),
+                    "single_factor": (ci.get("controlled") or {}).get(
+                        "single_factor"),
+                    "n_varying_factors": (ci.get("controlled") or {}).get(
+                        "n_varying_factors"),
+                    "varying_factors": (ci.get("controlled") or {}).get(
+                        "varying_factors") or {},
                 }
-                for metric, ci in (
-                    ("accuracy", _paired_diff(
-                        reference_runs["calib"], reference_runs[baseline],
-                        "accuracy")),
-                    ("abs_gate_vs_entropy", _paired_diff(
-                        reference_runs["calib"], reference_runs[baseline],
-                        "abs_gate_vs_entropy")),
-                    ("abs_gate_vs_maxprob", _paired_diff(
-                        reference_runs["calib"], reference_runs[baseline],
-                        "abs_gate_vs_maxprob")),
-                    ("gate_margin", _paired_diff(
-                        reference_runs["calib"], reference_runs[baseline],
-                        "gate_margin")),
-                )
+                for metric, ci in pairs.items()
             }
 
     print(f"\n[e1] per-variant tuning (separate fairness accounting, "
@@ -641,6 +646,12 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
                 "curve_invalid_seeds": ci.get("curve_invalid_seeds"),
                 "controlled": audit.get("controlled"),
                 "control_mismatches": audit.get("mismatches"),
+                # The single-factor verdict travels with the row: at each
+                # lr the pair must still vary exactly one factor, and a
+                # reader must not have to re-run the audit to know it.
+                "single_factor": audit.get("single_factor"),
+                "n_varying_factors": audit.get("n_varying_factors"),
+                "varying_factors": audit.get("varying_factors") or {},
                 "capacity": audit.get("capacity"),
                 "measured": measured,
                 "ci_excludes_zero": supported,

@@ -320,7 +320,15 @@ def _factorial_main_effect(cells, metric, factor):
                     f"{diff}")
     ci["controlled"] = {"controlled": not mismatches,
                         "mismatches": mismatches,
-                        "varying_factors": factors}
+                        "varying_factors": factors,
+                        # A factorial main effect averages the factor-on and
+                        # factor-off cells, so it is not a single-factor
+                        # pairwise contrast: the verdict is deliberately
+                        # undefined and the row declares itself as an
+                        # aggregate.
+                        "single_factor": None,
+                        "n_varying_factors": None,
+                        "aggregate": "factorial main effect"}
     return ci
 
 
@@ -472,7 +480,15 @@ def _grid_level_main_effect(metric, level_cells, baseline_cells):
                     f"{diff}")
     ci["controlled"] = {"controlled": not mismatches,
                         "mismatches": mismatches,
-                        "varying_factors": factors}
+                        "varying_factors": factors,
+                        # A grid-level main effect averages the level cells
+                        # over the control combinations, so it is not a
+                        # single-factor pairwise contrast: the verdict is
+                        # deliberately undefined and the row declares itself
+                        # as an aggregate.
+                        "single_factor": None,
+                        "n_varying_factors": None,
+                        "aggregate": "grid-level main effect"}
     return ci
 
 

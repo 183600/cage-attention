@@ -133,6 +133,8 @@ class ContrastMinimumEffectAuditTest(unittest.TestCase):
             "controlled": True,
             "mismatches": [],
             "varying_factors": {"gate": {"a": ["calib"], "b": ["query"]}},
+            "single_factor": True,
+            "n_varying_factors": 1,
             "capacity": {"matched": True, "a": 10, "b": 10,
                          "delta_b_minus_a": 0},
         }
@@ -158,6 +160,8 @@ class ContrastMinimumEffectAuditTest(unittest.TestCase):
             "controlled": True,
             "mismatches": [],
             "varying_factors": {"norm": {"a": ["seednorm"], "b": ["pre"]}},
+            "single_factor": True,
+            "n_varying_factors": 1,
             "capacity": {"matched": False, "a": 10, "b": 8,
                          "delta_b_minus_a": -2},
         }
@@ -247,6 +251,8 @@ class ContrastMinimumEffectAuditTest(unittest.TestCase):
         ci["controlled"] = {
             "controlled": True, "mismatches": [],
             "varying_factors": {"gate": {"a": ["calib"], "b": ["none"]}},
+            "single_factor": True,
+            "n_varying_factors": 1,
             "capacity": {"matched": True, "a": 10, "b": 10,
                          "delta_b_minus_a": 0},
         }

@@ -193,6 +193,20 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
                 and row["metric"] in _ACCURACY_METRICS):
             row["claim_eligible"] = False
             row["accuracy_balance_failed"] = True
+        # Single-factor contract at the decision point.  A row that passed
+        # the controlled-variable audit but carries no single-factor
+        # certificate is not a one-factor contrast: it is either a
+        # registered aggregate (factorial main effect, grid-level main
+        # effect, interaction - declared by the row itself) or a defect.
+        # Fail closed on the defect: without the certificate the row may
+        # not support a hypothesis, so a multi-factor manipulation can
+        # never be read through a one-factor claim.
+        row["single_factor_violation"] = False
+        if (row.get("controlled") is True
+                and row.get("single_factor") is not True
+                and not row.get("aggregate")):
+            row["single_factor_violation"] = True
+            row["claim_eligible"] = False
         row["supports_hypothesis"] = bool(
             row["fdr_reject"] and row["practically_relevant"]
             and row["claim_eligible"])
@@ -969,6 +983,17 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
               f"held-out answer-balance audit failed; accuracy is a "
               f"class-prior reading on that stream, so only the "
               f"macro/PR-AUC companions can support a mechanism claim")
+    single_factor_violations = [
+        r for r in testable if r.get("single_factor_violation")]
+    if single_factor_violations:
+        names = ", ".join(
+            f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+            for r in single_factor_violations)
+        print(f"[{self.tag}] WARNING: {len(single_factor_violations)} "
+              f"controlled contrast(s) carry no single-factor certificate "
+              f"and are marked claim-ineligible ({names}): without the "
+              f"certificate the row may not be read as a one-factor "
+              f"contrast, so it cannot support a hypothesis")
     low_seed = [r for r in testable
                 if r.get("seed_floor_failed")
                 and r.get("competence_passed") is not False
@@ -1227,6 +1252,17 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
                "n_confounded": len(confounded),
                "n_audited": len(audited),
                "n_control_passed": len(controlled_pass),
+               # The single-factor contract at the decision point: a
+               # controlled row without the certificate cannot support a
+               # hypothesis, and the count says how many rows that was.
+               "n_single_factor": len(
+                   [r for r in self.rows if r.get("single_factor") is True]),
+               "n_single_factor_violations": len(single_factor_violations),
+               "single_factor_violation_contrasts": [
+                   f"{r['hypothesis']}/{r['rule']} ({r['metric']})"
+                   for r in single_factor_violations],
+               "n_aggregate_rows": len(
+                   [r for r in self.rows if r.get("aggregate")]),
                "n_low_seed": len(low_seed),
                "n_curve_invalid_gated": len(curve_invalid_gated),
                "n_claim_ineligible_competence": len(competence_failed),
