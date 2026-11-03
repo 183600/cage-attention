@@ -234,6 +234,41 @@ class ReplayOptionTest(unittest.TestCase):
 
 
 
+class SkipBaselinesTest(unittest.TestCase):
+    """``--skip-baselines`` must be honoured for every experiment choice."""
+
+    def _run(self, tmp, experiment, skip_baselines):
+        runner = _runner(pathlib.Path(tmp), experiment=experiment,
+                         skip_baselines=skip_baselines)
+        seen = []
+        runner.capture_environment = lambda: {}
+        runner.run_gate_checks = lambda: True
+        runner.run_unit_tests = lambda: True
+        runner.run_baselines = lambda: seen.append("baselines") or True
+        runner.run_replay = lambda: seen.append("replay") or True
+        runner.run_experiment = lambda exp: seen.append(exp) or True
+        runner.run_verification = lambda: True
+        runner.generate_summary_report = lambda: {}
+        runner.create_replication_package = lambda: pathlib.Path(tmp)
+        runner.run_command = lambda *a, **k: types.SimpleNamespace(
+            returncode=0, stdout="", stderr="")
+        with contextlib.redirect_stdout(io.StringIO()):
+            runner.run()
+        return seen
+
+    def test_skip_baselines_is_honoured_for_every_experiment(self):
+        for experiment in ("all", "baselines", "e1", "e2", "e3"):
+            with tempfile.TemporaryDirectory() as tmp:
+                seen = self._run(tmp, experiment, True)
+                self.assertNotIn("baselines", seen, experiment)
+
+    def test_baselines_run_when_they_are_not_skipped(self):
+        for experiment in ("all", "baselines", "e1"):
+            with tempfile.TemporaryDirectory() as tmp:
+                seen = self._run(tmp, experiment, False)
+                self.assertIn("baselines", seen, experiment)
+
+
 class WorkingDirectoryTest(unittest.TestCase):
     """The runner must work when it is started outside the repository.
 

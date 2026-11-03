@@ -499,9 +499,11 @@ class ExperimentRunner:
         # 4. Baseline gates.  A replay inherits the source run's certified
         # baseline verdict (the experiment CLI copies it into the replay
         # directory), so the baseline step is skipped in replay mode.
-        if self.replay_manifest is None and (
-                self.args.experiment in ("all", "baselines")
-                or not self.args.skip_baselines):
+        # ``--skip-baselines`` is honoured for every experiment choice: the
+        # flag exists to let an operator run the grids without re-running
+        # the gate, and it used to be ignored for ``--experiment all`` /
+        # ``--experiment baselines``.
+        if self.replay_manifest is None and not self.args.skip_baselines:
             if not self.run_baselines():
                 print("\n[FATAL] Baseline gates failed. Aborting.")
                 return 1
