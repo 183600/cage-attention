@@ -16,6 +16,8 @@ either one is a provenance bug, not a cosmetic one:
 """
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import pathlib
@@ -24,6 +26,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -229,6 +232,59 @@ class ReplayOptionTest(unittest.TestCase):
                 returncode=0, stdout="", stderr="")
             self.assertFalse(runner.run_replay())
 
+
+
+class WorkingDirectoryTest(unittest.TestCase):
+    """The runner must work when it is started outside the repository.
+
+    ``run_experiment.py`` is documented as ``python3 /path/to/repo/
+    run_experiment.py ...``, but it invoked its helpers by relative path,
+    so the pre-flight environment capture died with "can't open file
+    '/tmp/capture_environment.py'" before anything was recorded.
+    """
+
+    def test_subprocesses_run_in_the_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = _runner(pathlib.Path(tmp))
+            with mock.patch.object(run_experiment.subprocess, "run") as run:
+                run.return_value = subprocess.CompletedProcess(
+                    args=[], returncode=0, stdout="", stderr="")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    runner.run_command([sys.executable, "-c", "pass"])
+            kwargs = run.call_args.kwargs
+            self.assertEqual(pathlib.Path(kwargs["cwd"]).resolve(),
+                             ROOT.resolve())
+            entries = kwargs["env"]["PYTHONPATH"].split(os.pathsep)
+            self.assertIn(str(ROOT.resolve()), entries)
+
+    def test_helper_scripts_are_addressed_by_repository_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            runner = _runner(out)
+            calls = []
+
+            def fake_run_command(cmd, capture=True, check=True, env=None):
+                calls.append(cmd)
+                if cmd[1].endswith("capture_environment.py"):
+                    target = cmd[cmd.index("--output") + 1]
+                    pathlib.Path(target).write_text(
+                        json.dumps({"environment_sha256": "x"}),
+                        encoding="utf-8")
+                return types.SimpleNamespace(returncode=0, stdout="",
+                                             stderr="")
+
+            runner.run_command = fake_run_command
+            with contextlib.redirect_stdout(io.StringIO()):
+                runner.capture_environment()
+                runner.run_gate_checks()
+                runner.run_unit_tests()
+            self.assertEqual(
+                pathlib.Path(calls[0][1]).resolve(),
+                ROOT.resolve() / "capture_environment.py")
+            self.assertEqual(
+                pathlib.Path(calls[1][1]).resolve(),
+                ROOT.resolve() / "ci_gate.py")
+            self.assertIn(str(ROOT.resolve() / "tests"), calls[2])
 
 
 if __name__ == "__main__":

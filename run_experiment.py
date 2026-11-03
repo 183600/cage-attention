@@ -101,16 +101,30 @@ class ExperimentRunner:
         
     def run_command(self, cmd: list[str], capture: bool = True, check: bool = True, 
                     env: dict | None = None) -> subprocess.CompletedProcess:
-        """Run a command with logging."""
+        """Run a command with logging.
+
+        The command runs in the repository, not in the caller's working
+        directory: the experiment package, the gate script and the test
+        suite all live in the checkout, and the runner is documented to be
+        usable from anywhere (``python3 /path/to/run_experiment.py ...``).
+        """
         print(f"\n[RUN] {' '.join(cmd)}")
         sys.stdout.flush()
         
         merged_env = os.environ.copy()
         if env:
             merged_env.update(env)
-            
+        # ``python -m`` only finds the checkout's package when the
+        # repository root is importable; an inherited PYTHONPATH must not
+        # shadow it.
+        python_path = [str(_REPO_ROOT)]
+        if merged_env.get("PYTHONPATH"):
+            python_path.append(merged_env["PYTHONPATH"])
+        merged_env["PYTHONPATH"] = os.pathsep.join(python_path)
+        
         if capture:
-            result = subprocess.run(cmd, capture_output=True, text=True, env=merged_env)
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    env=merged_env, cwd=str(_REPO_ROOT))
             if result.stdout:
                 print(result.stdout)
             if result.stderr:
@@ -119,7 +133,7 @@ class ExperimentRunner:
                 raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
             return result
         else:
-            result = subprocess.run(cmd, env=merged_env)
+            result = subprocess.run(cmd, env=merged_env, cwd=str(_REPO_ROOT))
             if check and result.returncode != 0:
                 raise subprocess.CalledProcessError(result.returncode, cmd)
             return result
@@ -131,7 +145,7 @@ class ExperimentRunner:
         print("="*60)
         
         result = self.run_command([
-            sys.executable, "capture_environment.py",
+            sys.executable, str(_REPO_ROOT / "capture_environment.py"),
             "--output", str(self.out_dir / "environment_pre_run.json")
         ])
         
@@ -147,7 +161,7 @@ class ExperimentRunner:
         print("="*60)
         
         try:
-            self.run_command([sys.executable, "ci_gate.py"])
+            self.run_command([sys.executable, str(_REPO_ROOT / "ci_gate.py")])
             print("[GATE] PASS")
             return True
         except subprocess.CalledProcessError as e:
@@ -161,7 +175,8 @@ class ExperimentRunner:
         print("="*60)
         
         try:
-            self.run_command([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"])
+            self.run_command([sys.executable, "-m", "unittest", "discover",
+                              "-s", str(_REPO_ROOT / "tests"), "-v"])
             print("[TESTS] PASS")
             return True
         except subprocess.CalledProcessError as e:
@@ -522,7 +537,7 @@ class ExperimentRunner:
         print("CAPTURING POST-RUN ENVIRONMENT")
         print("="*60)
         self.run_command([
-            sys.executable, "capture_environment.py",
+            sys.executable, str(_REPO_ROOT / "capture_environment.py"),
             "--output", str(self.out_dir / "environment_post_run.json")
         ])
         
