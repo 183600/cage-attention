@@ -269,6 +269,43 @@ class SkipBaselinesTest(unittest.TestCase):
                 self.assertIn("baselines", seen, experiment)
 
 
+class SummaryReportTest(unittest.TestCase):
+    """The summary report must carry the hypothesis-level synthesis."""
+
+    def test_synthesis_is_read_from_the_contrast_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            (out / "e1_manifest.json").write_text(
+                json.dumps({"experiment": "e1"}), encoding="utf-8")
+            (out / "e1_contrasts.json").write_text(
+                json.dumps({"hypothesis_synthesis": {
+                    "H1a": {"claim_level_status": "supported"}}}),
+                encoding="utf-8")
+            runner = _runner(out)
+            with contextlib.redirect_stdout(io.StringIO()):
+                report = runner.generate_summary_report()
+            self.assertIn("e1", report["experiments"])
+            self.assertEqual(
+                report["experiments"]["e1"]["synthesis"]["H1a"][
+                    "claim_level_status"], "supported")
+
+    def test_a_dedicated_synthesis_file_still_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            (out / "e1_manifest.json").write_text(
+                json.dumps({"experiment": "e1"}), encoding="utf-8")
+            (out / "e1_contrasts.json").write_text(
+                json.dumps({"hypothesis_synthesis": {"H1a": "from-log"}}),
+                encoding="utf-8")
+            (out / "e1_synthesis.json").write_text(
+                json.dumps({"H1a": "from-file"}), encoding="utf-8")
+            runner = _runner(out)
+            with contextlib.redirect_stdout(io.StringIO()):
+                report = runner.generate_summary_report()
+            self.assertEqual(report["experiments"]["e1"]["synthesis"]["H1a"],
+                             "from-file")
+
+
 class WorkingDirectoryTest(unittest.TestCase):
     """The runner must work when it is started outside the repository.
 

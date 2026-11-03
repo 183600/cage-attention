@@ -370,6 +370,20 @@ class ExperimentRunner:
                 if synthesis_path.exists():
                     with open(synthesis_path) as f:
                         report["experiments"][exp]["synthesis"] = json.load(f)
+                else:
+                    # The experiment CLI keeps the hypothesis-level
+                    # synthesis inside the contrast log
+                    # (``<tag>_contrasts.json``); no
+                    # ``<tag>_synthesis.json`` is ever written, so the
+                    # summary report used to omit the scientific
+                    # conclusion of every run.
+                    contrasts_path = self.out_dir / f"{exp}_contrasts.json"
+                    if contrasts_path.exists():
+                        with open(contrasts_path) as f:
+                            contrasts = json.load(f)
+                        synthesis = contrasts.get("hypothesis_synthesis")
+                        if synthesis is not None:
+                            report["experiments"][exp]["synthesis"] = synthesis
         
         # List artifacts
         artifact_index = self.out_dir / "artifact_index.json"
