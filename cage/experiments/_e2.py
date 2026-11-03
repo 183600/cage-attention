@@ -166,7 +166,11 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
     payload = {"lengths": list(lengths), "contrasts": {},
                "note": ("exploratory per-length companion; endpoint rows "
                         "above remain the pre-registered decision and the "
-                        "FDR family is unchanged")}
+                        "FDR family is unchanged - every row still carries "
+                        "its controlled-variable audit (paired seeds, shared "
+                        "recipe) and the single-factor verdict, so a row "
+                        "that varies more than one factor is visible here "
+                        "instead of being read as a one-factor check")}
     by_variant = ({label: _mapping_runs(runs)
                    for label, runs in by_variant.items()}
                   if isinstance(by_variant, Mapping) else {})
@@ -210,16 +214,26 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
                 "seeds_dropped": ci.get("seeds_dropped"),
                 "curve_invalid_seeds": ci.get("curve_invalid_seeds"),
                 "controlled": audit.get("controlled"),
+                # The single-factor verdict travels with every stored paired
+                # row (exactly as the decision rows keep it): an exploratory
+                # row that silently flipped two factors would otherwise be
+                # read as a one-factor robustness check.
+                "single_factor": audit.get("single_factor"),
+                "n_varying_factors": audit.get("n_varying_factors"),
+                "varying_factors": audit.get("varying_factors") or {},
+                "control_mismatches": audit.get("mismatches") or [],
                 "ci_excludes_zero": bool(signed),
                 "signed_direction": signed,
                 "stream_test": ci.get("stream_test"),
             }
             rule_rows.append(row)
+            factors = ",".join(sorted(row["varying_factors"])) or "n/a"
             print(f"{rule:>18} {length:>7} "
                   f"{row['a_mean'] if _finite(row['a_mean']) else float('nan'):>9.4f} "
                   f"{row['b_mean'] if _finite(row['b_mean']) else float('nan'):>9.4f} "
                   f"{_fmt_ci(ci):>28} {ci.get('n', 0):>6} "
-                  f"{'ok' if audit.get('controlled') else 'FAILED':>9}")
+                  f"{'ok' if audit.get('controlled') else 'FAILED':>9}"
+                  f"  [varies={factors}]")
         endpoint = rule_rows[-1]
         direct = _paired_diff(runs_a, runs_b, "accuracy_at_longest")
         recompute = {
