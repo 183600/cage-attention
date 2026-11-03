@@ -132,10 +132,23 @@ def _get_determinism_state() -> dict:
     }
 
 
+def _default_root() -> str:
+    """The repository root: the directory this script lives in.
+
+    ``capture_environment.py`` sits at the top level of the checkout, so the
+    repository root is its own directory.  Taking the *parent* of that
+    directory would point the record at whatever surrounds the checkout:
+    the git sha would be unreadable ("unavailable"), the tree would always
+    look dirty, and the dependency manifest (pyproject.toml /
+    requirements-ci.txt / README.md / docs/design_notes.md) would be empty.
+    """
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def capture_environment(root: str | None = None) -> dict:
     """Capture complete software environment."""
     if root is None:
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        root = _default_root()
     
     env = {
         "schema_version": 1,
@@ -222,7 +235,7 @@ def main():
     parser.add_argument("--root", help="Repository root (default: auto-detect)")
     args = parser.parse_args()
     
-    root = args.root or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = args.root or _default_root()
     
     if args.compare:
         with open(args.compare, "r") as f:
