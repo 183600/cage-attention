@@ -7,8 +7,13 @@
 | 1.0 | 2026-11-03 | 初始版本，对应预注册假设注册表 v1 | - |
 | 1.1 | 2026-11-04 | 新增 §3.5：单因素对照的**设计期证书**（把既有"受控对比只改一个因子"的要求从行级审计前移到开跑前；不新增/修改任何假设、臂、对比对、SESOI 或判定规则，故 `_config.py:HYPOTHESES` 与 `docs/design_notes.md` 无需改动） | - |
 | 1.2 | 2026-11-04 | 修正 §2.3 的 E2 臂表：第 8 臂按实现为 `null`（原文误列为 E1 的安慰剂 `calib_shuf_ent`，而 E2 预注册决策规则中没有安慰剂对比）；文档与实现对齐，不改任何假设/对比/规则 | - |
+| 1.3 | 2026-11-04 | 新增 §3.6：**研究级分析计划**（跨 E1/E2/E3 的预注册确认性对比集 + 声明式合取 + 合并族 FDR 裁决）；修正 §2.1 封存测试种子（456 → **2024**，与 `cage/_data_task.py:TEST_SEED` 对齐）与 §2.2 网格默认值（与 `Settings` 默认值对齐）；§5.5/附录 C 登记新增制品 | - |
 
-> **重要**：本协议文档与 `cage/experiments/_config.py:HYPOTHESES` 及 `docs/design_notes.md` 形成三位一体的预注册体系。任何实验协议变更必须同步更新三处，并通过 `ci_gate.py` 设计固定项检查。
+> **重要**：本协议文档与 `cage/experiments/_config.py:HYPOTHESES`、`docs/design_notes.md` 及
+> `cage/experiments/_analysis_plan.py:_PRIMARY_CONTRASTS`/`_STUDY_CLAIMS`
+> 形成**四位一体**的预注册体系：前三者定义单条假设与其判定规则，第四者定义
+> **哪些对比承担研究的确认性主张**以及它们如何合成研究级声明。任何实验协议变更
+> 必须同步更新相应文档，并通过 `ci_gate.py` 设计固定项检查。
 
 ---
 
@@ -73,7 +78,7 @@
 |----|------|------|------|
 | train | 用户种子集 | 训练批次生成 | 拒绝 VAL/TEST/STATS 种子 |
 | val | `VAL_SEED=123` | 学习率/配方选择 | 仅选择，不评估 |
-| test | `TEST_SEED=456` | 最终报告数字、预注册门控规则 | 封存，从不用于选择 |
+| test | `TEST_SEED=2024` | 最终报告数字、预注册门控规则 | 封存，从不用于选择 |
 | stats | `STATS_SEED=7` | 机制统计（熵、门控、错误挖掘） | 固定，与 test 独立 |
 
 **HB3 分裂审计**：训练流与每个保留流的精确重复重叠=0；分布偏移卡方检验 BH 校正后 p ≥ FDR。
@@ -93,14 +98,17 @@
 
 **共享调度**：上述 8 个 cell 进入**同一个**随机化完全区组设计（每种子一个区组，每区组 8 个 cell 位置随机排列），避免消融对比被机器漂移混淆。
 
-**网格配置**（默认，可通过 CLI 覆盖）：
+**网格配置**（`Settings` 默认值，可通过 CLI 覆盖）：
 ```python
-# 共享冻结配方（在 none 上用 VAL_SEED 调得）
-steps=2000, lr=3e-4, batch=32, n_pairs=16, vocab=64
+# 共享冻结配方：在 none 上用 VAL_SEED 从 lr_grid 调得后冻结（lr_grid=(1e-3, 3e-4, 1e-4)）
+steps=1500, batch=64, n_pairs=16, vocab=512
 d_model=256, n_layers=8, n_heads=4, max_len=256
 dropout=0.0, norm=pre, layer_scale=None
 # calib 专用
 calib_a=1.0, calib_c=1.0, calib_scale=1.0, calib_tau_init=0.9
+# 其余运行参数
+seeds=(0,1,2,3,4), fdr_q=0.05, min_seeds_for_claim=3
+design_alpha=0.05, power_target=0.8, run_order_seed=20240517
 ```
 
 **读出指标**（每层 Fisher z 平均后的 Pearson 相关）：
@@ -218,6 +226,55 @@ calib_a=1.0, calib_c=1.0, calib_scale=1.0, calib_tau_init=0.9
 - **非受控探索对比**：安慰剂臂与 `query` 的对比同时改变 `gate` 与 `calib_shuffle_ent`，显式记入证书的 `exploratory_pairs`（`controlled: false`），只在决策日志之外打印。
 - **与行级审计并存**：设计期证书不替代逐行的受控变量审计（`varying_factors` / `declared_label_diffs`）；两处都必须通过。
 
+### 3.6 研究级分析计划（跨家族多重性）
+
+E1/E2/E3 各自控制一个 FDR 家族，但**这些保证不复合**：三个家族各自在 q=0.05 上做 BH，
+并不意味着它们发现的并集是 FDR-0.05 集合。研究的头条主张同时在多个家族里被检验
+（校准门控在 E1 **和** E2 中都与 query 门控对比），所以"在自家家族里成立"这句话
+会让读者读到一个从未被控制过的研究级错误率。
+
+因此研究在**开跑前**注册一份研究级分析计划（`cage/experiments/_analysis_plan.py`）：
+
+- **确认性对比集**（`_PRIMARY_CONTRASTS`，9 条腿 P1–P9）：每条腿用
+  `(experiment, hypothesis, metric, rule)` 三元组标识运行器**实际产出的**那一行，
+  并显式写出它对比的网格单元 `arms`（如 P1 = `("calib", "query")`）与
+  `kind`（`one_factor` 对比两个单元 / `interaction` 对比两个差之差，共四个单元）。
+- **研究级声明**（`_STUDY_CLAIMS`，C1–C4）：每条声明是其各腿的**合取**
+  （intersection-union, IUT）。IUT 下拒绝一个合取需要拒绝它的**每一条**腿，
+  因此声明之间不需要额外校正；声明的全局 p 值是其各腿单侧 p 值的最大值。
+- **注册表审计**：每条腿的假设、实验归属、指标 SESOI、方向/零预测检验方式
+  必须在 `_config.py:HYPOTHESES` 中存在，否则计划无法发布。
+- **可达性审计**（`_primary_contrast_reachability`）：每条腿的 `arms` 必须真的
+  是它所属家族的网格单元（`_e1_cell_plan` / `_E2_VARIANTS` / E3 网格）。
+  不可达的腿**永远无法被测量**——研究会先花掉算力，再以"不可裁决"收场，
+  而原因在开跑前就写在源码里。不可达即**拒绝开跑**（`DesignPlanError`）。
+- **冻结**：`analysis_plan.json` 写入内容哈希（`analysis_plan_sha256`），
+  **任何家族产出结果行之后**修改确认性对比集、其多重性水平或计划种子数
+  都会抛出 `DesignPlanError`（那是看过数据之后重选确认性对比 = 事后重设计）。
+  开跑前的修订保留在 `analysis_plan_history.jsonl`。
+- **研究级功效**（`_primary_contrast_power`）：单家族预算通过**不等于**研究级
+  主张可裁决——合并后的确认性家族更大，BH 的最坏情况阈值是 `q/m`。计划同时报告
+  `claim_level`（未膨胀的 q）与 `pooled_family`（q/m）两个阈值下的种子数需求与功效。
+  只有 accuracy 量纲的腿有经验 pilot 方差，其余腿报 `no_pilot` 而不是编造种子数。
+- **裁决**（`_study_level_adjudication` → `study_level_adjudication.json`）：
+  读取三个家族的 `<tag>_contrasts.json`，报告每条腿的家族内与合并族判定、
+  每条声明的 IUT 判定、**家族缺失/腿缺失/腿歧义/计划与注册表不一致**等偏离，
+  以及研究级状态。缺家族的运行报 **incomplete**，不得当作完整研究汇报。
+  在自家家族成立但在合并族不成立的腿/声明分别记为 `family_inflated`。
+- **不合格的腿不能裁决声明**：配对种子数低于 `min_seeds_for_claim`、曲线失效、
+  评估流不平衡或非受控对比的行，其 `claim_eligible=false`，因此既不能支持
+  也不能**反驳**一条声明（与 §5.3 假设综合的约定一致）。
+
+**注册与刷新时机**：E1、E2、E3 **每个家族**在首次训练前都发布/复核这份计划
+（因此"先跑 E2"与"先跑 E1"等价），并在各自结束时刷新研究级裁决；
+`--only all` 在三个家族之后最后再写一次，因此完整运行留下的
+`study_level_adjudication.json` 是**完整研究**的读数，而不是第一个家族结束时的部分读数。
+
+**研究级设计预检**（`_study_design_preflight` → `study_design_preflight.json`）：
+在开跑前把注册表一致性、可达性、合并族功效预算和**算力预算**（由 `Settings`
+与网格计划推导出的运行数与解析 FLOPs）汇总成一份准备证书。算力预算取代
+手写的运行次数：提案里引用的运行数应当来自这份制品，而不是一个人工抄写的数字。
+
 ---
 
 ## 4. 基线与合理性门禁（运行前必须通过）
@@ -297,6 +354,18 @@ calib_a=1.0, calib_c=1.0, calib_scale=1.0, calib_tau_init=0.9
 {"run_id": "...", "compatible": false, "differences": [{"field": "torch", "severity": "critical", "previous": "2.3.0", "current": "2.4.0"}]}
 ```
 
+### 5.5 研究级制品（跨家族）
+
+| 制品 | 写入时机 | 内容 |
+|------|----------|------|
+| `study_design_preflight.json` | 每个家族开跑前 | 注册表一致性 + 腿可达性 + 合并族功效预算 + 算力预算（运行数、解析 FLOPs） |
+| `analysis_plan.json` | 每个家族开跑前 | 预注册研究级分析计划：确认性对比集 P1–P9、声明 C1–C4、合并 FDR 水平、计划种子数、内容哈希 |
+| `analysis_plan_history.jsonl` | 计划创建/修订时 | 每次计划事件的追加式历史（`created` / `amended` / `replaced_malformed`） |
+| `study_level_adjudication.json` | 每个家族结束时（`--only all` 结束后再写一次） | 每条腿的家族内/合并族判定、每条声明的 IUT 判定、研究级状态与偏离清单 |
+
+`analysis_plan.json` 的哈希覆盖**设计相关**部分（对比集、声明、合并 FDR 水平、
+声明门槛、计划种子数、假设注册表哈希），不覆盖每次调用都变的溯源信息。
+
 ---
 
 ## 6. 复现与验证检查表
@@ -309,6 +378,9 @@ calib_a=1.0, calib_c=1.0, calib_scale=1.0, calib_tau_init=0.9
 - [ ] `make verify OUT=results` 全部通过
 - [ ] `baselines_verdict.json` 所有门禁通过
 - [ ] 设计计划冻结无冲突（`_design_plan_history.jsonl` 无错误）
+- [ ] 研究级分析计划已注册且冻结（`analysis_plan.json` 存在，`analysis_plan_history.jsonl` 无意外修订）
+- [ ] `study_design_preflight.json` 中无不可达腿，功效预算已复核
+- [ ] `study_level_adjudication.json` 的 `study_complete=true`（三个家族齐备），否则报告必须写明"研究不完整"
 
 ### 6.2 独立复现核对
 
@@ -353,6 +425,19 @@ calib_a=1.0, calib_c=1.0, calib_scale=1.0, calib_tau_init=0.9
 | FCR 区间 | BH 选中集合的假覆盖率区间（BY 分母） |
 | 功效分析 | 观测方差下达到 80% 功效所需种子数 |
 
+### 7.4 研究级声明表（§3.6）
+
+| 声明 | 腿 | 家族内 IUT | 合并族 IUT | 家族膨胀 | 说明 |
+|------|----|-----------|-----------|---------|------|
+| C1 | P1, P2, P3 | supported | supported | 否 | 校准门控确实读取注意力分布 |
+| C2 | P4, P5 | partial | inconclusive | 是 | 读分布是否改变门控行为 |
+| C3 | P6, P7 | inconclusive | inconclusive | 否 | 长度鲁棒性是否超出 query 门控 |
+| C4 | P8, P9 | supported | partial | 是 | 门控与动态归一化是否协同 |
+
+> 表中数值为**格式示例**，不是结果。真实读数见 `study_level_adjudication.json`；
+> 研究级状态为 `incomplete`（有家族缺失）或任一声明的合并族读数为非 supported 时，
+> 不得把研究写成"结论成立"。
+
 ---
 
 ## 8. 变更控制
@@ -361,9 +446,13 @@ calib_a=1.0, calib_c=1.0, calib_scale=1.0, calib_tau_init=0.9
 
 1. 在 `docs/design_notes.md` 修改对应 `【固定】` 条目
 2. 同步更新 `cage/experiments/_config.py:HYPOTHESES`（假设注册表）
-3. 同步更新本文档 `EXPERIMENT_PROTOCOL.md`
-4. 运行 `make check` 确保 CI 门禁通过
-5. 提交并移动固定标签：`git tag -f design-pin <新提交sha> && git push origin design-pin`
+3. 若改动影响**确认性对比集或研究级声明**，同步更新
+   `cage/experiments/_analysis_plan.py:_PRIMARY_CONTRASTS`/`_STUDY_CLAIMS`
+   （两者的内容哈希进入 `analysis_plan.json`，改动会使既有结果目录的
+   `--verify-provenance` 失效，这是预期行为）
+4. 同步更新本文档 `EXPERIMENT_PROTOCOL.md`
+5. 运行 `make check` 确保 CI 门禁通过
+6. 提交并移动固定标签：`git tag -f design-pin <新提交sha> && git push origin design-pin`
 
 ### 8.2 版本兼容性
 
@@ -374,7 +463,10 @@ calib_a=1.0, calib_c=1.0, calib_scale=1.0, calib_tau_init=0.9
 
 ### 8.3 弃用与移除
 
-- 移除任何预注册假设/指标/对比需：同步三文档 + 移动 design-pin 标签 + 标记为 `deprecated` 而非直接删除（保留历史记录可读性）
+- 移除任何预注册假设/指标/对比需：同步四文档 + 移动 design-pin 标签 + 标记为 `deprecated` 而非直接删除（保留历史记录可读性）
+- 移除研究级确认性对比（P*）或声明（C*）需：同时更新 `_analysis_plan.py` 与本节 §3.6，
+  并在 `analysis_plan_history.jsonl` 留痕；**结果产出之后**的移除会被
+  `DesignPlanError` 拒绝
 - 移除手写 autograd 核需：通过 gradcheck + 参考实现对照 + 多块一致性 + 训练/评估路径一致性四重验证
 
 ---
@@ -434,6 +526,10 @@ make check | gate | test | sanity | verify | verify-replay SOURCE=results
 | `{tag}_manifest.json` | 重放清单 | `e1_manifest.json` |
 | `{tag}_per_variant_tuning.json` | 逐变体调参伴读 | `e1_per_variant_tuning.json` |
 | `{tag}_lr_sensitivity.json` | lr 敏感性伴读 | `e1_lr_sensitivity.json` |
+| `study_design_preflight.json` | 研究级设计预检（可达性 + 功效 + 算力） | — |
+| `analysis_plan.json` | 预注册研究级分析计划 | — |
+| `analysis_plan_history.jsonl` | 研究级计划修订历史 | — |
+| `study_level_adjudication.json` | 研究级裁决（IUT + 合并族） | — |
 | `baselines_verdict.json` | 基线裁决 | — |
 | `environment.json` | 当前环境记录 | — |
 | `environment_history.jsonl` | 环境漂移历史 | — |

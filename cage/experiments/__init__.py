@@ -166,6 +166,23 @@ Design principles
     rows' recorded block/position against that frozen schedule: a resumed
     or reordered loop is caught instead of being certified from the plan
     alone.
+    Three families each control their own FDR family, but those guarantees
+    do not compose: three families at ``q`` do not make the union of their
+    discoveries an FDR-``q`` set, and the study's headline claims are
+    re-tested in more than one family.  The study therefore registers a
+    **study-level analysis plan** before the first run of any family: the
+    small set of confirmatory contrasts (each naming the hypothesis, the
+    metric, the contrast label *and* the grid cells it contrasts), the
+    conjunctions they form, the multiplicity level under which they are
+    adjudicated, and the seed count the pooled family needs.  The plan is
+    content-hashed and frozen once any family has written outcome rows, and
+    every leg is checked against the hypothesis registry *and* against the
+    grid it claims to read: a leg whose cells are not trained can never be
+    measured, so the study refuses to start instead of spending compute on
+    a contrast it cannot produce.  The plan's power budget is reported at
+    the pooled family's worst-case threshold (``q/m``), which is lower than
+    the per-family one, and the study's compute bill is derived from the
+    settings and the cell plans rather than written down by hand.
 7. **Replication and claim-level synthesis.**  Two readings sit on top of
    the per-contrast decision without changing it.  First, every row carries
    a t-based **same-size replication interval** for a future study's mean
@@ -250,7 +267,7 @@ from ..data import (
     stream_seed_key,
     validate_batch,
 )
-from ..efficiency import measure_config
+from ..efficiency import analytic_matmul_flops, measure_config
 from ..metrics import (
     _normal_quantile,
     _positive_integer,
@@ -314,8 +331,10 @@ from ..train import (
 # ``_RUN_ARTIFACTS``.  Behaviour is byte-for-byte the pre-split implementation.
 _FRAGMENTS = (
     "_config.py",
+    "_analysis_plan.py",
     "_design.py",
     "_planning.py",
+    "_study_design.py",
     "_contrasts.py",
     "_synthesis.py",
     "_contrastlog.py",

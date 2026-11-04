@@ -1238,6 +1238,11 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
         attrition_accuracy_exact_unfalsifiable = []
         attrition_claim_seed_eligible = None
         attrition_claims_confirmable = None
+    # The study-level (pooled) primary family is larger than this
+    # experiment's own family, so the per-experiment budget above can be
+    # met while the study's headline claim is still out of reach.  The
+    # project-family block certifies the pooled budget separately.
+    project_family = _primary_contrast_power(settings, verdict)
     payload = {
         "experiment": tag,
         "planned_n": n,
@@ -1249,6 +1254,7 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
         "all_accuracy_claims_seed_eligible": all_claim_seed_eligible,
         "all_accuracy_claims_ready": all_claims_ready,
         "all_accuracy_claims_confirmable": all_claims_confirmable,
+        "project_family": project_family,
         "alpha": alpha,
         "power_target": target,
         # FDR level is part of the hashed design (see
@@ -1464,7 +1470,58 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
     elif rows:
         print("  exact sign-flip resolution: every registered alternative "
               "is falsifiable at the planned seed count")
+    _print_project_family_plan(project_family, n)
     return payload
+
+
+def _print_project_family_plan(project_family, n) -> None:
+    """Print the study-level (pooled) primary-family budget.
+
+    The per-experiment table above certifies one family; the study's
+    headline claims are adjudicated in the pooled primary family, which is
+    larger.  The budget is printed with the grid so a design that cannot
+    deliver its own study-level claim is visible before the compute is
+    spent.
+    """
+    if not isinstance(project_family, Mapping):
+        return
+    legs = project_family.get("legs") or []
+    if not legs:
+        return
+    print(f"  study-level primary family: {len(legs)} pre-registered "
+          f"contrast(s) in {project_family.get('n_claims')} claim(s); the "
+          f"pooled worst-case BH level is q/m="
+          f"{float(project_family.get('alpha_pooled_family_worst_case', 0.0)):.4g}")
+    print(f"  {'leg':>6} {'experiment':>10} {'hypothesis':>10} "
+          f"{'metric':>24} {'need_n':>7} {'power':>7} {'status':>12}")
+    for row in legs:
+        required = row.get("required_seeds_claim_level")
+        need = "-" if required is None else f"{float(required):.1f}"
+        power = row.get("power_at_planned_claim_level")
+        power_s = f"{power:.2f}" if _finite(power) else "-"
+        if row.get("powered_claim_level") is None:
+            status = "no-pilot"
+        elif row.get("powered_claim_level"):
+            status = "powered"
+        else:
+            status = "underpowered"
+        print(f"  {str(row.get('id')):>6} {str(row.get('experiment')):>10} "
+              f"{str(row.get('hypothesis')):>10} "
+              f"{str(row.get('metric')):>24} {need:>7} {power_s:>7} "
+              f"{status:>12}")
+    underpowered = project_family.get("underpowered_claim_level_legs") or []
+    if underpowered:
+        print(f"  WARNING: the planned n={n} does not resolve the "
+              f"study-level SESOI of {', '.join(underpowered)}; the "
+              f"per-experiment families may each be powered while the "
+              f"pooled study family cannot deliver the claim.  Add seeds "
+              f"before the grid if the study-level claim is the one that "
+              f"matters.")
+    unpiloted = project_family.get("legs_without_pilot") or []
+    if unpiloted:
+        print(f"  NOTE: {len(unpiloted)} primary contrast(s) "
+              f"({', '.join(unpiloted)}) have no empirical pilot variance, "
+              f"so their study-level power is not certified")
 
 
 def _recipe_view(run):

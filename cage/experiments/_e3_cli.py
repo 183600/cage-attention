@@ -553,7 +553,14 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H3a", "H3b", "H3c"))
     # HB1/HB3/HB4/HB5 hard gate (see run_e1).
     verdict = _enforce_baseline_verdict(settings, out_dir, "e3")
-    _design_sensitivity_plan(settings, verdict, out_dir, "e3")
+    plan = _design_sensitivity_plan(settings, verdict, out_dir, "e3")
+    # The study-level design pre-flight and the study-level analysis plan
+    # are registered by *every* family, not only by E1: a study that runs
+    # E3 first must still have its confirmatory contrasts frozen before
+    # the first training run, and a plan that only E1 publishes would
+    # make an E3-first run unable to register its own study afterwards.
+    _study_design_preflight(settings, out_dir, power=plan.get("project_family"))
+    _publish_analysis_plan(settings, out_dir)
     _write_manifest(settings, out_dir, "e3")
     _audit_data_splits(settings, out_dir, "e3", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e3")
@@ -961,6 +968,12 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
         print(f"      ls=1e-2: seednorm x (calib - query) - pre x "
               f"(calib - query) ({metric}): {_fmt_ci(ci)}")
     clog.finalize(out_dir, q=settings.fdr_q)
+    # The study-level reading is refreshed after every family: the pooled
+    # primary family spans E1/E2/E3, so an adjudication written before the
+    # other families ran would report a partial study as if it were the
+    # whole thing.  It is a companion - the per-family decisions above are
+    # unchanged.
+    _study_level_adjudication(out_dir, q=settings.fdr_q)
     robustness_rules = []
     for norm in NORMS:
         for layer_scale in (None, 1e-2):
@@ -1011,6 +1024,11 @@ def run_all(settings: Settings, out_dir: pathlib.Path) -> None:
     run_e2(settings, out_dir)
     run_e3(settings, out_dir)
     _project_evidence_synthesis(out_dir, q=settings.fdr_q)
+    # The study-level verdict is written last, when all three families are
+    # on disk.  Each family refreshes it as it finishes, so the artifact
+    # left behind by a full run is the complete-study reading rather than
+    # the partial one that was current when the first family ended.
+    _study_level_adjudication(out_dir, q=settings.fdr_q)
 
 
 def main(argv=None) -> int:

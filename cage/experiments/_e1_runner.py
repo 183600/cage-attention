@@ -9,7 +9,19 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     # (their pre-registered semantics invalidate everything above them;
     # the marks are stamped into every record via _run_context).
     verdict = _enforce_baseline_verdict(settings, out_dir, "e1")
-    _design_sensitivity_plan(settings, verdict, out_dir, "e1")
+    plan = _design_sensitivity_plan(settings, verdict, out_dir, "e1")
+    # The study-level design pre-flight certifies, before the first run of
+    # any family, that every registered primary contrast is reachable in
+    # its grid and that the pooled primary family is budgeted against the
+    # planned seed count.  It also derives the study's compute bill from
+    # the settings and the cell plans, so the run inventory quoted in a
+    # proposal comes from the code that executes it.
+    _study_design_preflight(settings, out_dir, power=plan.get("project_family"))
+    # The study-level analysis plan (the confirmatory contrasts and the
+    # claims they form) is registered and frozen before the first run of
+    # any family, so the study's headline verdict cannot be assembled from
+    # a set of contrasts chosen after the data were seen.
+    _publish_analysis_plan(settings, out_dir)
     _write_manifest(settings, out_dir, "e1")
     _audit_data_splits(settings, out_dir, "e1", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e1")
@@ -1314,6 +1326,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"a CI including 0 means the placebo's extra capacity alone "
               f"buys no advantage over the query gate")
     clog.finalize(out_dir, q=settings.fdr_q)
+    _study_level_adjudication(out_dir, q=settings.fdr_q)
     metric_robustness = _class_frequency_companions(
         [("calib - none", by_gate["calib"], by_gate["none"], "H1a"),
          ("calib - query", by_gate["calib"], by_gate["query"], "H1a"),

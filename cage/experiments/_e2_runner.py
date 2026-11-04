@@ -63,7 +63,14 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     _announce(("H2a", "H2b", "H2c", "H2d", "H2e", "H2f", "H2g"))
     # HB1/HB3/HB4/HB5 hard gate (see run_e1).
     verdict = _enforce_baseline_verdict(settings, out_dir, "e2")
-    _design_sensitivity_plan(settings, verdict, out_dir, "e2")
+    plan = _design_sensitivity_plan(settings, verdict, out_dir, "e2")
+    # The study-level design pre-flight and the study-level analysis plan
+    # are registered by *every* family, not only by E1: a study that runs
+    # E2 first must still have its confirmatory contrasts frozen before
+    # the first training run, and a plan that only E1 publishes would
+    # make an E2-first run unable to register its own study afterwards.
+    _study_design_preflight(settings, out_dir, power=plan.get("project_family"))
+    _publish_analysis_plan(settings, out_dir)
     _write_manifest(settings, out_dir, "e2")
     _audit_data_splits(settings, out_dir, "e2", enforce=True)
     _enforce_reproducibility(settings, out_dir, "e2")
@@ -984,6 +991,12 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         clog.print("length x concentration interaction (2x2)", "H2e", metric,
                    ci, warn=factorial_warn)
     e2_contrast_payload = clog.finalize(out_dir, q=settings.fdr_q)
+    # The study-level reading is refreshed after every family: the pooled
+    # primary family spans E1/E2/E3, so an adjudication written before the
+    # other families ran would report a partial study as if it were the
+    # whole thing.  It is a companion - the per-family decisions above are
+    # unchanged.
+    _study_level_adjudication(out_dir, q=settings.fdr_q)
     h2f_rows = [row for row in (e2_contrast_payload.get("rows") or [])
                 if row.get("hypothesis") == "H2f"]
     h2f_evaluable = bool(h2f_rows) and all(

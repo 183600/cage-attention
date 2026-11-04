@@ -226,21 +226,24 @@ cage/
 ├── efficiency.py     # 显存/吞吐测量
 └── experiments/      # E1/E2/E3 运行器、设计、对比、制品、环境、审计
     ├── _config.py    # 假设注册表、种子校验、Settings
+    ├── _analysis_plan.py # 研究级分析计划：确认性对比集、声明、冻结、合并族裁决
     ├── _design.py    # 运行调度、难度标记、覆盖率
     ├── _planning.py  # 设计计划冻结、功效换算
+    ├── _study_design.py # 研究级设计预检：腿可达性、算力预算
     ├── _contrasts.py # 配对 bootstrap、FDR、SESOI、符号翻转
     ├── _synthesis.py # 假设层面综合、复制区间、FCR
+    ├── _contrastlog.py / _contrastlog_finalize.py # 决策日志与家族内裁决
     ├── _artifacts.py # 结果写入、制品索引、来源审计
     ├── _environment.py # 环境指纹、漂移检测、历史
     ├── _gates.py     # 基线门禁、曲线裁决
     ├── _training.py  # 单运行训练+评估
     ├── _audits.py    # 数据/生成器/分裂/校准审计
     ├── _baselines.py # 基线阶梯、规则/探针/负控制
-    ├── _e1.py        # E1 细胞计划、逐变体调参、lr 敏感性
-    ├── _e2.py        # E2 长度扫描、系数读出、剂量反应
+    ├── _e1.py / _e1_runner.py # E1 细胞计划、逐变体调参、lr 敏感性、运行器
+    ├── _e2.py / _e2_runner.py # E2 长度扫描、系数读出、剂量反应、运行器
     ├── _single_factor.py # 单因素设计期证书、对比对守卫
-    ├── _e3_cli.py    # E3 网格、逐层写入、knockout
-    └── __init__.py   # 片段加载、CLI 入口
+    ├── _e3_cli.py    # E3 网格、逐层写入、knockout、CLI 入口
+    └── __init__.py   # 片段加载、方法学总纲
 ```
 
 ### 4.2 设计固定项（CI 强制）
@@ -259,7 +262,7 @@ cage/
 ### 4.3 测试规范
 
 - **仅使用标准库 `unittest`**，无 pytest/numpy 依赖
-- 测试分类：
+- 测试分类（完整清单见 `tests/` 目录）：
   - `test_reproducibility.py`：种子规范化、环境记录
   - `test_reproducibility_contract.py`：环境指纹、漂移、历史
   - `test_environment_record.py`：环境块可重建、git 溯源
@@ -271,6 +274,9 @@ cage/
   - `test_counterfactual_eval.py`：反事实评估
   - `test_run_audit.py`：运行审计
   - `test_replication_synthesis.py`：复制综合
+  - `test_design_preparation.py`：区组调度、功效计划、曲线失效损耗
+  - `test_single_factor_design.py` / `test_single_factor_contract.py`：单因素设计期证书
+  - `test_study_design.py`：研究级分析计划（注册表一致性、腿可达性、冻结、IUT 裁决、算力预算）
 
 ### 4.4 依赖管理
 
@@ -460,6 +466,10 @@ results/
 ├── environment_history.jsonl     # 环境漂移历史
 ├── artifact_index.json           # 累积制品索引
 ├── run_index.jsonl               # 运行生命周期
+├── study_design_preflight.json   # 研究级设计预检（可达性+功效+算力，开跑前）
+├── analysis_plan.json            # 预注册研究级分析计划（确认性对比集+声明）
+├── analysis_plan_history.jsonl   # 研究级计划修订历史
+├── study_level_adjudication.json # 研究级裁决（IUT + 合并族）
 ├── e1_design_plan.json           # E1 设计计划（冻结）
 ├── e1_design_plan_history.jsonl  # 计划修订历史
 ├── e1_single_factor_design.json  # E1 单因素设计证书（开跑前）

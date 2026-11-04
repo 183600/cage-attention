@@ -179,6 +179,25 @@ exist only for the single-factor E1/E2 contrasts:
   compare the pairs the certificate declares. The two-factor corner
   (`calib_no_terms`, both calibration terms off) is read through the registered
   2×2 factorial aggregates only, never as a one-factor decision row.
+- **Study-level analysis plan (cross-family multiplicity)**: E1/E2/E3 each
+  control their own FDR family, but those guarantees do not compose — three
+  families each running BH at q=0.05 do not make the union of their
+  discoveries an FDR-0.05 set, and the study's headline claims are re-tested
+  in more than one family. The study therefore registers a **study-level
+  analysis plan** (`analysis_plan.json`) before the first run: the
+  confirmatory contrasts name the grid cells each leg contrasts and how they
+  combine, the headline claims are conjunctions of those legs
+  (intersection-union), and the pooled family is adjudicated at its
+  worst-case threshold `q/m`. Before the grid starts, every leg is checked
+  against the grid it claims to read — a leg whose cells are not trained can
+  never be measured, so the study refuses to start. Once any family has
+  written outcome rows, the confirmatory set and its multiplicity level are
+  frozen; changing them is refused as a post-hoc redesign. The study-level
+  verdict is written to `study_level_adjudication.json`: a run missing a
+  family is reported as `incomplete`, and a leg or claim that survives its own
+  family but not the pooled family is flagged `family_inflated`. Each
+  family's own pre-registered decisions are unchanged; the study-level
+  reading is reported next to them.
 
 ## Key metrics
 
