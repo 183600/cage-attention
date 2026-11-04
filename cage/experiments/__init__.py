@@ -330,6 +330,7 @@ _FRAGMENTS = (
     "_e1_runner.py",
     "_e2.py",
     "_e2_runner.py",
+    "_single_factor.py",
     "_e3_cli.py",
 )
 load_fragments(globals(), _FRAGMENTS)

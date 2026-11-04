@@ -19,6 +19,11 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     examples = {}
     ablation_runs = {}
     cell_plan = _e1_cell_plan()
+    # The single-factor design certificate is computed from the resolved cell
+    # configurations before the first run: a declared controlled contrast
+    # that varies more than one model factor stops the grid instead of
+    # producing rows that cannot support their hypothesis.
+    _enforce_single_factor_design("e1", _e1_single_factor_design(), out_dir)
     # All E1 cells - the four gate variants and the calibration-term
     # ablation/active-control arms - are co-randomised in the same complete
     # blocks.  Running the ablation arms in a second grid would alias the
@@ -1083,9 +1088,11 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                        coverage=(ablation_coverage, design_coverage),
                        balance_ok=((verdict.get("eval_answer_balance") or {})
                                    .get("all_uniform")))
+    calib_none = _design_pair("e1", "calib", "none",
+                              by_gate["calib"], by_gate["none"])
     clog.print_equivalence_ci(
         "calib - none", "H1a", "accuracy",
-        _paired_equivalence(by_gate["calib"], by_gate["none"], "accuracy",
+        _paired_equivalence(*calib_none, "accuracy",
                             HYPOTHESES["H1a"]["sesoi"]["accuracy"],
                             mode="noninferior"),
         warn=_curve_warn(("calib", by_gate["calib"]),
@@ -1096,16 +1103,17 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     # lacks a gate altogether).  Pre-registered as one-sided
     # non-inferiority so a small loss inside the SESOI is not misread as a
     # directional refutation of H1a.
+    calib_query = _design_pair("e1", "calib", "query",
+                               by_gate["calib"], by_gate["query"])
     clog.print_equivalence_ci(
         "calib - query", "H1a", "accuracy",
-        _paired_equivalence(by_gate["calib"], by_gate["query"], "accuracy",
+        _paired_equivalence(*calib_query, "accuracy",
                             HYPOTHESES["H1a"]["sesoi"]["accuracy"],
                             mode="noninferior"),
         warn=_curve_warn(("calib", by_gate["calib"]),
                          ("query", by_gate["query"])))
     clog.print("calib - query", "H1a", "abs_gate_vs_entropy",
-               _paired_diff(by_gate["calib"], by_gate["query"],
-                            "abs_gate_vs_entropy"),
+               _paired_diff(*calib_query, "abs_gate_vs_entropy"),
                warn=_curve_warn(("calib", by_gate["calib"]),
                                 ("query", by_gate["query"])))
     # Same registered contrast on the other observable attention summary:
@@ -1114,8 +1122,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     # built on.  Leaving it exploratory would make half of the stated
     # evidence unaccounted for in the FDR family.
     clog.print("calib - query", "H1a", "abs_gate_vs_maxprob",
-               _paired_diff(by_gate["calib"], by_gate["query"],
-                            "abs_gate_vs_maxprob"),
+               _paired_diff(*calib_query, "abs_gate_vs_maxprob"),
                warn=_curve_warn(("calib", by_gate["calib"]),
                                 ("query", by_gate["query"])))
     # H1g: the correlation-level halves of the same variant difference.
@@ -1140,8 +1147,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             _one_sample_contrast(by_gate["query"], metric, bound=bound),
             warn=_curve_warn(("query", by_gate["query"])))
     clog.print("calib - query", "H1b", "gate_margin",
-               _paired_diff(by_gate["calib"], by_gate["query"],
-                            "gate_margin"),
+               _paired_diff(*calib_query, "gate_margin"),
                warn=_curve_warn(("calib", by_gate["calib"]),
                                 ("query", by_gate["query"])))
     # H1e: the operational, imbalance-aware reading of the same gate
@@ -1161,7 +1167,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         ("recall_at_10pct_gate_to_error", "H1e"),
     ):
         clog.print("calib - query", hyp, metric,
-                   _paired_diff(by_gate["calib"], by_gate["query"], metric),
+                   _paired_diff(*calib_query, metric),
                    warn=_curve_warn(("calib", by_gate["calib"]),
                                     ("query", by_gate["query"])))
     clog.print("null margin vs 0", "H1c", "null_mass_error_margin",
@@ -1185,9 +1191,11 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     # slot is not materially worse than no gate"), so it is routed through
     # the same FDR family with its own pre-registered bound rather than left
     # to the exploratory loop.
+    null_none = _design_pair("e1", "null", "none",
+                             by_gate["null"], by_gate["none"])
     clog.print_equivalence_ci(
         "null - none", "H1c", "accuracy",
-        _paired_equivalence(by_gate["null"], by_gate["none"], "accuracy",
+        _paired_equivalence(*null_none, "accuracy",
                             HYPOTHESES["H1c"]["sesoi"]["accuracy"],
                             mode="noninferior"),
         warn=_curve_warn(("null", by_gate["null"]), ("none", by_gate["none"])))
@@ -1200,8 +1208,10 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     # accuracy, not a signed claim - it routes through its own undirected
     # registry key so a significant loss is not read as refuting H1a's
     # calib-vs-controls prediction).
+    query_none = _design_pair("e1", "query", "none",
+                              by_gate["query"], by_gate["none"])
     clog.print("query - none", "H1a", "accuracy",
-               _paired_diff(by_gate["query"], by_gate["none"], "accuracy"),
+               _paired_diff(*query_none, "accuracy"),
                warn=_curve_warn(("query", by_gate["query"]),
                                 ("none", by_gate["none"])),
                direction_key="query_none_accuracy")
@@ -1217,10 +1227,11 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     for label in ("calib_len_only", "calib_ent_only"):
         rs = ablation_runs[label]
         warn = _curve_warn(("calib", by_gate["calib"]), (label, rs))
+        pair = _design_pair("e1", "calib", label, by_gate["calib"], rs)
         clog.print(f"calib - {label}", "H1d", "accuracy",
-                   _paired_diff(by_gate["calib"], rs, "accuracy"), warn=warn)
+                   _paired_diff(*pair, "accuracy"), warn=warn)
         clog.print(f"calib - {label}", "H1d", "gate_margin",
-                   _paired_diff(by_gate["calib"], rs, "gate_margin"),
+                   _paired_diff(*pair, "gate_margin"),
                    warn=warn)
     # Only the arm that actually removes the concentration term can test
     # the mechanism leg ("the association collapses when the entropy term
@@ -1232,8 +1243,9 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     # factorial main effect below.
     for label in ("calib_len_only",):
         rs = ablation_runs[label]
+        pair = _design_pair("e1", "calib", label, by_gate["calib"], rs)
         clog.print(f"calib - {label}", "H1d", "abs_gate_vs_entropy",
-                   _paired_diff(by_gate["calib"], rs, "abs_gate_vs_entropy"),
+                   _paired_diff(*pair, "abs_gate_vs_entropy"),
                    warn=_curve_warn(("calib", by_gate["calib"]), (label, rs)))
     # Full-factorial companion to the conditional leave-one-out rows: the
     # concentration term's effect averaged over both levels of the length
@@ -1289,9 +1301,11 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
           f"validates that the placebo actually severed the pathway:")
     placebo_warn = _curve_warn(("calib", by_gate["calib"]),
                                (_CALIB_PLACEBO_CELL, placebo_runs))
+    placebo_pair = _design_pair("e1", "calib", _CALIB_PLACEBO_CELL,
+                                by_gate["calib"], placebo_runs)
     for metric in ("abs_gate_vs_entropy", "accuracy", "gate_margin"):
         clog.print(f"calib - {_CALIB_PLACEBO_CELL}", "H1f", metric,
-                   _paired_diff(by_gate["calib"], placebo_runs, metric),
+                   _paired_diff(*placebo_pair, metric),
                    warn=placebo_warn)
     for metric in ("abs_gate_vs_entropy", "accuracy", "gate_margin"):
         ci = _paired_diff(placebo_runs, by_gate["query"], metric)

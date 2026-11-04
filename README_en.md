@@ -140,7 +140,7 @@ exist only for the single-factor E1/E2 contrasts:
 | `calib_use_len` | `True` | Use the length term `a·log T` |
 | `calib_use_ent` | `True` | Use the concentration term `c·H̄` |
 | `calib_ent_norm` | `True` | Normalize concentration by `log T`; `False` reads raw row-mean entropy |
-| `calib_pos_norm` | `False` | Position-conflation ablation: divisor and length term use each row's visible-token count `log(max(t+1,2))`; strictly identical on the final query row |
+| `calib_pos_norm` | `False` | Position-conflation ablation: divisor and length term use each row's visible-token count `log(max(t+1,2))`; strictly identical on the final query row (implemented and audited as a one-factor cell; no experiment arm trains it yet) |
 | `calib_shuffle_ent` | `False` | Active control: permute only the entropy read by the gate, keeping the same signal distribution |
 
 ## Experiments
@@ -171,6 +171,14 @@ exist only for the single-factor E1/E2 contrasts:
   cross-scheme-comparable per-layer relative writes (`attn_write_ratio` /
   `mlp_write_ratio`) and the per-layer knockout probe (`layer_knockout_eval`,
   see Methodological boundaries below).
+- **Single-factor design certificate**: before a grid trains, every declared
+  controlled contrast is checked against the *resolved* configuration of its
+  two arms: exactly one model factor may differ. The certificate is written to
+  `<tag>_single_factor_design.json`, a contrast that varies more than one
+  factor stops the grid before the first run, and the decision rows may only
+  compare the pairs the certificate declares. The two-factor corner
+  (`calib_no_terms`, both calibration terms off) is read through the registered
+  2×2 factorial aggregates only, never as a one-factor decision row.
 
 ## Key metrics
 

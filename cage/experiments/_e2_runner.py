@@ -101,6 +101,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     runs = []
     examples = {}
     cells = tuple(label for label, *_ in _E2_VARIANTS)
+    # The single-factor design certificate is computed from the resolved cell
+    # configurations before the first run: a declared controlled contrast
+    # that varies more than one model factor stops the grid instead of
+    # producing rows that cannot support their hypothesis.
+    _enforce_single_factor_design("e2", _e2_single_factor_design(), out_dir)
     by_label = {label: (label, gate, record_extra, model_overrides)
                 for label, gate, record_extra, model_overrides
                 in _E2_VARIANTS}
@@ -766,19 +771,18 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                        balance_ok=balance_ok)
     calib_runs = by_variant["calib"]
     calib_warn = _curve_warn(("calib", calib_runs))
+    calib_none = _design_pair("e2", "calib", "none",
+                              by_variant["calib"], by_variant["none"])
     clog.print("calib - none", "H2a", "accuracy_at_longest",
-               _paired_diff(by_variant["calib"], by_variant["none"],
-                            "accuracy_at_longest"),
+               _paired_diff(*calib_none, "accuracy_at_longest"),
                warn=_curve_warn(("calib", by_variant["calib"]),
                                 ("none", by_variant["none"])))
     clog.print("calib - none", "H2a", "accuracy_drop",
-               _paired_diff(by_variant["calib"], by_variant["none"],
-                            "accuracy_drop"),
+               _paired_diff(*calib_none, "accuracy_drop"),
                warn=_curve_warn(("calib", by_variant["calib"]),
                                 ("none", by_variant["none"])))
     clog.print("calib - none", "H2a", "accuracy_slope_log_len",
-               _paired_diff(by_variant["calib"], by_variant["none"],
-                            "accuracy_slope_log_len"),
+               _paired_diff(*calib_none, "accuracy_slope_log_len"),
                warn=_curve_warn(("calib", by_variant["calib"]),
                                 ("none", by_variant["none"])))
     # H2d: the same length-robustness read against the closest simpler
@@ -786,19 +790,18 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     # only in the calibration terms, so a calib-vs-query gain is the one
     # that can be attributed to length/concentration calibration rather
     # than to "having any learned gate".
+    calib_query = _design_pair("e2", "calib", "query",
+                               by_variant["calib"], by_variant["query"])
     clog.print("calib - query", "H2d", "accuracy_at_longest",
-               _paired_diff(by_variant["calib"], by_variant["query"],
-                            "accuracy_at_longest"),
+               _paired_diff(*calib_query, "accuracy_at_longest"),
                warn=_curve_warn(("calib", by_variant["calib"]),
                                 ("query", by_variant["query"])))
     clog.print("calib - query", "H2d", "accuracy_drop",
-               _paired_diff(by_variant["calib"], by_variant["query"],
-                            "accuracy_drop"),
+               _paired_diff(*calib_query, "accuracy_drop"),
                warn=_curve_warn(("calib", by_variant["calib"]),
                                 ("query", by_variant["query"])))
     clog.print("calib - query", "H2d", "accuracy_slope_log_len",
-               _paired_diff(by_variant["calib"], by_variant["query"],
-                            "accuracy_slope_log_len"),
+               _paired_diff(*calib_query, "accuracy_slope_log_len"),
                warn=_curve_warn(("calib", by_variant["calib"]),
                                 ("query", by_variant["query"])))
     clog.print("calib raw entropy drift vs 0", "H2b", "entropy_drift",
@@ -898,9 +901,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
           f"c*scale={raw_c_s} (coefficient on raw H; a non-positive value "
           f"would mean this arm did not use its concentration term, in which "
           f"case the contrast is not a normalisation-only comparison)")
+    raw_pair = _design_pair("e2", "calib", _CALIB_RAW_ENT_CELL,
+                            calib_runs, raw_runs)
     for metric in ("accuracy_at_longest", "accuracy_drop"):
         clog.print("calib - calib_raw_ent", "H2g", metric,
-                   _paired_diff(calib_runs, raw_runs, metric),
+                   _paired_diff(*raw_pair, metric),
                    warn=raw_warn)
     print(f"\n[e2] H2c length-term ablation contrast (the single-factor "
           f"arm removes only the length term from the full gate at "
@@ -912,11 +917,12 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     for arm in ("calib_ent_only",):
         rs = by_variant[arm]
         warn = _curve_warn(("calib", calib_runs), (arm, rs))
+        pair = _design_pair("e2", "calib", arm, calib_runs, rs)
         clog.print(f"calib - {arm}", "H2c", "accuracy_at_longest",
-                   _paired_diff(calib_runs, rs, "accuracy_at_longest"),
+                   _paired_diff(*pair, "accuracy_at_longest"),
                    warn=warn)
         clog.print(f"calib - {arm}", "H2c", "accuracy_drop",
-                   _paired_diff(calib_runs, rs, "accuracy_drop"),
+                   _paired_diff(*pair, "accuracy_drop"),
                    warn=warn)
     # Reverse check: H2c predicts the length-only arm *stays close* to the
     # full arm.  That is a null prediction, so a non-significant
@@ -925,12 +931,14 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     # the same pairing and controlled audit as the directional rows.
     reverse_warn = _curve_warn(
         ("calib", calib_runs), ("calib_len_only", by_variant["calib_len_only"]))
+    len_only_pair = _design_pair("e2", "calib", "calib_len_only",
+                                 calib_runs, by_variant["calib_len_only"])
     for metric, bound_key in (
         ("accuracy_at_longest", "calib_minus_len_only_accuracy_at_longest"),
         ("accuracy_drop", "calib_minus_len_only_accuracy_drop"),
     ):
         ci = _paired_equivalence(
-            calib_runs, by_variant["calib_len_only"], metric,
+            *len_only_pair, metric,
             HYPOTHESES["H2c"]["sesoi"][bound_key])
         clog.print_equivalence_ci(
             "calib - calib_len_only (reverse check)", "H2c", metric, ci,

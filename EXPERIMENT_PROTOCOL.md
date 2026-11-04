@@ -5,6 +5,8 @@
 | 版本 | 日期 | 变更说明 | Git SHA |
 |------|------|----------|---------|
 | 1.0 | 2026-11-03 | 初始版本，对应预注册假设注册表 v1 | - |
+| 1.1 | 2026-11-04 | 新增 §3.5：单因素对照的**设计期证书**（把既有"受控对比只改一个因子"的要求从行级审计前移到开跑前；不新增/修改任何假设、臂、对比对、SESOI 或判定规则，故 `_config.py:HYPOTHESES` 与 `docs/design_notes.md` 无需改动） | - |
+| 1.2 | 2026-11-04 | 修正 §2.3 的 E2 臂表：第 8 臂按实现为 `null`（原文误列为 E1 的安慰剂 `calib_shuf_ent`，而 E2 预注册决策规则中没有安慰剂对比）；文档与实现对齐，不改任何假设/对比/规则 | - |
 
 > **重要**：本协议文档与 `cage/experiments/_config.py:HYPOTHESES` 及 `docs/design_notes.md` 形成三位一体的预注册体系。任何实验协议变更必须同步更新三处，并通过 `ci_gate.py` 设计固定项检查。
 
@@ -125,7 +127,12 @@ calib_a=1.0, calib_c=1.0, calib_scale=1.0, calib_tau_init=0.9
 | calib_ent_only | calib | False | True | True | 仅集中度项 |
 | calib_no_terms | calib | False | False | True | 两项全关 |
 | calib_raw_ent | calib | True | True | **False** | **归一化消融**：读原始行均值熵而非 H/log T |
-| calib_shuf_ent | calib | True | True | True | 安慰剂（同 E1） |
+| null | null | — | — | — | 显式 null KV 槽位基线（进入逐变体公平性伴随，不进入预注册决策行） |
+
+> **臂表说明（v1.2 修正）**：本表原先把 E1 的安慰剂臂 `calib_shuf_ent` 列在 E2 中，
+> 但 E2 的预注册决策规则（§1.3 H2a–H2g）没有任何安慰剂对比，代码实现里 E2 也没有该
+> 臂；E2 的实际第 8 臂是 `null`（`cage/experiments/_e2.py:_E2_VARIANTS`）。此处按实现
+> 修正文档，不新增/删除任何臂、对比对、假设或判定规则。
 
 **位置编码外推控制**（探索性伴随，同一封闭评估流）：
 - `fold`：外推位置折叠回训练区间（模 训练最大位置）
@@ -199,6 +206,17 @@ calib_a=1.0, calib_c=1.0, calib_scale=1.0, calib_tau_init=0.9
 - Curve-invalid 率损耗修正
 - 精确配对符号翻转检验的可达 p-value 下界（5 种子双侧最小 0.0625，无法在 q=0.05 确认）
 - 计划冻结后修改种子/SESOI/FDR 抛出 `DesignPlanError`
+
+### 3.5 单因素对照的设计期证书
+
+预注册的受控对比必须是**单因素**实验：两条臂之间只允许有**一个**解析后的模型因子不同（`gate`/`norm`/`layer_scale`/`calib_use_len`/`calib_use_ent`/`calib_shuffle_ent`/`calib_ent_norm`/`calib_pos_norm`）。
+
+- **设计期（开跑前）**：每个实验用**解析后的 `Cfg`** 计算各实验单元的因子向量，并声明它的受控对比对（E1 7 对、E2 5 对、E3 20 对），逐对检查"恰好一个因子不同"；证书写入 `<tag>_single_factor_design.json`（注册进制品索引），控制台打印摘要。
+- **失败即停**：任一声明的对比对变化了多于一个因子时抛出 `ValueError`，网格**不启动**——多因子操作无法读作单因素结论，先跑再拒只会白花算力。
+- **运行期防漂移**：决策行必须从证书声明的对比对里取臂（`_design_pair`）；未声明的对比对会中止运行，因此"实际执行的对比"与"认证过的设计"始终是同一集合。
+- **因子格角落**：`calib_no_terms` 同时关闭两个校准项，是**双因子**单元，只通过已注册的 2×2 主效应/交互（聚合行）读取，**不得**作为单因素决策行；证书把它列在 `cells_without_one_factor_contrast` 中。
+- **非受控探索对比**：安慰剂臂与 `query` 的对比同时改变 `gate` 与 `calib_shuffle_ent`，显式记入证书的 `exploratory_pairs`（`controlled: false`），只在决策日志之外打印。
+- **与行级审计并存**：设计期证书不替代逐行的受控变量审计（`varying_factors` / `declared_label_diffs`）；两处都必须通过。
 
 ---
 

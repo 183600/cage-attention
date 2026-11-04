@@ -107,7 +107,16 @@ HYPOTHESES = {
 - **冻结机制**：首个结果行存在后计划锁定；改变种子/SESOI/FDR 水平抛出 `DesignPlanError`
 - 历史版本保存在 `<tag>_design_plan_history.jsonl`
 
-### 2.3 随机化完全区组设计
+### 2.3 单因素对照的设计期证书
+
+每个网格在**首次训练之前**生成 `<tag>_single_factor_design.json`：
+- 用解析后的 `Cfg` 计算每个实验单元的因子向量，声明该实验的受控对比对
+- 逐对检查"恰好一个模型因子不同"；多因子对比对会在开跑前抛 `ValueError`，网格不启动
+- 决策行从证书声明的对比对取臂，未声明的对比对会中止运行（执行与设计不漂移）
+- 双因子角落（`calib_no_terms`）只通过已注册的 2×2 聚合行读取，不作为单因素决策行
+- 故意非受控的探索对比（安慰剂 vs `query`）记在 `exploratory_pairs`（`controlled: false`）
+
+### 2.4 随机化完全区组设计
 
 ```python
 # 每个训练种子 = 一个区组
@@ -229,6 +238,7 @@ cage/
     ├── _baselines.py # 基线阶梯、规则/探针/负控制
     ├── _e1.py        # E1 细胞计划、逐变体调参、lr 敏感性
     ├── _e2.py        # E2 长度扫描、系数读出、剂量反应
+    ├── _single_factor.py # 单因素设计期证书、对比对守卫
     ├── _e3_cli.py    # E3 网格、逐层写入、knockout
     └── __init__.py   # 片段加载、CLI 入口
 ```
@@ -452,6 +462,7 @@ results/
 ├── run_index.jsonl               # 运行生命周期
 ├── e1_design_plan.json           # E1 设计计划（冻结）
 ├── e1_design_plan_history.jsonl  # 计划修订历史
+├── e1_single_factor_design.json  # E1 单因素设计证书（开跑前）
 ├── e1_run_order.json             # E1 计划调度
 ├── e1_run_order_realized.json    # E1 实测调度+位置效应
 ├── e1_manifest.json              # E1 冻结清单（供重放）

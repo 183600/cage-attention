@@ -1700,12 +1700,17 @@ _CALIB_PLACEBO_CELL = "calib_shuf_ent"
 # only across the length sweep.
 _CALIB_RAW_ENT_CELL = "calib_raw_ent"
 
-# E2 single-factor position-normalisation ablation: the full calib
+# Declared single-factor position-normalisation cell: the full calib
 # architecture and both additive terms with the registered H/log(T)
 # normalisation, but each causal row divides by its own visible-token count
 # log(max(t+1, 2)) instead of the global log(T).  It is a distinct cell
 # because, unlike the term ablations, the resolved term flags are identical
-# to ``full``; only ``calib_pos_norm`` identifies it.
+# to ``full``; only ``calib_pos_norm`` identifies it.  The cell is declared
+# and expanded into its factor vector like the other one-factor cells, so a
+# record that does train it is audited as such - but no E1/E2 arm trains it
+# yet (``_E2_VARIANTS`` has no position-normalisation arm), so it enters no
+# contrast and no design certificate.  Adding the arm is a protocol change
+# (a new arm and, for a decision row, a new registered hypothesis).
 _CALIB_POS_NORM_CELL = "calib_pos_norm"
 
 # Coefficient multipliers used by the within-model dose-response companion.

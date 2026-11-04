@@ -612,6 +612,11 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
                   for gate in ("query", "calib")
                   for norm in NORMS
                   for layer_scale in (None, 1e-2))
+    # The single-factor design certificate is computed from the resolved cell
+    # configurations before the first run: a declared controlled contrast
+    # that varies more than one model factor stops the grid instead of
+    # producing rows that cannot support their hypothesis.
+    _enforce_single_factor_design("e3", _e3_single_factor_design(), out_dir)
     order = _blocked_run_order(
         cells, settings.seeds, settings.run_order_seed,
         shuffle=settings.randomize_run_order)
@@ -835,11 +840,14 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
             a = index[(gate, "seednorm", layer_scale)]
             b = index[(gate, "pre", layer_scale)]
             ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
+            pair = _design_pair(
+                "e3", _e3_cell_label(gate, "seednorm", layer_scale),
+                _e3_cell_label(gate, "pre", layer_scale), a, b)
             for metric in ("gate_depth_ratio",
                            "resid_norm_last_over_first"):
                 clog.print(f"{gate}: seednorm - pre (ls={ls_label})",
                            "H3a", metric,
-                           _paired_diff(a, b, metric),
+                           _paired_diff(*pair, metric),
                            warn=_curve_warn((f"{gate}/seednorm", a),
                                             (f"{gate}/pre", b)))
     # H3a completeness: the average-own-level norm main effects, collapsed
@@ -895,9 +903,12 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
         for norm in NORMS:
             a = index[(gate, norm, 1e-2)]
             b = index[(gate, norm, None)]
+            pair = _design_pair(
+                "e3", _e3_cell_label(gate, norm, 1e-2),
+                _e3_cell_label(gate, norm, None), a, b)
             clog.print(f"{gate}/{norm}: ls=1e-2 - off", "H3b",
                        "resid_norm_last_over_first",
-                       _paired_diff(a, b, "resid_norm_last_over_first"),
+                       _paired_diff(*pair, "resid_norm_last_over_first"),
                        warn=_curve_warn((f"{gate}/{norm}/ls", a),
                                         (f"{gate}/{norm}/off", b)))
     for norm in NORMS:
@@ -905,9 +916,12 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
             a = index[("calib", norm, layer_scale)]
             b = index[("query", norm, layer_scale)]
             ls_label = "off" if layer_scale is None else f"{layer_scale:g}"
+            pair = _design_pair(
+                "e3", _e3_cell_label("calib", norm, layer_scale),
+                _e3_cell_label("query", norm, layer_scale), a, b)
             clog.print_equivalence_ci(
                 f"{norm}/ls={ls_label}: calib - query", "H3a", "accuracy",
-                _paired_equivalence(a, b, "accuracy",
+                _paired_equivalence(*pair, "accuracy",
                                     HYPOTHESES["H3a"]["sesoi"]["accuracy"],
                                     mode="noninferior"),
                 warn=_curve_warn((f"calib/{norm}/ls={ls_label}", a),

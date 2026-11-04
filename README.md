@@ -131,7 +131,7 @@ print(hist[-1], accuracy, sorted(stats))
 | `calib_use_len` | `True` | 是否使用长度项 `a·log T` |
 | `calib_use_ent` | `True` | 是否使用集中度项 `c·H̄` |
 | `calib_ent_norm` | `True` | 集中度按 `log T` 归一化；`False` 表示原始行均值熵 |
-| `calib_pos_norm` | `False` | 位置混淆消融：除数与长度项改用每行可见 token 数 `log(max(t+1,2))`；末位 query 行两臂严格一致 |
+| `calib_pos_norm` | `False` | 位置混淆消融：除数与长度项改用每行可见 token 数 `log(max(t+1,2))`；末位 query 行两臂严格一致（已实现并纳入单因素审计，当前还没有实验臂训练它） |
 | `calib_shuffle_ent` | `False` | 主动对照：只打乱门控读取的熵位置，保留同分布信号 |
 
 ## 实验设计
@@ -155,6 +155,11 @@ print(hist[-1], accuracy, sorted(stats))
   `gate_depth_ratio`（深层门控均值 / 浅层门控均值）；另报跨归一化方案
   可比的逐层相对写入量（`attn_write_ratio` / `mlp_write_ratio`）与
   逐层关闭干预（`layer_knockout_eval`，见下方方法学边界）。
+- **单因素设计证书**：网格开跑前，逐对检查受控对比两臂的**解析后**配置，
+  只允许一个模型因子不同；证书写入 `<tag>_single_factor_design.json`，
+  变化了多个因子的对比对会让网格在首次训练前直接拒绝启动，决策行也只能
+  比较证书声明过的对比对。双因子角落（`calib_no_terms`，两个校准项同时关闭）
+  只通过已注册的 2×2 聚合行读取，不作为单因素决策行。
 
 ## 关键指标
 
