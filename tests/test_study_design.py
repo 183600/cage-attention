@@ -39,6 +39,7 @@ from cage.experiments import (
     _analysis_plan_registry_fingerprint,
     _family_cell_labels,
     _primary_contrast_reachability,
+    _primary_contrast_single_factor,
     _publish_analysis_plan,
     _study_cost_plan,
     _study_design_preflight,
@@ -173,6 +174,93 @@ class AnalysisPlanRegistryTest(unittest.TestCase):
         self.assertIsNone(_analysis_plan_registry_fingerprint(None))
 
 
+class PrimaryContrastSingleFactorTest(unittest.TestCase):
+    """The study-level confirmatory set is certified against the designs.
+
+    The per-family certificate only guards the pairs a family declares.
+    The registered primary contrasts are a second registration, so a leg
+    that drifts - a two-factor corner promoted to a one-factor claim, an
+    interaction that differences two different manipulations - must be
+    refused before the grid trains, not read afterwards as the claim it is
+    not.
+    """
+
+    def test_every_registered_primary_contrast_certifies_as_designed(self):
+        report = _primary_contrast_single_factor()
+        self.assertTrue(report["ok"], report["violating_legs"])
+        self.assertEqual(report["violating_legs"], [])
+        self.assertEqual(report["n_legs"], 9)
+        for row in report["legs"]:
+            self.assertTrue(row["certified"], row)
+            self.assertEqual(row["issues"], [])
+            if row["kind"] == "one_factor":
+                self.assertTrue(row["single_factor"], row)
+                self.assertEqual(len(row["varying_factors"]["marginal"]), 1)
+
+    def test_interaction_leg_is_a_factorial_difference_of_two_edges(self):
+        report = _primary_contrast_single_factor()
+        interactions = [row for row in report["legs"]
+                        if row["kind"] == "interaction"]
+        self.assertEqual(len(interactions), 2)
+        for row in interactions:
+            self.assertEqual(row["varying_factors"]["marginal a"],
+                             ["gate"])
+            self.assertEqual(row["varying_factors"]["marginal b"],
+                             ["gate"])
+            self.assertEqual(row["varying_factors"]["context a"], ["norm"])
+            self.assertEqual(row["varying_factors"]["context b"], ["norm"])
+
+    def test_a_two_factor_one_factor_leg_is_refused(self):
+        legs = [_leg(arms=("calib", "calib_no_terms"))]
+        report = _primary_contrast_single_factor(legs)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["violating_legs"], ["PX"])
+        issues = " ".join(report["legs"][0]["issues"])
+        self.assertIn("2 model factor", issues)
+        self.assertIn("not a declared controlled contrast", issues)
+
+    def test_an_undeclared_single_factor_leg_is_refused(self):
+        # A reversed pair varies exactly one factor but is not the declared
+        # oriented contrast of the family, so its registered sign cannot be
+        # trusted.
+        legs = [_leg(arms=("none", "calib"))]
+        report = _primary_contrast_single_factor(legs)
+        self.assertFalse(report["ok"])
+        self.assertIn("not a declared controlled contrast",
+                      " ".join(report["legs"][0]["issues"]))
+
+    def test_an_interaction_with_different_marginals_is_refused(self):
+        legs = [_leg(
+            experiment="e3", hypothesis="H3c", metric="accuracy",
+            rule="bad interaction", kind="interaction",
+            arms=("calib|seednorm|off", "query|pre|off",
+                  "calib|pre|off", "query|seednorm|off"))]
+        report = _primary_contrast_single_factor(legs)
+        self.assertFalse(report["ok"])
+        issues = " ".join(report["legs"][0]["issues"])
+        self.assertIn("2 model factor", issues)
+
+    def test_an_interaction_with_an_unresolvable_axis_is_refused(self):
+        # The two "context" edges collapse onto the same cell, so the
+        # difference-of-differences is not a factorial contrast and the
+        # repeated arm is not a declared controlled pair.
+        legs = [_leg(
+            experiment="e3", hypothesis="H3c", metric="accuracy",
+            rule="bad interaction", kind="interaction",
+            arms=("calib|seednorm|off", "query|seednorm|off",
+                  "calib|seednorm|off", "query|seednorm|off"))]
+        report = _primary_contrast_single_factor(legs)
+        self.assertFalse(report["ok"])
+        issues = " ".join(report["legs"][0]["issues"])
+        self.assertIn("not a declared controlled contrast", issues)
+
+    def test_unknown_family_leaves_the_leg_uncertified(self):
+        legs = [_leg(experiment="e9", arms=("a", "b"))]
+        report = _primary_contrast_single_factor(legs)
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["legs"][0]["certified"])
+
+
 class StudyDesignPreflightTest(unittest.TestCase):
     """The pre-flight certifies the design and prices it."""
 
@@ -210,6 +298,27 @@ class StudyDesignPreflightTest(unittest.TestCase):
                 with self.assertRaises(DesignPlanError):
                     _study_design_preflight(Settings.quick(),
                                             pathlib.Path(tmp))
+
+    def test_preflight_refuses_a_multi_factor_primary_contrast(self):
+        broken = [_leg(arms=("calib", "calib_no_terms"))]
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(experiments, "_PRIMARY_CONTRASTS", broken):
+            out = pathlib.Path(tmp)
+            with contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(DesignPlanError) as caught:
+                    _study_design_preflight(Settings.quick(), out)
+            self.assertIn("2 model factor", str(caught.exception))
+            self.assertFalse((out / "study_design_preflight.json").exists())
+
+    def test_preflight_records_the_single_factor_certificate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _study_design_preflight(Settings.quick(),
+                                                  pathlib.Path(tmp))
+        self.assertTrue(payload["single_factor_certified"])
+        self.assertEqual(len(payload["single_factor_legs"]), 9)
+        for row in payload["single_factor_legs"]:
+            self.assertTrue(row["certified"], row)
 
     def test_cost_plan_counts_the_grid_cells_of_every_family(self):
         settings = Settings.quick()
@@ -511,7 +620,8 @@ class StudyRunnerWiringTest(unittest.TestCase):
     def test_the_analysis_plan_fragment_is_loaded(self):
         for name in ("_publish_analysis_plan", "_study_design_preflight",
                      "_study_level_adjudication", "_analysis_plan_audit",
-                     "_primary_contrast_reachability", "_study_cost_plan"):
+                     "_primary_contrast_reachability",
+                     "_primary_contrast_single_factor", "_study_cost_plan"):
             self.assertTrue(callable(getattr(experiments, name)), name)
 
 

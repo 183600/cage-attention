@@ -98,6 +98,146 @@ def _primary_contrast_reachability(legs=None):
     }
 
 
+def _family_single_factor_design(experiment):
+    """The declared single-factor design of one family.
+
+    The family builders resolve each cell label to the ``Cfg`` factor
+    vector the model is actually built from, so a primary contrast can be
+    checked against the *trained* configuration instead of the label.  An
+    unknown family returns an empty design, which makes every arm
+    unresolvable rather than silently certifiable.
+    """
+    if experiment == "e1":
+        return _e1_single_factor_design()
+    if experiment == "e2":
+        return _e2_single_factor_design()
+    if experiment == "e3":
+        return _e3_single_factor_design()
+    return {"cells": {}, "pairs": (), "exploratory_pairs": ()}
+
+
+def _primary_contrast_single_factor(legs=None):
+    """Certify the *study-level* confirmatory contrasts as designed.
+
+    The per-family certificate refuses a grid whose declared controlled
+    pairs vary more than one resolved model factor, but it only sees the
+    pairs *that family* declares.  The study's confirmatory set is a second
+    registration (``_PRIMARY_CONTRASTS``) that names its own ``arms`` and
+    ``kind``; a leg whose arms drift - a renamed cell, a two-factor corner
+    promoted to a one-factor claim, an interaction that differences two
+    different manipulations - would still be executed and then read as the
+    claim it is not.  This check closes that gap at preparation time by
+    resolving every leg against the *authoritative* single-factor cell plan
+    of its family:
+
+    * a ``one_factor`` leg must be a *declared controlled pair* of its
+      family and must vary exactly one resolved model factor;
+    * an ``interaction`` leg must be a difference-of-differences whose two
+      marginal edges each vary the *same* single factor and whose two
+      context edges each vary a single *other* factor - the same structure
+      the run-time ``_paired_did`` audit enforces after training - and all
+      four edges must be declared controlled pairs.
+
+    A leg that fails is a registration defect: the study would spend its
+    compute and then read the contrast as a claim the design does not
+    support, so the caller refuses to start the grid.
+    """
+    legs = _analysis_plan_legs(legs)
+    designs = {tag: _family_single_factor_design(tag)
+               for tag in _STUDY_EXPERIMENTS}
+    rows = []
+    for leg in legs:
+        experiment = leg.get("experiment")
+        kind = leg.get("kind")
+        arms = [str(a) for a in (leg.get("arms") or ())]
+        design = designs.get(experiment) or {"cells": {}, "pairs": ()}
+        cells = design.get("cells") or {}
+        declared = {(str(a), str(b))
+                    for a, b in (design.get("pairs") or ())}
+        issues = []
+        edges = {}
+
+        def _edge(name, arm_a, arm_b):
+            try:
+                names = sorted(_pair_factor_diff(cells, arm_a, arm_b))
+            except ValueError as exc:
+                issues.append(f"the {name} edge {arm_a} vs {arm_b}: {exc}")
+                return None
+            edges[name] = names
+            if len(names) != 1:
+                issues.append(
+                    f"the {name} edge {arm_a} vs {arm_b} varies "
+                    f"{len(names)} model factor(s) {names} instead of "
+                    f"exactly one")
+            if (arm_a, arm_b) not in declared:
+                issues.append(
+                    f"the {name} edge {arm_a} vs {arm_b} is not a declared "
+                    f"controlled contrast of the {experiment} design")
+            return names
+
+        if kind == "one_factor":
+            if len(arms) != 2:
+                issues.append(
+                    f"a one_factor leg names {len(arms)} arm(s), expected 2")
+            else:
+                _edge("marginal", arms[0], arms[1])
+        elif kind == "interaction":
+            if len(arms) != 4:
+                issues.append(
+                    f"an interaction leg names {len(arms)} arm(s), "
+                    f"expected 4")
+            else:
+                arm_a1, arm_b1, arm_a2, arm_b2 = arms
+                marginal_a = _edge("marginal a", arm_a1, arm_b1)
+                marginal_b = _edge("marginal b", arm_a2, arm_b2)
+                context_a = _edge("context a", arm_a1, arm_a2)
+                context_b = _edge("context b", arm_b1, arm_b2)
+                if marginal_a is not None and marginal_b is not None \
+                        and marginal_a != marginal_b:
+                    issues.append(
+                        "the interaction marginals vary different "
+                        f"factor(s): {marginal_a} vs {marginal_b}")
+                if context_a is not None and context_b is not None \
+                        and context_a != context_b:
+                    issues.append(
+                        "the interaction contexts vary different "
+                        f"factor(s): {context_a} vs {context_b}")
+                if marginal_a is not None and context_a is not None:
+                    overlap = sorted(set(marginal_a) & set(context_a))
+                    if overlap:
+                        issues.append(
+                            f"the interaction marginal and context edges "
+                            f"vary the same factor(s) {overlap}: a factorial "
+                            f"interaction needs two different factors")
+        else:
+            issues.append(f"unknown contrast kind {kind!r}")
+        single_factor = None
+        if kind == "one_factor" and "marginal" in edges:
+            single_factor = len(edges["marginal"]) == 1
+        rows.append({
+            "id": leg.get("id"),
+            "experiment": experiment,
+            "kind": kind,
+            "arms": arms,
+            "varying_factors": edges,
+            "single_factor": single_factor,
+            "issues": issues,
+            "certified": not issues,
+        })
+    violating = [row["id"] for row in rows if not row["certified"]]
+    return {
+        "ok": bool(rows) and not violating,
+        "n_legs": len(rows),
+        "legs": rows,
+        "violating_legs": violating,
+        "note": ("every registered one-factor primary contrast varies "
+                 "exactly one resolved model factor and is a declared "
+                 "controlled pair of its family; every interaction leg is a "
+                 "difference-of-differences over two declared single-factor "
+                 "edges with two different factors"),
+    }
+
+
 def _study_cost_plan(settings):
     """The compute the registered study is going to spend, before it spends it.
 
@@ -293,6 +433,7 @@ def _study_design_preflight(settings, out_dir, power=None, verdict=None):
     """
     audit = _analysis_plan_audit()
     reach = _primary_contrast_reachability()
+    single_factor = _primary_contrast_single_factor()
     if power is None:
         power = _primary_contrast_power(settings, verdict)
     try:
@@ -309,6 +450,9 @@ def _study_design_preflight(settings, out_dir, power=None, verdict=None):
             f"{row['id']}: the arms {missing} are not cells of the "
             f"{row['experiment']} grid, so this primary contrast can never "
             f"be measured")
+    for row in single_factor["legs"]:
+        for issue in row["issues"]:
+            issues.append(f"{row['id']}: {issue}")
     if issues:
         raise DesignPlanError(
             "the study-level design is not executable as registered: "
@@ -320,7 +464,9 @@ def _study_design_preflight(settings, out_dir, power=None, verdict=None):
         "description": ("Preparation-time certificate of the study-level "
                         "design: the confirmatory contrasts are consistent "
                         "with the hypothesis registry, every one of them is "
-                        "reachable in its family's grid, the pooled "
+                        "reachable in its family's grid and certified as a "
+                        "single-factor contrast (or a two-factor "
+                        "interaction) of its family, the pooled "
                         "primary family is budgeted against the planned "
                         "seed count, and the compute the study will spend "
                         "is derived from the settings and the cell plans."),
@@ -329,6 +475,8 @@ def _study_design_preflight(settings, out_dir, power=None, verdict=None):
         "registry_issues": [],
         "reachable": bool(reach["ok"]),
         "unreachable_legs": list(reach["unreachable_legs"]),
+        "single_factor_certified": bool(single_factor["ok"]),
+        "single_factor_legs": single_factor["legs"],
         "primary_contrasts": reach["legs"],
         "project_family": power,
         "compute": cost,
@@ -338,8 +486,9 @@ def _study_design_preflight(settings, out_dir, power=None, verdict=None):
                 payload)
     print(f"[study] design pre-flight: {len(reach['legs'])} pre-registered "
           f"primary contrast(s) over {len(payload['experiments'])} "
-          f"families are consistent with the hypothesis registry and "
-          f"reachable in their grids")
+          f"families are consistent with the hypothesis registry, "
+          f"reachable in their grids and certified as single-factor "
+          f"contrasts (or interactions)")
     if isinstance(cost, Mapping) and cost.get("available") is not False:
         print(f"[study] compute: {cost.get('total_exact_runs')} fixed "
               f"training run(s), {cost.get('total_runs_min')}-"
