@@ -154,6 +154,25 @@ class BaselineVerdictTest(unittest.TestCase):
     def test_non_dict_verdict_fails_closed(self):
         self.assertTrue(run_experiment.baseline_verdict_failures([]))
 
+    def test_inconsistent_hb4_state_and_supported_boolean_fail(self):
+        # Mirrors _gates._enforce_baseline_verdict: an inconclusive state
+        # cannot carry a true supported mark.
+        verdict = _passing_verdict()
+        verdict["hb4_state"] = "inconclusive"
+        verdict["hb4_supported"] = True
+        self.assertTrue(run_experiment.baseline_verdict_failures(verdict))
+
+    def test_inconsistent_hb4_state_and_violated_boolean_fail(self):
+        verdict = _passing_verdict()
+        verdict["hb4_state"] = "supported"
+        verdict["hb4_violated"] = True
+        self.assertTrue(run_experiment.baseline_verdict_failures(verdict))
+
+    def test_malformed_hb4_boolean_fails_closed(self):
+        verdict = _passing_verdict()
+        verdict["hb4_violated"] = "False"
+        self.assertTrue(run_experiment.baseline_verdict_failures(verdict))
+
     def test_run_baselines_accepts_passing_verdict(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = pathlib.Path(tmp)

@@ -100,6 +100,34 @@ class VersionEvaluationTest(unittest.TestCase):
             "unsatisfied")
 
 
+class DuplicateDistributionOrderTest(unittest.TestCase):
+    """A distribution reported twice must resolve order-independently."""
+
+    class _Dist:
+        def __init__(self, name, version):
+            self.metadata = {"Name": name}
+            self.version = version
+
+    def _install(self, entries):
+        dists = [self._Dist(name, version) for name, version in entries]
+        return mock.patch("cage.repro.importlib_metadata.distributions",
+                          return_value=iter(dists))
+
+    def test_scan_order_does_not_change_the_kept_version(self):
+        # Lexicographic order would keep 2.9.0 over 2.14.1; the semantic
+        # release order must keep the higher one regardless of scan order.
+        for order in ([("torch", "2.9.0"), ("torch", "2.14.1")],
+                      [("torch", "2.14.1"), ("torch", "2.9.0")]):
+            with self.subTest(order=order), self._install(order):
+                self.assertEqual(
+                    installed_distribution_versions()["torch"], "2.14.1")
+
+    def test_different_name_spellings_collapse_to_one_entry(self):
+        with self._install([("Foo.Bar", "1.0"), ("foo_bar", "2.0")]):
+            versions = installed_distribution_versions()
+            self.assertEqual(versions["foo-bar"], "2.0")
+
+
 class ConformanceReportTest(unittest.TestCase):
     def test_the_running_environment_conforms_to_the_declaration(self):
         report = check_dependency_conformance(ROOT)
