@@ -514,6 +514,29 @@ def _self_test() -> int:
         check("length_sweep_single_point_rejected", False)
     except ValueError:
         check("length_sweep_single_point_rejected", True)
+    # The plan must state the *whole* sweep decision: the requested grid,
+    # the realized grid and the length that was dropped for lack of
+    # position-embedding capacity.  A silently truncated sweep is a
+    # silently changed design.
+    sweep = length_sweep_plan(16, 2, 4, 256)
+    check("length_sweep_plan_realized",
+          sweep["realized_lengths"] == length_sweep_lengths(16, 2, 4, 256))
+    check("length_sweep_plan_requested",
+          sweep["requested_lengths"] == [16, 32, 64, 128])
+    check("length_sweep_plan_dropped_reason",
+          len(sweep["dropped"]) == 1
+          and sweep["dropped"][0]["length"] == 128
+          and sweep["dropped"][0]["required_positions"] == 258)
+    check("length_sweep_plan_coverage",
+          sweep["coverage"]["base_positions"] == 34
+          and sweep["coverage"]["longest_positions"] == 130)
+    check("length_sweep_plan_not_degenerate",
+          not sweep["slope_degenerate"])
+    try:
+        length_sweep_plan(2, 2, 4, 16, min_lengths=3)
+        check("length_sweep_plan_min_lengths_enforced", False)
+    except ValueError:
+        check("length_sweep_plan_min_lengths_enforced", True)
     zero_sim = answer_uniformity_test(torch.tensor([5, 5]), n_sim=0)
     check("uniformity_zero_sim_no_claim",
           math.isnan(zero_sim["p_value"])

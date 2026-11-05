@@ -541,9 +541,11 @@ def _eval_answer_balance(settings: Settings) -> dict:
                       for row in streams.values())
 
     try:
-        e2_lengths = length_sweep_lengths(
-            base=settings.n_pairs, factor=2, n=4,
-            max_len=settings.max_len)
+        # The same sweep geometry the E2 runner evaluates - resolved by the
+        # shared helper, so the balance audit can never certify a different
+        # set of lengths than the sweep actually runs.
+        e2_plan = _e2_length_sweep_plan(settings)
+        e2_lengths = e2_plan["realized_lengths"]
     except ValueError as exc:
         e2_sweep = {
             "lengths": [], "streams": {}, "endpoint_lengths": [],
@@ -560,6 +562,8 @@ def _eval_answer_balance(settings: Settings) -> dict:
         endpoints = [settings.n_pairs, e2_lengths[-1]]
         e2_sweep = {
             "lengths": [int(L) for L in e2_lengths],
+            "length_sweep_plan": e2_plan,
+            "coverage": e2_plan["coverage"],
             "streams": e2_streams,
             "endpoint_lengths": [int(L) for L in endpoints],
             "endpoint_uniform": bool(all(

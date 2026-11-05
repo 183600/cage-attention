@@ -129,7 +129,43 @@ design_alpha=0.05, power_target=0.8, run_order_seed=20240517
 ### 2.3 E2：长度泛化
 
 **训练长度**：固定 `n_pairs=16`（序列长度 ~34）
-**扫描长度**：`length_sweep_lengths(base=16, factor=2, n=4, max_len=256)` → `[16, 32, 64, 128]`（需至少 2 个拟合长度）
+
+**扫描长度（请求网格 vs 实际执行网格）**：
+- **请求网格** = `length_sweep_lengths(base=16, factor=2, n=4, max_len=256)`
+  的几何序列 `16 · 2^i`（i < 4），即 `[16, 32, 64, 128]`。
+- **实际执行网格** = `[16, 32, 64]`。长度 `L` 需要 `2L+2` 个序列位置；
+  `L=128` 需要 258 个位置，超过注册的 `max_len=256`（模型的位置嵌入表
+  没有这些位置，任何在该长度上的前向都会索引越界），因此该长度以及
+  更长的长度一律丢弃。**丢弃是显式记录、不是隐式截断**：
+  `cage.data.length_sweep_plan` 返回请求网格、实际网格、被丢弃的长度、
+  它需要的序列位置与原因；`e2_summary.json` / `e2_runs.jsonl` /
+  `e2_rule_ceiling.json` 都携带该计划，实际网格与请求网格不一致时
+  运行器会在控制台打印截断说明。
+- **实际覆盖范围** = 34 → 130 个序列位置（3.82×；键值对 16 → 64，4×）。
+  所有长度泛化结论必须对照这个**实际测量范围**读取，不能对照请求网格。
+- **最少实际长度 = 3**（`Settings.e2_sweep_min_lengths`，`length_sweep_plan`
+  的 `min_lengths`）。理由：H2a 同时读取 `accuracy_drop` 与
+  `accuracy_slope_log_len`，后者存在的意义正是发现"中段反转"——端点
+  下降不变但中段方向相反的情形；只有 2 个实际长度时，斜率只是端点差的
+  线性缩放、没有任何内部点，中段反转在结构上不可检测。因此无法给出
+  3 个实际长度的几何在开跑前直接拒绝，而不是产出一条无法回答问题的
+  斜率读数。
+- **执行几何的唯一来源**是 `cage.experiments._e2_length_sweep_plan`：
+  E2 运行器与评估答案均衡审计共用同一份计划，两份记录不可能对"实际
+  跑了哪些长度"产生分歧。
+
+<!-- e2-sweep-contract
+base=16
+factor=2
+n=4
+max_len=256
+min_lengths=3
+realized=16,32,64
+-->
+> 上面的 `e2-sweep-contract` 注释块是**可机检**的预注册记录：
+> `tests/test_length_sweep_contract.py` 用默认 `Settings` 重新计算
+> `length_sweep_plan` 并逐项比对，协议文档与代码一旦对"实际跑了哪些
+> 长度"产生分歧，测试立即失败。
 
 **臂**（8 臂完整 2×2×2 设计）：
 | 臂 | gate | calib_use_len | calib_use_ent | calib_ent_norm | 说明 |

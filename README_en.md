@@ -170,6 +170,21 @@ exist only for the single-factor E1/E2 contrasts:
   separates "the signed calibration correction does the work" from "any gate
   perturbation hurts equally"; it is exploratory and outside the
   pre-registered FDR family.
+- **E2 length-sweep geometry contract**: the requested grid is `16·2^i`
+  (i < 4), but a length `L` needs `2L+2` sequence positions and anything
+  beyond the registered `max_len=256` cannot run at all (`L=128` would need
+  258 positions), so the **realized grid is `[16, 32, 64]`**. This is not a
+  silent truncation: `cage.data.length_sweep_plan` returns the requested
+  grid, the realized grid, the dropped lengths with their reason and the
+  measured coverage (34 → 130 positions, 3.82×), and it is stored with
+  `e2_summary.json` / `e2_runs.jsonl` / `e2_rule_ceiling.json`; every
+  length-generalization claim is read against that measured range. **The
+  minimum realized length count is 3**: `accuracy_slope_log_len` exists to
+  catch a mid-sweep reversal that leaves the endpoint drop unchanged, and
+  with only two realized lengths the slope is just the endpoint difference
+  rescaled - it has no interior point and cannot detect a reversal at all -
+  so a geometry that cannot deliver three lengths is refused before the
+  grid starts.
 - **E3 normalization/activation co-design**: `query` / `calib` × `pre` /
   `post` / `mix` / `seednorm` × LayerScale (none / `1e-2`). Per-layer residual
   norms and `gate_depth_ratio` (mean deep gate / mean shallow gate), plus the

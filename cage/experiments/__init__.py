@@ -261,6 +261,7 @@ from ..data import (
     check_train_seed,
     generator_calibration_audit,
     length_sweep_lengths,
+    length_sweep_plan,
     make_batch,
     split_leakage_audit,
     stream_fingerprint,

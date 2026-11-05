@@ -916,6 +916,26 @@ class Settings:
     seeds: tuple = (0, 1, 2, 3, 4)
     eval_batch: int = 256
     eval_batches: int = 4
+    # E2 length-sweep geometry.  These are *requested* design parameters:
+    # the sweep is the geometric sequence ``n_pairs * e2_sweep_factor ** i``
+    # for ``i < e2_sweep_lengths``, truncated at the first length that no
+    # longer fits the model's position table.  The realized grid is what
+    # the runner evaluates and what every length-generalisation claim is
+    # read against; the plan (``cage.data.length_sweep_plan``) records the
+    # requested grid, the dropped lengths and the measured extrapolation
+    # range with the results.
+    #
+    # ``e2_sweep_min_lengths`` is the number of *realized* lengths the E2
+    # readouts need.  H2a reads ``accuracy_slope_log_len`` next to
+    # ``accuracy_drop`` precisely because a mid-sweep reversal can leave
+    # the endpoint drop unchanged, but with only two realized lengths that
+    # slope is the endpoint difference rescaled: it carries no interior
+    # point and cannot detect a reversal at all.  A geometry that cannot
+    # deliver three lengths therefore fails before the grid starts
+    # instead of producing a slope readout that answers nothing.
+    e2_sweep_lengths: int = 4
+    e2_sweep_factor: int = 2
+    e2_sweep_min_lengths: int = 3
     stats_batch: int = 128
     stats_batches: int = 4
     probe_steps: int = 400
@@ -1036,8 +1056,18 @@ class Settings:
                      "stats_batches", "val_batches", "probe_batch",
                      "probe_steps", "probe_eval_batch",
                      "probe_eval_batches", "overfit_steps",
-                     "overfit_batch"):
+                     "overfit_batch", "e2_sweep_lengths",
+                     "e2_sweep_factor", "e2_sweep_min_lengths"):
             _positive_int_field(name)
+        if self.e2_sweep_factor <= 1:
+            raise ValueError(
+                f"e2_sweep_factor must be > 1 so the sweep contains distinct "
+                f"lengths, got {self.e2_sweep_factor!r}")
+        if self.e2_sweep_min_lengths > self.e2_sweep_lengths:
+            raise ValueError(
+                f"e2_sweep_min_lengths={self.e2_sweep_min_lengths} exceeds "
+                f"e2_sweep_lengths={self.e2_sweep_lengths}: the sweep can "
+                f"never realize the minimum number of lengths it asks for")
         if self.d_model % self.n_heads:
             raise ValueError(
                 f"d_model={self.d_model} is not a positive multiple of "
@@ -1320,3 +1350,27 @@ class Settings:
             probe_batch=16, probe_eval_batch=64,
             probe_eval_batches=2, overfit_steps=100,
         )
+
+
+def _e2_length_sweep_plan(settings: "Settings") -> dict:
+    """The E2 length-sweep geometry for ``settings`` (one source of truth).
+
+    The runner and the evaluation-balance audit both need the *same* grid:
+    if they resolved it independently, the audit could certify a different
+    set of lengths than the sweep actually evaluates, and the two records
+    would disagree about the executed design.  The plan carries the
+    requested grid, the realized grid, the dropped lengths and the
+    measured extrapolation range, so it can be stored verbatim next to the
+    results.
+
+    Raises ``ValueError`` when the geometry cannot realize
+    ``settings.e2_sweep_min_lengths`` lengths - a sweep with fewer than
+    three points has no interior point, so the pre-registered
+    ``accuracy_slope_log_len`` readout would be the endpoint difference
+    rescaled and could not detect the mid-sweep reversal it exists to
+    detect.
+    """
+    return length_sweep_plan(
+        base=settings.n_pairs, factor=settings.e2_sweep_factor,
+        n=settings.e2_sweep_lengths, max_len=settings.max_len,
+        min_lengths=settings.e2_sweep_min_lengths)

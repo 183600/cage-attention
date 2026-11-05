@@ -76,8 +76,36 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     _enforce_reproducibility(settings, out_dir, "e2")
     _enforce_overfit_gate(settings, out_dir, "e2")
     lr = _resolve_lr(settings, out_dir, "e2")
-    lengths = length_sweep_lengths(base=settings.n_pairs, factor=2, n=4,
-                                   max_len=settings.max_len)
+    # Length-sweep geometry contract.  The registered sweep is the
+    # geometric sequence ``n_pairs * factor ** i`` for ``i < n``, truncated
+    # at the first length whose sequence (2*L+2 positions) no longer fits
+    # the model's position table.  The truncation is not implicit: the
+    # whole decision (requested grid, realized grid, dropped lengths, the
+    # measured extrapolation range) is recorded with the results, so a
+    # length-generalisation claim is always read against the range that
+    # was actually measured.  A geometry that cannot deliver
+    # ``e2_sweep_min_lengths`` realized lengths fails here, before any
+    # training run: with only two points the pre-registered
+    # ``accuracy_slope_log_len`` readout is the endpoint difference
+    # rescaled and cannot detect the mid-sweep reversal it exists to
+    # detect.
+    sweep_plan = _e2_length_sweep_plan(settings)
+    lengths = sweep_plan["realized_lengths"]
+    coverage = sweep_plan["coverage"]
+    if sweep_plan["dropped"]:
+        dropped_txt = "; ".join(
+            f"L={row['length']} needs {row['required_positions']} positions "
+            f"> max_len={sweep_plan['max_len']}"
+            for row in sweep_plan["dropped"])
+        print(f"[e2] length sweep truncated: requested "
+              f"{sweep_plan['requested_count']} length(s) (grid "
+              f"{sweep_plan['requested_lengths']}), realized {lengths} "
+              f"({dropped_txt}); every length beyond the first dropped one "
+              f"is dropped with it")
+    print(f"[e2] length-sweep coverage: {coverage['base_pairs']} -> "
+          f"{coverage['longest_pairs']} pairs "
+          f"({coverage['base_positions']} -> {coverage['longest_positions']} "
+          f"positions, {coverage['position_ratio']:.2f}x)")
     # Per-length absolute reference: the parameter-free structural rule is
     # the task ceiling at *every* length.  Without it a length-related
     # accuracy drop cannot be attributed to the mechanism under test rather
@@ -93,6 +121,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             seed=TEST_SEED)
     _write_json(out_dir / "e2_rule_ceiling.json", {
         "experiment": "e2", "test_seed": TEST_SEED,
+        "length_sweep_plan": sweep_plan,
         "by_length": {str(L): stats
                       for L, stats in rule_ceiling_by_length.items()},
         "_provenance": _stamp(settings),
@@ -151,6 +180,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                "difficulty_standardized_effective_n_by_length": {},
                "difficulty_standardized_min_stratum_n_by_length": {},
                "difficulty_mix_tv_by_length": {},
+               "length_sweep_plan": sweep_plan,
+               "length_sweep_coverage": coverage,
                **_run_context(settings),
                **record_extra,
                **_training_record(settings, lr),
@@ -770,6 +801,12 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     if balance_ok is None:
         balance_ok = eval_balance.get("all_uniform")
     print("\n[e2] pre-registered contrasts:")
+    print(f"[e2] length-generalisation rows below are read over the realized "
+          f"sweep {lengths} ({coverage['base_positions']} -> "
+          f"{coverage['longest_positions']} sequence positions, "
+          f"{coverage['position_ratio']:.2f}x); the requested grid "
+          f"{sweep_plan['requested_lengths']} was "
+          f"{'truncated to the realized one' if sweep_plan['truncated'] else 'fully realized'}")
     clog = ContrastLog("e2", hypotheses=("H2a", "H2b", "H2c", "H2d", "H2e",
                                        "H2f", "H2g"),
                        min_seeds=settings.min_seeds_for_claim,
@@ -1090,6 +1127,12 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             for L in lengths}
         for label, *_ in _E2_VARIANTS}
     e2_summary["_per_length_contrasts"] = length_contrasts
+    # The executed sweep geometry, stored with the summary: the requested
+    # grid, the realized grid, the lengths that were dropped for lack of
+    # position-embedding capacity, and the extrapolation range the
+    # length-generalisation rows actually cover.
+    e2_summary["_length_sweep_plan"] = sweep_plan
+    e2_summary["_length_sweep_coverage"] = coverage
     e2_summary["_calibration_coefficients"] = {
         label: {
             key: _mean_std([
