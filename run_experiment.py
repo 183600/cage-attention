@@ -57,7 +57,10 @@ def baseline_verdict_failures(verdict: Any) -> list[str]:
       ``True`` - a missing or hand-edited truthy string is not a pass);
     * HB4 is three-state: only a *violated* control (or an unusable /
       malformed state) blocks, while an inconclusive interval is stamped
-      rather than read as leakage.
+      rather than read as leakage.  The state and its ``hb4_supported`` /
+      ``hb4_violated`` booleans must also agree, mirroring
+      ``_gates._enforce_baseline_verdict`` so this pre-check and the
+      experiment CLI's own gate cannot disagree about the same verdict.
     """
     if not isinstance(verdict, dict):
         return ["baselines_verdict.json is not a verdict record"]
@@ -80,6 +83,26 @@ def baseline_verdict_failures(verdict: Any) -> list[str]:
     elif state == "supported" and verdict.get("hb4_supported") is not True:
         failures.append(
             "HB4 (state says supported but the supported boolean is not true)")
+    # The state and its two booleans must agree, exactly as the canonical
+    # ``_gates._enforce_baseline_verdict`` requires: a hand-edited verdict
+    # could otherwise pair an inconclusive state with ``hb4_violated=True``
+    # (or a supported state with a truthy but non-boolean mark) and pass this
+    # pre-check while the experiment CLI later refuses to train.
+    for key in ("hb4_supported", "hb4_violated"):
+        value = verdict.get(key)
+        if value is not None and not isinstance(value, bool):
+            failures.append(
+                f"HB4 ({key} malformed: expected a boolean, got {value!r})")
+    if state is None and verdict.get("hb4_violated") is True:
+        failures.append(
+            "HB4 (legacy verdict has no state but hb4_violated is true)")
+    if state in ("supported", "inconclusive") and \
+            verdict.get("hb4_violated") is True:
+        failures.append(f"HB4 (state {state!r} but hb4_violated is true)")
+    if state == "inconclusive" and verdict.get("hb4_supported") is True:
+        failures.append("HB4 (state inconclusive but hb4_supported is true)")
+    if state == "violated" and verdict.get("hb4_supported") is True:
+        failures.append("HB4 (state violated but hb4_supported is true)")
     return failures
 
 
