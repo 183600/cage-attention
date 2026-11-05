@@ -21,8 +21,23 @@ _E1_CALIB_PLACEBO = (
                         "calib_shuffle_ent": True}),
 )
 
+# E1 position-conflation ablation arm (H1h): the identical calib
+# architecture, parameter count, computation and recipe, but the gate's
+# length term and concentration divisor are taken from each causal row's
+# own visible-token count log(max(t+1, 2)) instead of the global log(T).
+# A causal row t can see at most t+1 keys, so its entropy ceiling is
+# log(t+1); the registered gate's global divisor therefore mixes a
+# position-dependent open-ness schedule into the concentration signal.  The
+# ablation removes exactly that schedule and is strictly identical on the
+# final query row (log(max(T, 2)) == log T), so the two arms differ only in
+# the intermediate rows whose gates the final position attends to.
+_E1_CALIB_POSITION = (
+    ("calib_pos_norm", {"calib_pos_norm": True}),
+)
+
 _E1_ABLATION_LABELS = tuple(
-    label for label, _ in _E1_CALIB_ABLATION + _E1_CALIB_PLACEBO)
+    label for label, _ in _E1_CALIB_ABLATION + _E1_CALIB_PLACEBO
+    + _E1_CALIB_POSITION)
 
 
 def _e1_cell_plan() -> dict:
@@ -30,13 +45,14 @@ def _e1_cell_plan() -> dict:
 
     E1 has two conceptually different groups of conditions: the four gate
     variants (the pre-registered E1 family) and the calibration-term
-    ablation / active-control arms that complete the 2x2 and the placebo.
-    Scheduling them as two separate grids would make every ablation
-    contrast compare a full-calib run from the first grid with an ablated
-    run from the second: any slow machine drift between the two invocations
-    would then be aliased with the ablation factor, exactly the confound the
-    complete-block randomisation exists to remove.  They therefore share
-    one seed block and one frozen schedule.
+    ablation / active-control / position-conflation arms that complete the
+    2x2, the placebo and the position control.  Scheduling them as two
+    separate grids would make every ablation contrast compare a full-calib
+    run from the first grid with an ablated run from the second: any slow
+    machine drift between the two invocations would then be aliased with
+    the ablation factor, exactly the confound the complete-block
+    randomisation exists to remove.  They therefore share one seed block and
+    one frozen schedule.
 
     ``e1_cell`` is the schedule label.  The full-calib cell keeps the gate
     label ``"calib"`` (its result-file row still carries
@@ -49,7 +65,8 @@ def _e1_cell_plan() -> dict:
     cells = tuple(GATES) + _E1_ABLATION_LABELS
     overrides = {
         label: dict(flags)
-        for label, flags in _E1_CALIB_ABLATION + _E1_CALIB_PLACEBO}
+        for label, flags in (_E1_CALIB_ABLATION + _E1_CALIB_PLACEBO
+                             + _E1_CALIB_POSITION)}
     gate_of = {gate: gate for gate in GATES}
     gate_of.update({label: "calib" for label in _E1_ABLATION_LABELS})
     variant_of = {"calib": "full"}
@@ -770,7 +787,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
     rec = {
         "experiment": "e1",
         "hypotheses": ["H1a", "H1b", "H1c", "H1d", "H1e", "H1f",
-                        "H1g"],
+                        "H1g", "H1h"],
         "gate": gate, "seed": seed, "lr": lr,
         "eval_seed": eval_seed, "stats_seed": stats_seed,
         "params": params, "model_cfg": model_cfg,
@@ -807,6 +824,17 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
             rec["query_abs_gate_vs_entropy"] = rec["abs_gate_vs_entropy"]
         if _finite(rec.get("abs_gate_vs_maxprob")):
             rec["query_abs_gate_vs_maxprob"] = rec["abs_gate_vs_maxprob"]
+    # H1h reads the same association for the position-conflation arm under
+    # its own key: the arm's gate is identical to the registered one on the
+    # final query row, so a collapsed association would mean the arm is not
+    # a valid probe of the mechanism at all (the comparison would then be
+    # between a working gate and a degenerate one).
+    if gate == "calib" and isinstance(model_cfg, Mapping) \
+            and model_cfg.get("calib_pos_norm"):
+        if _finite(rec.get("abs_gate_vs_entropy")):
+            rec["pos_norm_abs_gate_vs_entropy"] = rec["abs_gate_vs_entropy"]
+        if _finite(rec.get("abs_gate_vs_maxprob")):
+            rec["pos_norm_abs_gate_vs_maxprob"] = rec["abs_gate_vs_maxprob"]
     if _finite(fc.get("gate_on_correct")) and \
             _finite(fc.get("gate_on_false_conc")):
         rec["gate_margin"] = fc["gate_on_correct"] - fc["gate_on_false_conc"]

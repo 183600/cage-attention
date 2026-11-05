@@ -331,10 +331,10 @@ state: "supported" / "refuted" / "inconclusive" / "practically negligible" / "in
 
 README.md "方法学边界与对照" 节明确列出 9 条边界，关键者：
 1. **相关 ≠ 机制**：`gate_vs_entropy` 相关部分源于构造；证据链靠消融(H1d) + 安慰剂(H1f) + 反事实探针
-2. **熵归一化的位置语义**：非末行门控混入位置信息；`calib_pos_norm=True` 消融检验（末行两臂严格一致）
+2. **熵归一化的位置语义**：非末行门控混入位置信息；E1 训练位置中性臂 `calib_pos_norm`（H1h，末位 query 行两臂一致）并以单侧非劣性判定
 3. **E2 位置编码混淆**：`pos_extrapolation_control`（fold/zero 读法）区分机制退化 vs 位置外推
 4. **参数可识别性**：只有 `c × calib_scale` 乘积起作用；`calib_scale` 固定为 buffer
-5. **新颖性边界**：query 门控属 Gated Attention 家族；本项目新颖性仅限熵×长度校准项，需 H1d/H1f/H2g 支撑
+5. **新颖性边界**：query 门控属 Gated Attention 家族；本项目新颖性仅限熵×长度校准项，需 H1d/H1f/H1h/H2g 支撑
 
 ---
 

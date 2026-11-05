@@ -17,8 +17,8 @@
 
 HYPO_IDS = ("HB0", "HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7",
             "H1a", "H1b",
-            "H1c", "H1d", "H1e", "H1f", "H1g", "H2a", "H2b", "H2c", "H2d",
-            "H2e", "H2f", "H2g", "H3a", "H3b", "H3c")
+            "H1c", "H1d", "H1e", "H1f", "H1g", "H1h", "H2a", "H2b", "H2c",
+            "H2d", "H2e", "H2f", "H2g", "H3a", "H3b", "H3c")
 
 # Every hypothesis entry may carry ``"sesoi"``: the smallest effect size of
 # interest per metric (same metric keys as the pre-registered contrasts).
@@ -488,6 +488,55 @@ HYPOTHESES = {
                       "calib_abs_gate_vs_maxprob": "+"},
         "sesoi_test": {"query_abs_gate_vs_entropy": "equivalence",
                        "query_abs_gate_vs_maxprob": "equivalence"},
+    },
+    "H1h": {
+        "experiment": "e1",
+        "question": "Is the calibrated gate's behaviour an artefact of the "
+                    "position information that the global log(T) "
+                    "normalisation mixes into it, or does the mechanism "
+                    "survive without that confound?",
+        "hypothesis": "The registered gate divides *every* row's attention "
+                      "entropy by the global log(T) and subtracts a*log(T), "
+                      "although a causal row t can see at most t+1 keys, so "
+                      "its entropy ceiling is log(t+1).  The gate therefore "
+                      "carries an implicit, position-dependent open-ness "
+                      "schedule that is not part of the concentration "
+                      "signal: the same attention distribution opens the "
+                      "gate differently depending on where in the sequence "
+                      "it is read.  A position-neutral arm (the identical "
+                      "calib architecture, parameter count, computation and "
+                      "recipe, but with the divisor and the length term "
+                      "taken from each row's own visible-token count "
+                      "log(max(t+1, 2))) removes that schedule while "
+                      "staying strictly identical on the final query row, "
+                      "so only the intermediate rows differ.  If reading the "
+                      "attention concentration is what makes the calibrated "
+                      "gate work, the position-neutral arm must keep its "
+                      "behaviour; if the position schedule is what makes it "
+                      "work, removing the schedule costs accuracy.",
+        "prediction": "accuracy(calib_pos_norm) - accuracy(calib) stays "
+                      "inside the registered non-inferiority bound (the "
+                      "position-neutral arm is not materially worse than the "
+                      "registered arm, so the advantage does not rest on the "
+                      "position schedule), and the position-neutral arm "
+                      "still shows a gate/attention-entropy association of at "
+                      "least the registered SESOI (it still reads the "
+                      "distribution, so it is a valid probe of the mechanism "
+                      "rather than a degenerate arm)",
+        "decision": "the accuracy row is a one-sided non-inferiority test "
+                    "against the registered bound (the 95% CI of "
+                    "calib_pos_norm - calib must stay above -SESOI); a loss "
+                    "beyond that bound refutes the position-neutral reading "
+                    "and forces the concentration claim to be stated "
+                    "conditionally on the position schedule.  The mechanism "
+                    "row is a one-sample test of the position-neutral arm's "
+                    "gate/entropy association (CI excludes 0 and the effect "
+                    "is at least the SESOI).  Both rows join the E1 "
+                    "Benjamini-Hochberg family (q=0.05) and need the "
+                    "registered seed floor like every other row",
+        "sesoi": {"accuracy": 0.01, "pos_norm_abs_gate_vs_entropy": 0.05},
+        "direction": {"pos_norm_abs_gate_vs_entropy": "+"},
+        "sesoi_test": {"accuracy": "noninferior"},
     },
     "H2a": {
         "experiment": "e2",

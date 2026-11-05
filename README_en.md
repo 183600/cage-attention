@@ -140,7 +140,7 @@ exist only for the single-factor E1/E2 contrasts:
 | `calib_use_len` | `True` | Use the length term `a·log T` |
 | `calib_use_ent` | `True` | Use the concentration term `c·H̄` |
 | `calib_ent_norm` | `True` | Normalize concentration by `log T`; `False` reads raw row-mean entropy |
-| `calib_pos_norm` | `False` | Position-conflation ablation: divisor and length term use each row's visible-token count `log(max(t+1,2))`; strictly identical on the final query row (implemented and audited as a one-factor cell; no experiment arm trains it yet) |
+| `calib_pos_norm` | `False` | Position-conflation ablation: divisor and length term use each row's visible-token count `log(max(t+1,2))`; identical on the final query row (E1 trains this configuration as the H1h position-neutral arm, decided by one-sided non-inferiority) |
 | `calib_shuffle_ent` | `False` | Active control: permute only the entropy read by the gate, keeping the same signal distribution |
 
 ## Experiments
@@ -152,7 +152,12 @@ exist only for the single-factor E1/E2 contrasts:
   both splits (the cost of wrongly closing correct answers); `null`
   additionally reports `null_mass` and a full-distribution false-
   concentration readout. E1 records also carry the learned calibration
-  coefficients (`calib_coefficients`, the same readout E2 stamps).
+  coefficients (`calib_coefficients`, the same readout E2 stamps). E1 also
+  trains the ablation and control arms `calib_len_only` / `calib_ent_only` /
+  `calib_no_terms` (the 2×2 of the calibration terms), `calib_shuf_ent` (the
+  shuffled-entropy placebo) and `calib_pos_norm` (the position-neutral arm, see
+  boundary 2 below; decided by the one-sided non-inferiority of
+  `calib_pos_norm - calib` plus that arm's own mechanism row).
 - **E2 length generalization**: train at a fixed length and evaluate on a
   length sweep spaced by factors of 2. The calibrated gate explicitly corrects
   the `log T` entropy growth and should degrade more slowly. Accuracy at each
@@ -225,8 +230,16 @@ claim, so results are not over-read relative to the controlled design.
    `t` sees only `t+1` keys (entropy ceiling `log(t+1)`). This task supervises
    and measures only the final query row, where the visible-key count equals
    `T` and the global divisor is exact; the forward-time behaviour on
-   non-final rows does mix in position, and can be ablated with
-   `calib_pos_norm=True` (strictly identical on the final row).
+   non-final rows does mix in position. E1 therefore trains the
+   **position-neutral arm** `calib_pos_norm` (H1h): the divisor and the length
+   term come from each row's own visible-token count `log(max(t+1,2))`, with
+   identical architecture, parameter count, computation and recipe, and the
+   final query row's gate matches the registered arm
+   (`log(max(T,2)) = log T`), so only the intermediate rows differ. The
+   decision is a **one-sided non-inferiority** test (the 95% CI of
+   `calib_pos_norm - calib` must stay above −0.01): if the arm is materially
+   worse, the "the gate reads concentration, not a position schedule" reading
+   has to be stated conditionally.
 3. **E2 position-encoding confound and its control.** With learned absolute
    position embeddings trained at a fixed length, every sweep position beyond
    the trained length carries an untrained vector, so a length-sweep drop
@@ -269,7 +282,7 @@ claim, so results are not over-read relative to the controlled design.
    arXiv:2505.06708, NeurIPS 2025 - head-specific sigmoid gating, sparse
    gating and long-context extrapolation). This project’s novelty claim is
    limited to the entropy × length calibration terms and must be
-   established by the H1d/H1f/H2g ablations; “gating works” or “gating
+   established by the H1d/H1f/H1h/H2g ablations; “gating works” or “gating
    helps long context” is not a novelty claim.
 9. **Gradient verification of the hand-written kernels.** The four custom
    autograd kernels (`_SoftmaxInPlace` / `_RowEntropy` / `_CalibAttn` /

@@ -119,7 +119,7 @@ class AnalysisPlanRegistryTest(unittest.TestCase):
         self.assertEqual(report["unreachable_legs"], [])
 
     def test_family_cell_labels_come_from_the_cell_plans(self):
-        self.assertEqual(len(_family_cell_labels("e1")), 8)
+        self.assertEqual(len(_family_cell_labels("e1")), 9)
         self.assertEqual(len(_family_cell_labels("e2")), 8)
         self.assertEqual(len(_family_cell_labels("e3")), 16)
         self.assertEqual(_family_cell_labels("nope"), ())
@@ -189,7 +189,7 @@ class PrimaryContrastSingleFactorTest(unittest.TestCase):
         report = _primary_contrast_single_factor()
         self.assertTrue(report["ok"], report["violating_legs"])
         self.assertEqual(report["violating_legs"], [])
-        self.assertEqual(report["n_legs"], 9)
+        self.assertEqual(report["n_legs"], 10)
         for row in report["legs"]:
             self.assertTrue(row["certified"], row)
             self.assertEqual(row["issues"], [])
@@ -274,7 +274,7 @@ class StudyDesignPreflightTest(unittest.TestCase):
             stored = json.loads(path.read_text(encoding="utf-8"))
             self.assertTrue(stored["registry_consistent"])
             self.assertTrue(stored["reachable"])
-            self.assertEqual(len(stored["primary_contrasts"]), 9)
+            self.assertEqual(len(stored["primary_contrasts"]), 10)
             self.assertIn("compute", stored)
             self.assertEqual(payload["unreachable_legs"], [])
 
@@ -316,7 +316,7 @@ class StudyDesignPreflightTest(unittest.TestCase):
                 payload = _study_design_preflight(Settings.quick(),
                                                   pathlib.Path(tmp))
         self.assertTrue(payload["single_factor_certified"])
-        self.assertEqual(len(payload["single_factor_legs"]), 9)
+        self.assertEqual(len(payload["single_factor_legs"]), 10)
         for row in payload["single_factor_legs"]:
             self.assertTrue(row["certified"], row)
 
@@ -324,14 +324,14 @@ class StudyDesignPreflightTest(unittest.TestCase):
         settings = Settings.quick()
         plan = _study_cost_plan(settings)
         n = len(settings.seeds)
-        self.assertEqual(plan["families"]["e1"]["cells"], 8)
+        self.assertEqual(plan["families"]["e1"]["cells"], 9)
         self.assertEqual(plan["families"]["e2"]["cells"], 8)
         self.assertEqual(plan["families"]["e3"]["cells"], 16)
         grid = {
             tag: next(item["runs"] for item in fam["exact_runs"]
                       if item["name"] == "primary grid")
             for tag, fam in plan["families"].items()}
-        self.assertEqual(grid["e1"], 8 * n)
+        self.assertEqual(grid["e1"], 9 * n)
         self.assertEqual(grid["e2"], 8 * n)
         self.assertEqual(grid["e3"], 16 * n)
 
@@ -495,7 +495,7 @@ class StudyLevelAdjudicationTest(unittest.TestCase):
                                                 "fdr_reject": False})
             claim = next(c for c in payload["claims"] if c["id"] == "C1")
             self.assertEqual(claim["status"], "partial")
-            self.assertEqual(claim["n_legs_supporting_in_family"], 2)
+            self.assertEqual(claim["n_legs_supporting_in_family"], 3)
 
     def test_an_ineligible_reversed_leg_does_not_refute_a_claim(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -514,7 +514,8 @@ class StudyLevelAdjudicationTest(unittest.TestCase):
                 tmp, P1={"supports": False, "fdr_reject": False},
                 P2={"supports": False, "fdr_reject": True,
                     "direction_reversed": True, "claim_eligible": True},
-                P3={"supports": False, "fdr_reject": False})
+                P3={"supports": False, "fdr_reject": False},
+                P10={"supports": False, "fdr_reject": False})
             claim = next(c for c in payload["claims"] if c["id"] == "C1")
             self.assertEqual(claim["status"], "refuted")
             self.assertEqual(claim["direction_reversed_legs"], ["P2"])
@@ -557,8 +558,8 @@ class StudyLevelAdjudicationTest(unittest.TestCase):
 
     def test_a_leg_supported_in_family_but_not_pooled_is_flagged(self):
         with tempfile.TemporaryDirectory() as tmp:
-            # Nine legs, all significant on their own; the pooled family
-            # sees nine p-values, so only the strongest survives q/m.
+            # Ten legs, all significant on their own; the pooled family
+            # sees ten p-values, so only the strongest survives q/m.
             rows = []
             for index, leg in enumerate(self._legs().values()):
                 rows.append(_contrast_row(
@@ -587,7 +588,7 @@ class StudyLevelAdjudicationTest(unittest.TestCase):
             self.assertTrue(path.exists())
             stored = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(stored["q"], 0.05)
-            self.assertEqual(len(stored["legs"]), 9)
+            self.assertEqual(len(stored["legs"]), 10)
             self.assertEqual(len(stored["claims"]), 4)
 
 

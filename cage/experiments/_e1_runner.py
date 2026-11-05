@@ -3,7 +3,7 @@
 # split for readability, sharing the module globals.
 # ruff: noqa: F821, F541
 def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
-    _announce(("H1a", "H1b", "H1c", "H1d", "H1e", "H1f", "H1g"))
+    _announce(("H1a", "H1b", "H1c", "H1d", "H1e", "H1f", "H1g", "H1h"))
     # HB1/HB3/HB4/HB5 hard gate: the baselines verdict must exist, be
     # current for this exact protocol and pass, before any grid trains
     # (their pre-registered semantics invalidate everything above them;
@@ -100,10 +100,11 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     ablation_coverage = _report_ablation_coverage(
         out_dir, "e1",
         runs + [r for rs in ablation_runs.values() for r in rs],
-        cells=_CALIB_FACTORIAL_CELLS + (_CALIB_PLACEBO_CELL,),
+        cells=_CALIB_FACTORIAL_CELLS + (_CALIB_PLACEBO_CELL,
+                                        _CALIB_POS_NORM_CELL),
         planned_seeds=settings.seeds,
         design=("calib_use_len x calib_use_ent (2x2) + shuffled-entropy "
-                "active control"))
+                "active control + position-conflation ablation"))
     design_coverage = _report_design_coverage(
         out_dir, "e1", runs, "gate",
         lambda r: r.get("gate"), tuple(GATES),
@@ -240,6 +241,38 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         print(f"{label:>16} {n_params:>8} "
               f"{pcell('accuracy'):>17} {pcell('abs_gate_vs_entropy'):>17} "
               f"{pcell('gate_margin'):>17}")
+
+    position_runs = ablation_runs[_CALIB_POS_NORM_CELL]
+    position_table = _aggregate_runs(position_runs)
+    print(f"\n[e1] H1h position-conflation control: the position-neutral arm "
+          f"({_CALIB_POS_NORM_CELL}) keeps the identical calib architecture, "
+          f"parameter count, computation and recipe, but the gate's length "
+          f"term and concentration divisor are taken from each causal row's "
+          f"own visible-token count log(max(t+1, 2)) instead of the global "
+          f"log(T).  A causal row t sees at most t+1 keys, so the registered "
+          f"gate's global divisor mixes a position-dependent open-ness "
+          f"schedule into the concentration signal; this arm removes it and "
+          f"is strictly identical on the final query row, so only the "
+          f"intermediate rows differ.  If reading the attention "
+          f"concentration is what makes the calibrated gate work, this arm "
+          f"must keep its behaviour; if the position schedule does the work, "
+          f"it loses accuracy:")
+    print(f"{'arm':>16} {'params':>8} {'accuracy':>17} {'abs_r_ent':>17} "
+          f"{'gate_margin':>17}")
+    for label, cell_table in (("full", abl_table["full"]),
+                              (_CALIB_POS_NORM_CELL, position_table),
+                              ("query", table["query"])):
+        def qcell(key):
+            m = cell_table.get(key)
+            if not m or not math.isfinite(m["mean"]):
+                return "n/a"
+            return f"{m['mean']:.4f}±{m['std']:.4f}"
+
+        n_params = int(abl_index[label][0]["params"]) if label in abl_index \
+            else int(by_gate["query"][0]["params"])
+        print(f"{label:>16} {n_params:>8} "
+              f"{qcell('accuracy'):>17} {qcell('abs_gate_vs_entropy'):>17} "
+              f"{qcell('gate_margin'):>17}")
 
     print(f"\n[e1] positive control: the parameter-free structural rule is "
           f"the task ceiling, so every learned accuracy must be read as a "
@@ -1094,7 +1127,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
     print("\n[e1] pre-registered contrasts (calib vs query/none):")
     clog = ContrastLog("e1",
                        hypotheses=("H1a", "H1b", "H1c", "H1d", "H1e", "H1f",
-                                      "H1g"),
+                                       "H1g", "H1h"),
                        min_seeds=settings.min_seeds_for_claim,
                        competence=competence,
                        coverage=(ablation_coverage, design_coverage),
@@ -1325,6 +1358,41 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{_CALIB_PLACEBO_CELL} - query ({metric}): {_fmt_ci(ci)} - "
               f"a CI including 0 means the placebo's extra capacity alone "
               f"buys no advantage over the query gate")
+    print(f"\n[e1] H1h position-conflation contrasts: the position-neutral "
+          f"arm vs the registered calib arm.  Exactly one resolved model "
+          f"factor differs (the normalisation switch), which the design "
+          f"certificate verified before the grid started.  The accuracy row "
+          f"is a one-sided non-inferiority test: the position-neutral arm "
+          f"must not be materially *worse* than the registered arm, so a loss "
+          f"beyond the registered SESOI refutes the position-neutral reading "
+          f"and forces the concentration claim to be stated conditionally on "
+          f"the position schedule the global divisor mixes in.  The "
+          f"mechanism row checks that the arm still reads the attention "
+          f"distribution, so the comparison is never between a working gate "
+          f"and a degenerate one:")
+    position_warn = _curve_warn((_CALIB_POS_NORM_CELL, position_runs),
+                                ("calib", by_gate["calib"]))
+    position_pair = _design_pair("e1", _CALIB_POS_NORM_CELL, "calib",
+                                 position_runs, by_gate["calib"])
+    clog.print_equivalence_ci(
+        f"{_CALIB_POS_NORM_CELL} - calib", "H1h", "accuracy",
+        _paired_equivalence(*position_pair, "accuracy",
+                            HYPOTHESES["H1h"]["sesoi"]["accuracy"],
+                            mode="noninferior"),
+        warn=position_warn)
+    clog.print(f"{_CALIB_POS_NORM_CELL} |r| entropy vs 0", "H1h",
+               "pos_norm_abs_gate_vs_entropy",
+               _one_sample_contrast(position_runs,
+                                    "pos_norm_abs_gate_vs_entropy"),
+               warn=position_warn)
+    for metric in ("accuracy", "abs_gate_vs_entropy", "gate_margin"):
+        ci = _paired_diff(position_runs, by_gate["query"], metric)
+        print(f"      exploratory (outside the FDR family): "
+              f"{_CALIB_POS_NORM_CELL} - query ({metric}): {_fmt_ci(ci)} - "
+              f"this comparison changes the gate *and* the normalisation "
+              f"switch, so it is not a one-factor contrast; it only says "
+              f"whether the position-neutral gate still beats the query-only "
+              f"gate")
     clog.finalize(out_dir, q=settings.fdr_q)
     _study_level_adjudication(out_dir, q=settings.fdr_q)
     metric_robustness = _class_frequency_companions(

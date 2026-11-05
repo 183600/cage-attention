@@ -160,6 +160,12 @@ _E1_SINGLE_FACTOR_PAIRS = (
     ("calib", "calib_len_only"),
     ("calib", "calib_ent_only"),
     ("calib", _CALIB_PLACEBO_CELL),
+    # The position-conflation control is declared in the order of its
+    # registered difference (position-neutral arm minus the registered arm),
+    # because the pre-registered H1h prediction is a one-sided
+    # non-inferiority test in exactly that direction: the position-neutral
+    # arm must not be materially *worse* than the registered arm.
+    (_CALIB_POS_NORM_CELL, "calib"),
 )
 
 # The placebo arm against the query gate changes the gate *and* the

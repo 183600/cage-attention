@@ -9,6 +9,7 @@
 | 1.2 | 2026-11-04 | 修正 §2.3 的 E2 臂表：第 8 臂按实现为 `null`（原文误列为 E1 的安慰剂 `calib_shuf_ent`，而 E2 预注册决策规则中没有安慰剂对比）；文档与实现对齐，不改任何假设/对比/规则 | - |
 | 1.3 | 2026-11-04 | 新增 §3.6：**研究级分析计划**（跨 E1/E2/E3 的预注册确认性对比集 + 声明式合取 + 合并族 FDR 裁决）；修正 §2.1 封存测试种子（456 → **2024**，与 `cage/_data_task.py:TEST_SEED` 对齐）与 §2.2 网格默认值（与 `Settings` 默认值对齐）；§5.5/附录 C 登记新增制品 | - |
 | 1.4 | 2026-11-04 | 在 §3.6 增加**研究级单因素证书**：确认性对比集里的每条 `one_factor` 腿必须恰好变动一个解析后的模型因子、且是其家族已声明的受控对比对；`interaction` 腿必须是两个已声明单因素边际之差再跨两个上下文相减（两轴因子不同）。证书写入 `study_design_preflight.json`，不通过即拒绝开跑；不新增/修改任何假设、对比对、SESOI 或判定规则 | - |
+| 1.5 | 2026-11-05 | 新增 **H1h 位置混淆消融臂**（`calib_pos_norm`）与研究级腿 **P10**：注册门控用全局 `log(T)` 归一化每一行的注意力熵，而因果行 t 最多只能看到 t+1 个键，其熵上限是 `log(t+1)`——全局除数把**位置相关的开放度调度**混进了集中度信号。新臂改用每行可见 token 数 `log(max(t+1,2))` 做除数与长度项（架构/参数/计算/配方不变），在最终 query 行与注册臂数值相同（`log(max(T,2)) = log T`），因此只改动中间行。判定为**单侧非劣性**（`calib_pos_norm - calib` 的 95% CI 下界 ≥ -0.01）+ 机制行（位置中性臂自身的 \|r\|(gate, entropy) ≥ 0.05）。E1 网格 8→9 cell、单因素对 7→8 对、确认性腿 9→10（声明 C1 增加 P10）；其余假设/对比/SESOI 不变 | - |
 
 > **重要**：本协议文档与 `cage/experiments/_config.py:HYPOTHESES`、`docs/design_notes.md` 及
 > `cage/experiments/_analysis_plan.py:_PRIMARY_CONTRASTS`/`_STUDY_CLAIMS`
@@ -30,7 +31,7 @@
 | 层级 | 编号范围 | 性质 | 实验 |
 |------|----------|------|------|
 | 基线前提 | HB0–HB7 | 管道有效性/任务合理性/复杂度控制 | baselines |
-| 机制核心 | H1a–H1g | 校准门控的注意力分布使用、错误抑制、消融、安慰剂 | E1 |
+| 机制核心 | H1a–H1h | 校准门控的注意力分布使用、错误抑制、消融、安慰剂、位置混淆控制 | E1 |
 | 泛化机制 | H2a–H2g | 长度校准的显式修正、系数正向性、归一化负载 | E2 |
 | 协同设计 | H3a–H3c | 动态归一化深层写入、LayerScale 交互、校准×归一化交互 | E3 |
 
@@ -52,6 +53,7 @@
 | H1e | prauc_lift, recall@10% | E1 | 0.1, 0.02 | +, + | paired bootstrap CI ≠ 0 after BH |
 | H1f | accuracy, gate_margin, \|gate_vs_entropy\| (calib vs placebo) | E1 | 0.01, 0.02, 0.05 | +, +, + | paired bootstrap CI ≠ 0 after BH |
 | H1g | calib_abs_*, query_abs_* | E1 | 0.05, 0.05 / 0.10, 0.10 | +, + / equivalence | calib: CI ≠ 0 & ≥ SESOI; query: CI inside ±bound (TOST) |
+| H1h | accuracy (calib_pos_norm − calib), \|pos_norm_abs_gate_vs_entropy\| | E1 | 0.01, 0.05 | noninferior, + | 非劣性：95% CI 下界 ≥ −SESOI（位置中性臂不显著更差）；机制行：单样本 CI ≠ 0 且 ≥ SESOI |
 | H2a | accuracy_at_longest, accuracy_drop, accuracy_slope_log_len | E2 | 0.01, 0.01, 0.01 | +, -, + | paired bootstrap CI ≠ 0 after BH |
 | H2b | entropy_drift, entropy_norm_drift, gate_drift | E2 | 0.1, 0.05, 0.02 | + / equivalence, equivalence | raw: CI ≠ 0 & >0; norm/gate: CI inside ±bound (TOST) |
 | H2c | accuracy_at_longest, accuracy_drop (calib vs ent_only); calib vs len_only (reverse) | E2 | 0.01, 0.01 / 0.01, 0.01 | +, - / equivalence | calib-ent_only CI ≠ 0; calib-len_only CI inside ±bound (TOST) |
@@ -84,7 +86,7 @@
 
 **HB3 分裂审计**：训练流与每个保留流的精确重复重叠=0；分布偏移卡方检验 BH 校正后 p ≥ FDR。
 
-### 2.2 E1：门控对比（4 变体 + 消融 + 安慰剂）
+### 2.2 E1：门控对比（4 变体 + 消融 + 安慰剂 + 位置控制）
 
 | 变体 | gate | 关键配置 | 说明 |
 |------|------|----------|------|
@@ -96,8 +98,11 @@
 | calib_ent_only | `calib` | `calib_use_len=False, calib_use_ent=True` | 仅集中度项 |
 | calib_no_terms | `calib` | `calib_use_len=False, calib_use_ent=False` | 两项全关（退化为 query 偏置） |
 | calib_shuf_ent | `calib` | `calib_shuffle_ent=True` | **安慰剂**：熵位置固定打乱，架构/参数/计算/边缘分布不变 |
+| calib_pos_norm | `calib` | `calib_pos_norm=True` | **位置中性对照**：除数与长度项改用每行可见 token 数 `log(max(t+1,2))`，去掉全局 `log(T)` 混入的位置开放度调度 |
 
-**共享调度**：上述 8 个 cell 进入**同一个**随机化完全区组设计（每种子一个区组，每区组 8 个 cell 位置随机排列），避免消融对比被机器漂移混淆。
+**位置混淆消融（H1h）**：注册门控对**每一行**用全局 `log(T)` 归一化注意力熵并减去 `a·log(T)`，而因果行 t 最多只能看到 t+1 个键（其熵上限为 `log(t+1)`）。因此同一份注意力分布在不同位置会被读成不同的开放度——这是集中度信号里混入的位置信息。`calib_pos_norm` 把除数与长度项换成每行自己的可见 token 数：架构、参数、计算与配方不变（单因素 `calib_pos_norm`），且在最终 query 行与注册臂**数值相同**（`log(max(T,2)) = log T`），差异只出现在中间行的门控上。判定为**单侧非劣性**（位置中性臂不显著更差 ⇒ 优势不依赖位置调度；若显著更差，则"读集中度"的主张必须条件化表述）+ 机制行（位置中性臂自身仍读出注意力熵关联，排除"退化臂"对照）。
+
+**共享调度**：上述 9 个 cell 进入**同一个**随机化完全区组设计（每种子一个区组，每区组 9 个 cell 位置随机排列），避免消融对比被机器漂移混淆。
 
 **网格配置**（`Settings` 默认值，可通过 CLI 覆盖）：
 ```python
@@ -220,7 +225,7 @@ design_alpha=0.05, power_target=0.8, run_order_seed=20240517
 
 预注册的受控对比必须是**单因素**实验：两条臂之间只允许有**一个**解析后的模型因子不同（`gate`/`norm`/`layer_scale`/`calib_use_len`/`calib_use_ent`/`calib_shuffle_ent`/`calib_ent_norm`/`calib_pos_norm`）。
 
-- **设计期（开跑前）**：每个实验用**解析后的 `Cfg`** 计算各实验单元的因子向量，并声明它的受控对比对（E1 7 对、E2 5 对、E3 20 对），逐对检查"恰好一个因子不同"；证书写入 `<tag>_single_factor_design.json`（注册进制品索引），控制台打印摘要。
+- **设计期（开跑前）**：每个实验用**解析后的 `Cfg`** 计算各实验单元的因子向量，并声明它的受控对比对（E1 8 对、E2 5 对、E3 20 对），逐对检查"恰好一个因子不同"；证书写入 `<tag>_single_factor_design.json`（注册进制品索引），控制台打印摘要。
 - **失败即停**：任一声明的对比对变化了多于一个因子时抛出 `ValueError`，网格**不启动**——多因子操作无法读作单因素结论，先跑再拒只会白花算力。
 - **运行期防漂移**：决策行必须从证书声明的对比对里取臂（`_design_pair`）；未声明的对比对会中止运行，因此"实际执行的对比"与"认证过的设计"始终是同一集合。
 - **因子格角落**：`calib_no_terms` 同时关闭两个校准项，是**双因子**单元，只通过已注册的 2×2 主效应/交互（聚合行）读取，**不得**作为单因素决策行；证书把它列在 `cells_without_one_factor_contrast` 中。
@@ -236,10 +241,13 @@ E1/E2/E3 各自控制一个 FDR 家族，但**这些保证不复合**：三个�
 
 因此研究在**开跑前**注册一份研究级分析计划（`cage/experiments/_analysis_plan.py`）：
 
-- **确认性对比集**（`_PRIMARY_CONTRASTS`，9 条腿 P1–P9）：每条腿用
+- **确认性对比集**（`_PRIMARY_CONTRASTS`，10 条腿 P1–P10）：每条腿用
   `(experiment, hypothesis, metric, rule)` 三元组标识运行器**实际产出的**那一行，
   并显式写出它对比的网格单元 `arms`（如 P1 = `("calib", "query")`）与
   `kind`（`one_factor` 对比两个单元 / `interaction` 对比两个差之差，共四个单元）。
+  其中 **P10** 是 H1h 的位置中性腿：`arms = ("calib_pos_norm", "calib")`，
+  `rule = "calib_pos_norm - calib"`，`kind = one_factor`（顺序即差值方向，
+  与单因素证书的声明一致），并入声明 C1。
 - **研究级声明**（`_STUDY_CLAIMS`，C1–C4）：每条声明是其各腿的**合取**
   （intersection-union, IUT）。IUT 下拒绝一个合取需要拒绝它的**每一条**腿，
   因此声明之间不需要额外校正；声明的全局 p 值是其各腿单侧 p 值的最大值。
@@ -438,7 +446,7 @@ E1/E2/E3 各自控制一个 FDR 家族，但**这些保证不复合**：三个�
 
 | 声明 | 腿 | 家族内 IUT | 合并族 IUT | 家族膨胀 | 说明 |
 |------|----|-----------|-----------|---------|------|
-| C1 | P1, P2, P3 | supported | supported | 否 | 校准门控确实读取注意力分布 |
+| C1 | P1, P2, P3, P10 | supported | supported | 否 | 校准门控确实读取注意力分布（且不依赖全局归一化混入的位置调度） |
 | C2 | P4, P5 | partial | inconclusive | 是 | 读分布是否改变门控行为 |
 | C3 | P6, P7 | inconclusive | inconclusive | 否 | 长度鲁棒性是否超出 query 门控 |
 | C4 | P8, P9 | supported | partial | 是 | 门控与动态归一化是否协同 |
@@ -462,6 +470,13 @@ E1/E2/E3 各自控制一个 FDR 家族，但**这些保证不复合**：三个�
 4. 同步更新本文档 `EXPERIMENT_PROTOCOL.md`
 5. 运行 `make check` 确保 CI 门禁通过
 6. 提交并移动固定标签：`git tag -f design-pin <新提交sha> && git push origin design-pin`
+
+> **注（v1.5 的执行偏差）**：`docs/design_notes.md` 与 `ci_gate.py` 由 CI 以
+> `design-pin` 标签为基准自动还原（改动会被丢弃），因此本次 H1h 注册**只能**落在
+> `_config.py`、`_analysis_plan.py` 与本文档三处；第 1、6 步（写 `design_notes.md`
+> 并移动标签）需要具备推送权限的人执行。在标签移动之前，H1h 的登记以本文档
+> §1.3/§2.2/§3.6 与 `_config.py:HYPOTHESES["H1h"]` 为准，`design_notes.md`
+> 仍是 v1.4 的固定条目——这一偏差是**显式记录**的，而不是静默跳过。
 
 ### 8.2 版本兼容性
 

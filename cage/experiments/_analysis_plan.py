@@ -167,6 +167,26 @@ _PRIMARY_CONTRASTS = (
         "claim": "C4",
         "text": "the same interaction on the deep/early gate ratio",
     },
+    {
+        "id": "P10",
+        "experiment": "e1",
+        "hypothesis": "H1h",
+        "metric": "accuracy",
+        "rule": "calib_pos_norm - calib",
+        # The cell label is written literally (like the other arms here):
+        # this module is loaded before the design module that owns the
+        # constant, and the preparation-time reachability and single-factor
+        # certificates resolve both labels against the authoritative E1
+        # cell plan, so a renamed cell is caught before the grid starts.
+        "arms": ("calib_pos_norm", "calib"),
+        "kind": "one_factor",
+        "claim": "C1",
+        "text": "the calibrated gate keeps its behaviour when the position "
+                "information that the global log(T) normalisation mixes into "
+                "it is removed (the position-neutral arm is not materially "
+                "worse than the registered arm; a one-sided "
+                "non-inferiority test, not a superiority claim)",
+    },
 )
 
 # The number of arms each kind of leg contrasts.  A one-factor leg contrasts
@@ -184,7 +204,7 @@ _STUDY_CLAIMS = (
         "question": "Does the calibrated gate really read the attention "
                     "distribution, rather than merely having an extra "
                     "data-dependent input?",
-        "legs": ("P1", "P2", "P3"),
+        "legs": ("P1", "P2", "P3", "P10"),
     },
     {
         "id": "C2",

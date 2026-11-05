@@ -131,7 +131,7 @@ print(hist[-1], accuracy, sorted(stats))
 | `calib_use_len` | `True` | 是否使用长度项 `a·log T` |
 | `calib_use_ent` | `True` | 是否使用集中度项 `c·H̄` |
 | `calib_ent_norm` | `True` | 集中度按 `log T` 归一化；`False` 表示原始行均值熵 |
-| `calib_pos_norm` | `False` | 位置混淆消融：除数与长度项改用每行可见 token 数 `log(max(t+1,2))`；末位 query 行两臂严格一致（已实现并纳入单因素审计，当前还没有实验臂训练它） |
+| `calib_pos_norm` | `False` | 位置混淆消融：除数与长度项改用每行可见 token 数 `log(max(t+1,2))`；末位 query 行两臂一致（E1 的 H1h 位置中性臂训练该配置，判定为单侧非劣性） |
 | `calib_shuffle_ent` | `False` | 主动对照：只打乱门控读取的熵位置，保留同分布信号 |
 
 ## 实验设计
@@ -141,7 +141,11 @@ print(hist[-1], accuracy, sorted(stats))
   “假集中”（max-prob 高但回答错误）时门控是否关闭，另报门控分布分位数
   （误关正确答案的代价）；`null` 变体另报 `null_mass`，并给出含 null
   槽位的全分布假集中读出。E1 记录同时携带学得的校准系数
-  （`calib_coefficients`，与 E2 同一读出）。
+  （`calib_coefficients`，与 E2 同一读出）。E1 另训练三个消融/对照臂：
+  `calib_len_only` / `calib_ent_only` / `calib_no_terms`（校准项 2×2）、
+  `calib_shuf_ent`（打乱熵安慰剂）与 `calib_pos_norm`（位置中性臂，见下方
+  方法学边界第 2 条；判定为 `calib_pos_norm - calib` 的单侧非劣性 + 该臂
+  自身的机制行）。
 - **E2 长度泛化**：固定训练长度，在按 2 倍间隔扩展的长度扫描上评估；校准门控
   显式修正 `log T` 引起的熵增长，因此预期退化更慢。报告各长度准确率以及
   熵、max-prob、门控值的漂移；附带位置编码外推控制
@@ -193,8 +197,12 @@ print(hist[-1], accuracy, sorted(stats))
 2. **熵归一化的位置语义**。登记门控对每一行都用全序列 `log T` 作除数；
    因果第 t 行只能看到 t+1 个键，其熵上限是 `log(t+1)`。本任务只监督
    且只统计末位 query 行（该行可见键数恰为 T，`log T` 精确），但前向中
-   非末行的门控确实混入位置信息——可用 `calib_pos_norm=True` 消融检验
-   （末行两臂严格一致，仅非末行不同）。
+   非末行的门控确实混入位置信息。E1 因此训练**位置中性臂**
+   `calib_pos_norm`（H1h）：除数与长度项改用每行自己的可见 token 数
+   `log(max(t+1,2))`，架构/参数/计算/配方不变，末位 query 行的门控与
+   登记臂一致（`log(max(T,2)) = log T`），差异只在中间行。判定是**单侧
+   非劣性**（`calib_pos_norm - calib` 的 95% CI 下界 ≥ −0.01）：若该臂
+   显著更差，则“门控读的是集中度而非位置调度”的主张必须条件化表述。
 3. **E2 的位置编码混淆与控制**。模型用可学习绝对位置 embedding，固定
    长度训练后扫描更长序列时，超出训练长度的位置向量从未被训练。
    长度退化可能来自门控/注意力行为，也可能来自未训练位置向量。
@@ -226,7 +234,7 @@ print(hist[-1], accuracy, sorted(stats))
    Sparsity, and Attention-Sink-Free*, Qiu et al., 2025,
    arXiv:2505.06708，NeurIPS 2025；已研究 query 依赖的 sigmoid 门控、
    稀疏门控与长上下文外推）。
-   本项目的新颖性主张仅限熵 × 长度校准项，且必须由 H1d/H1f/H2g 消融
+   本项目的新颖性主张仅限熵 × 长度校准项，且必须由 H1d/H1f/H1h/H2g 消融
    支撑，不能把“门控有效”或“门控改善长上下文”作为新颖性主张。
 9. **手写核的梯度验证**。四个自定义 autograd 核（`_SoftmaxInPlace` /
    `_RowEntropy` / `_CalibAttn` / `_NullAttn`）在

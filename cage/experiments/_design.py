@@ -1706,11 +1706,14 @@ _CALIB_RAW_ENT_CELL = "calib_raw_ent"
 # log(max(t+1, 2)) instead of the global log(T).  It is a distinct cell
 # because, unlike the term ablations, the resolved term flags are identical
 # to ``full``; only ``calib_pos_norm`` identifies it.  The cell is declared
-# and expanded into its factor vector like the other one-factor cells, so a
-# record that does train it is audited as such - but no E1/E2 arm trains it
-# yet (``_E2_VARIANTS`` has no position-normalisation arm), so it enters no
-# contrast and no design certificate.  Adding the arm is a protocol change
-# (a new arm and, for a decision row, a new registered hypothesis).
+# and expanded into its factor vector like the other one-factor cells, and
+# E1 trains it as the position-conflation arm of H1h (E2 has no
+# position-normalisation arm): the registered gate divides every row by the
+# global log(T) although a causal row t can see at most t+1 keys, so the
+# global divisor mixes a position-dependent open-ness schedule into the
+# concentration signal.  The arm removes that schedule and is strictly
+# identical on the final query row, so it isolates the confound in a single
+# factor.
 _CALIB_POS_NORM_CELL = "calib_pos_norm"
 
 # Coefficient multipliers used by the within-model dose-response companion.
