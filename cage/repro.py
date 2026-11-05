@@ -390,11 +390,34 @@ def declared_requirements(root=None) -> dict[str, list[tuple[str, str]]]:
     return declared
 
 
+def _higher_version(current: str, candidate: str) -> str:
+    """Deterministically pick the higher of two version strings.
+
+    ``max`` on the raw strings orders lexicographically, so for a
+    distribution that appears twice in the metadata scan (e.g. a user-site
+    copy next to a system copy) ``"2.9.0"`` would beat ``"2.14.1"`` and the
+    conformance verdict could be decided by scan order.  Compare the PEP 440
+    public releases when both parse; fall back to the raw string order
+    (still deterministic) when either version carries a suffix this module
+    cannot order exactly.
+    """
+    left = _public_release(current)
+    right = _public_release(candidate)
+    if left is not None and right is not None:
+        order = _compare_releases(left, right)
+        if order != 0:
+            return current if order > 0 else candidate
+    return max(current, candidate)
+
+
 def installed_distribution_versions() -> dict[str, str]:
     """Installed distributions and their versions, normalised and sorted.
 
     Package metadata is untrusted input: a broken distribution must not
-    make the conformance check fail with a traceback.
+    make the conformance check fail with a traceback.  When the same
+    distribution is reported more than once, the semantically highest
+    version is kept so the result does not depend on the metadata scan
+    order.
     """
     versions: dict[str, str] = {}
     try:
@@ -413,7 +436,8 @@ def installed_distribution_versions() -> dict[str, str]:
         if not key or not version:
             continue
         previous = versions.get(key)
-        versions[key] = version if previous is None else max(previous, version)
+        versions[key] = (version if previous is None
+                         else _higher_version(previous, version))
     return dict(sorted(versions.items()))
 
 
