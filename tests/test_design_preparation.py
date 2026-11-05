@@ -436,7 +436,6 @@ class ControlledAuditProvenanceTest(unittest.TestCase):
                             for msg in mixed_side["mismatches"]))
 
     def test_unhashable_or_malformed_seeds_fail_closed(self):
-        good = self._run()
         for bad_seed in ([1], {"seed": 1}, True, 1.5, ""):
             with self.subTest(bad_seed=bad_seed):
                 bad = self._run()

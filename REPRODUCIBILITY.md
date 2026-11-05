@@ -43,6 +43,23 @@ pythonhashseed, hash_randomization, argv, cwd, repo_root, git_sha, git_dirty
 - **Advisory drift**（兼容但警告）：硬件平台、CPU 型号等非数值字段变化
 - 结果目录包含 `environment_history.jsonl`，追踪每次调用的环境漂移
 
+**单一事实来源**：环境记录只有一份实现——`cage.experiments._environment_record`。
+`capture_environment.py` 是它的命令行外壳，写出的文件与结果目录里
+`environment.json` 的环境块逐字段同构，`environment_sha256` 因此可以直接互比
+（两种文件形态都能读）：
+
+```bash
+python3 capture_environment.py --output /tmp/env.json
+python3 capture_environment.py --compare /tmp/env.json     # 与 --check-environment 同一判据
+python3 -m cage.experiments --check-environment --out results
+```
+
+> 历史教训：独立实现曾让同一台机器产生两个互不相容的 `environment_sha256`，
+> "比对两个环境"实际上在比两个不相关的对象。
+
+**声明 vs 实装**：环境记录说明"装了什么"，`--check-dependencies` 回答
+"装的是不是我们声明的那个"（详见 §4.4）。
+
 ### 1.3 制品完整性链
 
 ```
@@ -142,7 +159,10 @@ cd cage-attention
 python3 -m pip install -r requirements-ci.txt \
   --extra-index-url https://download.pytorch.org/whl/cpu
 
-# 3. 验证环境指纹
+# 3. 确认装出来的版本确实等于声明的固定版本
+make verify-deps
+
+# 4. 验证环境指纹
 python3 -m cage.experiments --check-environment --out results
 ```
 
@@ -157,6 +177,9 @@ make test
 
 # 组合检查
 make check
+
+# 正式实验前的完整预检（依赖一致性 + 门禁 + 测试）
+make preflight
 ```
 
 ### 3.3 运行实验
@@ -186,6 +209,9 @@ make verify-artifacts OUT=results  # 制品完整性
 make verify-provenance OUT=results # 来源溯源
 make verify-runs OUT=results       # 运行完整性+环境同质性
 make verify-source OUT=results     # 归档代码哈希与当前检出比对
+
+# 声明 vs 实装：这份结果当初是不是在声明的依赖集下跑出来的
+python3 -m cage.experiments --check-dependencies --out results
 ```
 
 ### 3.5 独立重放（Replication）
@@ -277,6 +303,8 @@ cage/
   - `test_design_preparation.py`：区组调度、功效计划、曲线失效损耗
   - `test_single_factor_design.py` / `test_single_factor_contract.py`：单因素设计期证书
   - `test_study_design.py`：研究级分析计划（注册表一致性、腿可达性、冻结、IUT 裁决、算力预算）
+  - `test_dependency_conformance.py`：声明依赖 vs 实装依赖（版本比较、归档记录重算、CLI 退出码）
+  - `test_documentation_integrity.py`：文档-代码漂移守卫（引用的版本、CLI 参数、make 目标、容器配方、文档链接）
 
 ### 4.4 依赖管理
 
@@ -289,9 +317,32 @@ dependencies = ["torch>=2.0"]
 dev = ["pytest>=7", "ruff>=0.5"]
 
 # requirements-ci.txt (CI 冻结版本)
-torch==2.3.0+cpu
+torch==2.14.1
 # 仅在 CI 复现固定依赖时使用
 ```
+
+**两处声明的分工**：`pyproject.toml` 声明"本包需要什么"（版本范围），
+`requirements-ci.txt` 声明"本次研究用什么"（冻结版本）。冻结版本是**唯一
+事实来源**：容器镜像也从它安装依赖，文档不再重复写版本号。
+
+**依赖一致性检查**（新增）：环境记录会写下"装了什么"，但不会自动回答
+"装的东西是不是我们声明的那个"。`--check-dependencies` 做这件事：
+
+```bash
+make verify-deps     # 等价于 python3 -m cage.experiments --check-dependencies
+```
+
+- 比对**当前解释器**与声明（`requirements-ci.txt` 的 `==` 固定版本、
+  `pyproject.toml` 的运行期要求）；
+- 带 `--out results` 时，额外用结果目录里归档的环境记录重算一遍，回答
+  "这份历史结果当初是不是在声明的依赖集下跑出来的"；
+- 退出码：`0` 一致、`1` 不一致（版本不符或缺包）、`2` 无声明可查；
+- 规范比较器只认得 `== / != / >= / <= / > / <`，其余写法（如 `~=`）标为
+  **未判定**并如实报告，绝不当作通过。
+
+正式实验前的推荐顺序：`make preflight`（= `verify-deps` + `check`）。
+`run_experiment.py` 也会在预检阶段打印同一份一致性结论（不阻断，
+但会明确警告结果不可与冻结配方下的运行直接比较）。
 
 ---
 
@@ -348,13 +399,26 @@ README.md "方法学边界与对照" 节明确列出 9 条边界，关键者：
 4. 运行 `make check` 确保门禁通过
 5. 更新 `README.md` 实验设计表与指标表
 
-### 6.2 修改固定设计
+### 6.2 改依赖 / 改文档时的纪律
+
+1. **依赖版本只在 `requirements-ci.txt` 写一次**。文档、容器配方、CI
+   安装命令都引用它，不复制版本号；`tests/test_documentation_integrity.py`
+   会检查文档里出现的 `torch==...` 仍然是声明的那个版本。
+2. **文档里出现的命令必须真的存在**：CLI 参数由
+   `tests/test_documentation_integrity.py` 对照 `_e3_cli.py` 的解析器核对，
+   `make <目标>` 对照 `Makefile` 核对（历史上协议文档曾写了一个并不存在的
+   lr 敏感性开关）。
+3. **容器配方必须装同一份冻结依赖**：`Dockerfile.repro` 不得写死 torch
+   版本，`pip install -e .` 必须带 `--no-deps`，并保留构建期的版本自检。
+4. 改完运行 `make check`（门禁 + 全量测试，含上述漂移守卫）。
+
+### 6.3 修改固定设计
 
 1. 直接修改 `docs/design_notes.md` 对应条目
 2. 同步移动固定标签：`git tag -f design-pin <新提交sha> && git push origin design-pin`
 3. 未移动标签的修改会在下一次 CI 被自动回滚
 
-### 6.3 数值核修改
+### 6.4 数值核修改
 
 四个手写 autograd 核（`_SoftmaxInPlace`、`_RowEntropy`、`_CalibAttn`、`_NullAttn`）任何修改必须：
 - 通过 `tests/test_gradcheck.py` 的 float64 gradcheck
@@ -387,8 +451,9 @@ python3 -m cage.experiments --only e1 --seeds 5 --out results
 ```bash
 # 原因：PyTorch/Python/依赖版本变化导致数值环境不兼容
 # 解决：使用 requirements-ci.txt 精确复现环境，或在容器中运行
-docker run --rm -v $(pwd):/work -w /work pytorch/pytorch:2.3.0-cuda11.8-cudnn8-runtime \
-  python3 -m cage.experiments --only e1 --seeds 5 --out results
+python3 -m pip install -r requirements-ci.txt \
+  --extra-index-url https://download.pytorch.org/whl/cpu
+make verify-deps          # 确认装出来的版本确实等于声明的固定版本
 ```
 
 ### 7.4 "design plan frozen with different seeds/SESOI"
@@ -398,39 +463,50 @@ docker run --rm -v $(pwd):/work -w /work pytorch/pytorch:2.3.0-cuda11.8-cudnn8-r
 # 解决：使用新的 --out 目录，或删除旧结果目录
 ```
 
+### 7.5 "依赖一致性检查失败"
+
+```bash
+# 症状：[dep-check] FAIL: the environment does not match the declared
+#        dependency set
+# 原因：解释器里的 torch 不是 requirements-ci.txt 固定的那个版本
+#       （常见于 pip install -e . 之后解析器把 torch 升到了最新版）
+# 解决：按 requirements-ci.txt 重装，并复核：
+python3 -m pip install -r requirements-ci.txt \
+  --extra-index-url https://download.pytorch.org/whl/cpu
+make verify-deps
+```
+
 ---
 
 ## 8. 容器化复现（推荐用于跨机器精确复现）
 
-```dockerfile
-# Dockerfile.repro
-FROM pytorch/pytorch:2.3.0-cuda11.8-cudnn8-runtime
-
-WORKDIR /work
-COPY requirements-ci.txt .
-RUN pip install -r requirements-ci.txt --extra-index-url https://download.pytorch.org/whl/cu118
-
-COPY . .
-RUN pip install -e .
-
-# 固定环境变量
-ENV OMP_NUM_THREADS=1
-ENV MKL_NUM_THREADS=1
-ENV OPENBLAS_NUM_THREADS=1
-ENV NUMEXPR_NUM_THREADS=1
-ENV PYTHONHASHSEED=0
-
-ENTRYPOINT ["python3", "-m", "cage.experiments"]
-```
+`Dockerfile.repro` 从**同一份冻结依赖**（`requirements-ci.txt`）安装，
+因此容器里的数值环境与 CI 一致。镜像内不再写死任何 torch 版本号——
+版本只存在于 `requirements-ci.txt` 一处。
 
 ```bash
-# 构建
+# 构建（CPU；与 CI 的 wheel 索引一致）
 docker build -f Dockerfile.repro -t cage-attention:repro .
+
+# 构建（GPU）：选择确实提供该固定版本的索引
+docker build -f Dockerfile.repro -t cage-attention:repro-gpu \
+  --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130 .
 
 # 运行（结果挂载到宿主机）
 docker run --rm -v $(pwd)/results:/work/results cage-attention:repro \
   --only e1 --seeds 5 --out results
 ```
+
+镜像的三条工程约束（每条都对应一个真实故障）：
+
+1. **索引必须提供固定版本**：torch 2.14.1 的 wheel 只发布在
+   `cpu` / `cu126` / `cu130` 索引（`cu118` 最高只到 2.7.1）。换索引前
+   先确认，否则构建会在装依赖时失败。
+2. **`pip install -e .` 必须带 `--no-deps`**：否则 pip 会按
+   `pyproject.toml` 的 `torch>=2.0` 重新解析依赖，把刚装好的固定版本
+   换成别的版本。
+3. **构建末尾自检**：装出来的 torch 与固定版本不一致就让构建失败，
+   而不是产出一个"看起来能用、其实换了配方"的镜像。
 
 ---
 
@@ -452,11 +528,14 @@ docker run --rm -v $(pwd)/results:/work/results cage-attention:repro \
 | 命令 | 作用 |
 |------|------|
 | `make check` | 语法+设计固定项+冒烟+完整测试套件 |
+| `make verify-deps` | 实装依赖 vs 声明依赖（固定版本是否真的装上了） |
+| `make preflight` | `verify-deps` + `check`（正式实验前的推荐入口） |
 | `make sanity` | 快速预检（HB5 overfit gate） |
 | `python -m cage.experiments --only e1 --seeds 5 --out results` | 运行 E1 正式实验 |
 | `make verify OUT=results` | 完整验证链（环境+制品+来源+运行+源码） |
 | `python -m cage.experiments --replay-manifest results/e1_manifest.json --out results_replay` | 独立重放 |
 | `make verify-replay SOURCE=results REPLAY_OUT=results_replay` | 重放比较 |
+| `python3 capture_environment.py --compare results/environment.json` | 独立环境快照比对（与 `--check-environment` 同一套判据） |
 | `python ci_gate.py --syntax-only` | 仅语法检查（关机 trap 用） |
 
 **结果目录结构**：

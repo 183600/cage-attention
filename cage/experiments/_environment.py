@@ -605,6 +605,91 @@ def _check_environment(out_dir) -> int:
     return 1
 
 
+def _print_conformance(prefix: str, report: Mapping) -> None:
+    """Print one conformance report (current process or archived record)."""
+    for entry in report.get("entries", []):
+        installed = entry.get("installed") or "<missing>"
+        print(f"    [{entry.get('status')}] {entry.get('name')}: "
+              f"required {entry.get('required')}, installed {installed} "
+              f"({entry.get('source', '?')})")
+
+
+def _check_dependencies(out_dir=None) -> int:
+    """Compare the installed distributions with the declared dependency set.
+
+    The seeds fix *which* numbers a run draws; this check fixes *which
+    library* produced them.  A run whose interpreter does not satisfy the
+    versions the project declares is not a reproduction of the declared
+    recipe, no matter how carefully it was seeded.
+
+    When ``out_dir`` holds an environment record, the archived run is
+    audited as well: its recorded package inventory is checked against the
+    same declarations, so an old result directory can be asked "was this
+    produced with the dependency set we declare?" without a rerun.
+
+    Exit codes: 0 = the installed set conforms (and the archived record, if
+    any, conforms too), 1 = a declaration is unsatisfied or its distribution
+    is missing, 2 = there is nothing to check (no declaration file, or an
+    unreadable archive).  Nothing is written.
+    """
+    current = check_dependency_conformance()
+    declared = current.get("declared", {})
+    total = sum(len(items) for items in declared.values())
+    if not total:
+        print("[dep-check] no dependency declaration found "
+              "(requirements-ci.txt / requirements.txt / pyproject.toml); "
+              "nothing to check")
+        return 2
+    print(f"[dep-check] declared dependency set: {total} requirement(s) in "
+          f"{len(declared)} file(s)")
+    for source in sorted(declared):
+        items = declared[source]
+        print(f"    {source}: {', '.join(items) if items else '<none>'}")
+    _print_conformance("current", current)
+    conforms = bool(current.get("conforms"))
+    unchecked = current.get("unchecked") or []
+    if unchecked:
+        print(f"[dep-check] WARNING: {len(unchecked)} declaration(s) cannot be "
+              "evaluated exactly and are reported, not certified: "
+              + ", ".join(unchecked))
+    print("[dep-check] current environment: "
+          + ("CONFORMS to the declaration" if conforms
+             else "DOES NOT CONFORM to the declaration"))
+    if out_dir is not None:
+        root = pathlib.Path(out_dir)
+        candidates = []
+        primary = root / "environment.json"
+        if primary.is_file():
+            candidates.append(primary)
+        if not candidates and root.is_dir():
+            candidates.extend(sorted(root.glob("*_manifest.json")))
+        if candidates:
+            recorded, _payload, error = _read_environment_file(candidates[0])
+            if error is not None:
+                print(f"[dep-check] cannot read {candidates[0]}: {error}")
+                return 2
+            archived = dependency_conformance_from_record(recorded)
+            print(f"[dep-check] archived record {candidates[0]} "
+                  "(checked against the current declaration):")
+            _print_conformance("archived", archived)
+            archived_ok = bool(archived.get("conforms"))
+            print("[dep-check] archived run: "
+                  + ("CONFORMS to the declaration" if archived_ok
+                     else "DOES NOT CONFORM to the declaration"))
+            conforms = conforms and archived_ok
+        else:
+            print(f"[dep-check] no archived environment record under {root}; "
+                  "only the current environment was checked")
+    if not conforms:
+        print("[dep-check] FAIL: the environment does not match the declared "
+              "dependency set; install requirements-ci.txt before running "
+              "the experiment")
+        return 1
+    print("[dep-check] PASS: the installed distributions satisfy the "
+          "declared dependency set")
+    return 0
+
+
 def _source_hash_of(record):
     """Code-content hash carried by one archived record, if any.
 

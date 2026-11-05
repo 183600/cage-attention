@@ -10,6 +10,7 @@
 | 1.3 | 2026-11-04 | 新增 §3.6：**研究级分析计划**（跨 E1/E2/E3 的预注册确认性对比集 + 声明式合取 + 合并族 FDR 裁决）；修正 §2.1 封存测试种子（456 → **2024**，与 `cage/_data_task.py:TEST_SEED` 对齐）与 §2.2 网格默认值（与 `Settings` 默认值对齐）；§5.5/附录 C 登记新增制品 | - |
 | 1.4 | 2026-11-04 | 在 §3.6 增加**研究级单因素证书**：确认性对比集里的每条 `one_factor` 腿必须恰好变动一个解析后的模型因子、且是其家族已声明的受控对比对；`interaction` 腿必须是两个已声明单因素边际之差再跨两个上下文相减（两轴因子不同）。证书写入 `study_design_preflight.json`，不通过即拒绝开跑；不新增/修改任何假设、对比对、SESOI 或判定规则 | - |
 | 1.5 | 2026-11-05 | 新增 **H1h 位置混淆消融臂**（`calib_pos_norm`）与研究级腿 **P10**：注册门控用全局 `log(T)` 归一化每一行的注意力熵，而因果行 t 最多只能看到 t+1 个键，其熵上限是 `log(t+1)`——全局除数把**位置相关的开放度调度**混进了集中度信号。新臂改用每行可见 token 数 `log(max(t+1,2))` 做除数与长度项（架构/参数/计算/配方不变），在最终 query 行与注册臂数值相同（`log(max(T,2)) = log T`），因此只改动中间行。判定为**单侧非劣性**（`calib_pos_norm - calib` 的 95% CI 下界 ≥ -0.01）+ 机制行（位置中性臂自身的 \|r\|(gate, entropy) ≥ 0.05）。E1 网格 8→9 cell、单因素对 7→8 对、确认性腿 9→10（声明 C1 增加 P10）；其余假设/对比/SESOI 不变 | - |
+| 1.6 | 2026-11-05 | 可复现性与工程规范修订（**不改动任何假设、臂、对比对、SESOI、判定规则与统计方法**）：①新增声明依赖 vs 实装依赖的一致性检查（`--check-dependencies` / `make verify-deps` / `make preflight`），并可用归档环境记录重算历史结果的依赖符合性；②`capture_environment.py` 改为复用包内唯一的环境记录实现，两套指纹不再互不相容；③`Dockerfile.repro` 改为从 `requirements-ci.txt` 安装（此前固定的 torch 版本在所选 cu118 索引中不存在，且 `pip install -e .` 会重新解析依赖），并加构建期版本自检；④修正附录 A 中并不存在的 lr 敏感性开关（该伴随读出随 E1 自动产出）；⑤新增文档-代码漂移守卫测试（引用的版本、CLI 参数、make 目标、容器配方、文档链接） | - |
 
 > **重要**：本协议文档与 `cage/experiments/_config.py:HYPOTHESES`、`docs/design_notes.md` 及
 > `cage/experiments/_analysis_plan.py:_PRIMARY_CONTRASTS`/`_STUDY_CLAIMS`
@@ -425,7 +426,7 @@ E1/E2/E3 各自控制一个 FDR 家族，但**这些保证不复合**：三个�
 
 ### 6.1 发布前自检
 
-- [ ] `make check` 通过（语法 + 设计固定项 + 冒烟 + 全测试）
+- [ ] `make preflight` 通过（依赖一致性 + 语法 + 设计固定项 + 冒烟 + 全测试）
 - [ ] 正式实验使用非 `--quick` 设置、足够种子数（≥5）
 - [ ] 结果目录完整保留（未手动删除/修改任何文件）
 - [ ] `make verify OUT=results` 全部通过
@@ -438,6 +439,7 @@ E1/E2/E3 各自控制一个 FDR 家族，但**这些保证不复合**：三个�
 ### 6.2 独立复现核对
 
 - [ ] 使用 `requirements-ci.txt` 精确依赖版本
+- [ ] 依赖一致性 `verify-deps` 通过（实装版本 == 声明的固定版本）
 - [ ] 环境指纹 `verify-env` 通过（critical 字段一致）
 - [ ] 制品完整性 `verify-artifacts` 通过
 - [ ] 来源溯源 `verify-provenance` 通过
@@ -541,7 +543,8 @@ python -m cage.experiments --only e1 --seeds 5 --out results --fdr-q 0.05 --dete
 # 设计与调试
 python -m cage.experiments --only e1 --quick --out results_quick     # 流水线检查
 python -m cage.experiments --only e1 --per-variant-tuning            # 逐变体调参（探索性）
-python -m cage.experiments --only e1 --lr-sensitivity                # lr 敏感性（探索性）
+# lr 敏感性是 E1 网格的固定伴随读出，随 E1 自动产出（e1_lr_sensitivity.json），
+# 没有单独的开关。
 
 # 验证
 python -m cage.experiments --verify-artifacts --out results
@@ -549,6 +552,7 @@ python -m cage.experiments --check-environment --out results
 python -m cage.experiments --verify-provenance --out results
 python -m cage.experiments --verify-runs --out results
 python -m cage.experiments --check-source --out results
+python -m cage.experiments --check-dependencies --out results
 python -m cage.experiments --verify-replay results --out results_replay
 
 # 重放
@@ -556,6 +560,7 @@ python -m cage.experiments --replay-manifest results/e1_manifest.json --out resu
 
 # Makefile 封装
 make check | gate | test | sanity | verify | verify-replay SOURCE=results
+make verify-deps | preflight
 ```
 
 ---

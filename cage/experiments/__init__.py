@@ -199,7 +199,9 @@ Design principles
    harmonic-factor denominator under arbitrary dependence); a supported
    row that loses its interval decision is flagged as selection-sensitive.
    All three are companions: row-level ``supports_hypothesis`` and the BH
-   family are untouched.  See ``docs/results_analysis.md``.
+   family are untouched.  The protocol and the reading rules live in
+   ``EXPERIMENT_PROTOCOL.md`` (§3, §7); the reproducibility framework lives
+   in ``REPRODUCIBILITY.md``.
 
 Outputs land in ``results/`` (git-ignored); nothing is written into the
 tracked tree.
@@ -292,7 +294,13 @@ from ..metrics import (
     wilson_ci,
 )
 from ..model import Cfg, GATES, NORMS, build
-from ..repro import configure_determinism, seed_everything, stream_generator
+from ..repro import (
+    check_dependency_conformance,
+    configure_determinism,
+    dependency_conformance_from_record,
+    seed_everything,
+    stream_generator,
+)
 from ..runlock import LOCK_EXIT_CODE, ResultsLock, ResultsLockError
 from ..train import (
     _ERROR_TYPES,

@@ -70,13 +70,31 @@ class CaptureEnvironmentTest(unittest.TestCase):
 
     def test_capture_records_the_real_git_state_and_dependencies(self):
         env = capture_environment.capture_environment()
-        self.assertEqual(pathlib.Path(env["git"]["repo_root"]).resolve(),
+        self.assertEqual(pathlib.Path(env["repo_root"]).resolve(),
                          ROOT.resolve())
-        self.assertNotEqual(env["git"]["git_sha"], "unavailable")
-        self.assertEqual(len(env["git"]["git_sha"]), 40)
-        for rel in ("pyproject.toml", "requirements-ci.txt", "README.md",
-                    "docs/design_notes.md"):
+        # The standalone capture must produce the *same* record as the
+        # experiment runner: one environment implementation, one
+        # fingerprint.  A second, divergent implementation made the two
+        # ``environment_sha256`` values incomparable.
+        from cage.experiments import Settings
+        from cage import experiments
+        canonical = experiments._environment_record(
+            Settings(device="cpu"), git_dirty=None)
+        self.assertEqual(env["environment_sha256"],
+                         canonical["environment_sha256"])
+        self.assertEqual(len(experiments._git_sha()), 40)
+        for rel in ("pyproject.toml", "requirements-ci.txt"):
             self.assertIn(rel, env["dependency_manifest"])
+
+    def test_capture_refuses_a_foreign_root(self):
+        with self.assertRaises(ValueError):
+            capture_environment.capture_environment(root="/tmp")
+
+    def test_compare_reports_the_same_verdict_as_the_package_check(self):
+        env = capture_environment.capture_environment()
+        drift = capture_environment.compare_environments(env, dict(env))
+        self.assertTrue(drift["compatible"])
+        self.assertTrue(drift["identical"])
 
 class SourceTreeStampTest(unittest.TestCase):
     """The provenance stamps must describe the repository, not the CWD."""
@@ -210,6 +228,7 @@ class ReplayOptionTest(unittest.TestCase):
             runner = _runner(out, replay=str(manifest))
             seen = []
             runner.capture_environment = lambda: {}
+            runner.run_dependency_check = lambda: True
             runner.run_gate_checks = lambda: True
             runner.run_unit_tests = lambda: True
             runner.run_baselines = lambda: seen.append("baselines") or True
@@ -242,6 +261,7 @@ class SkipBaselinesTest(unittest.TestCase):
                          skip_baselines=skip_baselines)
         seen = []
         runner.capture_environment = lambda: {}
+        runner.run_dependency_check = lambda: True
         runner.run_gate_checks = lambda: True
         runner.run_unit_tests = lambda: True
         runner.run_baselines = lambda: seen.append("baselines") or True
@@ -348,15 +368,18 @@ class WorkingDirectoryTest(unittest.TestCase):
             runner.run_command = fake_run_command
             with contextlib.redirect_stdout(io.StringIO()):
                 runner.capture_environment()
+                runner.run_dependency_check()
                 runner.run_gate_checks()
                 runner.run_unit_tests()
-            self.assertEqual(
-                pathlib.Path(calls[0][1]).resolve(),
-                ROOT.resolve() / "capture_environment.py")
-            self.assertEqual(
-                pathlib.Path(calls[1][1]).resolve(),
-                ROOT.resolve() / "ci_gate.py")
-            self.assertIn(str(ROOT.resolve() / "tests"), calls[2])
+            # The helper scripts are addressed by absolute path, whatever
+            # the caller's working directory is.  The calls are located by
+            # what they run, not by position: the pre-flight steps may grow.
+            scripts = [pathlib.Path(call[1]).resolve() for call in calls
+                       if len(call) > 1 and call[1].endswith(".py")]
+            self.assertIn(ROOT.resolve() / "capture_environment.py", scripts)
+            self.assertIn(ROOT.resolve() / "ci_gate.py", scripts)
+            self.assertTrue(any(str(ROOT.resolve() / "tests") in call
+                                for call in calls))
 
 
 if __name__ == "__main__":

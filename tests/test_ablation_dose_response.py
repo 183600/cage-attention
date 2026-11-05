@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import contextlib
 import io
-import math
 import unittest
 
 import torch

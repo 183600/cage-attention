@@ -28,13 +28,30 @@ PyTorch build is run-to-run stable.  Exact bit-for-bit reproduction across
 different hardware/instruction sets is *not* promised (reduction order in
 matmuls/atomics differs); ``deterministic=True`` additionally asks PyTorch
 for deterministic kernels where they exist.
+
+What is declared
+----------------
+Seeding fixes *which* numbers a run draws; it says nothing about *which
+library* produced them.  The second half of run-level reproducibility is
+therefore a dependency conformance check: the versions the project freezes
+(``requirements-ci.txt``, the ``pyproject.toml`` runtime requirement) must
+match the versions that are actually installed, otherwise a result is
+produced under a recipe nobody declared.  :func:`check_dependency_conformance`
+answers that question for the running interpreter, and
+:func:`dependency_conformance_from_record` answers it for an archived
+environment record - so an old result directory can be audited for "was this
+run executed with the dependency set the project declares?" without rerunning
+anything.
 """
 
 from __future__ import annotations
 
 import operator
 import os
+import pathlib
 import random
+import re
+from importlib import metadata as importlib_metadata
 
 import torch
 
@@ -229,3 +246,324 @@ def stream_generator(seed: int, device="cpu") -> torch.Generator:
     from .data import stream_seed_key
 
     return torch.Generator(device=device).manual_seed(stream_seed_key(seed))
+
+
+# ---------------------------------------------------------------------------
+# Declared-vs-installed dependency conformance
+# ---------------------------------------------------------------------------
+#
+# The frozen dependency set (``requirements-ci.txt``) and the declared
+# runtime requirement (``pyproject.toml``) describe the recipe a result is
+# supposed to belong to.  The interpreter that actually runs the experiment
+# can disagree with them - a stale virtualenv, an editable install that
+# re-resolved a dependency, a wheel index that no longer carries the pinned
+# version.  Such a run is not reproducible even when every seed matches,
+# because the numbers come from different code.  The helpers below make that
+# disagreement visible instead of leaving it to be noticed months later.
+
+# Files whose content declares what the project depends on.
+_DEPENDENCY_DECLARATION_FILES = ("requirements-ci.txt", "requirements.txt",
+                                  "pyproject.toml")
+
+# A requirement line: name, optional extras, optional version specifier.
+_REQUIREMENT_LINE = re.compile(
+    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)"
+    r"(?:\[[^\]]*\])?"
+    r"(?P<spec>[<>=!~^].*)?$")
+
+# A single, supported version specifier.  Anything else is reported as
+# "unchecked" instead of being silently treated as satisfied.
+_SINGLE_SPECIFIER = re.compile(
+    r"^(?P<op>===|==|>=|<=|!=|>|<)\s*(?P<version>[^\s,]+)$")
+
+# The release part of a version, without a local ("+cpu") or a pre/post/dev
+# suffix.  ``None`` means the version cannot be ordered exactly.
+_PUBLIC_RELEASE = re.compile(r"^(?P<release>\d+(?:\.\d+)*)$")
+
+
+def _normalise_distribution_name(name: str) -> str:
+    """Canonical spelling of a distribution name.
+
+    ``Foo.Bar``, ``foo_bar`` and ``foo-bar`` are the same distribution; the
+    environment record already normalises the installed inventory this way,
+    and the declared names have to be normalised the same way for the two
+    sides to be comparable.
+    """
+    return name.strip().lower().replace("_", "-").replace(".", "-")
+
+
+def _public_release(version: str) -> tuple[int, ...] | None:
+    """Release segments of a version, or ``None`` when it is not exact.
+
+    A local version label (``2.14.1+cpu``) is ignored: PEP 440 says
+    ``==2.14.1`` is satisfied by ``2.14.1+cpu``.  A pre/post/dev suffix
+    (``2.14.1rc1``) is *not* ignored - it orders differently from the final
+    release - so such a version is reported as unevaluable instead of being
+    compared by its numeric prefix.
+    """
+    public = str(version).split("+", 1)[0].strip()
+    match = _PUBLIC_RELEASE.match(public)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group("release").split("."))
+
+
+def _compare_releases(left: tuple[int, ...], right: tuple[int, ...]) -> int:
+    """Compare two release tuples, padding the shorter one with zeros."""
+    length = max(len(left), len(right))
+    left = left + (0,) * (length - len(left))
+    right = right + (0,) * (length - len(right))
+    return (left > right) - (left < right)
+
+
+def parse_requirement_specifiers(text: str) -> list[tuple[str, str]]:
+    """Parse ``(name, specifier)`` pairs out of a requirements-style body.
+
+    Comments, blank lines and pip options (``-r other.txt``, ``--index-url``)
+    are skipped.  A requirement without a version specifier is returned with
+    an empty specifier, which means "any version satisfies this".
+    """
+    entries: list[tuple[str, str]] = []
+    for raw in str(text).splitlines():
+        line = re.sub(r"(^|\s)#.*$", "", raw).strip()
+        if not line or line.startswith("-"):
+            continue
+        match = _REQUIREMENT_LINE.match(line)
+        if not match:
+            continue
+        name = _normalise_distribution_name(match.group("name"))
+        specifier = (match.group("spec") or "").strip()
+        entries.append((name, specifier))
+    return entries
+
+
+def _pyproject_dependencies(text: str) -> list[tuple[str, str]]:
+    """Runtime requirements declared in a ``pyproject.toml`` body.
+
+    ``tomllib`` is used when the interpreter provides it (Python 3.11+); the
+    fallback reads the ``[project] dependencies`` array directly so the check
+    also works on Python 3.10, which the package still supports.
+    """
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        tomllib = None
+    if tomllib is not None:
+        try:
+            data = tomllib.loads(text)
+        except Exception:  # noqa: BLE001 - malformed metadata is not fatal
+            data = {}
+        declared = data.get("project", {}).get("dependencies", [])
+        if isinstance(declared, list):
+            entries: list[tuple[str, str]] = []
+            for item in declared:
+                entries.extend(parse_requirement_specifiers(str(item)))
+            return entries
+    match = re.search(r"^dependencies\s*=\s*\[(?P<body>.*?)\]", text,
+                      re.S | re.M)
+    if not match:
+        return []
+    body = " ".join(re.findall(r"[\"']([^\"']+)[\"']", match.group("body")))
+    return parse_requirement_specifiers(body)
+
+
+def declared_requirements(root=None) -> dict[str, list[tuple[str, str]]]:
+    """The dependency declarations of this checkout.
+
+    Returns ``{file name: [(distribution, specifier), ...]}`` for every
+    declaration file that exists.  The file name (not its absolute path) is
+    the key, so the verdict does not depend on where the checkout lives.
+    """
+    base = pathlib.Path(__file__).resolve().parent.parent if root is None \
+        else pathlib.Path(root)
+    declared: dict[str, list[tuple[str, str]]] = {}
+    for name in _DEPENDENCY_DECLARATION_FILES:
+        path = base / name
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if name.endswith(".toml"):
+            declared[name] = _pyproject_dependencies(text)
+        else:
+            declared[name] = parse_requirement_specifiers(text)
+    return declared
+
+
+def installed_distribution_versions() -> dict[str, str]:
+    """Installed distributions and their versions, normalised and sorted.
+
+    Package metadata is untrusted input: a broken distribution must not
+    make the conformance check fail with a traceback.
+    """
+    versions: dict[str, str] = {}
+    try:
+        distributions = list(importlib_metadata.distributions())
+    except Exception:  # noqa: BLE001 - metadata is a best-effort probe
+        return {}
+    for dist in distributions:
+        try:
+            name = dist.metadata["Name"]
+            version = dist.version
+        except Exception:  # noqa: BLE001 - skip malformed distributions
+            continue
+        if not isinstance(name, str) or not isinstance(version, str):
+            continue
+        key = _normalise_distribution_name(name)
+        if not key or not version:
+            continue
+        previous = versions.get(key)
+        versions[key] = version if previous is None else max(previous, version)
+    return dict(sorted(versions.items()))
+
+
+def evaluate_requirement(name: str, specifier: str,
+                         installed_version: str | None) -> dict:
+    """Decide whether one installed version satisfies one declaration.
+
+    The verdict is one of ``satisfied`` / ``unsatisfied`` / ``missing`` /
+    ``unchecked``.  ``unchecked`` is used for specifiers this module cannot
+    evaluate exactly (compound ranges, compatible releases, pre-release
+    versions): the requirement is reported, never counted as satisfied.
+    """
+    entry = {
+        "name": name,
+        "required": specifier or "(any)",
+        "installed": installed_version,
+        "status": "unchecked",
+        "detail": "",
+    }
+    if installed_version is None:
+        entry["status"] = "missing"
+        entry["detail"] = "distribution is not installed"
+        return entry
+    if not specifier:
+        entry["status"] = "satisfied"
+        entry["detail"] = "no version constraint"
+        return entry
+    match = _SINGLE_SPECIFIER.match(specifier)
+    if not match:
+        entry["detail"] = (f"unsupported specifier {specifier!r}; "
+                           "reported, not certified")
+        return entry
+    operator_text = match.group("op")
+    required = match.group("version")
+    if operator_text == "===":
+        satisfied = installed_version == required
+        entry["detail"] = ("exact match" if satisfied
+                           else f"expected exactly {required}")
+        entry["status"] = "satisfied" if satisfied else "unsatisfied"
+        return entry
+    left = _public_release(installed_version)
+    right = _public_release(required)
+    if left is None or right is None:
+        entry["detail"] = (f"cannot compare {installed_version!r} with "
+                           f"{required!r} exactly")
+        return entry
+    order = _compare_releases(left, right)
+    if operator_text == "==":
+        satisfied = order == 0
+    elif operator_text == "!=":
+        satisfied = order != 0
+    elif operator_text == ">=":
+        satisfied = order >= 0
+    elif operator_text == "<=":
+        satisfied = order <= 0
+    elif operator_text == ">":
+        satisfied = order > 0
+    else:  # "<"
+        satisfied = order < 0
+    entry["status"] = "satisfied" if satisfied else "unsatisfied"
+    entry["detail"] = (f"installed {installed_version} vs required "
+                       f"{specifier}")
+    return entry
+
+
+def _conformance_report(declared: dict[str, list[tuple[str, str]]],
+                        installed: dict[str, str]) -> dict:
+    """Aggregate per-requirement verdicts into one conformance report."""
+    entries: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for source, requirements in declared.items():
+        for name, specifier in requirements:
+            key = (name, specifier)
+            if key in seen:
+                continue
+            seen.add(key)
+            entry = evaluate_requirement(name, specifier,
+                                         installed.get(name))
+            entry["source"] = source
+            entries.append(entry)
+    entries.sort(key=lambda item: (item["source"], item["name"]))
+    unsatisfied = [e["name"] for e in entries
+                   if e["status"] == "unsatisfied"]
+    missing = [e["name"] for e in entries if e["status"] == "missing"]
+    unchecked = [e["name"] for e in entries if e["status"] == "unchecked"]
+    return {
+        "conforms": not unsatisfied and not missing,
+        "complete": not unsatisfied and not missing and not unchecked,
+        "entries": entries,
+        "unsatisfied": unsatisfied,
+        "missing": missing,
+        "unchecked": unchecked,
+        "declared": {source: [f"{name}{specifier}"
+                               for name, specifier in requirements]
+                     for source, requirements in declared.items()},
+        "installed": {name: installed[name] for name, _ in seen
+                      if name in installed},
+    }
+
+
+def check_dependency_conformance(root=None, installed=None) -> dict:
+    """Do the installed distributions match the declared dependency set?
+
+    The report names every declaration, the installed version and the
+    verdict.  ``conforms`` is false when a declaration is unsatisfied or its
+    distribution is missing; ``complete`` additionally requires that every
+    declaration could be evaluated exactly (an unsupported specifier is
+    reported, never counted as a pass).
+    """
+    declared = declared_requirements(root)
+    versions = installed_distribution_versions() if installed is None \
+        else dict(installed)
+    return _conformance_report(declared, versions)
+
+
+def dependency_conformance_from_record(record, root=None) -> dict:
+    """Recompute the conformance verdict of an archived environment record.
+
+    An archived record carries the installed package inventory, so the
+    question "was this result produced with the dependency set the project
+    declares?" can be answered from the evidence alone - no rerun and no
+    access to the machine that produced it.
+    """
+    if not isinstance(record, dict):
+        return {
+            "conforms": False,
+            "complete": False,
+            "entries": [],
+            "unsatisfied": [],
+            "missing": [],
+            "unchecked": [],
+            "declared": {},
+            "installed": {},
+            "error": "environment record is missing or malformed",
+        }
+    inventory = record.get("package_inventory")
+    if not isinstance(inventory, dict):
+        return {
+            "conforms": False,
+            "complete": False,
+            "entries": [],
+            "unsatisfied": [],
+            "missing": [],
+            "unchecked": [],
+            "declared": {},
+            "installed": {},
+            "error": "environment record carries no package inventory",
+        }
+    installed = {}
+    for name, version in inventory.items():
+        if isinstance(name, str) and isinstance(version, str):
+            installed[_normalise_distribution_name(name)] = version
+    return _conformance_report(declared_requirements(root), installed)

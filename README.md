@@ -257,6 +257,10 @@ print(hist[-1], accuracy, sorted(stats))
   下的标准库 `unittest` 套件；测试不依赖 pytest 或 numpy。
   `tests/test_gradcheck.py` 对手写 autograd 核做双精度 gradcheck 与
   参考实现对照。
+- `make verify-deps` 比对**实装依赖**与**声明依赖**（`requirements-ci.txt`
+  的固定版本），`make preflight` = 依赖一致性 + 门禁 + 测试。环境记录只有
+  一份实现，因此 `capture_environment.py` 写出的指纹与结果目录里的
+  `environment.json` 可直接互比。
 - 所有 RNG 与数据流使用同一个 32 位 canonical seed：`s` 与 `s + 2**32`
   表示同一次运行；bool 或小数 seed 会被拒绝，而不是静默截断。
 - 每条结果记录都携带代码版本或源码哈希、完整配置、数据流指纹，以及线程与

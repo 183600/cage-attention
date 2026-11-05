@@ -25,7 +25,7 @@ import unittest
 import torch
 
 from cage.data import make_batch
-from cage.model import Cfg, build
+from cage.model import build
 from cage.train import (calib_term_knockout_eval, collect_stats,
                         eval_accuracy, false_concentration_analysis,
                         false_concentration_sweep, layer_knockout_eval,

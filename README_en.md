@@ -311,6 +311,12 @@ claim, so results are not over-read relative to the controlled design.
   standard-library `unittest` suite under `tests/`; the tests need neither
   pytest nor numpy. `tests/test_gradcheck.py` adds double-precision
   gradcheck and reference parity for the hand-written autograd kernels.
+- `make verify-deps` compares the *installed* distributions with the
+  *declared* dependency set (the pinned versions in `requirements-ci.txt`),
+  and `make preflight` = dependency conformance + gate + tests. The
+  environment record has a single implementation, so the fingerprint written
+  by `capture_environment.py` is directly comparable with the one in a
+  results directory.
 - Every RNG and data stream uses the same 32-bit canonical seed: `s` and
   `s + 2**32` denote the same run, while bool or fractional seeds are rejected
   instead of being silently truncated.

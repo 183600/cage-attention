@@ -692,7 +692,6 @@ def _primary_contrast_power(settings, verdict, legs=None):
     audit = _analysis_plan_audit(legs=legs)
     n = len(settings.seeds)
     q = float(settings.fdr_q)
-    alpha = float(settings.design_alpha)
     target = float(settings.power_target)
     paired_sd, paired_source, _ = _pilot_paired_accuracy_sd(verdict)
     m = max(len(legs), 1)

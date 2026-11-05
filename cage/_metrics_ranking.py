@@ -518,9 +518,12 @@ def auc_paired_bootstrap_ci(scores_a, scores_b, positives, n_boot: int = 10000,
     n = sa.numel()
     for _ in range(n_boot):
         idx = torch.randint(0, n, (n,), generator=gen, device=sa.device)
-        sbi = sa[idx]; sbj = sb[idx]; yb = y[idx]
+        sbi = sa[idx]
+        sbj = sb[idx]
+        yb = y[idx]
         if metric == "roc":
-            npo = int(yb.sum()); nno = yb.numel() - npo
+            npo = int(yb.sum())
+            nno = yb.numel() - npo
             if npo == 0 or nno == 0:
                 continue
         else:

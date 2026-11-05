@@ -18,8 +18,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import contextlib
-import io
 import json
 import os
 import pathlib
@@ -144,7 +142,7 @@ class ExperimentRunner:
         print("CAPTURING PRE-RUN ENVIRONMENT")
         print("="*60)
         
-        result = self.run_command([
+        self.run_command([
             sys.executable, str(_REPO_ROOT / "capture_environment.py"),
             "--output", str(self.out_dir / "environment_pre_run.json")
         ])
@@ -153,7 +151,34 @@ class ExperimentRunner:
             env = json.load(f)
         print(f"Environment fingerprint: {env['environment_sha256']}")
         return env
-    
+
+    def run_dependency_check(self) -> bool:
+        """Check the installed distributions against the declared ones.
+
+        The seeds fix which numbers a run draws; the dependency set fixes
+        which library produces them.  A run whose interpreter contradicts
+        the frozen requirements is not a reproduction of the declared
+        recipe, so the mismatch is reported before the compute is spent.
+        The check is advisory here: the environment record already carries
+        the full inventory, and the operator may legitimately run an
+        exploratory grid under a different build.
+        """
+        print("\n" + "="*60)
+        print("CHECKING DEPENDENCY CONFORMANCE")
+        print("="*60)
+        result = self.run_command([
+            sys.executable, "-m", "cage.experiments", "--check-dependencies"
+        ], check=False)
+        conforms = result.returncode == 0
+        if not conforms:
+            print("[DEPS] WARNING: the installed distributions do not match "
+                  "the declared dependency set (requirements-ci.txt); the "
+                  "results of this run are not comparable with a run made "
+                  "under the frozen recipe")
+        else:
+            print("[DEPS] PASS")
+        return conforms
+
     def run_gate_checks(self) -> bool:
         """Run CI gate checks (syntax + design pins + smoke)."""
         print("\n" + "="*60)
@@ -497,7 +522,12 @@ class ExperimentRunner:
         
         # 1. Capture environment
         self.capture_environment()
-        
+
+        # 1b. Dependency conformance (advisory): the installed versions must
+        # match the frozen dependency set for the numbers to be comparable
+        # with a run made under the declared recipe.
+        self.run_dependency_check()
+
         # 2. Gate checks
         if not self.args.skip_gate:
             if not self.run_gate_checks():

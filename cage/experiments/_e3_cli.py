@@ -1089,6 +1089,13 @@ def main(argv=None) -> int:
                              "this checkout and exit (0-match, 1-mismatch or "
                              "malformed, 2-no code-provenance records); "
                              "writes nothing")
+    parser.add_argument("--check-dependencies", action="store_true",
+                        help="compare the installed distributions with the "
+                             "versions declared in requirements-ci.txt / "
+                             "pyproject.toml and exit (0-conforms, "
+                             "1-mismatch, 2-nothing declared); with --out, "
+                             "the archived environment record is audited as "
+                             "well; writes nothing")
     parser.add_argument("--verify-provenance", action="store_true",
                         help="recompute every result row's setup/environment "
                              "hashes and check that one run_id never names "
@@ -1122,7 +1129,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     verify_flags = (args.verify_artifacts or args.check_environment
                     or args.check_source or args.verify_provenance
-                    or args.verify_runs or args.verify_replay is not None)
+                    or args.verify_runs or args.verify_replay is not None
+                    or args.check_dependencies)
     if args.replay_manifest is not None and verify_flags:
         print("[runner] --replay-manifest cannot be combined with a "
               "read-only --verify/--check action; aborting")
@@ -1153,6 +1161,8 @@ def main(argv=None) -> int:
         return _check_environment(verify_out)
     if args.check_source:
         return _check_source(verify_out)
+    if args.check_dependencies:
+        return _check_dependencies(verify_out)
     if args.verify_provenance:
         return _audit_provenance(
             verify_out, require_homogeneous=bool(args.require_homogeneous))

@@ -257,8 +257,6 @@ class MetricInputValidationTest(unittest.TestCase):
             torch.tensor([0.1 + 0.1j, 0.2 + 0j, 0.3 + 0j]))["valid"])
 
     def test_complex_calibration_and_count_inputs_abstain(self):
-        import torch
-
         # ``.float()`` would silently drop the imaginary part, inventing a
         # calibration sample; both helpers must abstain instead.
         self.assertTrue(math.isnan(

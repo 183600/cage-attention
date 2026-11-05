@@ -68,7 +68,6 @@ class CounterfactualEditTest(unittest.TestCase):
         self.assertIsNotNone(swapped)
         changed = (swapped != self.idx).sum(dim=1)
         self.assertEqual(changed.tolist(), [1] * self.idx.size(0))
-        rows = torch.arange(self.idx.size(0))
         keys = self.idx.gather(1, self.meta["key_pos"].unsqueeze(1)).squeeze(1)
         self.assertTrue(bool(swapped.gather(
             1, self.meta["key_pos"].unsqueeze(1)).squeeze(1).eq(keys).all()))
@@ -79,7 +78,6 @@ class CounterfactualEditTest(unittest.TestCase):
         moved = self.edits["relocation"]
         self.assertIsNotNone(moved)
         new_pos = self.edits["relocation_meta"]["key_pos"]
-        rows = torch.arange(self.idx.size(0))
         query = moved[:, -1]
         self.assertTrue(bool(moved.gather(1, new_pos.unsqueeze(1)).squeeze(1)
                               .eq(query).all()))

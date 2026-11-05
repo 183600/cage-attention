@@ -1,7 +1,11 @@
 # CAGE-Attention 可复现性容器
-# 
-# 构建：
+#
+# 构建（CPU，与 CI 使用同一份冻结依赖）：
 #   docker build -f Dockerfile.repro -t cage-attention:repro .
+#
+# 构建（GPU）：选择与固定版本相匹配的 wheel 索引
+#   docker build -f Dockerfile.repro -t cage-attention:repro-gpu \
+#     --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130 .
 #
 # 运行（结果挂载到宿主机）：
 #   docker run --rm -v $(pwd)/results:/work/results cage-attention:repro \
@@ -9,37 +13,68 @@
 #
 # 交互式调试：
 #   docker run --rm -it -v $(pwd):/work cage-attention:repro bash
+#
+# 为什么这样写（每条都对应一个真实的复现故障）：
+#   * 依赖版本只有一处事实来源：requirements-ci.txt。镜像里不再出现任何
+#     torch 版本号，避免"容器里的 torch"和"CI 里的 torch"各说各话。
+#   * 固定版本必须在所选索引里存在。torch 2.14.1 的 wheel 只发布在
+#     cpu / cu126 / cu130 索引（cu118 最高只到 2.7.1），旧镜像用 cu118
+#     装这个固定版本必然失败——构建期就会失败，而不是运行时才发现。
+#   * `pip install -e .` 必须带 --no-deps：否则 pip 会按 pyproject 里的
+#     torch>=2.0 重新解析依赖，把刚装好的固定版本换成别的版本。
+#   * 基础镜像不锁 apt 包版本：Debian 包池会删除旧版本，锁 apt 版本会让
+#     镜像在几个月后无法重建。真正影响数值的依赖由 requirements-ci.txt
+#     固定，apt 只提供 TLS 与 git。
+#   * 构建末尾校验装出来的 torch 与固定版本一致，不一致直接失败：宁可不
+#     要镜像，也不要一个"看起来能用、其实换了配方"的镜像。
 
-FROM pytorch/pytorch:2.3.0-cuda11.8-cudnn8-runtime
+ARG BASE_IMAGE=python:3.12-slim-bookworm
+FROM ${BASE_IMAGE}
 
-# 固定系统包版本（避免基础镜像更新导致的漂移）
+# torch wheel 的来源。CPU 默认；GPU 请选择确实提供该固定版本的索引。
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+# ca-certificates 供 pip 走 HTTPS；git 供环境记录读取 git sha 与脏标记。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git=1:2.39.2-1.1 \
-    ca-certificates=20230311 \
+        ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
-# 设置工作目录
 WORKDIR /work
 
-# 复制依赖文件并安装精确版本
-COPY requirements-ci.txt .
-RUN pip install --no-cache-dir -r requirements-ci.txt \
-    --extra-index-url https://download.pytorch.org/whl/cu118
+# 1) 冻结依赖：torch 从所选 wheel 索引取（该索引同时提供 torch 的传递
+#    依赖），其余依赖从 PyPI 取。
+COPY requirements-ci.txt ./
+RUN set -eux; \
+    PIN="$(sed -n 's/^torch==//p' requirements-ci.txt | head -n 1)"; \
+    test -n "$PIN"; \
+    python -m pip install "torch==${PIN}" --index-url "$TORCH_INDEX_URL"; \
+    python -m pip install -r requirements-ci.txt
 
-# 复制源码并以可编辑模式安装
-COPY . .
-RUN pip install --no-cache-dir -e .
+# 2) 本项目本身：--no-deps 防止解析器动 torch。
+COPY . ./
+RUN python -m pip install --no-deps -e .
 
-# 固定数值环境变量（消除 BLAS/OpenMP 线程数变化带来的非确定性）
-ENV OMP_NUM_THREADS=1
-ENV MKL_NUM_THREADS=1
-ENV OPENBLAS_NUM_THREADS=1
-ENV NUMEXPR_NUM_THREADS=1
-ENV CUBLAS_WORKSPACE_CONFIG=:4096:8
-ENV PYTHONHASHSEED=0
+# 3) 构建期自检：装出来的 torch 必须与冻结版本一致。
+RUN set -eux; \
+    PIN="$(sed -n 's/^torch==//p' requirements-ci.txt | head -n 1)"; \
+    GOT="$(python -c 'import importlib.metadata as m; print(m.version("torch"))')"; \
+    case "$GOT" in \
+      "$PIN"|"$PIN+"*) echo "[repro] torch ${GOT} matches the pin ${PIN}" ;; \
+      *) echo "[repro] FATAL: installed torch ${GOT} does not match the pin ${PIN}"; exit 1 ;; \
+    esac
 
-# 设置确定性算法（运行时由 seed_everything 控制，此处仅预置）
-ENV TORCH_DETERMINISTIC=1
+# 固定数值环境变量（消除 BLAS/OpenMP 线程数变化带来的非确定性）。
+# 确定性内核由 seed_everything 在进程内开启并记录，不依赖环境变量。
+ENV OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1 \
+    CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+    PYTHONHASHSEED=0
 
 # 默认入口点
 ENTRYPOINT ["python3", "-m", "cage.experiments"]

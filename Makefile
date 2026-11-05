@@ -4,12 +4,15 @@ MANIFEST ?=
 REPLAY_OUT ?=
 SOURCE ?=
 
-.PHONY: help gate test check sanity replay verify verify-env verify-artifacts verify-provenance verify-runs verify-replay verify-source
+.PHONY: help gate test check lint preflight sanity replay verify verify-env verify-artifacts verify-provenance verify-runs verify-replay verify-source verify-deps
 
 help:
 	@echo "make gate             - design pins + smoke gate (python3 ci_gate.py)"
 	@echo "make test             - standard-library test suite (no extra dependencies)"
 	@echo "make check            - gate + tests"
+	@echo "make lint             - ruff check (skipped when ruff is not installed)"
+	@echo "make verify-deps      - installed distributions vs declared dependency set"
+	@echo "make preflight        - verify-deps + check (run before a formal grid)"
 	@echo "make sanity           - quick reproducibility/split/overfit pre-flight"
 	@echo "make replay MANIFEST=results/e1_manifest.json [REPLAY_OUT=results_replay]"
 	@echo "                      - re-run a frozen manifest as a new evidence directory"
@@ -29,6 +32,18 @@ test:
 	$(PYTHON) -m unittest discover -s tests -v
 
 check: gate test
+
+lint:
+	@if $(PYTHON) -c "import ruff" >/dev/null 2>&1 || command -v ruff >/dev/null 2>&1; then \
+		ruff check . || $(PYTHON) -m ruff check .; \
+	else \
+		echo "[lint] ruff is not installed; skipping (pip install '.[dev]' to enable)"; \
+	fi
+
+verify-deps:
+	$(PYTHON) -m cage.experiments --check-dependencies
+
+preflight: verify-deps check
 
 sanity:
 	$(PYTHON) -m cage.experiments --only sanity --quick --out results_quick

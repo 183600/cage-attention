@@ -1,9 +1,19 @@
 __pycache__/
 *.pyc
-results_quick/
-results/
+# Experiment output directories: results/, results_quick/, results_replay/,
+# results_<anything>/.  The replay directories hold the *evidence* of an
+# independent replication, so they must not be committed - and they must not
+# be deleted by a `git clean` either (ignored files survive `git clean -fd`).
+results*/
 run_quick.log
 .coverage
 .coverage.*
 htmlcov/
 .pytest_cache/
+.ruff_cache/
+# Editable-install metadata (pip install -e . writes it into the checkout).
+*.egg-info/
+build/
+dist/
+# Standalone environment snapshots (capture_environment.py default output).
+environment_capture.json

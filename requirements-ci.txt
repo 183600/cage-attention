@@ -11,4 +11,9 @@
 # 安装方式（CPU wheel）：
 #   python3 -m pip install -r requirements-ci.txt \
 #     --extra-index-url https://download.pytorch.org/whl/cpu
+#
+# 本文件是依赖版本的**唯一事实来源**：Dockerfile.repro 从这里安装，文档
+# 不再重复写版本号，`make verify-deps` 拿这里的固定版本核对实装版本。
+# 换版本前请确认所选 wheel 索引确实提供该版本（torch 2.14.1 发布在
+# cpu / cu126 / cu130 索引；cu118 最高只到 2.7.1）。
 torch==2.14.1

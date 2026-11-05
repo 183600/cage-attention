@@ -224,8 +224,6 @@ class ProtocolConsistencyTest(unittest.TestCase):
         self.assertEqual(registered, plan["realized_lengths"])
 
     def test_registered_block_never_names_a_length_that_cannot_run(self):
-        from cage.experiments import Settings
-
         values = self._contract()
         max_len = int(values["max_len"])
         for raw in values["realized"].split(","):
