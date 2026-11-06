@@ -141,7 +141,8 @@ print(hist[-1], accuracy, sorted(stats))
   “假集中”（max-prob 高但回答错误）时门控是否关闭，另报门控分布分位数
   （误关正确答案的代价）；`null` 变体另报 `null_mass`，并给出含 null
   槽位的全分布假集中读出。E1 记录同时携带学得的校准系数
-  （`calib_coefficients`，与 E2 同一读出）。E1 另训练三个消融/对照臂：
+  （`calib_coefficients`，与 E2 同一读出）。E1 另训练五个消融/对照臂
+  （三个消融臂 + 两个对照臂）：
   `calib_len_only` / `calib_ent_only` / `calib_no_terms`（校准项 2×2）、
   `calib_shuf_ent`（打乱熵安慰剂）与 `calib_pos_norm`（位置中性臂，见下方
   方法学边界第 2 条；判定为 `calib_pos_norm - calib` 的单侧非劣性 + 该臂

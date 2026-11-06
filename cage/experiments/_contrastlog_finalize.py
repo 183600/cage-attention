@@ -392,7 +392,13 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
     exact_adj = benjamini_hochberg(
         [r.get("sign_flip_p") for r in self.rows], q=q)
     testable = [r for r in self.rows if math.isfinite(r["p_adj"])]
-    for row, exact_a in zip(testable, exact_adj):
+    # exact_adj is positionally aligned with self.rows (BH keeps NaN
+    # slots in place); pair by index so filtered-out rows cannot shift
+    # the companion results onto the wrong contrast.
+    for i, row in enumerate(self.rows):
+        if not math.isfinite(row["p_adj"]):
+            continue
+        exact_a = exact_adj[i]
         row["sign_flip_p_adj"] = exact_a["p_adj"]
         row["sign_flip_fdr_reject"] = bool(
             exact_a["reject"]
