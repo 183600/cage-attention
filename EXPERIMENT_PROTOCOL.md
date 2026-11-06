@@ -11,6 +11,7 @@
 | 1.4 | 2026-11-04 | 在 §3.6 增加**研究级单因素证书**：确认性对比集里的每条 `one_factor` 腿必须恰好变动一个解析后的模型因子、且是其家族已声明的受控对比对；`interaction` 腿必须是两个已声明单因素边际之差再跨两个上下文相减（两轴因子不同）。证书写入 `study_design_preflight.json`，不通过即拒绝开跑；不新增/修改任何假设、对比对、SESOI 或判定规则 | - |
 | 1.5 | 2026-11-05 | 新增 **H1h 位置混淆消融臂**（`calib_pos_norm`）与研究级腿 **P10**：注册门控用全局 `log(T)` 归一化每一行的注意力熵，而因果行 t 最多只能看到 t+1 个键，其熵上限是 `log(t+1)`——全局除数把**位置相关的开放度调度**混进了集中度信号。新臂改用每行可见 token 数 `log(max(t+1,2))` 做除数与长度项（架构/参数/计算/配方不变），在最终 query 行与注册臂数值相同（`log(max(T,2)) = log T`），因此只改动中间行。判定为**单侧非劣性**（`calib_pos_norm - calib` 的 95% CI 下界 ≥ -0.01）+ 机制行（位置中性臂自身的 \|r\|(gate, entropy) ≥ 0.05）。E1 网格 8→9 cell、单因素对 7→8 对、确认性腿 9→10（声明 C1 增加 P10）；其余假设/对比/SESOI 不变 | - |
 | 1.6 | 2026-11-05 | 可复现性与工程规范修订（**不改动任何假设、臂、对比对、SESOI、判定规则与统计方法**）：①新增声明依赖 vs 实装依赖的一致性检查（`--check-dependencies` / `make verify-deps` / `make preflight`），并可用归档环境记录重算历史结果的依赖符合性；②`capture_environment.py` 改为复用包内唯一的环境记录实现，两套指纹不再互不相容；③`Dockerfile.repro` 改为从 `requirements-ci.txt` 安装（此前固定的 torch 版本在所选 cu118 索引中不存在，且 `pip install -e .` 会重新解析依赖），并加构建期版本自检；④修正附录 A 中并不存在的 lr 敏感性开关（该伴随读出随 E1 自动产出）；⑤新增文档-代码漂移守卫测试（引用的版本、CLI 参数、make 目标、容器配方、文档链接） | - |
+| 1.7 | 2026-11-06 | 新增**方向性合取伴随读数**（`_synthesis.py` / `_contrastlog_finalize.py`，**不改动任何假设、臂、对比对、SESOI、判定规则与统计方法**）：假设级 IUT 此前一律读每条腿的**双侧** bootstrap p，而研究级声明裁决（§3.6）一直读登记方向的**单侧** p，两层对同一方向性假设相差约一倍，使假设族校正系统性偏保守。新增 `conjunction_p_directional` / `conjunction_directional_*` / `claim_level_status_directional` / `claim_level_supported_directional` 与 `directional_rescued_hypotheses` 等伴随字段：对方向性腿用 `_directional_p`（登记方向的单侧 p）、对等价/非劣腿沿用其 TOST/NI p，再做假设族 BH/BY/Holm；原 `conjunction_p`、`conjunction_fdr_reject`、`claim_level_supported` 与预注册家族判定**逐字节不变**，方向性读数只是并列在其旁。仅新增伴随读数，不新增/修改任何假设、臂、对比对、SESOI 或判定规则 | - |
 
 > **重要**：本协议文档与 `cage/experiments/_config.py:HYPOTHESES`、`docs/design_notes.md` 及
 > `cage/experiments/_analysis_plan.py:_PRIMARY_CONTRASTS`/`_STUDY_CLAIMS`
@@ -318,6 +319,19 @@ E1/E2/E3 各自控制一个 FDR 家族，但**这些保证不复合**：三个�
 - **不合格的腿不能裁决声明**：配对种子数低于 `min_seeds_for_claim`、曲线失效、
   评估流不平衡或非受控对比的行，其 `claim_eligible=false`，因此既不能支持
   也不能**反驳**一条声明（与 §5.3 假设综合的约定一致）。
+
+**方向性合取伴随读数**（`_hypothesis_evidence_synthesis`）：研究级裁决按
+登记方向读单侧 p（`_directional_p`），而假设级 IUT（§7.2 的
+`conjunction_p` / `claim_level_supported`）沿用的是**双侧** bootstrap p，
+对同一条方向性腿两者相差约一倍。为避免把"两层读数不一致"误当成"家族不显著"，
+假设综合额外报告一组**方向性伴随字段**：`conjunction_p_directional`（每条
+方向性腿读登记方向的单侧 p，等价/非劣腿沿用其 TOST/NI p）、
+`conjunction_directional_fdr_reject`（假设族 BH）与其 BY/Holm 伴随、
+`claim_level_status_directional` / `claim_level_supported_directional`，以及
+`directional_rescued_hypotheses`（仅方向性读数成立、双侧读数不成立的假设）。
+这是一组**并列读数**：预注册的 `conjunction_p`、`conjunction_fdr_reject`、
+`claim_level_supported` 与假设族判定逐字节不变，方向性读数只回答"若按登记
+方向读单侧 p，同一合取是否成立"。
 
 **注册与刷新时机**：E1、E2、E3 **每个家族**在首次训练前都发布/复核这份计划
 （因此"先跑 E2"与"先跑 E1"等价），并在各自结束时刷新研究级裁决；

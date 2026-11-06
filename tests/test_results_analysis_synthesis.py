@@ -114,6 +114,54 @@ class ConjunctionTest(unittest.TestCase):
         self.assertEqual(result["n_required"], 1)
         self.assertAlmostEqual(result["p"], 0.02)
 
+    def test_directional_conjunction_reads_the_registered_one_sided_p(self):
+        row = _row("H2a", "accuracy_at_longest", 0.06)
+        row["mean"] = 0.05
+        two_sided = _hypothesis_conjunction_p([row], "H2a")
+        directional = _hypothesis_conjunction_p(
+            [row], "H2a", directional=True)
+        self.assertAlmostEqual(two_sided["p"], 0.06)
+        self.assertAlmostEqual(directional["p"], 0.03)
+        self.assertEqual(two_sided["basis"], "two_sided")
+        self.assertEqual(directional["basis"], "directional")
+        self.assertTrue(directional["complete"])
+
+    def test_directional_conjunction_reverses_on_the_wrong_side(self):
+        row = _row("H2a", "accuracy_at_longest", 0.06)
+        row["mean"] = -0.05
+        directional = _hypothesis_conjunction_p(
+            [row], "H2a", directional=True)
+        self.assertAlmostEqual(directional["p"], 0.97)
+
+    def test_directional_conjunction_abstains_without_a_usable_mean(self):
+        # ``_row`` carries no mean, so the registered one-sided p is not
+        # defined: the conjunction must abstain rather than fall back to
+        # the two-sided value it is supposed to replace.
+        directional = _hypothesis_conjunction_p(
+            [_row("H2a", "accuracy_at_longest", 0.06)], "H2a",
+            directional=True)
+        self.assertFalse(directional["complete"])
+        self.assertIsNone(directional["p"])
+
+    def test_null_prediction_rows_keep_their_registered_p(self):
+        row = {"hypothesis": "H2b", "metric": "entropy_drift",
+               "test": "equivalence", "p_value": 0.01, "direction": None,
+               "claim_eligible": True, "controlled": True}
+        directional = _hypothesis_conjunction_p(
+            [row], "H2b", directional=True)
+        self.assertEqual(directional["basis"], "directional")
+        self.assertAlmostEqual(directional["p"], 0.01)
+
+    def test_null_prediction_test_keeps_its_stored_p_even_with_a_direction(self):
+        # A null-prediction row is decided by its TOST/NI p-value, not by
+        # a one-sided reading, even if a direction field were present.
+        row = {"hypothesis": "H2b", "metric": "entropy_drift",
+               "test": "equivalence", "p_value": 0.02, "direction": "+",
+               "mean": 0.03, "claim_eligible": True, "controlled": True}
+        directional = _hypothesis_conjunction_p(
+            [row], "H2b", directional=True)
+        self.assertAlmostEqual(directional["p"], 0.02)
+
 
 class HypothesisMultiplicityTest(unittest.TestCase):
     def test_complete_conjunction_passes_the_hypothesis_family(self):
@@ -154,6 +202,44 @@ class HypothesisMultiplicityTest(unittest.TestCase):
         entry = synthesis["H3b"]
         self.assertTrue(entry["registry_complete"])
         self.assertEqual(entry["status"], "undirected")
+
+    def test_directional_conjunction_rescues_a_borderline_two_sided_claim(self):
+        # Every registered H2a row points the predicted way with a
+        # two-sided p of 0.06: the frozen two-sided conjunction (0.06)
+        # misses the family threshold, while the registered one-sided
+        # conjunction (0.03) clears it.  The frozen decision must stay
+        # unchanged, and the directional companion reports the rescue.
+        rows = []
+        for metric in ("accuracy_at_longest", "accuracy_drop",
+                       "accuracy_slope_log_len"):
+            row = _row("H2a", metric, 0.06)
+            row["mean"] = 0.05
+            rows.append(row)
+        synthesis = _hypothesis_evidence_synthesis(rows, ("H2a",), q=0.05)
+        entry = synthesis["H2a"]
+        self.assertEqual(entry["status"], "supported")
+        self.assertTrue(entry["registry_complete"])
+        self.assertFalse(entry["claim_level_supported"])
+        self.assertEqual(entry["claim_level_status"],
+                         "not_family_significant")
+        self.assertAlmostEqual(entry["conjunction_p"], 0.06)
+        self.assertAlmostEqual(entry["conjunction_p_directional"], 0.03)
+        self.assertTrue(entry["conjunction_directional_fdr_reject"])
+        self.assertTrue(entry["claim_level_supported_directional"])
+        self.assertEqual(entry["claim_level_status_directional"],
+                         "supported")
+
+    def test_directional_rescue_does_not_change_the_frozen_family(self):
+        # With a two-sided p of 0.01 the frozen conjunction already
+        # clears the threshold: both readings agree and the directional
+        # companion introduces no discrepancy.
+        rows = _h2a_rows(0.01)
+        for row in rows:
+            row["mean"] = 0.05
+        synthesis = _hypothesis_evidence_synthesis(rows, ("H2a",), q=0.05)
+        entry = synthesis["H2a"]
+        self.assertTrue(entry["claim_level_supported"])
+        self.assertTrue(entry["claim_level_supported_directional"])
 
 
 class ProjectEvidenceSynthesisTest(unittest.TestCase):
@@ -230,6 +316,23 @@ class ProjectEvidenceSynthesisTest(unittest.TestCase):
             self.assertEqual(entry["status"], "inconclusive")
             self.assertFalse(entry["claim_level_supported"])
             self.assertEqual(payload["n_hypotheses_supported"], 0)
+
+    def test_project_payload_exposes_directional_claim_level_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = _h2a_rows(0.001)
+            for row in rows:
+                row["mean"] = 0.05
+            _write_family(tmp, "e2", rows, q=0.05)
+            with contextlib.redirect_stdout(io.StringIO()):
+                payload = _project_evidence_synthesis(tmp)
+            self.assertEqual(
+                payload["hypotheses_claim_level_supported"], ["H2a"])
+            self.assertEqual(
+                payload["hypotheses_claim_level_supported_directional"],
+                ["H2a"])
+            self.assertEqual(
+                payload["hypotheses_directional_only_claim_level_supported"],
+                [])
 
     def test_no_usable_family_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:

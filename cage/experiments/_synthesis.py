@@ -687,7 +687,30 @@ def _hypothesis_registry_coverage(rows, hyp) -> dict:
     }
 
 
-def _hypothesis_conjunction_p(rows, hyp) -> dict:
+def _hypothesis_component_p(row, directional: bool = False):
+    """The registered component p-value a conjunction should read.
+
+    The pre-registered hypotheses are directional: the alternative of a
+    ``+``/``-`` row is one-sided, so its component p-value is the one-sided
+    p in that direction (``_directional_p``), not the two-sided bootstrap
+    p-value that also spends mass on the unregistered opposite tail.  A
+    null-prediction row (``equivalence`` / ``noninferiority``) already
+    stores its TOST / NI p-value, which is the registered one.
+
+    ``directional=False`` preserves the historical two-sided reading used
+    to freeze the pre-registered hypothesis family; the study-level claim
+    adjudication (``_study_level_adjudication``) has always used the
+    one-sided reading, so the two layers are only made consistent through
+    the explicit ``directional=True`` companion.
+    """
+    if (directional
+            and row.get("test") not in ("equivalence", "noninferiority")
+            and row.get("direction") in ("+", "-")):
+        return _directional_p(row)
+    return row.get("p_value")
+
+
+def _hypothesis_conjunction_p(rows, hyp, directional: bool = False) -> dict:
     """Intersection-union p-value for a conjunctive hypothesis.
 
     A hypothesis claims every registered prediction holds.  Under the
@@ -696,6 +719,11 @@ def _hypothesis_conjunction_p(rows, hyp) -> dict:
     rejected, so the test is valid without an independence assumption.  A
     component with a non-finite p-value leaves the conjunction undecided
     rather than silently dropping that prediction from the conjunction.
+
+    ``directional=True`` reads each directional row through its registered
+    one-sided alternative (``_hypothesis_component_p``); the default keeps
+    the two-sided values that the pre-registered hypothesis family was
+    frozen with, so existing decisions are untouched.
     """
     required = [row for row in _mapping_runs(rows)
                 if row.get("hypothesis") == hyp
@@ -704,7 +732,7 @@ def _hypothesis_conjunction_p(rows, hyp) -> dict:
                                             "noninferiority"))]
     p_values = []
     for row in required:
-        p_value = row.get("p_value")
+        p_value = _hypothesis_component_p(row, directional)
         if _finite(p_value) and 0.0 <= float(p_value) <= 1.0:
             p_values.append(float(p_value))
     complete = bool(required) and len(p_values) == len(required)
@@ -713,6 +741,7 @@ def _hypothesis_conjunction_p(rows, hyp) -> dict:
         "n_required": len(required),
         "n_finite": len(p_values),
         "complete": complete,
+        "basis": "directional" if directional else "two_sided",
     }
 
 
@@ -806,6 +835,14 @@ def _hypothesis_evidence_synthesis(rows, hypotheses, q: float = 0.05,
                        if r.get("sesoi_point_estimate_only")]
         coverage = _hypothesis_registry_coverage(hrows, hyp)
         conjunction = _hypothesis_conjunction_p(hrows, hyp)
+        # Directional companion: the same intersection-union test read
+        # through each row's registered one-sided alternative.  The
+        # pre-registered hypothesis family stays frozen on the two-sided
+        # values above; the study-level claim adjudication has always
+        # used the one-sided reading, so this makes the two layers
+        # directly comparable instead of leaving a factor-of-two gap.
+        conjunction_directional = _hypothesis_conjunction_p(
+            hrows, hyp, directional=True)
 
         def _label(r):
             return f"{r.get('rule')} ({r.get('metric')})"
@@ -854,6 +891,21 @@ def _hypothesis_evidence_synthesis(rows, hypotheses, q: float = 0.05,
             "conjunction_holm_reject": False,
             "claim_level_supported": False,
             "claim_level_status": status,
+            "conjunction_p_directional": conjunction_directional["p"],
+            "conjunction_directional_n_required":
+                conjunction_directional["n_required"],
+            "conjunction_directional_n_finite":
+                conjunction_directional["n_finite"],
+            "conjunction_directional_complete":
+                conjunction_directional["complete"],
+            "conjunction_directional_p_adj": float("nan"),
+            "conjunction_directional_fdr_reject": False,
+            "conjunction_directional_by_p_adj": float("nan"),
+            "conjunction_directional_by_reject": False,
+            "conjunction_directional_holm_p_adj": float("nan"),
+            "conjunction_directional_holm_reject": False,
+            "claim_level_supported_directional": False,
+            "claim_level_status_directional": status,
         }
     finite = [(hyp, entry["conjunction_p"]) for hyp, entry in out.items()
               if _finite(entry.get("conjunction_p"))]
@@ -870,18 +922,45 @@ def _hypothesis_evidence_synthesis(rows, hypotheses, q: float = 0.05,
             entry["conjunction_by_reject"] = bool(by_row["reject"])
             entry["conjunction_holm_p_adj"] = holm_row["p_adj"]
             entry["conjunction_holm_reject"] = bool(holm_row["reject"])
+    finite_directional = [
+        (hyp, entry["conjunction_p_directional"]) for hyp, entry in out.items()
+        if _finite(entry.get("conjunction_p_directional"))]
+    if finite_directional:
+        family_p = [float(p_value) for _, p_value in finite_directional]
+        bh = benjamini_hochberg(family_p, q=q)
+        by = benjamini_yekutieli(family_p, q=q)
+        holm = holm_bonferroni(family_p, q=q)
+        for (hyp, _), bh_row, by_row, holm_row in zip(
+                finite_directional, bh, by, holm):
+            entry = out[hyp]
+            entry["conjunction_directional_p_adj"] = bh_row["p_adj"]
+            entry["conjunction_directional_fdr_reject"] = bool(
+                bh_row["reject"])
+            entry["conjunction_directional_by_p_adj"] = by_row["p_adj"]
+            entry["conjunction_directional_by_reject"] = bool(
+                by_row["reject"])
+            entry["conjunction_directional_holm_p_adj"] = holm_row["p_adj"]
+            entry["conjunction_directional_holm_reject"] = bool(
+                holm_row["reject"])
     for entry in out.values():
         if entry["status"] != "supported":
             entry["claim_level_status"] = entry["status"]
+            entry["claim_level_status_directional"] = entry["status"]
             continue
         if entry["registry_complete"] is not True:
             entry["claim_level_status"] = "partial_registry"
+            entry["claim_level_status_directional"] = "partial_registry"
             continue
         if not entry["conjunction_fdr_reject"]:
             entry["claim_level_status"] = "not_family_significant"
-            continue
-        entry["claim_level_status"] = "supported"
-        entry["claim_level_supported"] = True
+        else:
+            entry["claim_level_status"] = "supported"
+            entry["claim_level_supported"] = True
+        if not entry["conjunction_directional_fdr_reject"]:
+            entry["claim_level_status_directional"] = "not_family_significant"
+        else:
+            entry["claim_level_status_directional"] = "supported"
+            entry["claim_level_supported_directional"] = True
     return out
 
 
@@ -1026,6 +1105,11 @@ def _project_evidence_synthesis(out_dir, tags=("e1", "e2", "e3"),
         if entry.get("registry_complete") is False]
     claim_level = [hyp for hyp, entry in hypothesis_payload.items()
                    if entry.get("claim_level_supported")]
+    claim_level_directional = [
+        hyp for hyp, entry in hypothesis_payload.items()
+        if entry.get("claim_level_supported_directional")]
+    directional_only = [
+        hyp for hyp in claim_level_directional if hyp not in claim_level]
     invalid_sources = [
         tag for tag, info in sources.items()
         if info.get("present") and info.get("valid") is False]
@@ -1061,6 +1145,14 @@ def _project_evidence_synthesis(out_dir, tags=("e1", "e2", "e3"),
         "hypotheses_registry_incomplete": registry_incomplete,
         "n_hypotheses_claim_level_supported": len(claim_level),
         "hypotheses_claim_level_supported": claim_level,
+        "n_hypotheses_claim_level_supported_directional":
+            len(claim_level_directional),
+        "hypotheses_claim_level_supported_directional":
+            claim_level_directional,
+        "n_hypotheses_directional_only_claim_level_supported":
+            len(directional_only),
+        "hypotheses_directional_only_claim_level_supported":
+            directional_only,
         "hypothesis_synthesis": hypothesis_payload,
         "rows": rows,
         "note": ("Project-level multiplicity and hypothesis-conjunction "
@@ -1079,7 +1171,15 @@ def _project_evidence_synthesis(out_dir, tags=("e1", "e2", "e3"),
           f"{len(lost)} are project-level uncertain; "
           f"{len(claim_level)}/{len(hypothesis_payload)} hypothesis(es) "
           f"reach claim-level support with complete registered-metric "
-          f"coverage")
+          f"coverage "
+          f"({len(claim_level_directional)} under the registered-direction "
+          f"one-sided conjunction)")
+    if directional_only:
+        print(f"[project] note: {len(directional_only)} hypothesis(es) "
+              f"({', '.join(directional_only)}) reach claim-level support "
+              f"under their registered one-sided alternatives but not under "
+              f"the two-sided conjunction that froze the family; report them "
+              f"as directionally supported, not as family-null")
     if invalid_sources:
         print(f"[project] WARNING: source family(ies) "
               f"{', '.join(invalid_sources)} are unusable and were excluded "

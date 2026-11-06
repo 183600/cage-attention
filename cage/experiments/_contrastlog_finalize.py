@@ -367,11 +367,22 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
     synth_claim_level = [
         h for h, v in synthesis.items()
         if v.get("claim_level_supported")]
+    synth_claim_level_directional = [
+        h for h, v in synthesis.items()
+        if v.get("claim_level_supported_directional")]
+    synth_directional_rescued = [
+        h for h in synth_claim_level_directional
+        if h not in synth_claim_level]
     synth_dependence_sensitive = [
         h for h, v in synthesis.items()
         if v.get("claim_level_supported")
         and not (v.get("conjunction_by_reject")
                  and v.get("conjunction_holm_reject"))]
+    synth_directional_dependence_sensitive = [
+        h for h, v in synthesis.items()
+        if v.get("claim_level_supported_directional")
+        and not (v.get("conjunction_directional_by_reject")
+                 and v.get("conjunction_directional_holm_reject"))]
 # Parallel exact-test family: the same BH correction applied to the
     # paired sign-flip p-values.  This is a companion, not a replacement
     # for the pre-registered bootstrap decision; it answers "could this
@@ -886,12 +897,35 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
               f"registered-metric coverage and the hypothesis-family FDR "
               f"screen; the row-level pre-registered decision remains the "
               f"decision unit")
+    if synth_claim_level_directional:
+        print(f"[{self.tag}] directional hypothesis-level companion: "
+              f"{len(synth_claim_level_directional)}/{len(synthesis)} "
+              f"hypothesis(es) pass the same conjunction test when every "
+              f"directional row is read through its registered one-sided "
+              f"alternative (the two-sided family above stays frozen and "
+              f"byte-for-byte unchanged)")
+    if synth_directional_rescued:
+        names = ", ".join(synth_directional_rescued)
+        print(f"[{self.tag}] note: {len(synth_directional_rescued)} "
+              f"hypothesis(es) ({names}) reach claim-level support only "
+              f"under the registered-direction one-sided conjunction: their "
+              f"two-sided conjunction p-value sits just above the family "
+              f"threshold even though every registered directional leg "
+              f"points the predicted way; report them as directionally "
+              f"supported, not as family-null")
     if synth_dependence_sensitive:
         names = ", ".join(synth_dependence_sensitive)
         print(f"[{self.tag}] WARNING: {len(synth_dependence_sensitive)} "
               f"claim-level hypothesis(es) fail at least one "
               f"dependence-robust companion ({names}); their conjunction "
               f"support is multiplicity-model sensitive")
+    if synth_directional_dependence_sensitive:
+        names = ", ".join(synth_directional_dependence_sensitive)
+        count = len(synth_directional_dependence_sensitive)
+        print(f"[{self.tag}] WARNING: {count} directional claim-level "
+              f"hypothesis(es) fail at least one dependence-robust "
+              f"companion ({names}); their one-sided conjunction support "
+              f"is multiplicity-model sensitive")
     if equiv_rows:
         print(f"[{self.tag}] equivalence (null-prediction) tests: "
               f"{len(equivalent)}/{len(equiv_rows)} have their 95% CI "
@@ -1235,10 +1269,22 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
                "n_hypotheses_claim_level_supported":
                    len(synth_claim_level),
                "claim_level_supported_hypotheses": synth_claim_level,
+               "n_hypotheses_claim_level_supported_directional":
+                   len(synth_claim_level_directional),
+               "claim_level_supported_directional_hypotheses":
+                   synth_claim_level_directional,
+               "n_hypotheses_directional_rescued":
+                   len(synth_directional_rescued),
+               "directional_rescued_hypotheses":
+                   synth_directional_rescued,
                "n_hypotheses_dependence_sensitive":
                    len(synth_dependence_sensitive),
                "dependence_sensitive_hypotheses":
                    synth_dependence_sensitive,
+               "n_hypotheses_directional_dependence_sensitive":
+                   len(synth_directional_dependence_sensitive),
+               "directional_dependence_sensitive_hypotheses":
+                   synth_directional_dependence_sensitive,
                "partial_hypotheses": synth_partial,
                "refuted_hypotheses": synth_refuted,
                "replication_uncertain_hypotheses": synth_rep_uncertain,
