@@ -437,6 +437,7 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
     # floor for a particular row; using q / n_testable here labelled
     # rejectable rows as unfalsifiable whenever another exact p was
     # smaller.
+    testable = self.rows
     for exact_row in testable:
         exact_row["sign_flip_cannot_reject"] = bool(
             _finite(exact_row.get("sign_flip_min_p"))
