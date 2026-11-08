@@ -699,7 +699,7 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
     zero = sum(1 for d in directions if d == 0)
     overall_dir = (1 if item_mean > 0.0 else -1 if item_mean < 0.0 else 0)
     if overall_dir and nonzero:
-        agreement = sum(1 for d in nonzero if d == overall_dir) / len(nonzero)
+        agreement = sum(1 for d in nonzero if d == overall_dir) / len(nonzero) if nonzero else 0.0
         consistent = all(d == overall_dir for d in nonzero)
     else:
         agreement = None

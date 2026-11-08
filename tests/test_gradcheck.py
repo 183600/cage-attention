@@ -45,7 +45,7 @@ def _reference_probs(q, k, scale):
     mask = torch.full((T, T), float("-inf"), dtype=q.dtype,
                       device=q.device).triu_(1)
     return torch.softmax(
-        torch.baddbmm(mask, q, k.transpose(1, 2), beta=1.0, alpha=scale),
+        torch.baddbmm(mask, q, k.transpose(1, 2, dim=-1), beta=1.0, alpha=scale),
         dim=-1)
 
 
@@ -129,7 +129,7 @@ class RowEntropyGradcheckTest(unittest.TestCase):
     def test_backward_shape_and_none_grad(self):
         gen = torch.Generator().manual_seed(8)
         p = torch.softmax(torch.randn(2, 2, 5, dtype=torch.float64,
-                                      generator=gen),
+                                      generator=gen, dim=-1),
                           -1).requires_grad_(True)
         ent = _RowEntropy.apply(p, _EPS)
         ent.sum().backward()
@@ -153,7 +153,7 @@ class SoftmaxInPlaceGradcheckTest(unittest.TestCase):
         gen = torch.Generator().manual_seed(10)
         x = torch.randn(2, 3, 7, dtype=torch.float64, generator=gen)
         out = _SoftmaxInPlace.apply(x.clone())
-        self.assertTrue(torch.allclose(out, torch.softmax(x, -1),
+        self.assertTrue(torch.allclose(out, torch.softmax(x, -1, dim=-1),
                                        atol=1e-12, rtol=1e-12))
 
 

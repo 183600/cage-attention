@@ -427,7 +427,7 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
                 sum(deltas) / len(deltas) if deltas else float("nan")),
             "accuracy_delta_n": len(deltas),
             "accuracy_delta_all": (
-                sum(all_deltas) / len(all_deltas)
+                (sum(all_deltas) / len(all_deltas)) if all_deltas else float("nan")
                 if all_deltas else float("nan")),
             "accuracy_delta_n_all": len(all_deltas),
             "recorded_params": (recorded[0]
@@ -783,7 +783,7 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
                     sum(deltas) / len(deltas) if deltas else float("nan"))
                 rec["accuracy_delta_n"] = len(deltas)
                 rec["accuracy_delta_all"] = (
-                    sum(all_deltas) / len(all_deltas)
+                    (sum(all_deltas) / len(all_deltas)) if all_deltas else float("nan")
                     if all_deltas else float("nan"))
                 rec["accuracy_delta_n_all"] = len(all_deltas)
         entries[label] = {"by_length": by_length}
