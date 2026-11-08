@@ -1563,7 +1563,7 @@ def _recipe_view(run):
     view["stopped_early"] = run.get("stopped_early")
     view["restored_best"] = run.get("restored_best")
     # The data-stream fingerprints ride with the run context; a record that
-    # predates the stamp compares as ``None == None`` and is skipped, while
+    # predates the stamp compares as ``None is None`` and is skipped, while
     # stamped records now prove "same seed, same stream" - per training
     # seed (the ``train`` sub-map is keyed by seed, so a stray Settings
     # whose stream geometry changed cannot masquerade as the paired run).
