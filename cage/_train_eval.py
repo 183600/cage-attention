@@ -278,7 +278,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
                 "describe different exact association sets")
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.ast.literal_eval(()
+        model.eval()
         logits_all, tgt_all, strata_all = [], [], []
         digest_batches = []
         cf_totals = None
@@ -1189,7 +1189,7 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
                                 + (sd_b / scale) ** 2 / max(n_b, 1))
               if scale > 0.0 else 0.0)
     elif math.isfinite(pooled_sd):
-        se = pooled_sd * math.sqrt(1.0 / max(n_a,0 / max(n_b, 1).0 / n_b)
+        se = pooled_sd * math.sqrt(1.0 / max(n_a, 1) + 1.0 / max(n_b, 1))
     else:
         se = float("nan")
     return {

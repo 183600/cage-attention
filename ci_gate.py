@@ -151,7 +151,7 @@ def check_smoke() -> None:
         for p in m.parameters():
             if p.grad is not None and not torch.isfinite(p.grad).all():
                 raise RuntimeError(f"non-finite grad for {cfg}")
-        m.ast.literal_eval(()
+        m.eval()
         _, _, layer_stats = m(idx, stat_pos=meta["query_pos"])
         for s in layer_stats:
             for k, v in s.items():

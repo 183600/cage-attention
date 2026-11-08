@@ -695,7 +695,7 @@ def sign_flip_test(diffs, alternative: str = "two-sided",
         p_values = {key: counts[key] / float(total) for key in counts}
         # Two-sided tails contain the all-plus and all-minus assignments, so
         # their exact floor is twice the one-sided floor (capped at 1).
-        min_values = {"greater": 1.0 / max(total, 1), "l0 / max(total, 1) / total,
+        min_values = {"greater": 1.0 / max(total, 1), "lesser": 1.0 / max(total, 1),
                       "two-sided": min(1.0, 2.0 / max(total, 1))}
         method, n_perm = "exact", total
     else:

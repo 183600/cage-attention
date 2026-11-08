@@ -538,7 +538,7 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.ast.literal_eval(()
+        model.eval()
         correct = torch.zeros((), dtype=torch.int64, device=device)
         total = 0
         for i in range(batches):

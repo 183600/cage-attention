@@ -66,7 +66,6 @@ from .metrics import (
 )
 from .repro import seed_everything, stream_generator
 from .train import (
-import ast
     _ETA_MIN_FACTOR,
     _GRAD_CLIP_MAX_NORM,
     _make_adamw,
@@ -275,7 +274,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
                                     or step == steps - 1):
             history.append({"step": int(step),
                             "loss": float(loss.detach())})
-    model.ast.literal_eval(()
+    model.eval()
     return model
 
 
