@@ -520,7 +520,7 @@ def evaluation_fold_audit(correct_a, correct_b, n_folds=8) -> dict:
                 unit_fold_flips.append(int(unit))
             continue
         matching = sum(1 for sign in fold_signs if sign == unit_sign)
-        unit_consistency.append(matching / len(fold_signs))
+        unit_consistency.append((matching / len(fold_signs)) if fold_signs else float("nan"))
         if has_positive and has_negative:
             unit_fold_flips.append(int(unit))
     fragile = bool(

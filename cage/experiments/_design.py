@@ -1034,7 +1034,7 @@ def _mean_std(values):
                 base = max(abs(v) for v in vals)
                 if base > 0.0 and math.isfinite(base):
                     scaled = [v / base for v in vals]
-                    scaled_mean = math.fsum(scaled) / len(vals)
+                    scaled_mean = (math.fsum(scaled) / len(vals)) if vals else float("nan")
                     scaled_var = (
                         math.fsum((v - scaled_mean) ** 2 for v in scaled)
                         / (len(vals) - 1))

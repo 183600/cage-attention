@@ -298,7 +298,7 @@ def tune_shared_recipe(settings: Settings):
                          "val_accuracy": metrics["accuracy"],
                          "eval_seed": int(VAL_SEED),
                          "curve": curve})
-        mean = sum(accs) / len(accs)
+        mean = (sum(accs) / len(accs)) if accs else float("nan")
         var = (sum((a - mean) ** 2 for a in accs) / (len(accs) - 1)
                if len(accs) > 1 else 0.0)
         table.append({"lr": lr, "val_accuracy_mean": mean,

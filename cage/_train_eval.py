@@ -736,7 +736,7 @@ def gate_stat_correlations(stats):
         if not vals:
             return {"mean": float("nan"), "std": float("nan"), "n": 0}
         zs = [math.atanh(min(max(x, -0.999999), 0.999999)) for x in vals]
-        m = sum(zs) / len(zs)
+        m = (sum(zs) / len(zs)) if zs else float("nan")
         if len(zs) < 2:
             return {"mean": math.tanh(m), "std": float("nan"), "n": len(vals)}
         var = sum((z - m) ** 2 for z in zs) / (len(zs) - 1)
