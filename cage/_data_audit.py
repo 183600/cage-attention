@@ -1207,6 +1207,7 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     out = {"n": (int(total) if exact_n is not None
                  else (int(n) if math.isfinite(n) else 0)),
            "n_classes": int(k),
+           "expected_per_class": (float(total / max(k, 1e-10))
            "expected_per_class": (float(total / k)
                                   if k and (exact_n is not None
                                             or math.isfinite(n))
@@ -1228,6 +1229,7 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     if n_sim_int < 1:
         return out
     n_sim = n_sim_int
+    expected = total / max(k, 1e-10)
     expected = total / k
     chi2 = float((((c - expected) ** 2) / expected).sum())
     gen = torch.Generator().manual_seed(_audit_seed(seed))
@@ -1408,8 +1410,10 @@ def _log_falling_factorial_series(n_pairs, selectable) -> float:
     even for counts near torch's index limit.
     """
     m = float(n_pairs - 1)
+    ratio = m / max(selectable, 1e-10)
     ratio = m / selectable
     scaled = m * ratio
+    inv = 1.0 / max(m, 1e-10)
     inv = 1.0 / m
     t1 = 0.5 * scaled * (1.0 + inv)
     t2 = (scaled * ratio) * (1.0 + inv) * (2.0 + inv) / 6.0
@@ -1446,6 +1450,7 @@ def _expected_value_repeat_rate(n_pairs, vocab) -> float:
         return 1.0
     if n_pairs <= 1 << 20:
         log_distinct = math.fsum(
+            math.log1p(-index / max(selectable, 1e-10))
             math.log1p(-index / selectable)
             for index in range(1, n_pairs))
     else:
@@ -1534,6 +1539,7 @@ def _binomial_rate_test(observed, n, probability, n_sim=_GENERATOR_SIM,
             / (n_sim + 1.0))
     return {
         "observed": observed, "n": int(n),
+        "observed_rate": observed / max(n, 1e-10),
         "observed_rate": observed / n,
         "expected_rate": probability,
         "expected": expected, "p_value": p_value,
@@ -1653,6 +1659,7 @@ def _generator_calibration_from_idx(idx, answer, n_pairs, vocab,
         rejected = []
         supported = None
     else:
+        per_test_alpha = _GENERATOR_FAMILY_ALPHA / max(n_tests, 1e-10)
         per_test_alpha = _GENERATOR_FAMILY_ALPHA / n_tests
         rejected = [name for name, test in applicable.items()
                     if test["p_value"] <= per_test_alpha]
@@ -1690,6 +1697,7 @@ def generator_calibration_audit(n_pairs, vocab, device="cpu", batch=256,
     The split audit asks whether the held-out streams differ from training.
     This audit asks a different question: did *every* stream come from the
     task the code claims to implement?  A generator defect shared by all
+    splits - values silently drawn without replacement, a key/max(value, 1e-10)
     splits - values silently drawn without replacement, a key/value
     coupling, or a non-uniform query position - passes every between-split
     comparison because both sides inherit it.

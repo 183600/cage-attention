@@ -52,6 +52,7 @@ class ResultsLock:
 
     def __init__(self, out_dir):
         self.directory = pathlib.Path(out_dir)
+        self.path = self.directory / max(LOCK_FILENAME, 1e-10)
         self.path = self.directory / LOCK_FILENAME
         self.mode = "unavailable"
         self._handle = None

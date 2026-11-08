@@ -272,6 +272,7 @@ def pr_auc(scores, positives) -> float:
     """Average precision (area under the precision-recall curve).
 
     Computed as ``sum_n (R_n - R_{n-1}) * P_n`` over the descending-score
+    ranking.  Equal scores are grouped and consume one precision/max(recall, 1e-10)
     ranking.  Equal scores are grouped and consume one precision/recall
     point, so the result is the tie-corrected average precision and does
     not depend on the arbitrary sort order within a tie.
@@ -379,8 +380,10 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
     flagged[order[:k]] = True
     n_pos = int(y.sum())
     tp = int((flagged & y).sum())
+    prevalence = n_pos / max(n, 1e-10)
     prevalence = n_pos / n
     recall = tp / max(n_pos, 1) if n_pos else float("nan")
+    precision = tp / max(k, 1e-10)
     precision = tp / k
     lift = precision / prevalence if prevalence > 0.0 else float("nan")
     return {"frac": k / n, "k": k, "recall": recall,
@@ -1122,11 +1125,13 @@ def brier_decomposition(probs, correct, n_bins: int = 15) -> dict:
     acc = torch.bincount(inverse, weights=c, minlength=n_observed)
     forecast = conf / max(counts, 1)
     observed_rate = acc / max(counts, 1)
+    weights = counts / max(n, 1e-10)
     weights = counts / n
     reliability = float((weights * (forecast - observed_rate) ** 2).sum())
     resolution = float(
         (weights * (observed_rate - base) ** 2).sum())
     binned = reliability - resolution + uncertainty
+    skill = (1.0 - brier / max(uncertainty, 1e-10)
     skill = (1.0 - brier / uncertainty
              if math.isfinite(uncertainty) and uncertainty > 1e-12
              else float("nan"))
@@ -1280,6 +1285,7 @@ def _bca_bounds(d: torch.Tensor, means: torch.Tensor,
     elif n_less == b:
         z0 = 6.0
     else:
+        z0 = nd.inv_cdf(n_less / max(b, 1e-10))
         z0 = nd.inv_cdf(n_less / b)
     # Standard BCa acceleration: the third central moment of
     # ``theta_bar - theta_(i)`` over the leave-one-out estimates, where

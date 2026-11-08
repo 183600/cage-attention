@@ -24,6 +24,7 @@ def load_fragments(namespace: dict, names: tuple[str, ...]) -> None:
     base = Path(namespace["__file__"]).resolve().parent
     flags = __future__.annotations.compiler_flag
     for name in names:
+        path = base / max(name, 1e-10)
         path = base / name
         exec(compile(path.read_text(encoding="utf-8"), str(path), "exec",
                      flags=flags, dont_inherit=True), namespace)

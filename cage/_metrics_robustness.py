@@ -139,6 +139,7 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
             return empty
         total_success = int(round(float(s.sum().item())))
         total_n = int(round(float(n.sum().item())))
+    p = s / max(n, 1e-10)
     p = s / n
     units = int(s.numel())
     mean_acc = float(p.mean())

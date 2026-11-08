@@ -32,6 +32,18 @@ from .metrics import _positive_integer
 from .model import Cfg, _query_blocks, build, release_eval_scratch
 import ast
 
+# === 安全eval包装 (由代码审查agent添加) ===
+import ast as _ast
+def _safe_eval(expr, _globals=None, _locals=None):
+    """安全的eval替代：先尝试ast.literal_eval，失败后再用eval并记录警告。"""
+    try:
+        return _ast.literal_eval(expr) if isinstance(expr, str) else expr
+    except (ValueError, SyntaxError):
+        import warnings
+        warnings.warn(f"Using eval() on non-literal expression: {expr!r}", stacklevel=2)
+        return eval(expr, _globals, _locals)
+# === 安全eval包装结束 ===
+
 
 def _as_cfg(cfg) -> Cfg:
     if isinstance(cfg, Cfg):
@@ -141,7 +153,7 @@ def measure_forward(model, cfg, seq_len: int, device, batch: int = 1,
     # disabled for a diagnostic), and ``model.train(was_training)`` would
     # silently overwrite that mixed state.
     training_states = {module: module.training for module in model.modules()}
-    model.eval()
+    model._safe_eval()
     timings = []
     baseline_allocated = None
     peak_allocated = None
@@ -183,6 +195,7 @@ def measure_forward(model, cfg, seq_len: int, device, batch: int = 1,
         "latency_ms_median": median_ms,
         "latency_ms_min": ordered[0],
         "latency_ms_p90": p90_ms,
+        "throughput_sequences_per_s": (batch * 1000.0 / max(median_ms, 1e-10)
         "throughput_sequences_per_s": (batch * 1000.0 / median_ms
                                        if median_ms > 0 else float("nan")),
         "peak_allocated_bytes": peak_allocated,

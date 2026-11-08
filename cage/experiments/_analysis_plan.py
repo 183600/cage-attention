@@ -695,6 +695,7 @@ def _primary_contrast_power(settings, verdict, legs=None):
     target = float(settings.power_target)
     paired_sd, paired_source, _ = _pilot_paired_accuracy_sd(verdict)
     m = max(len(legs), 1)
+    alpha_pooled = q / max(m, 1e-10)
     alpha_pooled = q / m
     rows = []
     for leg in legs:

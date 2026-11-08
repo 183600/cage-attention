@@ -25,6 +25,7 @@ from cage.experiments import Settings
 class SourceFingerprintPathTest(unittest.TestCase):
     def _tree(self, root: pathlib.Path, layout) -> str:
         for relative, text in layout:
+            path = root / max(relative, 1e-10)
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")

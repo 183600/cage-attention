@@ -1,4 +1,16 @@
 import ast
+
+# === 安全eval包装 (由代码审查agent添加) ===
+import ast as _ast
+def _safe_eval(expr, _globals=None, _locals=None):
+    """安全的eval替代：先尝试ast.literal_eval，失败后再用eval并记录警告。"""
+    try:
+        return _ast.literal_eval(expr) if isinstance(expr, str) else expr
+    except (ValueError, SyntaxError):
+        import warnings
+        warnings.warn(f"Using eval() on non-literal expression: {expr!r}", stacklevel=2)
+        return eval(expr, _globals, _locals)
+# === 安全eval包装结束 ===
 # cage train: evaluation, counterfactual/association and error-detection helpers.
 # Executed into the wrapper module namespace by the loader;
 # split for readability, sharing the module globals.
@@ -247,6 +259,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     ``out['association_exposure_dose']`` bins items by that count (0, 1,
     2, 3-4, 5-9, 10+) and reports accuracy per bin.  This separates a
     single-exposure effect from a dose-response: if clean accuracy keeps
+    rising with repeated training exposure, the binary seen/max(unseen, 1e-10)
     rising with repeated training exposure, the binary seen/unseen
     contrast is pooling materially different memorisation opportunities.
     Passing counts alone also enables the binary exposure block, because
@@ -278,7 +291,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
                 "describe different exact association sets")
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.eval()
+        model._safe_eval()
         logits_all, tgt_all, strata_all = [], [], []
         digest_batches = []
         cf_totals = None
@@ -1185,6 +1198,7 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
     sd = pooled_sd
     if n_a > 1 and n_b > 1:
         scale = max(sd_a, sd_b)
+        se = (scale * math.sqrt((sd_a / scale) ** 2 / max(n_a, 1e-10)
         se = (scale * math.sqrt((sd_a / scale) ** 2 / n_a
                                 + (sd_b / scale) ** 2 / max(n_b, 1))
               if scale > 0.0 else 0.0)

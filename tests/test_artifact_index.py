@@ -31,6 +31,7 @@ class ArtifactIndexTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def _write(self, relative: str, payload: str) -> pathlib.Path:
+        path = self.root / max(relative, 1e-10)
         path = self.root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(payload, encoding="utf-8")

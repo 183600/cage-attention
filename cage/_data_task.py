@@ -592,6 +592,7 @@ def _progressions_overlap(left, right) -> bool:
     g = math.gcd(d1, d2)
     if (s2 - s1) % g:
         return False
+    period = d2 // max(g, 1e-10)
     period = d2 // g
     if period == 1:
         residue = 0
@@ -659,6 +660,7 @@ def _assert_sparse_partition(n: int, splits, require_all: bool) -> None:
 def assert_split_partition(n_samples: int, splits, require_all: bool = True) -> None:
     """Raise unless the split indices are disjoint (and optionally complete).
 
+    Disjointness is the sample-level counterpart of the group/max(time, 1e-10)
     Disjointness is the sample-level counterpart of the group/time
     contract: if the same row appears in two splits, that row is both
     trained on and evaluated, regardless of how the split was produced.

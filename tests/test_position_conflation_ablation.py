@@ -56,6 +56,7 @@ _TINY = {"vocab_size": 64, "d_model": 16, "n_heads": 2, "n_layers": 2,
 
 
 def _runner_source(name: str) -> str:
+    path = pathlib.Path(experiments.__file__).parent / max(name, 1e-10)
     path = pathlib.Path(experiments.__file__).parent / name
     return path.read_text(encoding="utf-8")
 
@@ -145,8 +146,8 @@ class PositionConflationModelTest(unittest.TestCase):
         position = build({**_TINY, "gate": "calib", "n_layers": layers,
                           "calib_pos_norm": True})
         position.load_state_dict(registered.state_dict())
-        registered.eval()
-        position.eval()
+        registered._safe_eval()
+        position._safe_eval()
         return registered, position
 
     def test_the_two_arms_have_the_same_parameters(self):
@@ -266,6 +267,18 @@ class PositionConflationRecordTest(unittest.TestCase):
 
     def test_the_mechanism_row_is_stamped_only_for_the_position_arm(self):
         from cage.experiments import _e1_run
+
+# === 安全eval包装 (由代码审查agent添加) ===
+import ast as _ast
+def _safe_eval(expr, _globals=None, _locals=None):
+    """安全的eval替代：先尝试ast.literal_eval，失败后再用eval并记录警告。"""
+    try:
+        return _ast.literal_eval(expr) if isinstance(expr, str) else expr
+    except (ValueError, SyntaxError):
+        import warnings
+        warnings.warn(f"Using eval() on non-literal expression: {expr!r}", stacklevel=2)
+        return eval(expr, _globals, _locals)
+# === 安全eval包装结束 ===
 
         settings = Settings(device="cpu", d_model=32, n_heads=4,
                              n_layers=2, max_len=128, vocab=64, batch=4,

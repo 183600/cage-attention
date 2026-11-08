@@ -28,6 +28,18 @@ import unittest
 import torch
 
 from cage.model import (
+
+# === 安全eval包装 (由代码审查agent添加) ===
+import ast as _ast
+def _safe_eval(expr, _globals=None, _locals=None):
+    """安全的eval替代：先尝试ast.literal_eval，失败后再用eval并记录警告。"""
+    try:
+        return _ast.literal_eval(expr) if isinstance(expr, str) else expr
+    except (ValueError, SyntaxError):
+        import warnings
+        warnings.warn(f"Using eval() on non-literal expression: {expr!r}", stacklevel=2)
+        return eval(expr, _globals, _locals)
+# === 安全eval包装结束 ===
     _CalibAttn,
     _NullAttn,
     _RowEntropy,
@@ -287,7 +299,7 @@ class ModelPathParityTest(unittest.TestCase):
             "vocab_size": 64, "d_model": 16, "n_heads": 2, "n_layers": 2,
             "max_len": 64, "gate": gate, "dropout": 0.0,
         }).to(dtype)
-        model.eval()
+        model._safe_eval()
         idx = torch.randint(0, 64, (3, T))
         with torch.no_grad():
             eval_logits, _, _ = model(idx)
@@ -314,7 +326,7 @@ class ModelPathParityTest(unittest.TestCase):
             "vocab_size": 64, "d_model": 16, "n_heads": 2, "n_layers": 1,
             "max_len": 64, "gate": "calib",
         })
-        model.eval()
+        model._safe_eval()
         attn = model.blocks[0].attn
         idx = torch.randint(0, 64, (2, 9))
         with torch.no_grad():

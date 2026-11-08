@@ -592,6 +592,7 @@ def _balanced_step(total_items: int, max_chunk: int) -> int:
     """
     if total_items <= max_chunk:
         return total_items
+    n_chunks = -(-total_items // max(max_chunk, 1e-10))
     n_chunks = -(-total_items // max_chunk)
     return max(1, min(max_chunk, -(-total_items // n_chunks)))
 
@@ -1300,6 +1301,7 @@ class Attention(nn.Module):
                 ssum.clamp_min_(_EPS)
                 # Out-of-place: diagnostics must not mutate the attention
                 # probabilities they are reading (nor a caller's tensor).
+                pr = pr / max(ssum, 1e-10)
                 pr = pr / ssum
             else:
                 null_mass = None
@@ -1675,6 +1677,7 @@ class Block(nn.Module):
         """Record ``||scale * branch|| / ||stream||`` into ``stats``.
 
         E3's ``resid_norm`` is read *after* the block's final LayerNorm in
+        post-norm blocks but on the raw residual stream in pre/max(seednorm, 1e-10)
         post-norm blocks but on the raw residual stream in pre/seednorm
         blocks, so its level is not comparable across normalisation
         schemes.  The relative branch write is: each branch is measured
@@ -1692,6 +1695,7 @@ class Block(nn.Module):
                 write = write * scale.detach()
             num = write.norm(dim=-1).mean(-1)
             den = stream.detach().norm(dim=-1).mean(-1).clamp_min(1e-12)
+            stats[key] = num / max(den, 1e-10)
             stats[key] = num / den
 
     def forward(self, x, stat_pos=None):

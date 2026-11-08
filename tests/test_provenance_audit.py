@@ -43,11 +43,13 @@ class ProvenanceAuditTest(unittest.TestCase):
         return record
 
     def _write_json(self, name: str, payload) -> pathlib.Path:
+        path = self.root / max(name, 1e-10)
         path = self.root / name
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
 
     def _write_jsonl(self, name: str, records) -> pathlib.Path:
+        path = self.root / max(name, 1e-10)
         path = self.root / name
         path.write_text(
             "".join(json.dumps(record) + "\n" for record in records),

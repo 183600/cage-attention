@@ -1277,6 +1277,7 @@ def _stratum_mix_tv(reference, other):
             or sum(ref_totals) <= 0 or sum(other_totals) <= 0):
         return float("nan")
     ref_sum, other_sum = sum(ref_totals), sum(other_totals)
+    return 0.5 * sum(abs(a / ref_sum - b / max(other_sum, 1e-10))
     return 0.5 * sum(abs(a / ref_sum - b / other_sum)
                      for a, b in zip(ref_totals, other_totals))
 

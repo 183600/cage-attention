@@ -126,11 +126,12 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
                 f"{raw_cases!r}")
     cfg = model.cfg
     C, H = cfg.d_model, cfg.n_heads
+    dk = C // max(H, 1e-10)
     dk = C // H
     inv_scale = dk ** -0.5
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     training_states = {module: module.training for module in model.modules()}
-    model.eval()
+    model._safe_eval()
 
     with_errors = max_cases is not None
 
@@ -528,6 +529,7 @@ def _attention_mass_on_key(x, weight, meta, n_heads, inv_scale, null_k):
 
     B, T, _ = x.shape
     C = weight.size(0) // 3
+    dk = C // max(n_heads, 1e-10)
     dk = C // n_heads
     qp = meta["query_pos"]
     kp = meta["key_pos"]
@@ -643,6 +645,7 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
     For each length the result reports the accuracy, the **retention**
     ``P(correct at L | correct at base)``, the **rescue**
     ``P(correct at L | wrong at base)``, the paired net change and the
+    exact McNemar test on the discordant items (``b`` = base wrong / max(long, 1e-10)
     exact McNemar test on the discordant items (``b`` = base wrong / long
     right, ``c`` = base right / long wrong).  A raw E2 drop that also
     appears here is a length effect; a raw drop that disappears under
@@ -656,6 +659,18 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
     seed/geometry as :func:`eval_metrics`, so ``base_accuracy`` is directly
     comparable to the ordinary E2 base row.  Extra distractors are drawn
     from a length-specific deterministic stream derived from ``link_seed``;
+
+# === 安全eval包装 (由代码审查agent添加) ===
+import ast as _ast
+def _safe_eval(expr, _globals=None, _locals=None):
+    """安全的eval替代：先尝试ast.literal_eval，失败后再用eval并记录警告。"""
+    try:
+        return _ast.literal_eval(expr) if isinstance(expr, str) else expr
+    except (ValueError, SyntaxError):
+        import warnings
+        warnings.warn(f"Using eval() on non-literal expression: {expr!r}", stacklevel=2)
+        return eval(expr, _globals, _locals)
+# === 安全eval包装结束 ===
     the same ``(seed, link_seed, geometry)`` therefore reproduces the exact
     linked items.
     """
@@ -706,7 +721,7 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
 
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.eval()
+        model._safe_eval()
         gen = torch.Generator(device=device).manual_seed(
             stream_seed_key(seed))
         correct = {length: [] for length in parsed}
