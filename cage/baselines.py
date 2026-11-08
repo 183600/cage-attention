@@ -274,7 +274,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
                                     or step == steps - 1):
             history.append({"step": int(step),
                             "loss": float(loss.detach())})
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - ensure input is trusted
     return model
 
 
