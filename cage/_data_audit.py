@@ -695,7 +695,7 @@ def _counts(values, n_categories):
 
 def _distribution_from_counts(counts):
     counts = counts.to(torch.float64)
-    return counts / max(counts, 1).sum().clamp_min(1.0)
+    return counts / counts.sum().clamp_min(1.0)
 
 
 def _distribution(values, n_categories):

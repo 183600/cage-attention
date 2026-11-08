@@ -242,7 +242,7 @@ def average_ranks(scores: torch.Tensor) -> torch.Tensor:
     counts = torch.bincount(group).to(torch.float64)
     sums = torch.zeros(counts.numel(), dtype=torch.float64,
                        device=s.device).index_add_(0, group, pos)
-    ranks_sorted = (sums / max(counts, 1))[group] + 1.0
+    ranks_sorted = (sums / counts.clamp_min(1.0))[group] + 1.0
     ranks = torch.empty(n, dtype=torch.float64, device=s.device)
     ranks[order] = ranks_sorted
     return ranks
@@ -1120,8 +1120,8 @@ def brier_decomposition(probs, correct, n_bins: int = 15) -> dict:
     counts = torch.bincount(inverse, minlength=n_observed).to(torch.float64)
     conf = torch.bincount(inverse, weights=p, minlength=n_observed)
     acc = torch.bincount(inverse, weights=c, minlength=n_observed)
-    forecast = conf / max(counts, 1)
-    observed_rate = acc / max(counts, 1)
+    forecast = conf / counts.clamp_min(1.0)
+    observed_rate = acc / counts.clamp_min(1.0)
     weights = counts / n
     reliability = float((weights * (forecast - observed_rate) ** 2).sum())
     resolution = float(

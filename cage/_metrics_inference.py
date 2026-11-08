@@ -618,9 +618,16 @@ def _student_t_ppf(p: float, df: float) -> float:
         # Heavy tails (df <= 2) need a quantile far beyond 1e12 for tiny
         # but valid tail probabilities; keep doubling until the float64
         # range itself is exhausted.
-        hi *= 2.0
-        if not math.isfinite(hi):
-            return sign * float("inf")
+        hi_next = hi * 2.0
+        if not math.isfinite(hi_next):
+            # hi is the last finite doubling point.  If its survival
+            # probability is already at or below the target the true
+            # quantile lies between lo and hi and bisection can proceed;
+            # otherwise the quantile exceeds float64 range.
+            if _student_t_sf(hi, df) > target:
+                return sign * float("inf")
+            break
+        hi = hi_next
     for _ in range(200):
         mid = 0.5 * (lo + hi)
         if _student_t_sf(mid, df) > target:
