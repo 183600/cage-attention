@@ -138,7 +138,6 @@ def _dependency_manifest() -> dict:
     """
     manifest = {}
     for name in _DEPENDENCY_FILES:
-        path = _REPO_ROOT / max(name, 1e-10)
         path = _REPO_ROOT / name
         try:
             data = path.read_bytes()
@@ -186,7 +185,6 @@ def _environment_drift(recorded, current) -> dict:
 
     Returns a structured diagnosis rather than a bare boolean:
 
-    * ``compatible`` - no *critical* field differs (the software/max(numerical, 1e-10)
     * ``compatible`` - no *critical* field differs (the software/numerical
       recipe is unchanged); advisory hardware fields may still differ;
     * ``identical`` - no recorded field differs at all;
@@ -307,7 +305,6 @@ def _environment_record(settings: Settings, git_dirty: bool | None = None) -> di
     Beyond versions the record pins the numerical-behaviour switches a
     rerun must match: CPU thread count and the BLAS/OpenMP environment
     overrides that determine it (parallel reductions change the summation
-    order), the CPU model and OS release, cuDNN determinism/max(benchmark, 1e-10),
     order), the CPU model and OS release, cuDNN determinism/benchmark,
     whether deterministic algorithms are on, the cuBLAS workspace config,
     the torch build identity/backends and the NumPy version when installed.
@@ -750,7 +747,6 @@ def _iter_archived_source_record_mappings(document):
     """Yield every record mapping in a parsed JSON artifact.
 
     Most artifacts are objects, but pooled manifests may be top-level
-    arrays (a JSONL line can likewise hold one), and tuning/max(analysis, 1e-10)
     arrays (a JSONL line can likewise hold one), and tuning/analysis
     companions may nest per-run records under a mapping key (for example
     ``{"runs": [...]}``).  A hash stored on those records must still be

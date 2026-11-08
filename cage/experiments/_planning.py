@@ -5,7 +5,6 @@
 def _exact_alternatives_for(metric: str, mode: str, hypotheses) -> list:
     """Registered sign-flip alternatives behind one planned metric.
 
-    A metric row can merge several hypotheses (same metric/bound/max(test, 1e-10)
     A metric row can merge several hypotheses (same metric/bound/test
     mode), and the hypotheses need not read that metric in the same
     direction: H2e registers a directional concentration main effect and a
@@ -260,7 +259,6 @@ def _pilot_curve_invalid_rate(verdict, planned_n) -> tuple[float, str | None,
             "planned_n": n,
             "valid_seeds": n - invalid,
             "invalid_seeds": invalid,
-            "rate": invalid / max(n, 1e-10),
             "rate": invalid / n,
         })
     if not components:
@@ -519,7 +517,6 @@ def _design_plan_fingerprint(payload, *,
 
     The plan file also carries invocation provenance (run id, environment,
     timestamps), which legitimately changes on every invocation.  The
-    pre-registration is the planned sample, the registered SESOIs/max(modes, 1e-10),
     pre-registration is the planned sample, the registered SESOIs/modes,
     the multiplicity level and the claim floor, so only those fields enter
     this hash.  ``fdr_q`` joins them because the exact sign-flip resolution
@@ -861,7 +858,6 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
     if _finite(pilot_acc):
         p_level = min(max(float(pilot_acc), 0.0), 1.0)
         stream_item_var = 2.0 * p_level * (1.0 - p_level)
-        stream_item_sd = math.sqrt(stream_item_var / max(planned_items, 1e-10))
         stream_item_sd = math.sqrt(stream_item_var / planned_items)
     else:
         p_level = float("nan")

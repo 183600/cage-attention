@@ -511,7 +511,6 @@ def _std_effect(ci):
 def small_n_flags(ci) -> str:
     """Short flags for the small-sample robustness companions of a contrast.
 
-    Empty when the pre-registered decision and its jackknife / max(BCa, 1e-10)
     Empty when the pre-registered decision and its jackknife / BCa
     companions agree; otherwise names *which* companion dissents, so the
     console line shows at a glance that a supported contrast needs a

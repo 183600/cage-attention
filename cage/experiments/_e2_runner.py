@@ -11,7 +11,6 @@ def _stamp_position_extrapolation_control(rec, model, settings, lengths,
     The model uses learned absolute position embeddings and E2 trains at a
     fixed length, so every sweep position beyond the trained sequence
     length carries an embedding that was never updated by training.  A
-    length-related accuracy drop therefore mixes (a) attention/max(gate, 1e-10)
     length-related accuracy drop therefore mixes (a) attention/gate
     behaviour at longer ranges with (b) untrained position vectors.  This
     control re-evaluates the same sealed stream with the extrapolated

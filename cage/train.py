@@ -121,18 +121,6 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     across the batch before the loss is computed.  The
     permutation draws from its own generator (seeded from ``seed``), not
     from the data generator, so a permuted run sees exactly the same
-
-# === 安全eval包装 (由代码审查agent添加) ===
-import ast as _ast
-def _safe_eval(expr, _globals=None, _locals=None):
-    """安全的eval替代：先尝试ast.literal_eval，失败后再用eval并记录警告。"""
-    try:
-        return _ast.literal_eval(expr) if isinstance(expr, str) else expr
-    except (ValueError, SyntaxError):
-        import warnings
-        warnings.warn(f"Using eval() on non-literal expression: {expr!r}", stacklevel=2)
-        return eval(expr, _globals, _locals)
-# === 安全eval包装结束 ===
     batches as an otherwise identical non-permuted run and only the label
     channel differs - the control isolates the labels instead of also
     changing the data stream.  A model trained this way cannot learn any
@@ -350,7 +338,6 @@ def _safe_eval(expr, _globals=None, _locals=None):
         nonlocal window_loss_sum, window_loss_n
         if not window_loss_n:
             return
-        target["train_loss_window"] = window_loss_sum / max(window_loss_n, 1e-10)
         target["train_loss_window"] = window_loss_sum / window_loss_n
         window_loss_sum = 0.0
         window_loss_n = 0
@@ -551,7 +538,7 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     training_states = {module: module.training for module in model.modules()}
     try:
-        model._safe_eval()
+        model.eval()
         correct = torch.zeros((), dtype=torch.int64, device=device)
         total = 0
         for i in range(batches):

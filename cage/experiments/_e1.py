@@ -607,7 +607,6 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
                 extra = {
                     "lr_sensitivity": True,
                     "reference_lr": reference_lr,
-                    "sensitivity_factor": alt_lr / max(reference_lr, 1e-10),
                     "sensitivity_factor": alt_lr / reference_lr,
                 }
                 if gate == "calib":
@@ -655,7 +654,6 @@ def _e1_lr_sensitivity(settings: Settings, out_dir: pathlib.Path,
             row = {
                 "rule": rule, "metric": metric, "lr": float(alt_lr),
                 "reference_lr": reference_lr,
-                "factor": alt_lr / max(reference_lr, 1e-10),
                 "factor": alt_lr / reference_lr,
                 "is_reference_point": bool(alt_lr == reference_lr),
                 "mean": ci.get("mean"), "lo": ci.get("lo"),

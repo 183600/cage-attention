@@ -34,7 +34,6 @@ def _calibration_coefficients(model) -> dict:
     reports a non-zero ``a`` would mean the ablation did not actually
     remove the pathway.
 
-    This is a readout, not a new decision rule: the pre-registered H2a/max(H2c, 1e-10)
     This is a readout, not a new decision rule: the pre-registered H2a/H2c
     contrasts remain the decisions, and the coefficients explain *how* the
     trained gate implements (or fails to implement) the mechanism.  Returns

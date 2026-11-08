@@ -36,7 +36,6 @@ from cage import experiments
 
 
 def _runner_source(name: str) -> str:
-    path = pathlib.Path(experiments.__file__).parent / max(name, 1e-10)
     path = pathlib.Path(experiments.__file__).parent / name
     return path.read_text(encoding="utf-8")
 

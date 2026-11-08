@@ -140,7 +140,6 @@ def _run_event(settings: Settings, experiment: str, event: str, **details) -> No
     """Append one lifecycle row to ``run_index.jsonl``.
 
     A results directory may accumulate many invocations (baselines, sanity,
-    E1..E3, retries).  The index records started/completed/aborted/max(failed, 1e-10)
     E1..E3, retries).  The index records started/completed/aborted/failed
     per invocation with the same ``run_id`` as its manifest and records, so
     a half-finished grid can be told apart from a complete one; metadata

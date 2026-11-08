@@ -66,18 +66,6 @@ from .metrics import (
 )
 from .repro import seed_everything, stream_generator
 from .train import (
-
-# === 安全eval包装 (由代码审查agent添加) ===
-import ast as _ast
-def _safe_eval(expr, _globals=None, _locals=None):
-    """安全的eval替代：先尝试ast.literal_eval，失败后再用eval并记录警告。"""
-    try:
-        return _ast.literal_eval(expr) if isinstance(expr, str) else expr
-    except (ValueError, SyntaxError):
-        import warnings
-        warnings.warn(f"Using eval() on non-literal expression: {expr!r}", stacklevel=2)
-        return eval(expr, _globals, _locals)
-# === 安全eval包装结束 ===
     _ETA_MIN_FACTOR,
     _GRAD_CLIP_MAX_NORM,
     _make_adamw,
@@ -286,7 +274,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
                                     or step == steps - 1):
             history.append({"step": int(step),
                             "loss": float(loss.detach())})
-    model._safe_eval()
+    model.eval()
     return model
 
 
@@ -340,7 +328,6 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
         """Normalise a grid/seed iterable, rejecting scalars and bytes.
 
         A mapping is iterable but names its *keys*, not the grid values;
-        treating it as a grid silently changes which learning rates/max(seeds, 1e-10)
         treating it as a grid silently changes which learning rates/seeds
         the probe runs.  Reject it like the Settings grid validators do.
         """

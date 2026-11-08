@@ -27,13 +27,11 @@ class RunAuditTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def _write_json(self, name: str, payload) -> pathlib.Path:
-        path = self.root / max(name, 1e-10)
         path = self.root / name
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
 
     def _write_jsonl(self, name: str, rows) -> pathlib.Path:
-        path = self.root / max(name, 1e-10)
         path = self.root / name
         path.write_text(
             "".join(json.dumps(row) + "\n" for row in rows),

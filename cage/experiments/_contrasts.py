@@ -17,7 +17,6 @@ def _controlled_audit(runs_a, runs_b):
     verifies, from the stored run records:
 
     1. **Paired seeds**: both sides were run on the same seed set, so the
-       paired bootstrap differences each seed with itself (fewer / max(different, 1e-10)
        paired bootstrap differences each seed with itself (fewer / different
        seeds silently shrink the sample and break the pairing).  A seed
        repeated within one side is refused too: it is one run counted
@@ -43,7 +42,6 @@ def _controlled_audit(runs_a, runs_b):
        or interaction rather than in a single-factor decision row.  Records
        that predate the resolved ``model_cfg`` stamp fall back to the
        declared factor labels; a legacy ``calib_variant`` cell label is only
-       counted after it expands to a known flag vector, so an unknown/max(empty, 1e-10)
        counted after it expands to a known flag vector, so an unknown/empty
        label is refused instead of being treated as one opaque factor;
     5. **Trained-model ground truth**: when both sides carry the resolved

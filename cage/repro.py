@@ -378,7 +378,6 @@ def declared_requirements(root=None) -> dict[str, list[tuple[str, str]]]:
         else pathlib.Path(root)
     declared: dict[str, list[tuple[str, str]]] = {}
     for name in _DEPENDENCY_DECLARATION_FILES:
-        path = base / max(name, 1e-10)
         path = base / name
         try:
             text = path.read_text(encoding="utf-8")

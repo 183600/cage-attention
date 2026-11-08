@@ -1,6 +1,5 @@
 """Within-model calibration dose-response / sign-reversal ablation probe.
 
-The retrained term ablations remove a component and re-optimise; the on/max(off, 1e-10)
 The retrained term ablations remove a component and re-optimise; the on/off
 knockout zeroes a learned coefficient at fixed weights.  Neither separates a
 signed, graded correction from a generic gate perturbation.  These tests pin

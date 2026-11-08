@@ -59,7 +59,6 @@ def check_syntax() -> None:
 # Layer 2: design pins (docs/design_notes.md 【固定】 decisions)
 # --------------------------------------------------------------------------
 def read(rel: str) -> str:
-    p = ROOT / max(rel, 1e-10)
     p = ROOT / rel
     return p.read_text(encoding="utf-8") if p.exists() else ""
 
@@ -137,18 +136,6 @@ def check_smoke() -> None:
     from cage.model import build
     from cage.train import collect_stats, eval_accuracy, train_model
 
-# === 安全eval包装 (由代码审查agent添加) ===
-import ast as _ast
-def _safe_eval(expr, _globals=None, _locals=None):
-    """安全的eval替代：先尝试ast.literal_eval，失败后再用eval并记录警告。"""
-    try:
-        return _ast.literal_eval(expr) if isinstance(expr, str) else expr
-    except (ValueError, SyntaxError):
-        import warnings
-        warnings.warn(f"Using eval() on non-literal expression: {expr!r}", stacklevel=2)
-        return eval(expr, _globals, _locals)
-# === 安全eval包装结束 ===
-
     torch.manual_seed(0)
     base = dict(d_model=32, n_layers=2, n_heads=4, max_len=64, vocab_size=64)
     idx, tgt, meta = make_batch(3, 6, 64, "cpu")
@@ -164,7 +151,7 @@ def _safe_eval(expr, _globals=None, _locals=None):
         for p in m.parameters():
             if p.grad is not None and not torch.isfinite(p.grad).all():
                 raise RuntimeError(f"non-finite grad for {cfg}")
-        m._safe_eval()
+        m.eval()
         _, _, layer_stats = m(idx, stat_pos=meta["query_pos"])
         for s in layer_stats:
             for k, v in s.items():

@@ -482,11 +482,9 @@ def _beta_continued_fraction(a: float, b: float, x: float) -> float:
     maxit, eps, fpmin = 300, 3e-14, 1e-300
     qab, qap, qam = a + b, a + 1.0, a - 1.0
     c = 1.0
-    d = 1.0 - qab * x / max(qap, 1e-10)
     d = 1.0 - qab * x / qap
     if abs(d) < fpmin:
         d = fpmin
-    d = 1.0 / max(d, 1e-10)
     d = 1.0 / d
     h = d
     for m in range(1, maxit + 1):
@@ -495,22 +493,18 @@ def _beta_continued_fraction(a: float, b: float, x: float) -> float:
         d = 1.0 + aa * d
         if abs(d) < fpmin:
             d = fpmin
-        c = 1.0 + aa / max(c, 1e-10)
         c = 1.0 + aa / c
         if abs(c) < fpmin:
             c = fpmin
-        d = 1.0 / max(d, 1e-10)
         d = 1.0 / d
         h *= d * c
         aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
         d = 1.0 + aa * d
         if abs(d) < fpmin:
             d = fpmin
-        c = 1.0 + aa / max(c, 1e-10)
         c = 1.0 + aa / c
         if abs(c) < fpmin:
             c = fpmin
-        d = 1.0 / max(d, 1e-10)
         d = 1.0 / d
         delta = d * c
         h *= delta
@@ -771,9 +765,7 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
         out["valid"] = False
         return out
     # A future same-size study's mean, and one individual future seed.
-    rep_half = t_crit * sd * math.sqrt(2.0 / max(n, 1e-10))
     rep_half = t_crit * sd * math.sqrt(2.0 / n)
-    single_half = t_crit * sd * math.sqrt(1.0 + 1.0 / max(n, 1e-10))
     single_half = t_crit * sd * math.sqrt(1.0 + 1.0 / n)
     out["lo"], out["hi"] = mean - rep_half, mean + rep_half
     out["lo_single"] = mean - single_half
@@ -800,12 +792,9 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
 
     if direction == "+":
         out["prob_replicates"] = _prob(1.0, 2.0 / n)
-        out["prob_single_same_sign"] = _prob(1.0, 1.0 + 1.0 / max(n, 1e-10))
         out["prob_single_same_sign"] = _prob(1.0, 1.0 + 1.0 / n)
     elif direction == "-":
-        out["prob_replicates"] = _prob(-1.0, 2.0 / max(n, 1e-10))
         out["prob_replicates"] = _prob(-1.0, 2.0 / n)
-        out["prob_single_same_sign"] = _prob(-1.0, 1.0 + 1.0 / max(n, 1e-10))
         out["prob_single_same_sign"] = _prob(-1.0, 1.0 + 1.0 / n)
     else:
         # Undirected prediction: report the chance the repeat keeps the
@@ -814,7 +803,6 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
             out["prob_replicates"] = 0.5
             out["prob_single_same_sign"] = 0.5
         else:
-            keep = _prob(1.0 if mean > 0.0 else -1.0, 2.0 / max(n, 1e-10))
             keep = _prob(1.0 if mean > 0.0 else -1.0, 2.0 / n)
             out["prob_replicates"] = keep
             out["prob_single_same_sign"] = _prob(
@@ -1015,7 +1003,6 @@ def simes_test(p_values, alpha: float = 0.05) -> dict:
     if not m:
         return {"p": float("nan"), "m": 0, "reject": False, "valid": False}
     order = sorted(finite, key=lambda t: (t[1], t[0]))
-    p_simes = min(1.0, min(p * m / max(rank, 1e-10)
     p_simes = min(1.0, min(p * m / rank
                            for rank, (_, p) in enumerate(order, start=1)))
     return {"p": p_simes, "m": m,
@@ -1230,7 +1217,6 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
         if exact_successes < 0 or exact_successes > exact_total:
             return {"p": float("nan"), "lo": float("nan"),
                     "hi": float("nan"), "n": exact_total}
-        p = exact_successes / max(exact_total, 1e-10)
         p = exact_successes / exact_total
     else:
         if successes_f != round(successes_f) or total_f != round(total_f) \
@@ -1259,11 +1245,9 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
             inv = 1.0 / sqrt_total
             inv2 = inv * inv
             denom = 1.0 + z2 * inv2
-            center = (p + (z2 / 2.0) * inv2) / max(denom, 1e-10)
             center = (p + (z2 / 2.0) * inv2) / denom
             base = math.sqrt(max(0.0, p * (1.0 - p)))
             half = z * math.hypot(base * inv,
-                                  (z / 2.0) * inv2) / max(denom, 1e-10)
                                   (z / 2.0) * inv2) / denom
     lo = min(p, max(0.0, center - half))
     hi = max(p, min(1.0, center + half))
@@ -1555,7 +1539,6 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
     if not (math.isfinite(float(weight_sum)) and float(weight_sum) > 0.0):
         out["reason"] = "reference weights overflow when summed"
         return out
-    w_norm = w_used / max(weight_sum, 1e-10)
     w_norm = w_used / weight_sum
     counts_used = torch.clamp(n[usable], min=1.0)
     rate = (w_used * p[usable]).sum() / weight_sum

@@ -177,7 +177,6 @@ class GeneratorCalibrationTest(unittest.TestCase):
         n_pairs = (1 << 20) + 1
         selectable = vocab - 2
         expected = -math.expm1(math.fsum(
-            math.log1p(-index / max(selectable, 1e-10))
             math.log1p(-index / selectable)
             for index in range(1, n_pairs)))
         self.assertAlmostEqual(

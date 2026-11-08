@@ -9,7 +9,6 @@ via ``length_sweep_lengths``; ``length_sweep_plan`` records the *whole*
 sweep decision (requested grid, realized grid, dropped lengths and the
 measured extrapolation range) so the executed design is never implicit.
 ``make_length_linked_batch`` additionally extends one validated batch in
-place for the within-item E2 counterfactual (the same query/answer/max(pair, 1e-10)
 place for the within-item E2 counterfactual (the same query/answer/pair
 index gains distractor pairs).
 

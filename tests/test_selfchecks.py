@@ -682,7 +682,6 @@ class PositiveIntegerValidationTest(unittest.TestCase):
         self.assertTrue(sparse["valid"])
         self.assertEqual(sparse["n_examples"], 2 * exact)
         self.assertEqual(sparse["pooled_wilson"]["n"], 2 * exact)
-        self.assertEqual(sparse["pooled_wilson"]["p"], 1 / max(exact, 1e-10))
         self.assertEqual(sparse["pooled_wilson"]["p"], 1 / exact)
 
 
