@@ -24,7 +24,7 @@ import pathlib
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -371,7 +371,7 @@ class ExperimentRunner:
         
         report = {
             "metadata": {
-                "timestamp_utc": datetime.utcnow().isoformat() + "Z",
+                "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + "Z",
                 "duration_seconds": round(time.time() - self.start_time, 2),
                 "experiment": (self.replayed_experiment
                                if self.replayed_experiment is not None
@@ -485,7 +485,7 @@ class ExperimentRunner:
         
         # Create replication manifest
         replication_manifest = {
-            "created_utc": datetime.utcnow().isoformat() + "Z",
+            "created_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + "Z",
             "source_git_sha": self._get_git_sha(),
             "source_tree_sha256": self._get_source_tree_sha256(),
             "experiments": [exp for exp in ["e1", "e2", "e3", "sanity"] 

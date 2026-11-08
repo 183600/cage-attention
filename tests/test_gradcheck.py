@@ -118,7 +118,7 @@ class RowEntropyGradcheckTest(unittest.TestCase):
         scores = torch.randn(4, 3, 6, dtype=torch.float64,
                              generator=gen) * 0.5
         p = torch.softmax(scores, dim=-1).requires_grad_(True)
-        self.assertGreater(float(p.min()), 1e-3)
+        self.assertGreater(float(p.detach().min()), 1e-3)
         ent = _RowEntropy.apply(p, _EPS)
         ref = -(p.detach() * p.detach().clamp_min(_EPS).log()).sum(-1)
         self.assertTrue(torch.allclose(ent, ref, atol=1e-12, rtol=1e-12))
