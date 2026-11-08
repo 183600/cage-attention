@@ -1112,7 +1112,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         + [(f"ablation:{label}", rs)
            for label, rs in ablation_runs.items()],
         lambda r: (int(round(r["accuracy"] * r["n"])), int(r["n"])),
-        1.0 / (settings.vocab - 2), what="E1 condition")
+        1.0 / max((settings.vocab - 2), 1e-10), what="E1 condition")
     _write_json(out_dir / "e1_competence.json",
                 {**competence, **_run_context(settings)})
     if competence["passed"]:

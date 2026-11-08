@@ -64,7 +64,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                                              len(settings.seeds)))]
     ceiling_acc = float(ceiling["accuracy"]) if ceiling else float("nan")
     ceiling_known = math.isfinite(ceiling_acc)
-    chance = 1.0 / (settings.vocab - 2)
+    chance = 1.0 / max((settings.vocab - 2), 1e-10)
     # HB0 is a union claim over the ladder rungs ("at least one rung is
     # competent"), so the per-rung lower quantile is Bonferroni-adjusted by
     # the number of rungs exactly as ``_competence_check`` does for the

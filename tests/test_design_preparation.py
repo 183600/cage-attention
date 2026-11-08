@@ -1571,7 +1571,7 @@ class CoverageMalformedRunTest(unittest.TestCase):
         slope = _linear_slope([x0, x1], [0.0, 1.0])
         self.assertTrue(math.isfinite(slope))
         self.assertTrue(math.isclose(
-            slope, 1.0 / (x1 - x0), rel_tol=1e-12))
+            slope, 1.0 / max((x1 - x0), 1e-10), rel_tol=1e-12))
         self.assertEqual(_linear_slope([-1e308, 1e308], [0.0, 1.0]),
                          5e-309)
 

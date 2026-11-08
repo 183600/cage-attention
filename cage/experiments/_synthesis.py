@@ -1339,7 +1339,7 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
 
     - ``margin`` = best - runner-up on the selection metric;
     - ``margin_se`` an upper-bound gap standard error,
-      ``sqrt(std_best^2 / n_best + std_second^2 / n_second)``.  The grid
+      ``sqrt(std_best^2 / max(n_best, 1) + std2 / max(n_second, 1)n_second)``.  The grid
       rows come from the *same* seeds (paired), so the conservative
       unpaired combination is used deliberately: it cannot claim more
       resolution than a paired test would;

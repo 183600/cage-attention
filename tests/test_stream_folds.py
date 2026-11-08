@@ -362,7 +362,7 @@ class PairedStreamDigestTest(unittest.TestCase):
         b = [[0] * n_items for _ in range(4)]
         by_a, by_b = self._records(a, b)
         for seed in range(4):
-            by_a[seed]["accuracy"] = 1.0 / n_items
+            by_a[seed]["accuracy"] = 1.0 / max(n_items, 1)
             by_b[seed]["accuracy"] = 0.0
         paired = _paired_diff(list(by_a.values()), list(by_b.values()),
                               "accuracy")

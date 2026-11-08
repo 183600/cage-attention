@@ -141,7 +141,7 @@ def _run_order_audit(order, cells, seeds, randomized=True):
     genuinely random schedule can put one arm at an extreme in every block
     by chance, so the extreme-position warning is only raised when the
     family-wise probability under random complete blocks
-    (``n_cells * (1/n_cells)**n_blocks``) is below 0.05; a deliberately
+    (``n_cells * (1 / max(n_cells, 1))**n_blocks``) is below 0.05; a deliberately
     unshuffled schedule is always flagged.  The audit is stored next to
     the run records so the realised order can be checked without rerunning
     the grid.
@@ -850,7 +850,7 @@ def _position_effect_audit(runs, cell_of, metrics, *,
         for positions, _ in blocks:
             n_assignments *= math.factorial(len(positions))
         try:
-            exact_floor = 2.0 / n_assignments
+            exact_floor = 2.0 / max(n_assignments, 1)
         except OverflowError:
             exact_floor = 0.0
         resolution = min(1.0, max(exact_floor, 1.0 / (valid + 1.0)))
@@ -1007,7 +1007,7 @@ def _mean_std(values):
         # sum (e.g. two 1e308 observations whose true mean is 1e308).  Scale
         # each term before summing; this cannot overflow.
         try:
-            mean = math.fsum(v / len(vals) for v in vals)
+            mean = math.fsum(v / max(len(vals), 1) for v in vals)
         except (OverflowError, ValueError):
             mean = float("nan")
     if len(vals) > 1:

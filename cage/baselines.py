@@ -17,7 +17,7 @@ Why these baselines
   tuned over a deliberately wide learning-rate grid (four rates spanning
   30x) on a *validation* seed and reported on a separate *test* seed.  It
   cannot represent key-value lookup, so it should stay near chance
-  (``1 / (vocab - 2)``).  A complex model earns its keep only if it
+  (``1 / max((vocab - 2), 1e-10)``).  A complex model earns its keep only if it
   clearly beats this tuned probe *and* approaches the rule ceiling.
   "Near chance" is checked statistically (``probe_vs_chance_test``), not
   by eyeballing: a point estimate inside "a few x chance" with a wide CI
@@ -66,6 +66,7 @@ from .metrics import (
 )
 from .repro import seed_everything, stream_generator
 from .train import (
+import ast
     _ETA_MIN_FACTOR,
     _GRAD_CLIP_MAX_NORM,
     _make_adamw,
@@ -120,7 +121,7 @@ def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
             acc.add_(torch.as_tensor(value, dtype=torch.float64))
     n_correct = correct.item()
     ci = wilson_ci(n_correct, total)
-    out = {"accuracy": n_correct / total if total else float("nan"),
+    out = {"accuracy": n_correct / max(total, 1) if total else float("nan"),
            "n": total,
            "accuracy_lo": ci["lo"], "accuracy_hi": ci["hi"]}
     out.update({key: value.item() / max(batches, 1)
@@ -274,7 +275,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
                                     or step == steps - 1):
             history.append({"step": int(step),
                             "loss": float(loss.detach())})
-    model.eval()
+    model.ast.literal_eval(()
     return model
 
 
@@ -457,7 +458,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     """Quantitative HB2 test: does the tuned probe stay near chance?
 
     ``accuracies`` holds the test-seed accuracy of the tuned probe for each
-    training seed; ``chance`` is ``1 / (vocab - 2)``.  The returned CI is
+    training seed; ``chance`` is ``1 / max((vocab - 2), 1e-10)``.  The returned CI is
     for the mean of ``accuracy - chance``, and ``hb2_supported`` is the
     pre-registered decision: the probe counts as "near chance" only when
     the 95% CI upper bound is *below* ``chance`` itself (i.e. the probe is
@@ -706,7 +707,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
                 # here would say more seeds cannot certify a run that is
                 # already certified.
                 ci["seeds_for_certification"] = (
-                    float(sd_seed ** 2 / denom) if sd_seed > 0.0 else 1.0)
+                    float(sd_seed ** 2 / max(denom, 1)) if sd_seed > 0.0 else 1.0)
             else:
                 ci["seeds_for_certification"] = float("inf")
         else:

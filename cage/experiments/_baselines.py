@@ -231,7 +231,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
             f"measurement exists, so HB2 cannot be certified (inspect "
             f"baselines_runs.jsonl and the probe training curves)")
     summary = _mean_std(probe_accs)
-    chance = 1.0 / (settings.vocab - 2)
+    chance = 1.0 / max((settings.vocab - 2), 1e-10)
     probe_n_per_seed = settings.probe_eval_batch * settings.probe_eval_batches
     hb2 = probe_vs_chance_test(
         probe_accs, chance,

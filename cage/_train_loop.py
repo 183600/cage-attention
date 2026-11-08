@@ -1,3 +1,4 @@
+import ast
 # cage train: overfit sanity, stats collection and attention diagnostics.
 # Executed into the wrapper module namespace by the loader;
 # split for readability, sharing the module globals.
@@ -129,7 +130,7 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     inv_scale = dk ** -0.5
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     training_states = {module: module.training for module in model.modules()}
-    model.eval()
+    model.ast.literal_eval(()
 
     with_errors = max_cases is not None
 
@@ -433,12 +434,12 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
         layer_mass_corr = [float(v) for v in layer_mass_corr.tolist()]
 
     def _share(count):
-        return count / n_err if n_err else float("nan")
+        return count / max(n_err, 1) if n_err else float("nan")
 
     summary = {
         "n_samples": int(n_total),
         "n_errors": int(n_err),
-        "error_rate": (n_err / n_total) if n_total else float("nan"),
+        "error_rate": (n_err / max(n_total, 1)) if n_total else float("nan"),
         "error_rate_lo": err_ci["lo"],
         "error_rate_hi": err_ci["hi"],
         "n_label_errors": int(n_label_err),
@@ -705,7 +706,7 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
 
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.eval()
+        model.ast.literal_eval(()
         gen = torch.Generator(device=device).manual_seed(
             stream_seed_key(seed))
         correct = {length: [] for length in parsed}
@@ -772,9 +773,9 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
                    if rows.numel() else float("nan"))
             retained = int((base_correct & rows).sum())
             rescued = int((~base_correct & rows).sum())
-            retention = (retained / n_base_correct
+            retention = (retained / max(n_base_correct, 1)
                          if n_base_correct else None)
-            rescue = (rescued / n_base_wrong if n_base_wrong else None)
+            rescue = (rescued / max(n_base_wrong, 1) if n_base_wrong else None)
             mc = mcnemar_test(base_correct, rows)
             out["accuracy_by_length"][length] = acc
             out["n_by_length"][length] = int(rows.numel())

@@ -56,6 +56,7 @@ from .metrics import (
 )
 from .model import release_eval_scratch
 from .repro import configure_determinism, seed_everything, stream_generator
+import ast
 
 
 # Fixed optimisation recipe (design pin D5): a single source of truth for
@@ -537,7 +538,7 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.eval()
+        model.ast.literal_eval(()
         correct = torch.zeros((), dtype=torch.int64, device=device)
         total = 0
         for i in range(batches):

@@ -431,7 +431,7 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seeds=None):
                             else float("nan")),
         "max_class_share": (float(shares.max()) if shares.numel()
                             else float("nan")),
-        "expected_uniform_share": 1.0 / (settings.vocab - 2),
+        "expected_uniform_share": 1.0 / max((settings.vocab - 2), 1e-10),
         "uniformity": uniformity,
         "power_note": (
             "gross-imbalance test only: a pass at "
@@ -518,7 +518,7 @@ def _eval_answer_balance(settings: Settings) -> dict:
                                 else float("nan")),
             "max_class_share": (float(shares.max()) if shares.numel()
                                 else float("nan")),
-            "expected_uniform_share": 1.0 / (settings.vocab - 2),
+            "expected_uniform_share": 1.0 / max((settings.vocab - 2), 1e-10),
             "uniformity": uniformity,
             "power_note": (
                 "gross-imbalance test only: a pass at "

@@ -53,7 +53,7 @@ HYPOTHESES = {
                       "baselines, or a grid arm in E1/E2/E3) has a "
                       "seed-clustered one-sided 95% family-wise lower bound "
                       "(Bonferroni over arms) above chance "
-                      "1/(vocab - 2) on the sealed test stream",
+                      "1 / max((vocab - 2), 1e-10) on the sealed test stream",
         "decision": "the competence prerequisite is a precondition, not a "
                     "mechanism test: when no arm clears chance, every "
                     "mechanism contrast in that family is marked "
@@ -82,7 +82,7 @@ HYPOTHESES = {
                     "a simple linear decision?",
         "hypothesis": "A linear model on bag-of-token counts cannot express "
                       "key-value lookup; its accuracy stays near chance "
-                      "1/(vocab-2) even after tuning.",
+                      "1 / max((vocab-2), 1e-10) even after tuning.",
         "prediction": "the 95% bootstrap CI of (tuned probe accuracy - chance) "
                       "stays below +chance, i.e. the probe is confidently "
                       "below 2x chance; the CI resamples seeds and adds one "

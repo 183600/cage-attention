@@ -221,7 +221,7 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
                 (key_seen - pair_seen) / n if n else float("nan")),
             "pair_seen_unique": int(pair_seen_unique),
             "pair_seen_unique_rate": (
-                pair_seen_unique / len(unique) if unique else float("nan")),
+                pair_seen_unique / max(len(unique), 1) if unique else float("nan")),
         }
     train_summary = {
         "n_items": int(sum(len(associations[name]) for name in names
@@ -563,8 +563,8 @@ def difficulty_strata(idx, answer, n_pairs,
                  + features["value_repeats"] * 2
                  + features["naive_confusable"]).to(torch.long)
     stratum = key_bin * 8 + ambiguity
-    bounds = [[math.ceil(bin_idx * n_pairs / n_key_bins),
-               math.ceil((bin_idx + 1) * n_pairs / n_key_bins)]
+    bounds = [[math.ceil(bin_idx * n_pairs / max(n_key_bins, 1)),
+               math.ceil((bin_idx + 1) * n_pairs / max(n_key_bins, 1))]
               for bin_idx in range(n_key_bins)]
     return {
         "stratum": stratum,
@@ -695,7 +695,7 @@ def _counts(values, n_categories):
 
 def _distribution_from_counts(counts):
     counts = counts.to(torch.float64)
-    return counts / counts.sum().clamp_min(1.0)
+    return counts / max(counts, 1).sum().clamp_min(1.0)
 
 
 def _distribution(values, n_categories):
@@ -1463,7 +1463,7 @@ def _expected_answer_as_key_rate(n_pairs, vocab) -> float:
     are a uniformly random ``n_pairs``-subset of the ``vocab - 2`` selectable
     ids and values are i.i.d. uniform and independent of the keys, so the
     answer is uniform on the selectable ids and the event has probability
-    ``n_pairs / (vocab - 2)``.  This is the DGP-implied companion to the
+    ``n_pairs / max((vocab - 2), 1e-10)``.  This is the DGP-implied companion to the
     observed ``answer_as_key_rate``: a generator that makes the answer a
     copy of its query key, or that couples values to keys, changes this
     rate while leaving the marginal token counts uniform.

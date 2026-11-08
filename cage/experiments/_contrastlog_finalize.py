@@ -1178,7 +1178,7 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
               f"independence/PRDS premise; report these as "
               f"multiplicity-model sensitive, not as robust claims")
     if selected:
-        fcr_level = (1.0 - q * n_selected / n_tests
+        fcr_level = (1.0 - q * n_selected / max(n_tests, 1)
                      if n_tests else float("nan"))
         print(f"[{self.tag}] selection-adjusted (FCR) companion: "
               f"{n_selected}/{n_tests} BH-selected contrast(s); the "

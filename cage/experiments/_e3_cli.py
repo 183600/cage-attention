@@ -423,7 +423,7 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                 [(ref["name"], _curve_valid_runs(ref["runs"]))],
                 lambda r: (int(round(r["accuracy"] * r["eval_n"])),
                            int(r["eval_n"])),
-                1.0 / (settings.vocab - 2),
+                1.0 / max((settings.vocab - 2), 1e-10),
                 what="capacity-matched reference")
             reference_competent = bool(reference_competence["passed"])
             target_competence = _competence_check(
@@ -431,7 +431,7 @@ def _e3_capacity_benchmark(settings: Settings, out_dir: pathlib.Path,
                   _curve_valid_runs(target_runs))],
                 lambda r: (int(round(r["accuracy"] * r["eval_n"])),
                            int(r["eval_n"])),
-                1.0 / (settings.vocab - 2),
+                1.0 / max((settings.vocab - 2), 1e-10),
                 what="capacity-benchmark target")
             target_competent = bool(target_competence["passed"])
             cell = {
@@ -819,7 +819,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
          for (g, n, ls), rs in index.items()],
         lambda r: (int(round(r["accuracy"] * r["eval_n"])),
                    int(r["eval_n"])),
-        1.0 / (settings.vocab - 2), what="E3 grid cell")
+        1.0 / max((settings.vocab - 2), 1e-10), what="E3 grid cell")
     _write_json(out_dir / "e3_competence.json",
                 {**competence, **_run_context(settings)})
     if competence["passed"]:

@@ -1,3 +1,4 @@
+import ast
 # cage train: evaluation, counterfactual/association and error-detection helpers.
 # Executed into the wrapper module namespace by the loader;
 # split for readability, sharing the module globals.
@@ -180,7 +181,7 @@ def _association_exposure_dose_summary(totals) -> dict:
         "bins": rows,
         "n_items": int(n_items),
         "n_seen": int(seen_n),
-        "seen_rate": seen_n / n_items if n_items else float("nan"),
+        "seen_rate": seen_n / max(n_items, 1) if n_items else float("nan"),
         "seen_accuracy": seen_accuracy,
         "seen_minus_unseen_accuracy": gap,
         "mean_train_count": (
@@ -277,7 +278,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
                 "describe different exact association sets")
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.eval()
+        model.ast.literal_eval(()
         logits_all, tgt_all, strata_all = [], [], []
         digest_batches = []
         cf_totals = None
@@ -434,7 +435,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
                 # ``None`` (not NaN) for an unobserved stratum: records are
                 # compared for exact reproducibility, and NaN != NaN would
                 # make an otherwise identical evaluation look different.
-                "accuracy": (k_s / n_s) if n_s else None,
+                "accuracy": (k_s / max(n_s, 1)) if n_s else None,
             })
         observed = sum(1 for row in strata_rows if row["n"] > 0)
         out["difficulty"] = {
@@ -445,7 +446,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
             "n_realizable_strata": int(n_realizable_strata),
             "observed_strata": int(observed),
             "coverage_of_possible": (
-                observed / n_realizable_strata
+                observed / max(n_realizable_strata, 1)
                 if n_realizable_strata else float("nan")),
             "strata": strata_rows,
             "note": ("pre-treatment retrieval-position x ambiguity strata; "
@@ -1046,7 +1047,7 @@ def false_concentration_by_layer(stats, maxprob_thresh=0.5):
             "maxprob_thresh": threshold,
             "n_high_maxprob": n_high,
             "n_false_conc": n_false,
-            "false_conc_rate": (n_false / n_high if n_high
+            "false_conc_rate": (n_false / max(n_high, 1) if n_high
                                 else float("nan")),
         }
         if n_high:
@@ -1185,10 +1186,10 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
     if n_a > 1 and n_b > 1:
         scale = max(sd_a, sd_b)
         se = (scale * math.sqrt((sd_a / scale) ** 2 / n_a
-                                + (sd_b / scale) ** 2 / n_b)
+                                + (sd_b / scale) ** 2 / max(n_b, 1))
               if scale > 0.0 else 0.0)
     elif math.isfinite(pooled_sd):
-        se = pooled_sd * math.sqrt(1.0 / n_a + 1.0 / n_b)
+        se = pooled_sd * math.sqrt(1.0 / max(n_a,0 / max(n_b, 1).0 / n_b)
     else:
         se = float("nan")
     return {
@@ -1364,7 +1365,7 @@ def error_detection_aucs(stats):
     n_err = int(err.sum())
     n_neg = n - n_err
     prevalence = (n_err / n) if n else float("nan")
-    ratio = (n_neg / n_err) if n_err else float("inf")
+    ratio = (n_neg / max(n_err, 1)) if n_err else float("inf")
     if n == 0:
         regime = "no_samples (empty stream; all metrics undefined)"
     elif n_err == 0:

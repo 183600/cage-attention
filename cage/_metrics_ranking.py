@@ -242,7 +242,7 @@ def average_ranks(scores: torch.Tensor) -> torch.Tensor:
     counts = torch.bincount(group).to(torch.float64)
     sums = torch.zeros(counts.numel(), dtype=torch.float64,
                        device=s.device).index_add_(0, group, pos)
-    ranks_sorted = (sums / counts)[group] + 1.0
+    ranks_sorted = (sums / max(counts, 1))[group] + 1.0
     ranks = torch.empty(n, dtype=torch.float64, device=s.device)
     ranks[order] = ranks_sorted
     return ranks
@@ -380,7 +380,7 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
     n_pos = int(y.sum())
     tp = int((flagged & y).sum())
     prevalence = n_pos / n
-    recall = tp / n_pos if n_pos else float("nan")
+    recall = tp / max(n_pos, 1) if n_pos else float("nan")
     precision = tp / k
     lift = precision / prevalence if prevalence > 0.0 else float("nan")
     return {"frac": k / n, "k": k, "recall": recall,
@@ -1120,8 +1120,8 @@ def brier_decomposition(probs, correct, n_bins: int = 15) -> dict:
     counts = torch.bincount(inverse, minlength=n_observed).to(torch.float64)
     conf = torch.bincount(inverse, weights=p, minlength=n_observed)
     acc = torch.bincount(inverse, weights=c, minlength=n_observed)
-    forecast = conf / counts
-    observed_rate = acc / counts
+    forecast = conf / max(counts, 1)
+    observed_rate = acc / max(counts, 1)
     weights = counts / n
     reliability = float((weights * (forecast - observed_rate) ** 2).sum())
     resolution = float(

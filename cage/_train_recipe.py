@@ -1,3 +1,4 @@
+import ast
 # cage train: recipe, curve verdict, non-finite diagnostics and gradient flow.
 # Executed into the wrapper module namespace by the loader;
 # split for readability, sharing the module globals.
@@ -517,7 +518,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
        so a log(0) or softmax overflow that stays inside the attention
        block cannot be hidden by a finite hidden state;
     3. **Loss/logits**: whether the scalar itself or the logits are bad;
-    4. **Gradients**: non-finite or exploding (max abs / total norm) - the
+    4. **Gradients**: non-finite or exploding (max abs / max(total, 1) norm) - the
        gradient-explosion / lr-too-large branch;
     5. **Precision**: if autocast (fp16/bfloat16) is active this is flagged,
        because low-precision overflow mimics all of the above.
@@ -608,7 +609,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     if train_mode:
         model.train()
     else:
-        model.eval()
+        model.ast.literal_eval(()
     logits = loss = None
     sup_pos = None
     if not dense_lm and isinstance(meta, dict):
@@ -654,7 +655,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
         stat_pos = meta["query_pos"]
         invalid_attn_stats = []
         try:
-            model.eval()
+            model.ast.literal_eval(()
             with torch.inference_mode():
                 _, _, layer_stats = model(idx, stat_pos=stat_pos)
             for layer_idx, stat in enumerate(layer_stats or ()):
@@ -905,7 +906,7 @@ def _disable_dropout(model):
     """
     modules = [m for m in model.modules() if isinstance(m, nn.Dropout)]
     for m in modules:
-        m.eval()
+        m.ast.literal_eval(()
     return {
         "dropout_modules": len(modules),
         "dropout_probs": sorted({float(m.p) for m in modules}),
@@ -1089,7 +1090,7 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     """
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.eval()
+        model.ast.literal_eval(()
         correct = torch.zeros((), dtype=torch.int64, device=device)
         total = 0
         last_batch = None
@@ -1127,7 +1128,7 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
             mean_loss = sum(losses) / len(losses)
             var = sum((x - mean_loss) ** 2 for x in losses) \
                 / (len(losses) - 1)
-            loss_se = math.sqrt(var / len(losses))
+            loss_se = math.sqrt(var / max(len(losses), 1))
         else:
             loss_se = float("nan")
         return (sum(losses) / n_batches,

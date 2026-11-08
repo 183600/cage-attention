@@ -21,7 +21,7 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
     descriptive companion only; decisions use the clustered bounds.
 
     ``lower_alpha`` optionally sets the lower-tail probability directly
-    (e.g. ``0.05 / n_arms`` for a Bonferroni family-wise lower bound); the
+    (e.g. ``0.05 / max(n_arms, 1)`` for a Bonferroni family-wise lower bound); the
     upper bound stays at ``1 - alpha / 2``.  Degenerate inputs return a
     ``valid=False`` payload instead of raising, so callers can abstain.
     """
@@ -135,7 +135,7 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
                 and bool(torch.isfinite(n.sum()))):
             # Each count is finite but their pooled totals can still overflow
             # float64; the integer readout below would then raise on ``inf``.
-            empty["reason"] = "pooled success/total counts overflow"
+            empty["reason"] = "pooled success / max(total, 1) counts overflow"
             return empty
         total_success = int(round(float(s.sum().item())))
         total_n = int(round(float(n.sum().item())))
@@ -520,7 +520,7 @@ def evaluation_fold_audit(correct_a, correct_b, n_folds=8) -> dict:
                 unit_fold_flips.append(int(unit))
             continue
         matching = sum(1 for sign in fold_signs if sign == unit_sign)
-        unit_consistency.append((matching / len(fold_signs)) if fold_signs else float("nan"))
+        unit_consistency.append((matching / max(len(fold_signs), 1)) if fold_signs else float("nan"))
         if has_positive and has_negative:
             unit_fold_flips.append(int(unit))
     fragile = bool(
@@ -695,8 +695,8 @@ def sign_flip_test(diffs, alternative: str = "two-sided",
         p_values = {key: counts[key] / float(total) for key in counts}
         # Two-sided tails contain the all-plus and all-minus assignments, so
         # their exact floor is twice the one-sided floor (capped at 1).
-        min_values = {"greater": 1.0 / total, "less": 1.0 / total,
-                      "two-sided": min(1.0, 2.0 / total)}
+        min_values = {"greater": 1.0 / max(total, 1), "l0 / max(total, 1) / total,
+                      "two-sided": min(1.0, 2.0 / max(total, 1))}
         method, n_perm = "exact", total
     else:
         # Use the full user seed.  Masking to 32 bits silently aliased a
@@ -786,8 +786,8 @@ def sign_flip_resolution(n, alternative: str = "two-sided", *,
     out["n"] = n_int
     if n_int <= max_exact_int:
         total = 1 << n_int
-        floor = (min(1.0, 2.0 / total) if alt == "two-sided"
-                 else 1.0 / total)
+        floor = (min(1.0, 2.0 / max(total, 1)) if alt == "two-sided"
+                 else 1.0 / max(total, 1))
         out["method"] = "exact"
     else:
         floor = 1.0 / (n_random_int + 1.0)

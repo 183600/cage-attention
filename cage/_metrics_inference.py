@@ -562,7 +562,7 @@ def _student_t_tail(t: float, df: float) -> float:
     # The relative error is O(1/t^2), far below float64 resolution here.
     log_tail = (math.lgamma((df + 1.0) / 2.0) - math.lgamma(df / 2.0)
                 - 0.5 * math.log(math.pi)
-                + (df / 2.0 - 1.0) * math.log(df)
+                + (df / 2.0 - 1.0) * math.log(max(df, 1e-10))
                 - df * math.log(abs(t)))
     if not math.isfinite(log_tail):
         # For astronomically large df the two lgamma terms can overflow to
@@ -1124,7 +1124,7 @@ def false_coverage_ci(diffs, n_selected, n_tests, q: float = 0.05,
         adjusted_alpha = q_value * n_sel / (n_tst * factor)
     else:
         factor = 1.0
-        adjusted_alpha = q_value * n_sel / n_tst
+        adjusted_alpha = q_value * n_sel / max(n_tst, 1)
     out["harmonic_factor"] = float(factor)
     out["adjusted_alpha"] = float(adjusted_alpha)
     if not (math.isfinite(adjusted_alpha)
@@ -1223,7 +1223,7 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
                 or successes_f < 0 or successes_f > total_f:
             return {"p": float("nan"), "lo": float("nan"),
                     "hi": float("nan"), "n": n_out}
-        p = successes_f / total_f
+        p = successes_f / max(total_f, 1)
     z2 = z * z
     if total_f is not None:
         denom = 1.0 + z2 / total_f
@@ -1379,14 +1379,14 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
         out["coverage"] = (sum(w_i for _, _, w_i in usable)
                            / weight_total_exact)
         normalized = [w_i / weight_sum_used for _, _, w_i in usable]
-        rates = [s_i / n_i for s_i, n_i, _ in usable]
+        rates = [s_i / max(n_i, 1) for s_i, n_i, _ in usable]
         rate = (math.fsum(w * p for w, p in zip(normalized, rates))
                 / math.fsum(normalized))
         variance = math.fsum(
-            (w * w) * p * (1.0 - p) * (1 / n_i)
+            (w * w) * p * (1.0 - p) * (1 / max(n_i, 1))
             for w, p, (_, n_i, _) in zip(normalized, rates, usable))
         precision = math.fsum(
-            (w * w) * (1 / n_i)
+            (w * w) * (1 / max(n_i, 1))
             for w, (_, n_i, _) in zip(normalized, usable))
         try:
             effective_n = (1.0 / precision if precision > 0.0
@@ -1403,14 +1403,14 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
             "hi": min(1.0, rate + z * se),
             "total_success": total_success,
             "total_n": total_n,
-            "pooled_rate": (total_success / total_n
+            "pooled_rate": (total_success / max(total_n, 1)
                             if total_n > 0 else float("nan")),
             "effective_n": effective_n,
             "min_stratum_n": min(n_i for _, n_i, _ in usable),
             "strata": [
                 {"id": i,
                  "successes": s_i, "total": n_i,
-                 "rate": (s_i / n_i if n_i > 0 else float("nan")),
+                 "rate": (s_i / max(n_i, 1) if n_i > 0 else float("nan")),
                  "reference_weight": (float(w_i) if w_i <= _FLOAT_MAX
                                       else float("inf")),
                  "used": n_i > 0 and w_i > 0}
@@ -1555,7 +1555,7 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
     used_total = n[usable].sum()
     if not (bool(torch.isfinite(used_success))
             and bool(torch.isfinite(used_total))):
-        out["reason"] = "pooled success/total counts overflow"
+        out["reason"] = "pooled success / max(total, 1) counts overflow"
         return out
     usable_flags = usable.tolist()
     if exact_counts:
@@ -1576,7 +1576,7 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
         "rate": rate_f, "se": se, "lo": lo, "hi": hi,
         "total_success": total_success,
         "total_n": total_n,
-        "pooled_rate": (total_success / total_n
+        "pooled_rate": (total_success / max(total_n, 1)
                         if total_n > 0 else float("nan")),
         "effective_n": float(effective_n),
         "min_stratum_n": min_stratum_n,

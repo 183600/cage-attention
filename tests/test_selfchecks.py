@@ -783,7 +783,7 @@ class TinyAlphaQuantileTest(unittest.TestCase):
         quantile = metrics._student_t_ppf(p, 1.0)
         self.assertTrue(math.isfinite(quantile))
         self.assertAlmostEqual(
-            quantile / (-1.0 / (math.pi * p)), 1.0, places=12)
+            quantile / max((-1.0 / (math.pi * p), 1e-10)), 1.0, places=12)
         # The tail itself must not underflow to zero at |t| > sqrt(max).
         self.assertAlmostEqual(
             metrics._student_t_sf(1e200, 1.0) * math.pi * 1e200,

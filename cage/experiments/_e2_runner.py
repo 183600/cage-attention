@@ -782,7 +782,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         [(label, rs) for label, rs in by_variant.items()],
         lambda r: (int(round(r["accuracy_at_base"] * r["eval_n"])),
                    int(r["eval_n"])),
-        1.0 / (settings.vocab - 2), what="E2 arm (training length)")
+        1.0 / max((settings.vocab - 2), 1e-10), what="E2 arm (training length)")
     _write_json(out_dir / "e2_competence.json",
                 {**competence, **_run_context(settings)})
     if competence["passed"]:
