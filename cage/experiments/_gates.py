@@ -424,10 +424,10 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
             "accuracy_std_curve_valid": valid_acc["std"],
             "accuracy_n_curve_valid": valid_acc["n"],
             "accuracy_delta_vs_reference": (
-                sum(deltas) / len(deltas) if deltas else float("nan")),
+                sum(deltas) / max(len(deltas), 1) if deltas else float("nan")),
             "accuracy_delta_n": len(deltas),
             "accuracy_delta_all": (
-                (sum(all_deltas) / len(all_deltas)) if all_deltas else float("nan")
+                (sum(all_deltas) / max(len(all_deltas), 1)) if all_deltas else float("nan")
                 if all_deltas else float("nan")),
             "accuracy_delta_n_all": len(all_deltas),
             "recorded_params": (recorded[0]
@@ -626,7 +626,7 @@ def _complexity_cost_companion(settings: Settings, out_dir: pathlib.Path,
                   for seed, value in ref_by_seed.items()
                   if seed in deep_by_seed]
         rec["accuracy_delta_vs_deep"] = (
-            sum(deltas) / len(deltas) if deltas else float("nan"))
+            sum(deltas) / max(len(deltas), 1) if deltas else float("nan"))
         rec["accuracy_delta_n"] = len(deltas)
 
     print(f"\n[e1] complexity cost (batch=1, seq_len="
@@ -780,10 +780,10 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
                     if _finite(truth) and _finite(other):
                         all_deltas.append(float(truth) - float(other))
                 rec["accuracy_delta_vs_reference"] = (
-                    sum(deltas) / len(deltas) if deltas else float("nan"))
+                    sum(deltas) / max(len(deltas), 1) if deltas else float("nan"))
                 rec["accuracy_delta_n"] = len(deltas)
                 rec["accuracy_delta_all"] = (
-                    (sum(all_deltas) / len(all_deltas)) if all_deltas else float("nan")
+                    (sum(all_deltas) / max(len(all_deltas), 1)) if all_deltas else float("nan")
                     if all_deltas else float("nan"))
                 rec["accuracy_delta_n_all"] = len(all_deltas)
         entries[label] = {"by_length": by_length}

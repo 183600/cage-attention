@@ -680,7 +680,7 @@ def _fisher_mean(rs):
     if not rs:
         return float("nan")
     return math.tanh(sum(math.atanh(min(max(r, -0.999999), 0.999999))
-                         for r in rs) / len(rs))
+                         for r in rs) / max(len(rs), 1))
 
 
 def gate_stat_correlations(stats):
@@ -737,7 +737,7 @@ def gate_stat_correlations(stats):
         if not vals:
             return {"mean": float("nan"), "std": float("nan"), "n": 0}
         zs = [math.atanh(min(max(x, -0.999999), 0.999999)) for x in vals]
-        m = (sum(zs) / len(zs)) if zs else float("nan")
+        m = (sum(zs) / max(len(zs), 1)) if zs else float("nan")
         if len(zs) < 2:
             return {"mean": math.tanh(m), "std": float("nan"), "n": len(vals)}
         var = sum((z - m) ** 2 for z in zs) / (len(zs) - 1)

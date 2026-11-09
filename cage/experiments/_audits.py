@@ -101,7 +101,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                         "seed": int(seed), "params": int(params),
                         "val_accuracy": metrics["accuracy"],
                         "eval_seed": int(VAL_SEED), "curve": curve})
-                mean = (sum(accs) / len(accs)) if accs else float("nan")
+                mean = (sum(accs) / max(len(accs), 1)) if accs else float("nan")
                 std = ((sum((a - mean) ** 2 for a in accs)
                         / (len(accs) - 1)) ** 0.5 if len(accs) > 1 else 0.0)
                 table.append({"lr": lr, "steps": int(train_steps),
@@ -607,7 +607,7 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
                     "seed": int(seed), "params": int(params),
                     "val_accuracy": metrics["accuracy"],
                     "eval_seed": int(VAL_SEED), "curve": curve})
-            mean = (sum(accs) / len(accs)) if accs else float("nan")
+            mean = (sum(accs) / max(len(accs), 1)) if accs else float("nan")
             std = ((sum((a - mean) ** 2 for a in accs)
                     / (len(accs) - 1)) ** 0.5 if len(accs) > 1 else 0.0)
             table.append({"lr": lr, "steps": int(train_steps),

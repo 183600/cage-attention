@@ -72,7 +72,7 @@ def _calibration_coefficients(model) -> dict:
 
     def _mean(key):
         vals = [row[key] for row in rows if _finite(row.get(key))]
-        return sum(vals) / len(vals) if vals else float("nan")
+        return sum(vals) / max(len(vals), 1) if vals else float("nan")
 
     def _positive(key):
         vals = [row[key] for row in rows if _finite(row.get(key))]
@@ -788,7 +788,7 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
             runs = [_tune_run(gate, seed, lr, default_tau, "lr")
                     for seed in tune_seeds]
             accs = [r["val_accuracy"] for r in runs]
-            mean = sum(accs) / len(accs) if accs else float("nan")
+            mean = sum(accs) / max(len(accs), 1) if accs else float("nan")
             var = (sum((a - mean) ** 2 for a in accs) / (len(accs) - 1)
                    if len(accs) > 1 else 0.0)
             verdicts = [r["curve_verdict"] for r in runs]
@@ -824,7 +824,7 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                     runs = [_tune_run(gate, seed, final_lr, tau, "tau")
                             for seed in tune_seeds]
                 accs = [r["val_accuracy"] for r in runs]
-                mean = sum(accs) / len(accs) if accs else float("nan")
+                mean = sum(accs) / max(len(accs), 1) if accs else float("nan")
                 var = (sum((a - mean) ** 2 for a in accs) / (len(accs) - 1)
                        if len(accs) > 1 else 0.0)
                 verdicts = [r["curve_verdict"] for r in runs]

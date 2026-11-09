@@ -223,7 +223,7 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
             runs = [_tune_run(gate, seed, lr, default_tau, "lr")
                     for seed in tune_seeds]
             accs = [r["val_accuracy"] for r in runs]
-            mean = sum(accs) / len(accs) if accs else float("nan")
+            mean = sum(accs) / max(len(accs), 1) if accs else float("nan")
             var = (sum((a - mean) ** 2 for a in accs) / (len(accs) - 1)
                    if len(accs) > 1 else 0.0)
             verdicts = [r["curve"]["curve_verdict"] for r in runs]
@@ -259,7 +259,7 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                     runs = [_tune_run(gate, seed, final_lr, tau, "tau")
                             for seed in tune_seeds]
                 accs = [r["val_accuracy"] for r in runs]
-                mean = sum(accs) / len(accs) if accs else float("nan")
+                mean = sum(accs) / max(len(accs), 1) if accs else float("nan")
                 var = (sum((a - mean) ** 2 for a in accs) / (len(accs) - 1)
                        if len(accs) > 1 else 0.0)
                 verdicts = [r["curve"]["curve_verdict"] for r in runs]
@@ -853,13 +853,13 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
                     if _finite(row.get("false_conc_rate"))]
     if _layer_rates:
         rec["false_conc_layer_rate_mean"] = (
-            sum(_layer_rates) / len(_layer_rates))
+            sum(_layer_rates) / max(len(_layer_rates), 1))
     if gate in ("query", "calib"):
         _margins = [row["gate_margin"] for row in fc_layers
                     if _finite(row.get("gate_margin"))]
         if _margins:
             rec["false_conc_layer_margin_mean"] = (
-                sum(_margins) / len(_margins))
+                sum(_margins) / max(len(_margins), 1))
             rec["false_conc_layer_margin_min"] = min(_margins)
             rec["false_conc_layer_margin_positive_layers"] = sum(
                 1 for value in _margins if value > 0.0)
@@ -871,7 +871,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
                          if _finite(row.get("null_mass_error_margin"))]
         if _null_margins:
             rec["null_mass_layer_margin_mean"] = (
-                sum(_null_margins) / len(_null_margins))
+                sum(_null_margins) / max(len(_null_margins), 1))
             rec["null_mass_layer_margin_min"] = min(_null_margins)
             rec["null_mass_layer_margin_positive_layers"] = sum(
                 1 for value in _null_margins if value > 0.0)

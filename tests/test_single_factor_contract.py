@@ -26,6 +26,15 @@ import unittest
 
 from cage import experiments
 from cage.experiments import ContrastLog, _controlled_audit, paired_bootstrap_ci
+# Ensure reproducibility
+import random as _rnd
+_rnd.seed(42)
+try:
+    import numpy as _np
+    _np.random.seed(42)
+except ImportError:
+    pass
+
 
 
 class SingleFactorAuditTest(unittest.TestCase):

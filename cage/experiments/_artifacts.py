@@ -60,7 +60,7 @@ def _print_conf_by_error_type(named_runs, title="[e1]"):
                 value = bucket.get(etype)
                 if _finite(value):
                     vals.append(float(value))
-            cells.append(f"{sum(vals) / len(vals):.3f}" if vals else "n/a"
+            cells.append(f"{sum(vals) / max(len(vals), 1):.3f}" if vals else "n/a"
                          if vals else "n/a")
         print(f"{label:>{width}}" + "".join(f"{c:>{width}}" for c in cells))
 

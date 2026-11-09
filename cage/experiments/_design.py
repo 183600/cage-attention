@@ -335,7 +335,7 @@ def _run_order_audit(order, cells, seeds, randomized=True):
     # extreme position is below 5%.
     flag_extremes = (not randomized) or extreme_p < 0.05
     mean_position = {
-        key: (sum(vals) / len(vals) if vals else float("nan"))
+        key: (sum(vals) / max(len(vals), 1) if vals else float("nan"))
         for key, vals in sorted(positions.items())}
     finite_means = [v for v in mean_position.values() if _finite(v)]
     return {
@@ -1034,7 +1034,7 @@ def _mean_std(values):
                 base = max(abs(v) for v in vals)
                 if base > 0.0 and math.isfinite(base):
                     scaled = [v / base for v in vals]
-                    scaled_mean = (math.fsum(scaled) / len(vals)) if vals else float("nan")
+                    scaled_mean = (math.fsum(scaled) / max(len(vals), 1)) if vals else float("nan")
                     scaled_var = (
                         math.fsum((v - scaled_mean) ** 2 for v in scaled)
                         / (len(vals) - 1))

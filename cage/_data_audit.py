@@ -738,7 +738,7 @@ def _noise_floor(stream_values, n_categories):
             floors.append(
                 _total_variation(dists[j],
                                  _distribution_from_counts(total - counts[j])))
-        return (sum(floors) / len(floors)) if floors else float("nan")
+        return (sum(floors) / max(len(floors), 1)) if floors else float("nan")
     values = stream_values[0]
     if values.numel() < 2:
         return float("nan")

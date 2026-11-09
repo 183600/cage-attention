@@ -1125,7 +1125,7 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
         n_batches = max(1, batches)
         losses = [float(x) for x in batch_losses]
         if len(losses) > 1:
-            mean_loss = sum(losses) / len(losses)
+            mean_loss = sum(losses) / max(len(losses), 1)
             var = sum((x - mean_loss) ** 2 for x in losses) \
                 / (len(losses) - 1)
             loss_se = math.sqrt(var / max(len(losses), 1))

@@ -50,6 +50,15 @@ from cage.experiments import (
 )
 from cage.model import build
 import ast
+# Ensure reproducibility
+import random as _rnd
+_rnd.seed(42)
+try:
+    import numpy as _np
+    _np.random.seed(42)
+except ImportError:
+    pass
+
 
 _TINY = {"vocab_size": 64, "d_model": 16, "n_heads": 2, "n_layers": 2,
          "max_len": 16, "norm": "pre", "dropout": 0.0}

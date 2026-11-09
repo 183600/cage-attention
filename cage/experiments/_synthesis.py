@@ -255,8 +255,8 @@ def _factorial_main_effect(cells, metric, factor):
         used.append(seed)
         values = {c: float(by_cell[c][seed][metric]) for c in required}
         diffs.append(
-            sum(values[c] for c in spec["on"]) / len(spec["on"])
-            - sum(values[c] for c in spec["off"]) / len(spec["off"]))
+            sum(values[c] for c in spec["on"]) / max(len(spec["on"]), 1)
+            - sum(values[c] for c in spec["off"]) / max(len(spec["off"]), 1))
     ci = paired_bootstrap_ci(diffs)
     on_vals = [float(by_cell[c][s][metric])
                for s in used for c in spec["on"]]
@@ -422,8 +422,8 @@ def _grid_level_main_effect(metric, level_cells, baseline_cells):
             (unpaired if finite_any else undefined).append(seed)
             continue
         used.append(seed)
-        diffs.append(sum(float(v) for v in level_vals) / len(level_vals)
-                     - sum(float(v) for v in base_vals) / len(base_vals))
+        diffs.append(sum(float(v) for v in level_vals) / max(len(level_vals), 1)
+                     - sum(float(v) for v in base_vals) / max(len(base_vals), 1))
     ci = paired_bootstrap_ci(diffs)
     level_pool = [float(m[s][metric]) for s in used for m in maps]
     base_pool = [float(m[s][metric]) for s in used for m in base_maps]

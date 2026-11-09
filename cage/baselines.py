@@ -413,7 +413,7 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
                         diverged_accs.append(acc)
                 elif math.isfinite(acc):
                     accs.append(acc)
-            mean = (sum(accs) / len(accs)) if accs else float("nan")
+            mean = (sum(accs) / max(len(accs), 1)) if accs else float("nan")
             var = (sum((a - mean) ** 2 for a in accs)
                    / (len(accs) - 1) if len(accs) > 1 else 0.0)
             # A row with even one diverged seed is not a completed-run
@@ -430,9 +430,9 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
                    "diverged_runs": diverged, "runs": runs}
             if diverged_accs:
                 row["diverged_accuracy_mean"] = (sum(diverged_accs)
-                                                 / len(diverged_accs))
+                                                 / max(len(diverged_accs), 1))
             if loss_means:
-                row["train_loss_mean"] = sum(loss_means) / len(loss_means)
+                row["train_loss_mean"] = sum(loss_means) / max(len(loss_means), 1)
             table.append(row)
     # Same all-NaN guard as ``tune_shared_recipe`` / the depth ladder:
     # ``max`` over an all-non-finite key returns an arbitrary row, which

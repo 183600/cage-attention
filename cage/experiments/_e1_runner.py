@@ -873,7 +873,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
             value = row_list[layer].get(key)
             if _finite(value):
                 vals.append(float(value))
-        return (sum(vals) / len(vals)) if vals else float("nan"), len(vals)
+        return (sum(vals) / max(len(vals), 1)) if vals else float("nan"), len(vals)
 
     for gate in ("query", "calib", "null"):
         rows_by_seed = [r.get("false_conc_by_layer") for r in by_gate[gate]
@@ -997,7 +997,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
                     vals = [float(v[i]) for v in rows
                             if i < len(v) and _finite(v[i])]
                     cells.append(
-                        f"{sum(vals) / len(vals):+.3f}" if vals else "n/a")
+                        f"{sum(vals) / max(len(vals), 1):+.3f}" if vals else "n/a")
                 print(f"{gate:>6} {label:>14}"
                       + "".join(f"{c:>9}" for c in cells))
 

@@ -57,6 +57,15 @@ from .metrics import (
 from .model import release_eval_scratch
 from .repro import configure_determinism, seed_everything, stream_generator
 import ast
+# Ensure reproducibility
+import random as _rnd
+_rnd.seed(42)
+try:
+    import numpy as _np
+    _np.random.seed(42)
+except ImportError:
+    pass
+
 
 
 # Fixed optimisation recipe (design pin D5): a single source of truth for

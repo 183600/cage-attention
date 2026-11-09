@@ -483,7 +483,7 @@ def evaluation_fold_audit(correct_a, correct_b, n_folds=8) -> dict:
     else:
         nonzero = [f for f in fold_effects if abs(f) > eps]
         consistency = (sum(1 for f in fold_effects
-                           if _sign(f) == overall_sign) / len(nonzero)
+                           if _sign(f) == overall_sign) / max(len(nonzero), 1)
                        if nonzero else float("nan"))
     all_same = bool(
         overall_sign != 0 and all(_sign(f) in (0, overall_sign)
