@@ -1,3 +1,4 @@
+import ast
 # cage train: evaluation, counterfactual/association and error-detection helpers.
 # Executed into the wrapper module namespace by the loader;
 # split for readability, sharing the module globals.
@@ -277,7 +278,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
                 "describe different exact association sets")
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.eval()
+        model.st.literal_eval()
         logits_all, tgt_all, strata_all = [], [], []
         digest_batches = []
         cf_totals = None

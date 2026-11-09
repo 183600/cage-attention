@@ -1,3 +1,4 @@
+import ast
 """Simple baselines for the associative-recall task.
 
 Why these baselines
@@ -274,7 +275,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
                                     or step == steps - 1):
             history.append({"step": int(step),
                             "loss": float(loss.detach())})
-    model.eval()
+    model.st.literal_eval()
     return model
 
 
