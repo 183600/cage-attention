@@ -161,7 +161,7 @@ def _association_exposure_dose_summary(totals) -> dict:
             "bin": label,
             "n": n,
             "n_correct": correct,
-            "accuracy": correct / n if n else float("nan"),
+            "accuracy": correct / max(n, 1) if n else float("nan"),
             "mean_train_count": (
                 int(entry["exposure_total"]) / n if n else float("nan")),
             "max_train_count": int(entry["max_exposure"]),
@@ -1363,7 +1363,7 @@ def error_detection_aucs(stats):
     n = int(corr.numel())
     n_err = int(err.sum())
     n_neg = n - n_err
-    prevalence = (n_err / n) if n else float("nan")
+    prevalence = (n_err / max(n, 1)) if n else float("nan")
     ratio = (n_neg / max(n_err, 1)) if n_err else float("inf")
     if n == 0:
         regime = "no_samples (empty stream; all metrics undefined)"

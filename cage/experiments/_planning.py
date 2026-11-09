@@ -259,7 +259,7 @@ def _pilot_curve_invalid_rate(verdict, planned_n) -> tuple[float, str | None,
             "planned_n": n,
             "valid_seeds": n - invalid,
             "invalid_seeds": invalid,
-            "rate": invalid / n,
+            "rate": invalid / max(n, 1),
         })
     if not components:
         return float("nan"), None, []

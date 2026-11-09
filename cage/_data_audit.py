@@ -209,9 +209,9 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
             "n_unique_pairs": int(len(unique)),
             "n_unique_keys": int(len({code // vocab_int for code in codes})),
             "pair_seen_train": int(pair_seen),
-            "pair_seen_train_rate": (pair_seen / n if n else float("nan")),
+            "pair_seen_train_rate": (pair_seen / max(n, 1) if n else float("nan")),
             "key_seen_train": int(key_seen),
-            "key_seen_train_rate": (key_seen / n if n else float("nan")),
+            "key_seen_train_rate": (key_seen / max(n, 1) if n else float("nan")),
             # Seen key, unseen exact pair: the item's key occurred in
             # training but not with this value, so a memorised key -> value
             # lookup cannot directly supply the answer.  This is the cohort
@@ -1534,7 +1534,7 @@ def _binomial_rate_test(observed, n, probability, n_sim=_GENERATOR_SIM,
             / (n_sim + 1.0))
     return {
         "observed": observed, "n": int(n),
-        "observed_rate": observed / n,
+        "observed_rate": observed / max(n, 1),
         "expected_rate": probability,
         "expected": expected, "p_value": p_value,
         "n_sim": int(n_sim), "valid": True, "reason": "",

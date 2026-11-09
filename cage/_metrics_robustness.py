@@ -139,7 +139,7 @@ def clustered_proportion_ci(successes, n_per_unit, n_boot: int = 10000,
             return empty
         total_success = int(round(float(s.sum().item())))
         total_n = int(round(float(n.sum().item())))
-    p = s / n
+    p = s / max(n, 1)
     units = int(s.numel())
     mean_acc = float(p.mean())
     sd_between = float(p.std(unbiased=True)) if units > 1 else 0.0
@@ -327,7 +327,7 @@ def crossed_cluster_bootstrap_ci(correct_a, correct_b, n_boot: int = 4000,
     sd_total = (float(crossed.std(unbiased=True)) if n_boot_int > 1 else 0.0)
     denom = sd_seed ** 2 + sd_item ** 2
     if denom > 0.0:
-        share = sd_seed ** 2 / denom
+        share = sd_seed ** 2 / max(denom, 1)
         axis = "seed" if sd_seed > sd_item else (
             "item" if sd_item > sd_seed else "tie")
     else:

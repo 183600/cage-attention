@@ -379,11 +379,11 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
     flagged[order[:k]] = True
     n_pos = int(y.sum())
     tp = int((flagged & y).sum())
-    prevalence = n_pos / n
+    prevalence = n_pos / max(n, 1)
     recall = tp / max(n_pos, 1) if n_pos else float("nan")
     precision = tp / k
     lift = precision / prevalence if prevalence > 0.0 else float("nan")
-    return {"frac": k / n, "k": k, "recall": recall,
+    return {"frac": k / max(n, 1), "k": k, "recall": recall,
             "precision": precision, "lift": lift,
             "threshold": float(s[order[k - 1]])}
 
@@ -1122,7 +1122,7 @@ def brier_decomposition(probs, correct, n_bins: int = 15) -> dict:
     acc = torch.bincount(inverse, weights=c, minlength=n_observed)
     forecast = conf / counts.clamp_min(1.0)
     observed_rate = acc / counts.clamp_min(1.0)
-    weights = counts / n
+    weights = counts / max(n, 1)
     reliability = float((weights * (forecast - observed_rate) ** 2).sum())
     resolution = float(
         (weights * (observed_rate - base) ** 2).sum())

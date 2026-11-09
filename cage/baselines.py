@@ -622,7 +622,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
                      / n_per_seed if n_per_seed > 0 else float("nan"))
         sd_binomial = math.sqrt(max(var_binom, 0.0))
         sd_effective = math.sqrt(max(sd_seed, 0.0) ** 2 + max(var_binom, 0.0))
-        se_effective = (math.sqrt(max(sd_seed, 0.0) ** 2 / n
+        se_effective = (math.sqrt(max(sd_seed, 0.0) ** 2 / max(n, 1)
                                   + max(var_binom, 0.0)) if n else float("nan"))
         ci.update({
             "mean": mean, "lo": lo, "hi": hi,

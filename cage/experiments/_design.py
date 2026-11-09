@@ -637,8 +637,8 @@ def _pooled_within_block_slope(blocks) -> float:
         n = len(positions)
         if n < 2 or len(values) != n:
             continue
-        p_mean = sum(positions) / n
-        v_mean = sum(values) / n
+        p_mean = sum(positions) / max(n, 1)
+        v_mean = sum(values) / max(n, 1)
         for position, value in zip(positions, values):
             delta = position - p_mean
             numerator.append(delta * (value - v_mean))
@@ -1101,8 +1101,8 @@ def _linear_slope(xs, ys):
     # fitted line is forced through the first observation.  Centring the
     # bounded (normalised) values keeps the sums representable even when the
     # raw offsets are extreme.
-    x_mean = math.fsum(dx_norm) / n
-    y_mean = math.fsum(dy_norm) / n
+    x_mean = math.fsum(dx_norm) / max(n, 1)
+    y_mean = math.fsum(dy_norm) / max(n, 1)
     dx_centered = [value - x_mean for value in dx_norm]
     dy_centered = [value - y_mean for value in dy_norm]
     denom = math.fsum(value * value for value in dx_centered)

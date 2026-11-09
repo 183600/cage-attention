@@ -520,7 +520,7 @@ def _regularized_incomplete_beta(a: float, b: float, x: float) -> float:
     if x >= 1.0:
         return 1.0
     log_beta = (math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
-                + a * math.log(x) + b * math.log1p(-x))
+                + a * math.log(x + 1e-8) + b * math.log1p(-x))
     front = math.exp(log_beta)
     if x < (a + 1.0) / (a + b + 2.0):
         return front * _beta_continued_fraction(a, b, x) / a
@@ -772,8 +772,8 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
         out["valid"] = False
         return out
     # A future same-size study's mean, and one individual future seed.
-    rep_half = t_crit * sd * math.sqrt(2.0 / n)
-    single_half = t_crit * sd * math.sqrt(1.0 + 1.0 / n)
+    rep_half = t_crit * sd * math.sqrt(2.0 / max(n, 1))
+    single_half = t_crit * sd * math.sqrt(1.0 + 1.0 / max(n, 1))
     out["lo"], out["hi"] = mean - rep_half, mean + rep_half
     out["lo_single"] = mean - single_half
     out["hi_single"] = mean + single_half
@@ -798,11 +798,11 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
         return _student_t_cdf(-ratio, df)
 
     if direction == "+":
-        out["prob_replicates"] = _prob(1.0, 2.0 / n)
-        out["prob_single_same_sign"] = _prob(1.0, 1.0 + 1.0 / n)
+        out["prob_replicates"] = _prob(1.0, 2.0 / max(n, 1))
+        out["prob_single_same_sign"] = _prob(1.0, 1.0 + 1.0 / max(n, 1))
     elif direction == "-":
-        out["prob_replicates"] = _prob(-1.0, 2.0 / n)
-        out["prob_single_same_sign"] = _prob(-1.0, 1.0 + 1.0 / n)
+        out["prob_replicates"] = _prob(-1.0, 2.0 / max(n, 1))
+        out["prob_single_same_sign"] = _prob(-1.0, 1.0 + 1.0 / max(n, 1))
     else:
         # Undirected prediction: report the chance the repeat keeps the
         # observed sign (descriptive; no direction was registered).
@@ -810,10 +810,10 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
             out["prob_replicates"] = 0.5
             out["prob_single_same_sign"] = 0.5
         else:
-            keep = _prob(1.0 if mean > 0.0 else -1.0, 2.0 / n)
+            keep = _prob(1.0 if mean > 0.0 else -1.0, 2.0 / max(n, 1))
             out["prob_replicates"] = keep
             out["prob_single_same_sign"] = _prob(
-                1.0 if mean > 0.0 else -1.0, 1.0 + 1.0 / n)
+                1.0 if mean > 0.0 else -1.0, 1.0 + 1.0 / max(n, 1))
     if mode == "equivalence":
         out["replicates"] = bool(out["lo"] > -bound and out["hi"] < bound)
     elif mode == "noninferiority":
@@ -1127,7 +1127,7 @@ def false_coverage_ci(diffs, n_selected, n_tests, q: float = 0.05,
         if n_tst <= 100000:
             factor = math.fsum(1.0 / i for i in range(1, n_tst + 1))
         else:
-            factor = math.log(n_tst) + 0.5772156649015329 + 0.5 / n_tst
+            factor = math.log(n_tst + 1e-8) + 0.5772156649015329 + 0.5 / n_tst
         adjusted_alpha = q_value * n_sel / (n_tst * factor)
     else:
         factor = 1.0
