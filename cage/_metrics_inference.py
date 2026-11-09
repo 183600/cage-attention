@@ -1555,7 +1555,8 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
     # reference bin represented by one or two base samples can dominate a
     # standardized comparison, so the companion must expose its precision
     # instead of printing a four-decimal rate as if it were well measured.
-    effective_n = 1.0 / float(((w_norm ** 2) / counts_used).sum())
+    _kish_denom = float(((w_norm ** 2) / counts_used).sum())
+    effective_n = 1.0 / max(_kish_denom, 1e-300)
     se = float(torch.sqrt(torch.clamp(variance, min=0.0)))
     z = 1.959964
     used_success = s[usable].sum()
