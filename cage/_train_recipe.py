@@ -1,4 +1,3 @@
-import ast
 # cage train: recipe, curve verdict, non-finite diagnostics and gradient flow.
 # Executed into the wrapper module namespace by the loader;
 # split for readability, sharing the module globals.

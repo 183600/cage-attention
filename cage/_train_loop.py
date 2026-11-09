@@ -1,4 +1,3 @@
-import ast
 # cage train: overfit sanity, stats collection and attention diagnostics.
 # Executed into the wrapper module namespace by the loader;
 # split for readability, sharing the module globals.

@@ -49,7 +49,6 @@ from cage.experiments import (
     _single_factor_design_audit,
 )
 from cage.model import build
-import ast
 # Ensure reproducibility
 import random as _rnd
 _rnd.seed(42)

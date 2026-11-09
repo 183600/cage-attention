@@ -1,4 +1,3 @@
-import ast
 """Model-cost accounting for the CAGE grids.
 
 The experiment records already carry parameter counts, but a parameter count

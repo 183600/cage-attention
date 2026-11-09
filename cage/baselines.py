@@ -1,4 +1,3 @@
-import ast
 """Simple baselines for the associative-recall task.
 
 Why these baselines

@@ -56,7 +56,6 @@ from .metrics import (
 )
 from .model import release_eval_scratch
 from .repro import configure_determinism, seed_everything, stream_generator
-import ast
 # Ensure reproducibility
 import random as _rnd
 _rnd.seed(42)
