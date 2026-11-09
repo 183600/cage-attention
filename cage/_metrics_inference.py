@@ -772,7 +772,7 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
         out["valid"] = False
         return out
     # A future same-size study's mean, and one individual future seed.
-    rep_half = t_crit * sd * math.sqrt(2.0 / (n + 1e-8))
+    rep_half = t_crit * sd * math.sqrt(2.0 / n)
     single_half = t_crit * sd * math.sqrt(1.0 + 1.0 / n)
     out["lo"], out["hi"] = mean - rep_half, mean + rep_half
     out["lo_single"] = mean - single_half
@@ -1234,7 +1234,7 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
     z2 = z * z
     if total_f is not None:
         denom = 1.0 + z2 / total_f
-        center = (p + z2 / (2.0 * total_f)) / (denom + 1e-8)
+        center = (p + z2 / (2.0 * total_f)) / denom
         half = (z * math.sqrt(p * (1.0 - p) / total_f
                               + z2 / (4.0 * total_f * total_f)) / denom)
     else:
@@ -1252,7 +1252,7 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
             inv = 1.0 / sqrt_total
             inv2 = inv * inv
             denom = 1.0 + z2 * inv2
-            center = (p + (z2 / 2.0) * inv2) / (denom + 1e-8)
+            center = (p + (z2 / 2.0) * inv2) / denom
             base = math.sqrt(max(0.0, p * (1.0 - p)))
             half = z * math.hypot(base * inv,
                                   (z / 2.0) * inv2) / denom
