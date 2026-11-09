@@ -81,6 +81,7 @@ import torch.utils.checkpoint
 # Ensure reproducibility
 import random as _rnd
 _rnd.seed(42)
+torch.manual_seed(42)
 try:
     import numpy as _np
     _np.random.seed(42)
