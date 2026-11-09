@@ -418,7 +418,9 @@ def _answer_balance(settings: Settings, batch=256, batches=4, seeds=None):
             n_seed += meta["answer"].numel()
         per_seed[int(seed)] = int(n_seed)
     present = counts > 0
-    shares = counts[present] / counts.sum()
+    total_counts = counts.sum()
+    shares = counts[present] / total_counts if total_counts > 0 else \
+        counts[present]
     uniformity = answer_uniformity_test(counts[2:])
     return {
         "train_seeds": [int(s) for s in seeds],
