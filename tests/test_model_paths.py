@@ -33,7 +33,6 @@ class DropoutStatsPathTest(unittest.TestCase):
                 _, loss, stats = model(
                     idx, tgt, sup_pos=meta["query_pos"],
                     stat_pos=meta["query_pos"])
-                optimizer.zero_grad()
                 loss.backward()
                 self.assertTrue(torch.isfinite(loss))
                 for layer in stats:
