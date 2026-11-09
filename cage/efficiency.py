@@ -141,7 +141,7 @@ def measure_forward(model, cfg, seq_len: int, device, batch: int = 1,
     # disabled for a diagnostic), and ``model.train(was_training)`` would
     # silently overwrite that mixed state.
     training_states = {module: module.training for module in model.modules()}
-    model.st.literal_eval()
+    model.eval()
     timings = []
     baseline_allocated = None
     peak_allocated = None

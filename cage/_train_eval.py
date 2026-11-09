@@ -278,7 +278,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
                 "describe different exact association sets")
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.st.literal_eval()
+        model.eval()
         logits_all, tgt_all, strata_all = [], [], []
         digest_batches = []
         cf_totals = None
