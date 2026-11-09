@@ -395,7 +395,7 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
                 losses = [p["loss"] for p in history
                           if math.isfinite(p.get("loss", float("nan")))]
                 if losses:
-                    loss_means.append(sum(losses) / len(losses))
+                    loss_means.append(sum(losses) / max(len(losses), 1))
                 acc = linear_probe_accuracy(model, n_pairs, vocab, device,
                                             batch=probe_batch,
                                             batches=val_batches,

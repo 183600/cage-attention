@@ -1519,7 +1519,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
         if not rows:
             return []
         n = min(len(v) for v in rows)
-        return [sum(float(v[i]) for v in rows) / len(rows) for i in range(n)]
+        return [sum(float(v[i]) for v in rows) / max(len(rows), 1) for i in range(n)]
 
     layer_keys = []
     for gate in GATES:

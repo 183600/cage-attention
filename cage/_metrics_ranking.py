@@ -379,7 +379,7 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
     flagged[order[:k]] = True
     n_pos = int(y.sum())
     tp = int((flagged & y).sum())
-    prevalence = n_pos / n
+    prevalence = n_pos / (n + 1e-8)
     recall = tp / max(n_pos, 1) if n_pos else float("nan")
     precision = tp / k
     lift = precision / prevalence if prevalence > 0.0 else float("nan")
@@ -1021,7 +1021,7 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     acc = torch.bincount(inverse, weights=c, minlength=n_observed)
     nz = counts > 0
     gap = (acc[nz] / counts[nz] - conf[nz] / counts[nz]).abs()
-    return float(((counts[nz] / n) * gap).sum())
+    return float(((counts[nz] / (n + 1e-8)) * gap).sum())
 
 
 def brier_score(probs, correct) -> float:
@@ -1122,7 +1122,7 @@ def brier_decomposition(probs, correct, n_bins: int = 15) -> dict:
     acc = torch.bincount(inverse, weights=c, minlength=n_observed)
     forecast = conf / counts.clamp_min(1.0)
     observed_rate = acc / counts.clamp_min(1.0)
-    weights = counts / n
+    weights = counts / (n + 1e-8)
     reliability = float((weights * (forecast - observed_rate) ** 2).sum())
     resolution = float(
         (weights * (observed_rate - base) ** 2).sum())
@@ -1313,7 +1313,7 @@ def _bca_bounds(d: torch.Tensor, means: torch.Tensor,
         denom = 1.0 - a * (z0 + z)
         if abs(denom) < 1e-9:
             return None
-        return float(nd.cdf(z0 + (z0 + z) / denom))
+        return float(nd.cdf(z0 + (z0 + z) / (denom + 1e-8)))
 
     try:
         z_lo = _normal_quantile(alpha / 2.0)

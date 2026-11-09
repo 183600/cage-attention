@@ -1001,7 +1001,7 @@ def _mean_std(values):
     vals = [float(v) for v in iterator if _finite(v)]
     if not vals:
         return {"mean": float("nan"), "std": float("nan"), "n": 0}
-    mean = sum(vals) / len(vals)
+    mean = sum(vals) / max(len(vals), 1)
     if not math.isfinite(mean):
         # The sample mean of finite values can still overflow an intermediate
         # sum (e.g. two 1e308 observations whose true mean is 1e308).  Scale
@@ -1101,8 +1101,8 @@ def _linear_slope(xs, ys):
     # fitted line is forced through the first observation.  Centring the
     # bounded (normalised) values keeps the sums representable even when the
     # raw offsets are extreme.
-    x_mean = math.fsum(dx_norm) / n
-    y_mean = math.fsum(dy_norm) / n
+    x_mean = math.fsum(dx_norm) / (n + 1e-8)
+    y_mean = math.fsum(dy_norm) / (n + 1e-8)
     dx_centered = [value - x_mean for value in dx_norm]
     dy_centered = [value - y_mean for value in dy_norm]
     denom = math.fsum(value * value for value in dx_centered)

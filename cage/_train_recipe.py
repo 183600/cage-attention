@@ -352,14 +352,14 @@ def training_curve_verdict(hist, rel_tol: float = 0.05,
         if y_scale == 0.0:
             return 0.0
         ys = [y / y_scale for y in ys]
-        my = math.fsum(ys) / n
+        my = math.fsum(ys) / (n + 1e-8)
         if my == 0.0:
             return 0.0
         x_scale = max(abs(x) for x in xs)
         if x_scale == 0.0:
             return 0.0
         xs = [x / x_scale for x in xs]
-        mx = math.fsum(xs) / n
+        mx = math.fsum(xs) / (n + 1e-8)
         denom = math.fsum((x - mx) ** 2 for x in xs)
         if denom == 0.0:
             return 0.0

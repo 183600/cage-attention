@@ -623,8 +623,8 @@ def partial_pearson(x, y, control):
     denom = (dc * dc).sum()
     if not math.isfinite(float(denom)) or float(denom) <= 0.0:
         return torch.tensor(float("nan"))
-    rx = dx - (dx * dc).sum() / denom * dc
-    ry = dy - (dy * dc).sum() / denom * dc
+    rx = dx - (dx * dc).sum() / (denom + 1e-8) * dc
+    ry = dy - (dy * dc).sum() / (denom + 1e-8) * dc
     if (not bool(torch.isfinite(rx).all())
             or not bool(torch.isfinite(ry).all())
             or rx.abs().max() == 0.0 or ry.abs().max() == 0.0):
