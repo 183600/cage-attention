@@ -25,5 +25,17 @@ def load_fragments(namespace: dict, names: tuple[str, ...]) -> None:
     flags = __future__.annotations.compiler_flag
     for name in names:
         path = base / name
-        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec",
-                     flags=flags, dont_inherit=True), namespace)
+        source = path.read_text(encoding="utf-8")
+        try:
+            code = compile(source, str(path), "exec",
+                           flags=flags, dont_inherit=True)
+        except SyntaxError as exc:
+            raise RuntimeError(
+                f"Failed to compile fragment {name!r} ({path}): {exc}"
+            ) from exc
+        try:
+            exec(code, namespace)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to execute fragment {name!r} ({path}): {exc}"
+            ) from exc
