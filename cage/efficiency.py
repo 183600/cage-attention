@@ -30,7 +30,6 @@ import torch
 
 from .metrics import _positive_integer
 from .model import Cfg, _query_blocks, build, release_eval_scratch
-import ast
 
 
 def _as_cfg(cfg) -> Cfg:
