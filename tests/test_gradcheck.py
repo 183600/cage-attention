@@ -1,10 +1,4 @@
 """Gradient checks and reference parity for the hand-written autograd kernels.
-
-
-# Reproducibility seed (added by code review)
-torch.manual_seed(42)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(42)
 Design pin D6 keeps four custom ``torch.autograd.Function`` kernels
 (``_SoftmaxInPlace``, ``_RowEntropy``, ``_CalibAttn``, ``_NullAttn``) with
 hand-derived backward passes; the entropy term participates in the gradient,

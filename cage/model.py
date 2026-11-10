@@ -1,10 +1,4 @@
 """CAGE-Attention: Calibrated Attention Gating Experiments.
-
-
-# Reproducibility seed (added by code review)
-torch.manual_seed(42)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(42)
 Implements a small GPT-style decoder-only transformer with pluggable
 attention-gate variants and normalization schemes.
 

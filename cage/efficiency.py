@@ -1,10 +1,4 @@
 """Model-cost accounting for the CAGE grids.
-
-
-# Reproducibility seed (added by code review)
-torch.manual_seed(42)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(42)
 The experiment records already carry parameter counts, but a parameter count
 alone cannot separate a mechanism from capacity or compute.  This module adds
 three companions that are reported next to accuracy, never inside a

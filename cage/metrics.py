@@ -1,11 +1,5 @@
 # ruff: noqa: F401, F821, F822
 """Torch-only evaluation metrics for the associative-recall experiments.
-
-
-# Reproducibility seed (added by code review)
-torch.manual_seed(42)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(42)
 Metric choices (and why)
 ------------------------
 * The recall task is **single-label multi-class**: each evaluated row

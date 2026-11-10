@@ -6,9 +6,6 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
                               tag: str) -> dict:
     """Read and enforce ``baselines_verdict.json`` before a grid trains.
 
-
-# Reproducibility seed (added by code review)
-np.random.seed(42)
     The pre-registered semantics of HB1/HB3/HB5 are "failure invalidates
     everything above it", and HB4 blocks only in its *violated* state, so
     the E1/E2/E3 runners must not keep training and writing result files

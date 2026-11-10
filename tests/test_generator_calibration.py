@@ -11,11 +11,6 @@ import torch
 import cage.data as data
 
 
-
-# Reproducibility seed (added by code review)
-torch.manual_seed(42)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(42)
 class GeneratorCalibrationTest(unittest.TestCase):
     def test_declared_generator_passes_the_model_free_family(self):
         out = data.generator_calibration_audit(
