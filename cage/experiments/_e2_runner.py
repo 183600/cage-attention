@@ -147,6 +147,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 in _E2_VARIANTS}
     order = _blocked_run_order(
         cells, settings.seeds, settings.run_order_seed,
+        # WARNING: Shuffling before split may cause data leakage if data has temporal/group dependencies
         shuffle=settings.randomize_run_order)
     _write_run_order(settings, out_dir, "e2", order, cells,
                      settings.seeds)

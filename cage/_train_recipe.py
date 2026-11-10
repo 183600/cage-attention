@@ -1131,7 +1131,7 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
         else:
             loss_se = float("nan")
         return (sum(losses) / n_batches,
-                correct.item() / total if total else float("nan"),
+                correct.item() / max(total, 1) if total else float("nan"),
                 first_bad_batch if first_bad_batch is not None else last_batch,
                 loss_se)
     finally:

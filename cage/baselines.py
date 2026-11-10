@@ -293,7 +293,7 @@ def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
         pred = model(idx).argmax(dim=-1)
         correct.add_((pred == meta["answer"]).sum())
         total += idx.size(0)
-    return correct.item() / total if total else float("nan")
+    return correct.item() / max(total, 1) if total else float("nan")
 
 
 def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),

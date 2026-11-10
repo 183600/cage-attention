@@ -547,7 +547,7 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
             pred = logits.squeeze(1).argmax(-1)
             correct.add_((pred == meta["answer"]).sum())
             total += idx.size(0)
-        return correct.item() / total if total else float("nan")
+        return correct.item() / max(total, 1) if total else float("nan")
     finally:
         for module, training in training_states.items():
             module.train(training)

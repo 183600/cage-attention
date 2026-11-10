@@ -233,7 +233,7 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
             eval_steps = {train_steps - 1}
         else:
             eval_steps = {
-                int(round(i * (train_steps - 1) / (points - 1)))
+                int(round(i * (train_steps - 1) / max(points - 1, 1)))
                 for i in range(points)}
         eval_every = 0
     early_stop_info = {}

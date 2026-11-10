@@ -1232,7 +1232,7 @@ def _jackknife_means(d: torch.Tensor) -> torch.Tensor:
     n = d.numel()
     if n < 2:
         return d.new_empty(0)
-    return (d.sum() - d) / (n - 1)
+    return (d.sum() - d) / max(n - 1, 1)
 
 
 def _normal_quantile(p: float) -> float:
