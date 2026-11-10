@@ -18,6 +18,7 @@ checks are written as regressions rather than as style preferences:
 
 from __future__ import annotations
 
+import ast
 import pathlib
 import re
 import unittest
