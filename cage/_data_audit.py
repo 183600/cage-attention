@@ -228,10 +228,10 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
                           if groups[name] == "train")),
         "n_unique_pairs": int(len(train_codes)),
         "n_unique_keys": int(len(train_keys_seen)),
-        "n_possible_pairs": int((vocab_int - 2) ** 2),
+        "n_possible_pairs": int((vocab_int - 2) ** 2) if vocab_int < 2**31 else float("inf"),
         "n_possible_keys": int(vocab_int - 2),
         "pair_space_coverage": (
-            len(train_codes) / ((vocab_int - 2) ** 2)
+            len(train_codes) / ((vocab_int - 2) ** 2) if vocab_int < 2**31 else 0.0
             if vocab_int > 2 else float("nan")),
     }
     max_exposure = max(
