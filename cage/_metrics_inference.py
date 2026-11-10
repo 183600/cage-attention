@@ -520,7 +520,7 @@ def _regularized_incomplete_beta(a: float, b: float, x: float) -> float:
     if x >= 1.0:
         return 1.0
     log_beta = (math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
-                + a * math.log(x + 1e-8) + b * math.log1p(-x))
+                + a * math.log(x) + b * math.log1p(-x))
     front = math.exp(log_beta)
     if x < (a + 1.0) / (a + b + 2.0):
         return front * _beta_continued_fraction(a, b, x) / a
