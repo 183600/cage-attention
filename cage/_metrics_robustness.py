@@ -327,7 +327,7 @@ def crossed_cluster_bootstrap_ci(correct_a, correct_b, n_boot: int = 4000,
     sd_total = (float(crossed.std(unbiased=True)) if n_boot_int > 1 else 0.0)
     denom = sd_seed ** 2 + sd_item ** 2
     if denom > 0.0:
-        share = sd_seed ** 2 / max(denom, 1)
+        share = sd_seed ** 2 / denom
         axis = "seed" if sd_seed > sd_item else (
             "item" if sd_item > sd_seed else "tie")
     else:

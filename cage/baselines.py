@@ -706,7 +706,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
                 # here would say more seeds cannot certify a run that is
                 # already certified.
                 ci["seeds_for_certification"] = (
-                    float(sd_seed ** 2 / max(denom, 1)) if sd_seed > 0.0 else 1.0)
+                    float(sd_seed ** 2 / denom) if sd_seed > 0.0 else 1.0)
             else:
                 ci["seeds_for_certification"] = float("inf")
         else:
