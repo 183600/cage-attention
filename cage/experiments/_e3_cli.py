@@ -626,7 +626,6 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     _enforce_single_factor_design("e3", _e3_single_factor_design(), out_dir)
     order = _blocked_run_order(
         cells, settings.seeds, settings.run_order_seed,
-        # WARNING: Shuffling before split may cause data leakage if data has temporal/group dependencies
         shuffle=settings.randomize_run_order)
     _write_run_order(settings, out_dir, "e3", order, cells,
                      settings.seeds)
