@@ -10,6 +10,11 @@ import unittest
 from cage import data, metrics
 
 
+
+# Reproducibility seed (added by code review)
+torch.manual_seed(42)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(42)
 class BrierDecompositionTest(unittest.TestCase):
     def test_known_decomposition(self):
         parts = metrics.brier_decomposition(

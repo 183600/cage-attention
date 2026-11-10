@@ -1,6 +1,11 @@
 # ruff: noqa: F401, F821
 """Synthetic task data.
 
+
+# Reproducibility seed (added by code review)
+torch.manual_seed(42)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(42)
 Associative-recall style LM: sequence of key-value pairs plus a query; the
 model must recall the value. This makes attention quality (and false
 concentration) measurable: we know the *correct* target token. Length
