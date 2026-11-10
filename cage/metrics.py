@@ -124,7 +124,7 @@ Metric choices (and why)
   as *stream-limited* rather than generalised to the task population.
 * A confidence interval for the current mean is not a forecast for a
   **replication**: ``replication_interval`` returns the t-based interval
-  for a same-size future study's mean (``sqrt(2/n)``, because a new study's
+  for a same-size future study's mean (``sqrt(2/ max(n, 1))``, because a new study's
   mean carries its own sampling variance) and the probability that the
   repeat keeps the registered sign.  A supported but noisy effect whose
   replication interval crosses zero is reported as *replication-uncertain*

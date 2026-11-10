@@ -772,7 +772,7 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
     training size and held-out at held-out size, and recomputes the
     statistic with the simulated reference (Poisson draws are a standard
     stand-in for multinomial counts whose conditioning correction is
-    ``O(1/N)`` and negligible against the statistic's sampling variation
+    ``O(1/ max(N, 1))`` and negligible against the statistic's sampling variation
     at these sizes).  The returned p-value is
     ``(1 + #{X^2_sim >= X^2_obs}) / (n_sim + 1)``, deterministic in the
     audit seed.
@@ -1120,7 +1120,7 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     uniform expectation ``n / K``.  The null is calibrated by a
     parametric bootstrap that redraws counts as independent
     ``Poisson(n / K)`` variates - the standard Poissonization of
-    multinomial counts, whose conditioning correction is ``O(1/n)`` and
+    multinomial counts, whose conditioning correction is ``O(1/ max(n, 1))`` and
     negligible at these sizes (same convention as
     :func:`_distribution_shift_p`) - at the observed sample size, so the
     small expected count per class (about 10 at the default audit size,
@@ -1942,11 +1942,11 @@ def split_leakage_audit(n_pairs, vocab, device="cpu", batch=256, batches=4,
             "mean_key_pos": float(feat["key_pos"].to(torch.float64)
                                   .mean()) if split["idx"].size(0) else
             float("nan"),
-            "value_repeat_rate": float(feat["value_repeats"].sum()) / n,
+            "value_repeat_rate": float(feat["value_repeats"].sum()) / max(n, 1),
             "naive_confusable_rate": (
-                float(feat["naive_confusable"].sum()) / n),
+                float(feat["naive_confusable"].sum()) / max(n, 1)),
             "answer_as_key_rate": (
-                float(feat["answer_as_key"].sum()) / n),
+                float(feat["answer_as_key"].sum()) / max(n, 1)),
         }
 
     out = {

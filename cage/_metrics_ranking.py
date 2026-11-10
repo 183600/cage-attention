@@ -1021,7 +1021,7 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     acc = torch.bincount(inverse, weights=c, minlength=n_observed)
     nz = counts > 0
     gap = (acc[nz] / counts[nz] - conf[nz] / counts[nz]).abs()
-    return float(((counts[nz] / n) * gap).sum())
+    return float(((counts[nz] / max(n, 1)) * gap).sum())
 
 
 def brier_score(probs, correct) -> float:
@@ -1056,8 +1056,8 @@ def brier_decomposition(probs, correct, n_bins: int = 15) -> dict:
     observed correctness rate ``o_k`` in confidence bin ``k``,
 
         Brier_binned = reliability - resolution + uncertainty
-        reliability  = sum_k (n_k / n) * (f_k - o_k)^2
-        resolution   = sum_k (n_k / n) * (o_k - o_bar)^2
+        reliability  = sum_k (n_k / max(n, 1)) * (f_k - o_k)^2
+        resolution   = sum_k (n_k / max(n, 1)) * (o_k - o_bar)^2
         uncertainty  = o_bar * (1 - o_bar)
 
     Reliability is the calibration penalty (forecast vs observed rate),

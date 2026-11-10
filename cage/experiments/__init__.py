@@ -186,7 +186,7 @@ Design principles
 7. **Replication and claim-level synthesis.**  Two readings sit on top of
    the per-contrast decision without changing it.  First, every row carries
    a t-based **same-size replication interval** for a future study's mean
-   (``sqrt(2/n)``, not the CI's ``sqrt(1/n)``) and the probability that a
+   (``sqrt(2/ max(n, 1))``, not the CI's ``sqrt(1/ max(n, 1))``) and the probability that a
    repeat keeps the registered sign, so a significant but noisy effect is
    labelled *replication-uncertain* instead of "robust".  Second, the
    pre-registered hypotheses are conjunctions ("A and B and C"); a single

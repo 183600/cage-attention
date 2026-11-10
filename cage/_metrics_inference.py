@@ -654,12 +654,12 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
     This function returns the Student-t **replication interval** for the
     mean of a future study of the same size,
     ``mean +- t_{1-alpha/2, n-1} * sd * sqrt(2/n)``.  The ``sqrt(2/n)``
-    (instead of the CI's ``sqrt(1/n)``) is the variance of
+    (instead of the CI's ``sqrt(1/ max(n, 1))``) is the variance of
     ``mean_new - mean_old`` when both studies have ``n`` seeds and the same
     seed-level SD, so the interval describes a same-size repeat rather than
     the precision of the current mean.  ``lo_single``/``hi_single`` give
     the wider prediction interval for one *individual* future seed,
-    ``mean +- t * sd * sqrt(1 + 1/n)``, as a secondary readout.
+    ``mean +- t * sd * sqrt(1 + 1/ max(n, 1))``, as a secondary readout.
 
     ``prob_replicates`` is the t-distribution probability that a same-size
     repeat's mean lies in the pre-registered direction (``+``: above 0,
