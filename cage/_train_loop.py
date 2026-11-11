@@ -462,7 +462,7 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
         "error_rate_key_early": (tertile_err[0] / tertile_n[0]) if tertile_n[0] else float("nan"),
         "error_rate_key_mid": (tertile_err[1] / tertile_n[1]) if tertile_n[1] else float("nan"),
         "error_rate_key_late": (tertile_err[2] / tertile_n[2]) if tertile_n[2] else float("nan"),
-        "errors_key_missed_share": ((key_wrong_n) / n_err) if n_err else float("nan"),
+        "errors_key_missed_share": ((key_wrong_n) / n_err) if n_err and n_err > 0 else float("nan"),
         "attn_mass_on_key_error_key_hit": (
             key_right_total / key_right_n) if key_right_n else float("nan"),
         "attn_mass_on_key_error_key_missed": (
