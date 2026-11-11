@@ -592,7 +592,7 @@ def _balanced_step(total_items: int, max_chunk: int) -> int:
     if total_items <= max_chunk:
         return total_items
     n_chunks = -(-total_items // max_chunk)
-    return max(1, min(max_chunk, -(-total_items // max(n_chunks, 1e-10))))
+    return max(1, min(max_chunk, -(-total_items // n_chunks)))  # n_chunks >= 2 from ceiling division
 
 
 def _qkv_step(batch_size: int, seq_len: int, embed_dim: int) -> int:

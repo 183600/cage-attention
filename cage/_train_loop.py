@@ -527,7 +527,7 @@ def _attention_mass_on_key(x, weight, meta, n_heads, inv_scale, null_k):
 
     B, T, _ = x.shape
     C = weight.size(0) // 3
-    dk = C // max(n_heads, 1e-10)
+    dk = C // max(n_heads, 1)  # n_heads validated > 0 in Cfg
     qp = meta["query_pos"]
     kp = meta["key_pos"]
     rows = _arange(B, x.device)
