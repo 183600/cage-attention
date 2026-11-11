@@ -1645,7 +1645,7 @@ class Block(nn.Module):
         if torch.is_grad_enabled():
             return self.mlp(h)
         c = self.cfg.d_model
-        n = h.numel() // max(c, 1e-10)
+        n = h.numel() // max(c, 1)
         # Row-chunked up projection.
         if n > _MLP_CHUNK_ROWS:
             step = _balanced_step(n, _MLP_CHUNK_ROWS)

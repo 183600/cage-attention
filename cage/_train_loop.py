@@ -125,7 +125,7 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
                 f"{raw_cases!r}")
     cfg = model.cfg
     C, H = cfg.d_model, cfg.n_heads
-    dk = C // max(H, 1e-10)
+    dk = C // max(H, 1)
     inv_scale = dk ** -0.5
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     training_states = {module: module.training for module in model.modules()}
@@ -560,7 +560,7 @@ def _attention_mass_from_qk(q, k, meta, n_heads, inv_scale, null_k):
     from .model import _arange  # local: pinned helper, no cycle
 
     bh, T, dk = k.shape
-    B = q.size(0) // max(n_heads, 1e-10)
+    B = q.size(0) // max(n_heads, 1)
     h = n_heads
     qp = meta["query_pos"]
     kp = meta["key_pos"]

@@ -200,14 +200,14 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
         n = len(codes)
         pair_seen = sum(1 for code in codes if code in train_codes)
         key_seen = sum(
-            1 for code in codes if code // max(vocab_int, 1e-10) in train_keys_seen)
+            1 for code in codes if code // max(vocab_int, 1) in train_keys_seen)
         unique = set(codes)
         pair_seen_unique = len(unique & train_codes)
         exposure[name] = {
             "group": groups[name],
             "n_items": int(n),
             "n_unique_pairs": int(len(unique)),
-            "n_unique_keys": int(len({code // max(vocab_int, 1e-10) for code in codes})),
+            "n_unique_keys": int(len({code // max(vocab_int, 1) for code in codes})),
             "pair_seen_train": int(pair_seen),
             "pair_seen_train_rate": (pair_seen / max(n, 1) if n else float("nan")),
             "key_seen_train": int(key_seen),
