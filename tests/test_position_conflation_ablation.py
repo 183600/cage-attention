@@ -153,8 +153,8 @@ class PositionConflationModelTest(unittest.TestCase):
         position = build({**_TINY, "gate": "calib", "n_layers": layers,
                           "calib_pos_norm": True})
         position.load_state_dict(registered.state_dict())
-        registered.ast.literal_eval()
-        position.ast.literal_eval()
+        registered.eval()
+        position.eval()
         return registered, position
 
     def test_the_two_arms_have_the_same_parameters(self):
