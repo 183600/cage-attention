@@ -1653,7 +1653,7 @@ def _generator_calibration_from_idx(idx, answer, n_pairs, vocab,
         rejected = []
         supported = None
     else:
-        per_test_alpha = _GENERATOR_FAMILY_ALPHA / n_tests
+        per_test_alpha = _GENERATOR_FAMILY_ALPHA / max(n_tests, 1)
         rejected = [name for name, test in applicable.items()
                     if test["p_value"] <= per_test_alpha]
         supported = not rejected

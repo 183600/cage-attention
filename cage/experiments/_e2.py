@@ -738,7 +738,7 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
 
     def _tune_run(gate, seed, lr, tau, phase):
         overrides = ({"calib_tau_init": tau} if gate == "calib" else {})
-        _, params, metrics, curve, model_cfg = _train_and_eval(
+        _, params, metrics, curve, model_cfg = _train_and_eval(  # SECURITY: eval() usage - manual review needed
             settings, seed, lr, eval_seed=VAL_SEED, selection=True,
             gate=gate, **overrides)
         rec = {
@@ -864,7 +864,7 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                 overrides = ({"calib_tau_init": final_tau}
                              if gate == "calib" else {})
                 model, params, base_metrics, curve, model_cfg = \
-                    _train_and_eval(
+                    _train_and_eval(  # SECURITY: eval() usage - manual review needed
                         settings, seed, final_lr, eval_seed=TEST_SEED,
                         gate=gate, **overrides)
                 long_metrics = eval_metrics(

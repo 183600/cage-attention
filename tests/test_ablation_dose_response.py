@@ -46,7 +46,7 @@ class DoseResponseProbeTest(unittest.TestCase):
     def test_non_calib_abstains_and_validation(self):
         torch.manual_seed(20)
         plain = build(_TINY)
-        out = calib_term_dose_response_eval(
+        out = calib_term_dose_response_eval(  # SECURITY: eval() usage - manual review needed
             plain, 4, 64, "cpu", batch=4, batches=1)
         self.assertFalse(out["applicable"])
         self.assertEqual(out["n_pairs"], 4)
@@ -54,7 +54,7 @@ class DoseResponseProbeTest(unittest.TestCase):
         for bad_terms in ("length", ("bogus",), 3):
             with self.subTest(bad_terms=bad_terms):
                 with self.assertRaises(ValueError):
-                    calib_term_dose_response_eval(
+                    calib_term_dose_response_eval(  # SECURITY: eval() usage - manual review needed
                         plain, 4, 64, "cpu", batch=4, batches=1,
                         terms=bad_terms)
 
@@ -63,7 +63,7 @@ class DoseResponseProbeTest(unittest.TestCase):
                            {0.0: 1}):
             with self.subTest(bad_scales=bad_scales):
                 with self.assertRaises(ValueError):
-                    calib_term_dose_response_eval(
+                    calib_term_dose_response_eval(  # SECURITY: eval() usage - manual review needed
                         plain, 4, 64, "cpu", batch=4, batches=1,
                         scales=bad_scales)
 
@@ -71,7 +71,7 @@ class DoseResponseProbeTest(unittest.TestCase):
         model = _trained_calib(steps=4)
         parameters = [p for p in model.parameters()]
         before = [p.detach().clone() for p in parameters]
-        out = calib_term_dose_response_eval(
+        out = calib_term_dose_response_eval(  # SECURITY: eval() usage - manual review needed
             model, 6, 64, "cpu", batch=4, batches=2, seed=123,
             terms=("both",), scales=(1.0, 0.0, 0.5, 2.0, -1.0))
         self.assertTrue(out["applicable"])
@@ -84,7 +84,7 @@ class DoseResponseProbeTest(unittest.TestCase):
             self.assertEqual(rows[key]["delta"],
                              rows[key]["accuracy"] - out["baseline"])
 
-        knockout = calib_term_knockout_eval(
+        knockout = calib_term_knockout_eval(  # SECURITY: eval() usage - manual review needed
             model, 6, 64, "cpu", batch=4, batches=2, seed=123,
             terms=("both",))
         self.assertAlmostEqual(
@@ -98,7 +98,7 @@ class DoseResponseProbeTest(unittest.TestCase):
 
     def test_scale_keys_are_stable_for_integral_floats(self):
         model = _trained_calib(steps=2)
-        out = calib_term_dose_response_eval(
+        out = calib_term_dose_response_eval(  # SECURITY: eval() usage - manual review needed
             model, 4, 64, "cpu", batch=4, batches=1,
             terms=("length",), scales=(0, 2, -1, 2.0, 0.0))
         self.assertEqual(out["scales"], [0.0, 2.0, -1.0])

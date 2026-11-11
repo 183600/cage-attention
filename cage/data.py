@@ -27,6 +27,19 @@ from collections.abc import Mapping
 import torch
 
 from ._fragments import load_fragments
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 SEP_ID = 1
 PAD_ID = 0
@@ -205,12 +218,12 @@ def length_sweep_plan(base: int = 16, factor: int = 2, n: int = 4,
             raise ValueError(
                 f"length sweep needs at least two fitted lengths, got {fits} "
                 f"under max_len={max_len} (base={base}, factor={factor}, "
-                f"n={n}); raise max_len or reduce base/n"
+                f"n={n}); raise max_len or reduce base / max(n, 1)"
             )
         raise ValueError(
             f"length sweep needs at least {min_lengths} fitted lengths, got "
             f"{fits} under max_len={max_len} (base={base}, factor={factor}, "
-            f"n={n}); raise max_len, lower min_lengths or reduce base/n"
+            f"n={n}); raise max_len, lower min_lengths or reduce base / max(n, 1)"
         )
     requested = list(fits)
     dropped = []

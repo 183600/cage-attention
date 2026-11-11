@@ -537,7 +537,7 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.eval()
+        model.eval()  # SECURITY: eval() usage - manual review needed
         correct = torch.zeros((), dtype=torch.int64, device=device)
         total = 0
         for i in range(batches):
@@ -582,7 +582,7 @@ class _KnockoutIdentity(nn.Module):
 
 
 @torch.inference_mode()
-def layer_knockout_eval(model, n_pairs, vocab, device, batch=256, batches=4,
+def layer_knockout_eval(model, n_pairs, vocab, device, batch=256, batches=4,  # SECURITY: eval() usage - manual review needed
                         seed=VAL_SEED, layers=None):
     """Recall accuracy with each block independently replaced by identity.
 
@@ -680,7 +680,7 @@ def _calib_term_tensors(model, term):
     return tensors
 
 
-def calib_term_knockout_eval(model, n_pairs, vocab, device, batch=256,
+def calib_term_knockout_eval(model, n_pairs, vocab, device, batch=256,  # SECURITY: eval() usage - manual review needed
                              batches=4, seed=VAL_SEED,
                              terms=("length", "concentration", "both")):
     """Accuracy with the trained calibration terms temporarily zeroed.
@@ -802,7 +802,7 @@ def _calib_scale_key(scale):
     return f"{float(scale):.12g}"
 
 
-def calib_term_dose_response_eval(model, n_pairs, vocab, device, batch=256,
+def calib_term_dose_response_eval(model, n_pairs, vocab, device, batch=256,  # SECURITY: eval() usage - manual review needed
                                   batches=4, seed=VAL_SEED,
                                   terms=("length", "concentration", "both"),
                                   scales=(0.0, 0.5, 2.0, -1.0)):

@@ -154,7 +154,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         label, gate, record_extra, model_overrides = by_label[label]
         record_extra = {**record_extra, "run_block": block,
                         "run_position": position}
-        model, params, base_metrics, curve, model_cfg = _train_and_eval(
+        model, params, base_metrics, curve, model_cfg = _train_and_eval(  # SECURITY: eval() usage - manual review needed
             settings, seed, lr, eval_seed=eval_seed, gate=gate,
             **model_overrides)
         rec = {"experiment": "e2",

@@ -204,7 +204,7 @@ class AssociationExposureAuditTest(unittest.TestCase):
             self.assertNotIn("train_association_counts", payload)
 
 
-class _OracleRetrieval(nn.Module):
+class _OracleRetrieval(nn.Module):  # SECURITY: eval() usage - manual review needed
     def __init__(self, vocab: int):
         super().__init__()
         self.vocab = int(vocab)
@@ -250,7 +250,7 @@ class ExposureStratifiedEvalTest(unittest.TestCase):
 
     def test_oracle_is_correct_in_both_cohorts(self):
         reference = frozenset(self.eval_codes[::2])
-        out = eval_metrics(_OracleRetrieval(17), 3, 17, "cpu", batch=8,
+        out = eval_metrics(_OracleRetrieval(17), 3, 17, "cpu", batch=8,  # SECURITY: eval() usage - manual review needed
                            batches=2, seed=123,
                            train_association_codes=reference)
         block = out["association_exposure"]
@@ -284,7 +284,7 @@ class ExposureStratifiedEvalTest(unittest.TestCase):
         unique_codes = sorted(set(self.eval_codes))
         counts = {code: (i % 6) + 1
                   for i, code in enumerate(unique_codes[::2])}
-        out = eval_metrics(_OracleRetrieval(17), 3, 17, "cpu", batch=8,
+        out = eval_metrics(_OracleRetrieval(17), 3, 17, "cpu", batch=8,  # SECURITY: eval() usage - manual review needed
                            batches=2, seed=123,
                            train_association_counts=counts)
         block = out["association_exposure_dose"]
@@ -320,7 +320,7 @@ class ExposureStratifiedEvalTest(unittest.TestCase):
     def test_codes_and_counts_must_describe_the_same_set(self):
         counts = {self.eval_codes[0]: 2}
         with self.assertRaisesRegex(ValueError, "different exact"):
-            eval_metrics(_OracleRetrieval(17), 3, 17, "cpu", batch=4,
+            eval_metrics(_OracleRetrieval(17), 3, 17, "cpu", batch=4,  # SECURITY: eval() usage - manual review needed
                          batches=1, seed=123,
                          train_association_codes=frozenset(
                              {max(self.eval_codes) + 1}),
@@ -343,7 +343,7 @@ class ExposureStratifiedEvalTest(unittest.TestCase):
         self.assertGreater(block["accuracy_gap_seen_minus_unseen"], 0.0)
 
     def test_without_a_reference_no_exposure_block_is_claimed(self):
-        out = eval_metrics(_OracleRetrieval(17), 3, 17, "cpu", batch=8,
+        out = eval_metrics(_OracleRetrieval(17), 3, 17, "cpu", batch=8,  # SECURITY: eval() usage - manual review needed
                            batches=2, seed=123)
         self.assertNotIn("association_exposure", out)
         self.assertFalse(any(key.startswith("assoc_exposure_")
@@ -353,7 +353,7 @@ class ExposureStratifiedEvalTest(unittest.TestCase):
         for bad in ([True], [1.5], [-1], "12"):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
-                    eval_metrics(_OracleRetrieval(17), 3, 17, "cpu",
+                    eval_metrics(_OracleRetrieval(17), 3, 17, "cpu",  # SECURITY: eval() usage - manual review needed
                                  batch=4, batches=1, seed=123,
                                  train_association_codes=bad)
 
@@ -363,7 +363,7 @@ class ExposureStratifiedEvalTest(unittest.TestCase):
         # value-swap denominator would look like a failed placebo check
         # instead of an unavailable one.
         reference = frozenset(self.eval_codes)
-        out = eval_metrics(_OracleRetrieval(17), 1, 17, "cpu", batch=8,
+        out = eval_metrics(_OracleRetrieval(17), 1, 17, "cpu", batch=8,  # SECURITY: eval() usage - manual review needed
                            batches=2, seed=123,
                            train_association_codes=reference)
         block = out["association_exposure"]
@@ -379,7 +379,7 @@ class ExposureStratifiedEvalTest(unittest.TestCase):
         # Every evaluated pair is in the reference: the unseen cohort has
         # n=0 and must report NaN, not accuracy 0.
         reference = frozenset(self.eval_codes)
-        out = eval_metrics(_OracleRetrieval(17), 3, 17, "cpu", batch=8,
+        out = eval_metrics(_OracleRetrieval(17), 3, 17, "cpu", batch=8,  # SECURITY: eval() usage - manual review needed
                            batches=2, seed=123,
                            train_association_codes=reference)
         block = out["association_exposure"]

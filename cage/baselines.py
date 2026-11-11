@@ -273,7 +273,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
                                     or step == steps - 1):
             history.append({"step": int(step),
                             "loss": float(loss.detach())})
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     return model
 
 
@@ -481,7 +481,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     and the common-stream scoring noise.  ``sd_effective`` is the total
     per-seed SD (``sqrt(sd_seed^2 + mean(p(1-p))/n_per_seed)``) for
     display, while planning uses the SD of the mean,
-    ``se_effective = sqrt(sd_seed^2/n + mean(p(1-p))/n_per_seed)``; the
+    ``se_effective = sqrt(sd_seed^2 / max(n, 1) + mean(p(1-p))/n_per_seed)``; the
     stream term does not shrink with more seeds, so
     ``seeds_for_certification`` is ``inf`` when the observed margin cannot
     clear that noise floor.  Without this correction a near-bound run can

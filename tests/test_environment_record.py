@@ -7,6 +7,19 @@ from unittest import mock
 
 from cage import experiments
 from cage.experiments import Settings, _environment_record
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 
 class EnvironmentRecordTest(unittest.TestCase):

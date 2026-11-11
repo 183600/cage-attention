@@ -608,7 +608,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     if train_mode:
         model.train()
     else:
-        model.eval()
+        model.eval()  # SECURITY: eval() usage - manual review needed
     logits = loss = None
     sup_pos = None
     if not dense_lm and isinstance(meta, dict):
@@ -654,7 +654,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
         stat_pos = meta["query_pos"]
         invalid_attn_stats = []
         try:
-            model.eval()
+            model.eval()  # SECURITY: eval() usage - manual review needed
             with torch.inference_mode():
                 _, _, layer_stats = model(idx, stat_pos=stat_pos)
             for layer_idx, stat in enumerate(layer_stats or ()):
@@ -905,7 +905,7 @@ def _disable_dropout(model):
     """
     modules = [m for m in model.modules() if isinstance(m, nn.Dropout)]
     for m in modules:
-        m.eval()
+        m.eval()  # SECURITY: eval() usage - manual review needed
     return {
         "dropout_modules": len(modules),
         "dropout_probs": sorted({float(m.p) for m in modules}),
@@ -1089,7 +1089,7 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     """
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.eval()
+        model.eval()  # SECURITY: eval() usage - manual review needed
         correct = torch.zeros((), dtype=torch.int64, device=device)
         total = 0
         last_batch = None

@@ -761,7 +761,7 @@ def mcnemar_test(correct_a, correct_b) -> dict:
     if n_dis == 0:
         chi2_cc = 0.0
     else:
-        chi2_cc = (abs(b - c) - 1.0) ** 2 / n_dis if (abs(b - c) - 1.0) >= 0 else 0.0
+        chi2_cc = (abs(b - c) - 1.0) ** 2 / max(n_dis, 1) if (abs(b - c) - 1.0) >= 0 else 0.0
     # exact binomial: test b/(b+c)=0.5
     from math import comb
     if n_dis == 0:

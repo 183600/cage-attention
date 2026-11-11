@@ -58,7 +58,7 @@ class CurvePointsTest(unittest.TestCase):
         settings.steps = steps
         settings.curve_points = points
         with contextlib.redirect_stdout(io.StringIO()):
-            _, _, _, curve, _ = _train_and_eval(
+            _, _, _, curve, _ = _train_and_eval(  # SECURITY: eval() usage - manual review needed
                 settings, 0, 1e-3, eval_seed=123, gate="none")
         return curve["curve_steps"]
 

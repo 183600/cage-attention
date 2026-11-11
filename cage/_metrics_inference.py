@@ -667,7 +667,8 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
 
     This function returns the Student-t **replication interval** for the
     mean of a future study of the same size,
-    ``mean +- t_{1-alpha/2, n-1} * sd * sqrt(2/n)``.  The ``sqrt(2/n)``
+    ``mean +- t_{1-alpha/2, n-1} * sd * sqrt(2 / max(n, 1))``.  The ``sqrt(2/n)``
+    ``mean +- t_{1-alpha/2, n-1} * sd * sqrt(2 / max(n, 1))``.  The ``sqrt(2/n)``
     (instead of the CI's ``sqrt(1/ max(n, 1))``) is the variance of
     ``mean_new - mean_old`` when both studies have ``n`` seeds and the same
     seed-level SD, so the interval describes a same-size repeat rather than
@@ -1141,7 +1142,7 @@ def false_coverage_ci(diffs, n_selected, n_tests, q: float = 0.05,
         if n_tst <= 100000:
             factor = math.fsum(1.0 / max(i, 1e-10) for i in range(1, n_tst + 1))
         else:
-            factor = math.log(n_tst + 1e-8) + 0.5772156649015329 + 0.5 / n_tst
+            factor = math.log(n_tst + 1e-8) + 0.5772156649015329 + 0.5 / max(n_tst, 1)
         adjusted_alpha = q_value * n_sel / (n_tst * factor)
     else:
         factor = 1.0

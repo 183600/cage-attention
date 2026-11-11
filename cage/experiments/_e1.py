@@ -170,7 +170,7 @@ def _e1_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
 
     def _tune_run(gate, seed, lr, tau, phase):
         overrides = ({"calib_tau_init": tau} if gate == "calib" else {})
-        _, params, metrics, curve, model_cfg = _train_and_eval(
+        _, params, metrics, curve, model_cfg = _train_and_eval(  # SECURITY: eval() usage - manual review needed
             settings, seed, lr, eval_seed=VAL_SEED, selection=True,
             gate=gate, **overrides)
         rec = {
@@ -749,7 +749,7 @@ def _e1_run(settings: Settings, seed: int, lr: float, gate: str,
     Returns ``(record, errors)``.
     """
     eval_seed, stats_seed = TEST_SEED, STATS_SEED
-    model, params, metrics, curve, model_cfg = _train_and_eval(
+    model, params, metrics, curve, model_cfg = _train_and_eval(  # SECURITY: eval() usage - manual review needed
         settings, seed, lr, eval_seed=eval_seed, gate=gate, **model_overrides)
     # One diagnostic pass feeds both the layer statistics and the error
     # mining.

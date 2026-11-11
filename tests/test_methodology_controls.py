@@ -183,8 +183,8 @@ class LayerKnockoutTest(unittest.TestCase):
                     log_every=0)
         params_before = {n: p.clone() for n, p in model.named_parameters()}
         blocks_before = list(model.blocks)
-        out1 = layer_knockout_eval(model, 6, 64, "cpu", batch=4, batches=1)
-        out2 = layer_knockout_eval(model, 6, 64, "cpu", batch=4, batches=1)
+        out1 = layer_knockout_eval(model, 6, 64, "cpu", batch=4, batches=1)  # SECURITY: eval() usage - manual review needed
+        out2 = layer_knockout_eval(model, 6, 64, "cpu", batch=4, batches=1)  # SECURITY: eval() usage - manual review needed
         self.assertEqual(out1, out2)
         self.assertEqual(out1["n_layers"], 2)
         self.assertEqual(sorted(out1["by_layer"]), [0, 1])
@@ -205,14 +205,14 @@ class LayerKnockoutTest(unittest.TestCase):
     def test_layer_selection_and_validation(self):
         torch.manual_seed(7)
         model = build({**_TINY, "gate": "none"})
-        out = layer_knockout_eval(model, 6, 64, "cpu", batch=4, batches=1,
+        out = layer_knockout_eval(model, 6, 64, "cpu", batch=4, batches=1,  # SECURITY: eval() usage - manual review needed
                                   layers=(1,))
         self.assertEqual(out["layers"], [1])
         self.assertIsNone(out["embedding_only"])
         for bad in ((2,), (-1,), (True,), "0", {"0": 1}, (0.5,)):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
-                    layer_knockout_eval(model, 6, 64, "cpu", batch=4,
+                    layer_knockout_eval(model, 6, 64, "cpu", batch=4,  # SECURITY: eval() usage - manual review needed
                                         batches=1, layers=bad)
 
 
@@ -419,7 +419,7 @@ class CalibTermKnockoutTest(unittest.TestCase):
     def test_non_calib_abstains_and_validation(self):
         torch.manual_seed(20)
         plain = build(_TINY)
-        out = calib_term_knockout_eval(
+        out = calib_term_knockout_eval(  # SECURITY: eval() usage - manual review needed
             plain, 4, 64, "cpu", batch=4, batches=1)
         self.assertFalse(out["applicable"])
         self.assertEqual(out["n_pairs"], 4)
@@ -427,13 +427,13 @@ class CalibTermKnockoutTest(unittest.TestCase):
         for bad_terms in ("length", ("bogus",), 3):
             with self.subTest(bad_terms=bad_terms):
                 with self.assertRaises(ValueError):
-                    calib_term_knockout_eval(
+                    calib_term_knockout_eval(  # SECURITY: eval() usage - manual review needed
                         plain, 4, 64, "cpu", batch=4, batches=1,
                         terms=bad_terms)
 
         torch.manual_seed(21)
         len_only = build({**_TINY, "gate": "calib", "calib_use_ent": False})
-        out = calib_term_knockout_eval(
+        out = calib_term_knockout_eval(  # SECURITY: eval() usage - manual review needed
             len_only, 4, 64, "cpu", batch=4, batches=1,
             terms=("length", "concentration"))
         self.assertTrue(out["applicable"])
@@ -447,7 +447,7 @@ class CalibTermKnockoutTest(unittest.TestCase):
             for parameter in (block.attn.calib_a, block.attn.calib_c)
             if parameter is not None]
         before = [parameter.detach().clone() for parameter in parameters]
-        out = calib_term_knockout_eval(
+        out = calib_term_knockout_eval(  # SECURITY: eval() usage - manual review needed
             model, 6, 64, "cpu", batch=4, batches=2, seed=123)
         self.assertTrue(out["applicable"])
         for term in ("length", "concentration", "both"):

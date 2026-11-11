@@ -29,6 +29,19 @@ import torch
 
 from .metrics import _positive_integer
 from .model import Cfg, _query_blocks, build, release_eval_scratch
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 
 def _as_cfg(cfg) -> Cfg:
@@ -139,7 +152,7 @@ def measure_forward(model, cfg, seq_len: int, device, batch: int = 1,
     # disabled for a diagnostic), and ``model.train(was_training)`` would
     # silently overwrite that mixed state.
     training_states = {module: module.training for module in model.modules()}
-    model.eval()
+    model.eval()  # SECURITY: eval() usage - manual review needed
     timings = []
     baseline_allocated = None
     peak_allocated = None

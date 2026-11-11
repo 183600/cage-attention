@@ -327,7 +327,7 @@ def _run_order_audit(order, cells, seeds, randomized=True):
         if len(vals) == n_blocks and vals and all(
             v == n_cells - 1 for v in vals))
     if n_cells > 1 and n_blocks > 0:
-        extreme_p = min(1.0, n_cells * (1.0 / n_cells) ** n_blocks)
+        extreme_p = min(1.0, n_cells * (1.0 / max(n_cells, 1)) ** n_blocks)
     else:
         extreme_p = 1.0
     # A systematic (unshuffled) schedule is always a real order confound;
@@ -1476,7 +1476,7 @@ def _stamp_calib_term_knockout(rec, model, settings, lengths, eval_seed):
         return None
     terms = ("length", "concentration", "both")
     by_length = {
-        str(length): calib_term_knockout_eval(
+        str(length): calib_term_knockout_eval(  # SECURITY: eval() usage - manual review needed
             model, length, settings.vocab, settings.device,
             batch=settings.eval_batch, batches=settings.eval_batches,
             seed=eval_seed, terms=terms)
@@ -1555,7 +1555,7 @@ def _stamp_calib_term_dose_response(rec, model, settings, lengths, eval_seed):
         return None
     terms = ("length", "concentration", "both")
     by_length = {
-        str(length): calib_term_dose_response_eval(
+        str(length): calib_term_dose_response_eval(  # SECURITY: eval() usage - manual review needed
             model, length, settings.vocab, settings.device,
             batch=settings.eval_batch, batches=settings.eval_batches,
             seed=eval_seed, terms=terms, scales=_CALIB_DOSE_SCALES)

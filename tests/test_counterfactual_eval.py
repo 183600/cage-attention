@@ -432,7 +432,7 @@ class AssociationExposureSummaryTest(unittest.TestCase):
         self.assertEqual(out["seen"]["cf_value_follow_rate"], 1.0)
 
 
-class _OracleRetrieval(nn.Module):
+class _OracleRetrieval(nn.Module):  # SECURITY: eval() usage - manual review needed
     """Perfect retrieval model: copy the value paired with the query key."""
 
     def __init__(self, vocab: int):
@@ -453,7 +453,7 @@ class _OracleRetrieval(nn.Module):
         return logits, None, None
 
 
-class _ExtremeDoubleRetrieval(_OracleRetrieval):
+class _ExtremeDoubleRetrieval(_OracleRetrieval):  # SECURITY: eval() usage - manual review needed
     def forward(self, idx):
         logits, _, _ = super().forward(idx)
         return logits.double() * 1e300, None, None
@@ -461,14 +461,14 @@ class _ExtremeDoubleRetrieval(_OracleRetrieval):
 
 class CounterfactualEvalIntegrationTest(unittest.TestCase):
     def test_float64_logit_panel_is_not_downcast_to_float32(self):
-        out = eval_metrics(_ExtremeDoubleRetrieval(17), 3, 17, "cpu",
+        out = eval_metrics(_ExtremeDoubleRetrieval(17), 3, 17, "cpu",  # SECURITY: eval() usage - manual review needed
                            batch=8, batches=2, seed=123)
         self.assertEqual(out["finite_logit_frac"], 1.0)
         self.assertAlmostEqual(out["accuracy"], 1.0)
         self.assertTrue(math.isfinite(out["nll"]))
 
     def test_perfect_retrieval_follows_every_probe(self):
-        model = _OracleRetrieval(17)
+        model = _OracleRetrieval(17)  # SECURITY: eval() usage - manual review needed
         out = eval_metrics(model, 3, 17, "cpu", batch=8, batches=2,
                            seed=123)
         self.assertAlmostEqual(out["accuracy"], 1.0)

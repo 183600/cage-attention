@@ -46,6 +46,19 @@ from cage.experiments import (
     _study_level_adjudication,
 )
 from cage.efficiency import analytic_matmul_flops
+# Reproducibility: Set random seeds
+import random
+import numpy as np
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+try:
+    import torch
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+except ImportError:
+    pass
 
 
 def _leg(**overrides):
