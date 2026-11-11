@@ -1299,7 +1299,9 @@ class Attention(nn.Module):
                 ssum.clamp_min_(_EPS)
                 # Out-of-place: diagnostics must not mutate the attention
                 # probabilities they are reading (nor a caller's tensor).
-                pr = pr / max(ssum, 1e-10)
+                # ssum already clamped to _EPS above; max() crashes on
+                # multi-element tensors (Boolean value ambiguous).
+                pr = pr / ssum
             else:
                 null_mass = None
                 pr = rows
