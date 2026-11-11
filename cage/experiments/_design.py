@@ -1476,7 +1476,7 @@ def _stamp_calib_term_knockout(rec, model, settings, lengths, eval_seed):
         return None
     terms = ("length", "concentration", "both")
     by_length = {
-        str(length): calib_term_knockout_eval(  # SECURITY: eval() usage - manual review needed
+        str(length): calib_term_knockout_eval(
             model, length, settings.vocab, settings.device,
             batch=settings.eval_batch, batches=settings.eval_batches,
             seed=eval_seed, terms=terms)
@@ -1555,7 +1555,7 @@ def _stamp_calib_term_dose_response(rec, model, settings, lengths, eval_seed):
         return None
     terms = ("length", "concentration", "both")
     by_length = {
-        str(length): calib_term_dose_response_eval(  # SECURITY: eval() usage - manual review needed
+        str(length): calib_term_dose_response_eval(
             model, length, settings.vocab, settings.device,
             batch=settings.eval_batch, batches=settings.eval_batches,
             seed=eval_seed, terms=terms, scales=_CALIB_DOSE_SCALES)

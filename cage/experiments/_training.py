@@ -163,7 +163,7 @@ def _curve_record(hist, early_stop_info=None, seeding=None):
     }
 
 
-def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,  # SECURITY: eval() usage - manual review needed
+def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
                     permute_labels: bool = False, selection: bool = False,
                     steps: int | None = None, **model_overrides):
     """Train + score one run through the single shared entry point.
@@ -289,7 +289,7 @@ def tune_shared_recipe(settings: Settings):
     for lr in settings.lr_grid:
         accs, verdicts, runs = [], [], []
         for seed in tune_seeds:
-            _, params, metrics, curve, _ = _train_and_eval(  # SECURITY: eval() usage - manual review needed
+            _, params, metrics, curve, _ = _train_and_eval(
                 settings, seed, lr, eval_seed=VAL_SEED, selection=True,
                 gate="none")
             accs.append(metrics["accuracy"])

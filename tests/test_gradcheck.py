@@ -286,7 +286,7 @@ class ModelPathParityTest(unittest.TestCase):
             "vocab_size": 64, "d_model": 16, "n_heads": 2, "n_layers": 2,
             "max_len": 64, "gate": gate, "dropout": 0.0,
         }).to(dtype)
-        model.eval()  # SECURITY: eval() usage - manual review needed
+        model.eval()
         idx = torch.randint(0, 64, (3, T))
         with torch.no_grad():
             eval_logits, _, _ = model(idx)
@@ -313,7 +313,7 @@ class ModelPathParityTest(unittest.TestCase):
             "vocab_size": 64, "d_model": 16, "n_heads": 2, "n_layers": 1,
             "max_len": 64, "gate": "calib",
         })
-        model.eval()  # SECURITY: eval() usage - manual review needed
+        model.eval()
         attn = model.blocks[0].attn
         idx = torch.randint(0, 64, (2, 9))
         with torch.no_grad():

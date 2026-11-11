@@ -275,7 +275,7 @@ def _e3_capacity_matched_pre_reference(settings: Settings,
                  f"seednorm target {target_params})")
     runs = []
     for seed in settings.seeds:
-        model, params, metrics, curve, model_cfg = _train_and_eval(  # SECURITY: eval() usage - manual review needed
+        model, params, metrics, curve, model_cfg = _train_and_eval(
             settings, seed, lr, eval_seed=TEST_SEED, gate=gate,
             norm="pre", layer_scale=layer_scale, d_model=wide_d)
         stats, errors = collect_stats_and_errors(
@@ -630,7 +630,7 @@ def run_e3(settings: Settings, out_dir: pathlib.Path) -> None:
     _write_run_order(settings, out_dir, "e3", order, cells,
                      settings.seeds)
     for (gate, norm, layer_scale), seed, block, position in order:
-        model, params, metrics, curve, model_cfg = _train_and_eval(  # SECURITY: eval() usage - manual review needed
+        model, params, metrics, curve, model_cfg = _train_and_eval(
             settings, seed, lr, eval_seed=eval_seed, gate=gate,
             norm=norm, layer_scale=layer_scale)
         # The same diagnostic pass feeds the mechanism

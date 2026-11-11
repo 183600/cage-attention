@@ -301,7 +301,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     lr_shared = _resolve_lr(settings, out_dir, "baselines")
     ctrl_runs = []
     for seed in settings.seeds:
-        _, _, metrics, curve, _ = _train_and_eval(  # SECURITY: eval() usage - manual review needed
+        _, _, metrics, curve, _ = _train_and_eval(
             settings, seed, lr_shared, eval_seed=TEST_SEED, gate="none",
             permute_labels=True)
         n = int(metrics["n"])

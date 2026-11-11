@@ -129,7 +129,7 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     inv_scale = dk ** -0.5
     gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
     training_states = {module: module.training for module in model.modules()}
-    model.eval()  # SECURITY: eval() usage - manual review needed
+    model.eval()
 
     with_errors = max_cases is not None
 
@@ -705,7 +705,7 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
 
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.eval()  # SECURITY: eval() usage - manual review needed
+        model.eval()
         gen = torch.Generator(device=device).manual_seed(
             stream_seed_key(seed))
         correct = {length: [] for length in parsed}

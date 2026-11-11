@@ -91,7 +91,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             for lr in settings.lr_grid:
                 accs, verdicts, tuning_runs = [], [], []
                 for seed in tune_seeds:
-                    _, params, metrics, curve, _ = _train_and_eval(  # SECURITY: eval() usage - manual review needed
+                    _, params, metrics, curve, _ = _train_and_eval(
                         settings, seed, lr, eval_seed=VAL_SEED,
                         selection=True, steps=train_steps, gate="none",
                         n_layers=depth)
@@ -178,7 +178,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
                   f"understate the depth it is credited with")
         runs = []
         for seed in settings.seeds:
-            model, params, metrics, curve, _ = _train_and_eval(  # SECURITY: eval() usage - manual review needed
+            model, params, metrics, curve, _ = _train_and_eval(
                 settings, seed, best["lr"], eval_seed=TEST_SEED, gate="none",
                 n_layers=depth, steps=best["steps"])
             n = int(metrics["n"])
@@ -597,7 +597,7 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
         for lr in settings.lr_grid:
             accs, verdicts, tuning_runs = [], [], []
             for seed in tune_seeds:
-                _, params, metrics, curve, _ = _train_and_eval(  # SECURITY: eval() usage - manual review needed
+                _, params, metrics, curve, _ = _train_and_eval(
                     settings, seed, lr, eval_seed=VAL_SEED, selection=True,
                     steps=train_steps, gate="none", n_layers=1,
                     d_model=wide_d)
@@ -639,7 +639,7 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
               f"understate one-layer capacity")
     runs = []
     for seed in settings.seeds:
-        _, params, metrics, curve, _ = _train_and_eval(  # SECURITY: eval() usage - manual review needed
+        _, params, metrics, curve, _ = _train_and_eval(
             settings, seed, best["lr"], eval_seed=TEST_SEED, gate="none",
             n_layers=1, d_model=wide_d, steps=best["steps"])
         n = int(metrics["n"])
