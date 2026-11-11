@@ -183,7 +183,7 @@ def _calibration_bh_reject(p_values: torch.Tensor, q: float) -> torch.Tensor:
     order = torch.argsort(p_values, dim=1, stable=True)
     ordered = torch.gather(p_values, 1, order)
     ranks = torch.arange(1, m + 1, dtype=torch.float64).unsqueeze(0)
-    ratios = ordered * float(m) / ranks
+    ratios = ordered * float(m) / max(ranks, 1e-10)
     suffix = torch.flip(
         torch.cummin(torch.flip(ratios, dims=[1]), dim=1).values, dims=[1])
     adjusted = torch.clamp(suffix, max=1.0)

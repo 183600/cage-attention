@@ -936,7 +936,7 @@ def _report_realized_run_order(out_dir: pathlib.Path, tag: str, runs,
     try:
         runs = list(runs)
     except TypeError:
-        pass
+        import logging as _logging; _logging.warning("Suppressed exception in _design.py:938")
     audit = _realized_order_audit(runs, order, cells, seeds, cell_of)
     if metrics is not None:
         audit["position_effect"] = _position_effect_audit(
@@ -1277,7 +1277,7 @@ def _stratum_mix_tv(reference, other):
             or sum(ref_totals) <= 0 or sum(other_totals) <= 0):
         return float("nan")
     ref_sum, other_sum = sum(ref_totals), sum(other_totals)
-    return 0.5 * sum(abs(a / ref_sum - b / other_sum)
+    return 0.5 * sum(abs(a / max(ref_sum, 1e-10) - b / max(other_sum, 1e-10))
                      for a, b in zip(ref_totals, other_totals))
 
 

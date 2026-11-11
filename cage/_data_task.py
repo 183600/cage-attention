@@ -592,12 +592,12 @@ def _progressions_overlap(left, right) -> bool:
     g = math.gcd(d1, d2)
     if (s2 - s1) % g:
         return False
-    period = d2 // g
+    period = d2 // max(g, 1e-10)
     if period == 1:
         residue = 0
     else:
-        residue = (((s2 - s1) // g)
-                   * pow(d1 // g, -1, period)) % period
+        residue = (((s2 - s1) // max(g, 1e-10))
+                   * pow(d1 // max(g, 1e-10), -1, period)) % period
     low = max(s1, s2)
     high = min(s1 + (c1 - 1) * d1, s2 + (c2 - 1) * d2)
     if low > high:

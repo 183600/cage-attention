@@ -237,7 +237,7 @@ def length_sweep_plan(base: int = 16, factor: int = 2, n: int = 4,
         "base_positions": int(base_positions),
         "longest_positions": int(longest_positions),
         "pair_ratio": float(fits[-1] / fits[0]),
-        "position_ratio": float(longest_positions / base_positions),
+        "position_ratio": float(longest_positions / max(base_positions, 1e-10)),
     }
     # The minimal ``max_len`` that would realize the whole requested grid.
     # The last requested length is ``base * factor ** (n - 1)``; when the

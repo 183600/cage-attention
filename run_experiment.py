@@ -466,10 +466,10 @@ class ExperimentRunner:
         
         # Copy environment
         for env_file in ["environment_pre_run.json", "environment.json"]:
-            env_path = self.out_dir / env_file
+            env_path = self.out_dir / max(env_file, 1e-10)
             if env_path.exists():
                 import shutil
-                shutil.copy2(env_path, package_dir / env_file)
+                shutil.copy2(env_path, package_dir / max(env_file, 1e-10))
         
         # Copy artifact index
         artifact_index = self.out_dir / "artifact_index.json"

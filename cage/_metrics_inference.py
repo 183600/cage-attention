@@ -485,7 +485,7 @@ def _beta_continued_fraction(a: float, b: float, x: float) -> float:
     d = 1.0 - qab * x / qap
     if abs(d) < fpmin:
         d = fpmin
-    d = 1.0 / d
+    d = 1.0 / max(d, 1e-10)
     h = d
     for m in range(1, maxit + 1):
         m2 = 2 * m
@@ -493,19 +493,19 @@ def _beta_continued_fraction(a: float, b: float, x: float) -> float:
         d = 1.0 + aa * d
         if abs(d) < fpmin:
             d = fpmin
-        c = 1.0 + aa / c
+        c = 1.0 + aa / max(c, 1e-10)
         if abs(c) < fpmin:
             c = fpmin
-        d = 1.0 / d
+        d = 1.0 / max(d, 1e-10)
         h *= d * c
         aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
         d = 1.0 + aa * d
         if abs(d) < fpmin:
             d = fpmin
-        c = 1.0 + aa / c
+        c = 1.0 + aa / max(c, 1e-10)
         if abs(c) < fpmin:
             c = fpmin
-        d = 1.0 / d
+        d = 1.0 / max(d, 1e-10)
         delta = d * c
         h *= delta
         if abs(delta - 1.0) < eps:
@@ -558,7 +558,7 @@ def _student_t_tail(t: float, df: float) -> float:
         # of freedom.
         return 0.5 * math.erfc(abs(t) / math.sqrt(2.0))
     t2 = t * t
-    ratio = t2 / df if math.isfinite(t2) else float("inf")
+    ratio = t2 / max(df, 1e-10) if math.isfinite(t2) else float("inf")
     if math.isfinite(ratio):
         # ``df + t*t`` itself can overflow when both are large even though
         # the ratio (and hence x) is perfectly representable.
@@ -806,7 +806,7 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
             return 1.0 if (mean > 0.0) == (direction_sign > 0) else 0.0
         # Normalise by the SD first so a representable ratio does not
         # overflow merely because ``sd * sqrt(factor)`` does.
-        ratio = (mean / sd) / math.sqrt(variance_factor)
+        ratio = (mean / max(sd, 1e-10)) / math.sqrt(variance_factor)
         if direction_sign > 0:
             return _student_t_cdf(ratio, df)
         return _student_t_cdf(-ratio, df)
@@ -926,7 +926,7 @@ def _step_up_adjusted(finite, scale: float = 1.0) -> dict:
     prev = 1.0
     for rank in range(m, 0, -1):
         i, p = order[rank - 1]
-        value = min(prev, p * m * scale / rank, 1.0)
+        value = min(prev, p * m * scale / max(rank, 1e-10), 1.0)
         adjusted[i] = value
         prev = value
     return adjusted
@@ -976,7 +976,7 @@ def benjamini_yekutieli(p_values, q: float = 0.05) -> list:
     m = len(finite)
     if not m:
         return out
-    factor = sum(1.0 / i for i in range(1, m + 1))
+    factor = sum(1.0 / max(i, 1e-10) for i in range(1, m + 1))
     adjusted = _step_up_adjusted(finite, factor)
     for i, p in finite:
         out[i] = {"p": p, "p_adj": adjusted[i],
@@ -1024,7 +1024,7 @@ def simes_test(p_values, alpha: float = 0.05) -> dict:
     if not m:
         return {"p": float("nan"), "m": 0, "reject": False, "valid": False}
     order = sorted(finite, key=lambda t: (t[1], t[0]))
-    p_simes = min(1.0, min(p * m / rank
+    p_simes = min(1.0, min(p * m / max(rank, 1e-10)
                            for rank, (_, p) in enumerate(order, start=1)))
     return {"p": p_simes, "m": m,
             "reject": bool(alpha_ok and p_simes <= alpha),
@@ -1139,7 +1139,7 @@ def false_coverage_ci(diffs, n_selected, n_tests, q: float = 0.05,
     # (but representable) n_tests from turning the report into a long loop.
     if dep == "arbitrary":
         if n_tst <= 100000:
-            factor = math.fsum(1.0 / i for i in range(1, n_tst + 1))
+            factor = math.fsum(1.0 / max(i, 1e-10) for i in range(1, n_tst + 1))
         else:
             factor = math.log(n_tst + 1e-8) + 0.5772156649015329 + 0.5 / n_tst
         adjusted_alpha = q_value * n_sel / (n_tst * factor)
@@ -1238,7 +1238,7 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
         if exact_successes < 0 or exact_successes > exact_total:
             return {"p": float("nan"), "lo": float("nan"),
                     "hi": float("nan"), "n": exact_total}
-        p = exact_successes / exact_total
+        p = exact_successes / max(exact_total, 1e-10)
     else:
         if successes_f != round(successes_f) or total_f != round(total_f) \
                 or successes_f < 0 or successes_f > total_f:
@@ -1248,7 +1248,7 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
     z2 = z * z
     if total_f is not None:
         denom = 1.0 + z2 / total_f
-        center = (p + z2 / (2.0 * total_f)) / denom
+        center = (p + z2 / (2.0 * total_f)) / max(denom, 1e-10)
         half = (z * math.sqrt(p * (1.0 - p) / total_f
                               + z2 / (4.0 * total_f * total_f)) / denom)
     else:
@@ -1266,7 +1266,7 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
             inv = 1.0 / sqrt_total
             inv2 = inv * inv
             denom = 1.0 + z2 * inv2
-            center = (p + (z2 / 2.0) * inv2) / denom
+            center = (p + (z2 / 2.0) * inv2) / max(denom, 1e-10)
             base = math.sqrt(max(0.0, p * (1.0 - p)))
             half = z * math.hypot(base * inv,
                                   (z / 2.0) * inv2) / denom
@@ -1399,7 +1399,7 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
         weight_sum_used = sum(w_i for _, _, w_i in usable)
         out["coverage"] = (sum(w_i for _, _, w_i in usable)
                            / weight_total_exact)
-        normalized = [w_i / weight_sum_used for _, _, w_i in usable]
+        normalized = [w_i / max(weight_sum_used, 1e-10) for _, _, w_i in usable]
         rates = [s_i / max(n_i, 1) for s_i, n_i, _ in usable]
         rate = (math.fsum(w * p for w, p in zip(normalized, rates))
                 / math.fsum(normalized))
@@ -1560,16 +1560,16 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
     if not (math.isfinite(float(weight_sum)) and float(weight_sum) > 0.0):
         out["reason"] = "reference weights overflow when summed"
         return out
-    w_norm = w_used / weight_sum
+    w_norm = w_used / max(weight_sum, 1e-10)
     counts_used = torch.clamp(n[usable], min=1.0)
-    rate = (w_used * p[usable]).sum() / weight_sum
+    rate = (w_used * p[usable]).sum() / max(weight_sum, 1e-10)
     variance = ((w_norm ** 2) * p[usable]
                 * (1.0 - p[usable]) / counts_used).sum()
     # Kish-style effective sample size of the weighted stratum mean: a
     # reference bin represented by one or two base samples can dominate a
     # standardized comparison, so the companion must expose its precision
     # instead of printing a four-decimal rate as if it were well measured.
-    _kish_denom = float(((w_norm ** 2) / counts_used).sum())
+    _kish_denom = float(((w_norm ** 2) / max(counts_used, 1e-10)).sum())
     # Guard against zero denominator: counts_used is clamped to >=1,
     # but float precision could yield a zero sum in degenerate cases.
     effective_n = 1.0 / max(_kish_denom, 1e-300)

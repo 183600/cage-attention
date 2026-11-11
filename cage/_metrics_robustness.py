@@ -296,7 +296,7 @@ def crossed_cluster_bootstrap_ci(correct_a, correct_b, n_boot: int = 4000,
     # Bound the advanced-index temporary: chunk x n_units x n_items stays
     # near one million elements even when the evaluation stream is large.
     per_draw = max(1, n_units * n_items)
-    chunk = max(1, min(512, 1_000_000 // per_draw))
+    chunk = max(1, min(512, 1_000_000 // max(per_draw, 1e-10)))
     crossed_parts, seed_parts, item_parts = [], [], []
     remaining = n_boot_int
     while remaining > 0:

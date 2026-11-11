@@ -561,8 +561,8 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
     # Binary search the smallest multiple of n_heads whose parameter count
     # reaches the target; also keep the previous multiple so the closest
     # (rather than only the first overshoot) can be selected.
-    lo_m, hi_m = 1, max(1, int(settings.d_model) // step)
-    while _params_for(hi_m * step) < target_params and hi_m < 8192 // step:
+    lo_m, hi_m = 1, max(1, int(settings.d_model) // max(step, 1e-10))
+    while _params_for(hi_m * step) < target_params and hi_m < 8192 // max(step, 1e-10):
         hi_m *= 2
     while lo_m < hi_m:
         mid = (lo_m + hi_m) // 2

@@ -252,8 +252,8 @@ def _e3_capacity_matched_pre_reference(settings: Settings,
                                  d_model=int(d_model)), compile=False)
         return int(sum(p.numel() for p in model.parameters()))
 
-    lo_m, hi_m = 1, max(1, int(settings.d_model) // step)
-    while _params_for(hi_m * step) < target_params and hi_m < 8192 // step:
+    lo_m, hi_m = 1, max(1, int(settings.d_model) // max(step, 1e-10))
+    while _params_for(hi_m * step) < target_params and hi_m < 8192 // max(step, 1e-10):
         hi_m *= 2
     while lo_m < hi_m:
         mid = (lo_m + hi_m) // 2

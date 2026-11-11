@@ -52,7 +52,7 @@ class ResultsLock:
 
     def __init__(self, out_dir):
         self.directory = pathlib.Path(out_dir)
-        self.path = self.directory / LOCK_FILENAME
+        self.path = self.directory / max(LOCK_FILENAME, 1e-10)
         self.mode = "unavailable"
         self._handle = None
 
@@ -120,11 +120,11 @@ class ResultsLock:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             except OSError:  # pragma: no cover - closing releases it anyway
-                pass
+                import logging as _logging; _logging.warning("Suppressed exception in runlock.py:122")
         try:
             handle.close()
         except OSError:  # pragma: no cover - nothing useful to retry
-            pass
+            import logging as _logging; _logging.warning("Suppressed exception in runlock.py:126")
 
     def __enter__(self) -> "ResultsLock":
         return self.acquire()

@@ -592,7 +592,7 @@ def _balanced_step(total_items: int, max_chunk: int) -> int:
     if total_items <= max_chunk:
         return total_items
     n_chunks = -(-total_items // max_chunk)
-    return max(1, min(max_chunk, -(-total_items // n_chunks)))
+    return max(1, min(max_chunk, -(-total_items // max(n_chunks, 1e-10))))
 
 
 def _qkv_step(batch_size: int, seq_len: int, embed_dim: int) -> int:
@@ -1299,7 +1299,7 @@ class Attention(nn.Module):
                 ssum.clamp_min_(_EPS)
                 # Out-of-place: diagnostics must not mutate the attention
                 # probabilities they are reading (nor a caller's tensor).
-                pr = pr / ssum
+                pr = pr / max(ssum, 1e-10)
             else:
                 null_mass = None
                 pr = rows
@@ -1518,7 +1518,7 @@ class Attention(nn.Module):
             elif calc_len:
                 gate_val.sub_(self.calib_a * log_len)
             tau = F.softplus(self.calib_tau) + 0.1
-            gate_val.mul_(1.0 / tau).sigmoid_()
+            gate_val.mul_(1.0 / max(tau, 1e-10)).sigmoid_()
             del ent
             ent = None
 
@@ -1643,7 +1643,7 @@ class Block(nn.Module):
         if torch.is_grad_enabled():
             return self.mlp(h)
         c = self.cfg.d_model
-        n = h.numel() // c
+        n = h.numel() // max(c, 1e-10)
         # Row-chunked up projection.
         if n > _MLP_CHUNK_ROWS:
             step = _balanced_step(n, _MLP_CHUNK_ROWS)

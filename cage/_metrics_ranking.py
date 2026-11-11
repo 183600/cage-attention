@@ -154,7 +154,7 @@ def _exact_integer_sequence(values):
     try:
         return [operator.index(values)]
     except (TypeError, ValueError, OverflowError):
-        pass
+        import logging as _logging; _logging.warning("Suppressed exception in _metrics_ranking.py:156")
     if not isinstance(values, (list, tuple)):
         return None
     pending = list(reversed(values))
@@ -299,7 +299,7 @@ def pr_auc(scores, positives) -> float:
     tp_end = tp[ends]
     precision = tp_end / (ends + 1).to(torch.float64)
     prev_tp = torch.cat((tp_end.new_zeros(1), tp_end[:-1]))
-    return float(((tp_end - prev_tp) / n_pos * precision).sum())
+    return float(((tp_end - prev_tp) / max(n_pos, 1e-10) * precision).sum())
 
 
 def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
@@ -381,7 +381,7 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
     tp = int((flagged & y).sum())
     prevalence = n_pos / max(n, 1)
     recall = tp / max(n_pos, 1) if n_pos else float("nan")
-    precision = tp / k
+    precision = tp / max(k, 1e-10)
     lift = precision / prevalence if prevalence > 0.0 else float("nan")
     return {"frac": k / max(n, 1), "k": k, "recall": recall,
             "precision": precision, "lift": lift,
@@ -1280,7 +1280,7 @@ def _bca_bounds(d: torch.Tensor, means: torch.Tensor,
     elif n_less == b:
         z0 = 6.0
     else:
-        z0 = nd.inv_cdf(n_less / b)
+        z0 = nd.inv_cdf(n_less / max(b, 1e-10))
     # Standard BCa acceleration: the third central moment of
     # ``theta_bar - theta_(i)`` over the leave-one-out estimates, where
     # ``theta_bar`` is their mean (equal to the observed mean for the

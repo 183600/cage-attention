@@ -200,14 +200,14 @@ def actual_stream_overlap_audit(n_pairs, vocab, device="cpu",
         n = len(codes)
         pair_seen = sum(1 for code in codes if code in train_codes)
         key_seen = sum(
-            1 for code in codes if code // vocab_int in train_keys_seen)
+            1 for code in codes if code // max(vocab_int, 1e-10) in train_keys_seen)
         unique = set(codes)
         pair_seen_unique = len(unique & train_codes)
         exposure[name] = {
             "group": groups[name],
             "n_items": int(n),
             "n_unique_pairs": int(len(unique)),
-            "n_unique_keys": int(len({code // vocab_int for code in codes})),
+            "n_unique_keys": int(len({code // max(vocab_int, 1e-10) for code in codes})),
             "pair_seen_train": int(pair_seen),
             "pair_seen_train_rate": (pair_seen / max(n, 1) if n else float("nan")),
             "key_seen_train": int(key_seen),
@@ -863,7 +863,7 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
     k = ref.numel()
     probs = (ref + _AUDIT_SMOOTH) / (n_ref + _AUDIT_SMOOTH * k)
     expected = n_h * probs
-    chi2 = float((((obs - expected) ** 2) / expected).sum())
+    chi2 = float((((obs - expected) ** 2) / max(expected, 1e-10)).sum())
     if not math.isfinite(chi2):
         return float("nan"), float("nan")
 
@@ -1012,7 +1012,7 @@ def _support_coverage(pooled_counts, split_values, heldout_names, categories,
         entry = {
             "n_categories": n_categories,
             "n_seen_train": int(seen.sum()),
-            "fraction_seen_train": int(seen.sum()) / n_categories,
+            "fraction_seen_train": int(seen.sum()) / max(n_categories, 1e-10),
             "unseen_by_split": {},
         }
         for name in heldout_names:
@@ -1085,7 +1085,7 @@ def _exact_count_vector(values):
             exact.append(operator.index(item))
             continue
         except TypeError:
-            pass
+            import logging as _logging; _logging.warning("Suppressed exception in _data_audit.py:1087")
         try:
             number = float(item)
         except (TypeError, ValueError, OverflowError):
@@ -1228,8 +1228,8 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     if n_sim_int < 1:
         return out
     n_sim = n_sim_int
-    expected = total / k
-    chi2 = float((((c - expected) ** 2) / expected).sum())
+    expected = total / max(k, 1e-10)
+    chi2 = float((((c - expected) ** 2) / max(expected, 1e-10)).sum())
     gen = torch.Generator().manual_seed(_audit_seed(seed))
     try:
         sim = torch.poisson(torch.full((n_sim, k), expected), generator=gen)
@@ -1410,7 +1410,7 @@ def _log_falling_factorial_series(n_pairs, selectable) -> float:
     m = float(n_pairs - 1)
     ratio = m / selectable
     scaled = m * ratio
-    inv = 1.0 / m
+    inv = 1.0 / max(m, 1e-10)
     t1 = 0.5 * scaled * (1.0 + inv)
     t2 = (scaled * ratio) * (1.0 + inv) * (2.0 + inv) / 6.0
     t3 = (scaled * ratio * ratio) * (1.0 + inv) ** 2 / 4.0
@@ -1446,10 +1446,10 @@ def _expected_value_repeat_rate(n_pairs, vocab) -> float:
         return 1.0
     if n_pairs <= 1 << 20:
         log_distinct = math.fsum(
-            math.log1p(-index / selectable)
+            math.log1p(-index / max(selectable, 1e-10))
             for index in range(1, n_pairs))
     else:
-        ratio = (n_pairs - 1) / selectable
+        ratio = (n_pairs - 1) / max(selectable, 1e-10)
         if n_pairs * ratio >= 100.0:
             return 1.0
         log_distinct = _log_falling_factorial_series(n_pairs, selectable)

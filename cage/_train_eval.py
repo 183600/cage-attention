@@ -534,7 +534,7 @@ def gate_depth_ratio(stats, n_early=2):
         return float("nan")
     early = g[:, :n_early].mean()
     deep = g[:, -1].mean()
-    return (deep / early).item()
+    return (deep / max(early, 1e-10)).item()
 
 
 def _centered_unit(values):
@@ -622,8 +622,8 @@ def partial_pearson(x, y, control):
     denom = (dc * dc).sum()
     if not math.isfinite(float(denom)) or float(denom) <= 0.0:
         return torch.tensor(float("nan"))
-    rx = dx - (dx * dc).sum() / denom * dc
-    ry = dy - (dy * dc).sum() / denom * dc
+    rx = dx - (dx * dc).sum() / max(denom, 1e-10) * dc
+    ry = dy - (dy * dc).sum() / max(denom, 1e-10) * dc
     if (not bool(torch.isfinite(rx).all())
             or not bool(torch.isfinite(ry).all())
             or rx.abs().max() == 0.0 or ry.abs().max() == 0.0):
@@ -1184,7 +1184,7 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
     sd = pooled_sd
     if n_a > 1 and n_b > 1:
         scale = max(sd_a, sd_b)
-        se = (scale * math.sqrt((sd_a / scale) ** 2 / n_a
+        se = (scale * math.sqrt((sd_a / max(scale, 1e-10)) ** 2 / n_a
                                 + (sd_b / scale) ** 2 / max(n_b, 1))
               if scale > 0.0 else 0.0)
     elif math.isfinite(pooled_sd):

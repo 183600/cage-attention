@@ -486,10 +486,10 @@ def _power_at_effect(mode: str, effect, sd, n: int, alpha: float,
         return float("nan")
     if mode == "equivalence":
         upper = (float(bound) - float(effect)) / se
-        lower = (-float(bound) - float(effect)) / se
+        lower = (-float(bound) - float(effect)) / max(se, 1e-10)
         power = nd.cdf(upper - cutoff) - nd.cdf(lower + cutoff)
     elif mode == "noninferior":
-        power = nd.cdf((float(bound) + float(effect)) / se - cutoff)
+        power = nd.cdf((float(bound) + float(effect)) / max(se, 1e-10) - cutoff)
     else:
         try:
             cutoff = -_normal_quantile(alpha / 2.0)
@@ -858,7 +858,7 @@ def _design_sensitivity_plan(settings: Settings, verdict, out_dir,
     if _finite(pilot_acc):
         p_level = min(max(float(pilot_acc), 0.0), 1.0)
         stream_item_var = 2.0 * p_level * (1.0 - p_level)
-        stream_item_sd = math.sqrt(stream_item_var / planned_items)
+        stream_item_sd = math.sqrt(stream_item_var / max(planned_items, 1e-10))
     else:
         p_level = float("nan")
         stream_item_var = float("nan")

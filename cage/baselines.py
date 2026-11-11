@@ -694,7 +694,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
             #   se_effective^2 = sd_seed^2 / n + sd_binomial^2,
             # so invert that variance model rather than subtracting the
             # stream SD from the margin linearly.
-            target_var = (margin / z) ** 2
+            target_var = (margin / max(z, 1e-10)) ** 2
             stream_var = float(ci.get("sd_binomial", 0.0)) ** 2
             denom = target_var - stream_var
             if denom > 0.0:
@@ -705,7 +705,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
                 # here would say more seeds cannot certify a run that is
                 # already certified.
                 ci["seeds_for_certification"] = (
-                    float(sd_seed ** 2 / denom) if sd_seed > 0.0 else 1.0)
+                    float(sd_seed ** 2 / max(denom, 1e-10)) if sd_seed > 0.0 else 1.0)
             else:
                 ci["seeds_for_certification"] = float("inf")
         else:

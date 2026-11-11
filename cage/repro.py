@@ -120,7 +120,7 @@ def configure_determinism(deterministic: bool) -> dict:
     try:
         torch.use_deterministic_algorithms(deterministic, warn_only=True)
     except (AttributeError, TypeError):
-        pass
+        import logging as _logging; _logging.warning("Suppressed exception in repro.py:122")
     cudnn = getattr(torch.backends, "cudnn", None)
     if cudnn is not None:
         cudnn.deterministic = deterministic
