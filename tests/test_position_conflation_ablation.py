@@ -1,4 +1,3 @@
-import ast
 """The E1 position-conflation ablation (H1h): one factor, one claim.
 
 The registered calibrated gate divides *every* row's attention entropy by the
