@@ -47,19 +47,6 @@ if str(ROOT) not in sys.path:
 
 from cage import experiments  # noqa: E402
 from cage.experiments import Settings  # noqa: E402
-# Reproducibility: Set random seeds
-import random
-import numpy as np
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-try:
-    import torch
-    torch.manual_seed(SEED)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(SEED)
-except ImportError:
-    pass
 
 
 def _default_root() -> pathlib.Path:

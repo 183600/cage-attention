@@ -1570,7 +1570,7 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
     # reference bin represented by one or two base samples can dominate a
     # standardized comparison, so the companion must expose its precision
     # instead of printing a four-decimal rate as if it were well measured.
-    _kish_denom = float(((w_norm ** 2) / max(counts_used, 1e-10)).sum())
+    _kish_denom = float(((w_norm ** 2) / counts_used.clamp_min(1e-10)).sum())
     # Guard against zero denominator: counts_used is clamped to >=1,
     # but float precision could yield a zero sum in degenerate cases.
     effective_n = 1.0 / max(_kish_denom, 1e-300)
