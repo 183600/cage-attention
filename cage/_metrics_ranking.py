@@ -1021,7 +1021,7 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     acc = torch.bincount(inverse, weights=c, minlength=n_observed)
     nz = counts > 0
     safe_counts = counts[nz].clamp_min(1)
-            gap = (acc[nz] / safe_counts - conf[nz] / safe_counts).abs()
+    gap = (acc[nz] / safe_counts - conf[nz] / safe_counts).abs()
     return float(((counts[nz] / max(n, 1)) * gap).sum())
 
 
