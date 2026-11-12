@@ -176,7 +176,7 @@ def _run_event(settings: Settings, experiment: str, event: str, **details) -> No
             try:
                 os.fsync(fh.fileno())
             except OSError:  # noqa: PERF203 - durability is best-effort
-                import logging as _logging; _logging.warning("Suppressed exception in _artifacts.py:178")
+                import logging as _logging; _logging.warning("Suppressed exception in _artifacts.py:178", exc_info=True)
         _register_artifact(path)
     except Exception as e:  # noqa: BLE001 - tracking must not kill a run
         print(f"[runner] WARNING: could not write run_index event "
@@ -249,7 +249,7 @@ def _write_result(path: pathlib.Path, record: dict) -> None:
         try:
             os.fsync(fh.fileno())
         except OSError:  # noqa: PERF203 - durability is best-effort
-            import logging as _logging; _logging.warning("Suppressed exception in _artifacts.py:251")
+            import logging as _logging; _logging.warning("Suppressed exception in _artifacts.py:251", exc_info=True)
     if not existed:
         # A durable file is not durable until its directory entry is too:
         # otherwise a crash right after the first append can lose the file
@@ -273,12 +273,12 @@ def _fsync_directory(path: pathlib.Path) -> None:
     try:
         os.fsync(fd)
     except OSError:  # pragma: no cover - some filesystems reject dir fsync
-        import logging as _logging; _logging.warning("Suppressed exception in _artifacts.py:275")
+        import logging as _logging; _logging.warning("Suppressed exception in _artifacts.py:275", exc_info=True)
     finally:
         try:
             os.close(fd)
         except OSError:  # pragma: no cover - nothing useful to retry
-            import logging as _logging; _logging.warning("Suppressed exception in _artifacts.py:280")
+            import logging as _logging; _logging.warning("Suppressed exception in _artifacts.py:280", exc_info=True)
 
 
 def _atomic_write_bytes(path: pathlib.Path, data: bytes) -> None:
@@ -301,7 +301,7 @@ def _atomic_write_bytes(path: pathlib.Path, data: bytes) -> None:
             try:
                 os.fsync(fh.fileno())
             except OSError:  # noqa: PERF203 - durability is best-effort
-                import logging as _logging; _logging.warning("Suppressed exception in _artifacts.py:303")
+                import logging as _logging; _logging.warning("Suppressed exception in _artifacts.py:303", exc_info=True)
         os.replace(tmp, path)
         _fsync_directory(path.parent)
     finally:
@@ -375,7 +375,7 @@ def _register_artifact(path) -> None:
     try:
         _RUN_ARTIFACTS.add(pathlib.Path(path).resolve())
     except Exception:  # noqa: BLE001 - tracking must not kill a run
-        import logging as _logging; _logging.warning("Suppressed exception in _artifacts.py:377")
+        import logging as _logging; _logging.warning("Suppressed exception in _artifacts.py:377", exc_info=True)
 
 
 def _fallback_context(error: Exception) -> dict:

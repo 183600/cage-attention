@@ -769,7 +769,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
         try:
             autocast_on = autocast_on or bool(fn())
         except Exception:  # noqa: BLE001 - probe must never break the triage
-            import logging as _logging; _logging.warning("Suppressed exception in _train_recipe.py:771")
+            import logging as _logging; _logging.warning("Suppressed exception in _train_recipe.py:771", exc_info=True)
     if autocast_on:
         report["notes"].append(
             "autocast (fp16/bfloat16) is active on the current device: check "

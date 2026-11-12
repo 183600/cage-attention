@@ -120,11 +120,11 @@ class ResultsLock:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             except OSError:  # pragma: no cover - closing releases it anyway
-                import logging as _logging; _logging.warning("Suppressed exception in runlock.py:122")
+                import logging as _logging; _logging.warning("Suppressed exception in runlock.py:122", exc_info=True)
         try:
             handle.close()
         except OSError:  # pragma: no cover - nothing useful to retry
-            import logging as _logging; _logging.warning("Suppressed exception in runlock.py:126")
+            import logging as _logging; _logging.warning("Suppressed exception in runlock.py:126", exc_info=True)
 
     def __enter__(self) -> "ResultsLock":
         return self.acquire()

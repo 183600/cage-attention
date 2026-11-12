@@ -936,7 +936,7 @@ def _report_realized_run_order(out_dir: pathlib.Path, tag: str, runs,
     try:
         runs = list(runs)
     except TypeError:
-        import logging as _logging; _logging.warning("Suppressed exception in _design.py:938")
+        import logging as _logging; _logging.warning("Suppressed exception in _design.py:938", exc_info=True)
     audit = _realized_order_audit(runs, order, cells, seeds, cell_of)
     if metrics is not None:
         audit["position_effect"] = _position_effect_audit(

@@ -154,7 +154,7 @@ def _exact_integer_sequence(values):
     try:
         return [operator.index(values)]
     except (TypeError, ValueError, OverflowError):
-        import logging as _logging; _logging.warning("Suppressed exception in _metrics_ranking.py:156")
+        import logging as _logging; _logging.warning("Suppressed exception in _metrics_ranking.py:156", exc_info=True)
     if not isinstance(values, (list, tuple)):
         return None
     pending = list(reversed(values))
