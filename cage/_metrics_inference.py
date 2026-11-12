@@ -1561,16 +1561,16 @@ def standardized_proportion(successes, totals, reference_weights=None) -> dict:
     if not (math.isfinite(float(weight_sum)) and float(weight_sum) > 0.0):
         out["reason"] = "reference weights overflow when summed"
         return out
-    w_norm = w_used / max(weight_sum, 1e-10)
+    w_norm = w_used / weight_sum
     counts_used = torch.clamp(n[usable], min=1.0)
-    rate = (w_used * p[usable]).sum() / max(weight_sum, 1e-10)
+    rate = (w_used * p[usable]).sum() / weight_sum
     variance = ((w_norm ** 2) * p[usable]
                 * (1.0 - p[usable]) / counts_used).sum()
     # Kish-style effective sample size of the weighted stratum mean: a
     # reference bin represented by one or two base samples can dominate a
     # standardized comparison, so the companion must expose its precision
     # instead of printing a four-decimal rate as if it were well measured.
-    _kish_denom = float(((w_norm ** 2) / max(counts_used, 1e-10)).sum())
+    _kish_denom = float(((w_norm ** 2) / counts_used.clamp_min(1e-10)).sum())
     # Guard against zero denominator: counts_used is clamped to >=1,
     # but float precision could yield a zero sum in degenerate cases.
     effective_n = 1.0 / max(_kish_denom, 1e-300)

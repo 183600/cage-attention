@@ -863,7 +863,7 @@ def _distribution_shift_p(observed, reference, n_sim=_AUDIT_SIM,
     k = ref.numel()
     probs = (ref + _AUDIT_SMOOTH) / (n_ref + _AUDIT_SMOOTH * k)
     expected = n_h * probs
-    chi2 = float((((obs - expected) ** 2) / max(expected, 1e-10)).sum())
+    chi2 = float((((obs - expected) ** 2) / expected.clamp_min(1e-10)).sum())
     if not math.isfinite(chi2):
         return float("nan"), float("nan")
 
