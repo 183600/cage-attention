@@ -91,11 +91,11 @@ def _make_adamw(params, lr):
         try:
             return torch.optim.AdamW(params, fused=True, **kw)
         except (TypeError, RuntimeError, ValueError):
-            import logging as _logging; _logging.warning("Suppressed exception in train.py:93")
+            import logging as _logging; _logging.warning("Suppressed exception in train.py:93", exc_info=True)
     try:
         return torch.optim.AdamW(params, foreach=True, **kw)
     except (TypeError, RuntimeError, ValueError):
-        import logging as _logging; _logging.warning("Suppressed exception in train.py:97")
+        import logging as _logging; _logging.warning("Suppressed exception in train.py:97", exc_info=True)
     return torch.optim.AdamW(params, **kw)
 
 def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,

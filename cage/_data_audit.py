@@ -1085,7 +1085,7 @@ def _exact_count_vector(values):
             exact.append(operator.index(item))
             continue
         except TypeError:
-            import logging as _logging; _logging.warning("Suppressed exception in _data_audit.py:1087")
+            import logging as _logging; _logging.warning("Suppressed exception in _data_audit.py:1087", exc_info=True)
         try:
             number = float(item)
         except (TypeError, ValueError, OverflowError):
