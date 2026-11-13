@@ -520,7 +520,7 @@ def _regularized_incomplete_beta(a: float, b: float, x: float) -> float:
     if x >= 1.0:
         return 1.0
     log_beta = (math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
-                + a * math.log(x + 1e-8) + b * math.log1p(-x))
+                + a * math.log(x) + b * math.log1p(-x))
     if log_beta > 709.0:
         # Prefactor overflows; compute result in log-space to preserve
         # cancellation with the tiny continued fraction.  I_x ∈ [0,1].
@@ -528,12 +528,12 @@ def _regularized_incomplete_beta(a: float, b: float, x: float) -> float:
             cf = _beta_continued_fraction(a, b, x)
             if cf <= 0.0:
                 return 0.0
-            lr = log_beta + math.log(cf + 1e-8) - math.log(a + 1e-8)
+            lr = log_beta + math.log(cf) - math.log(a)
             return min(1.0, math.exp(lr)) if lr > -745.0 else 0.0
         cf = _beta_continued_fraction(b, a, 1.0 - x)
         if cf <= 0.0:
             return 1.0
-        lr = log_beta + math.log(cf + 1e-8) - math.log(b + 1e-8)
+        lr = log_beta + math.log(cf) - math.log(b)
         return 1.0 - (min(1.0, math.exp(lr)) if lr > -745.0 else 0.0)
     front = math.exp(log_beta) if log_beta > -745.0 else 0.0
     if x < (a + 1.0) / (a + b + 2.0):
@@ -575,9 +575,9 @@ def _student_t_tail(t: float, df: float) -> float:
     #         * df^(df/2 - 1) * t^-df.
     # The relative error is O(1/t^2), far below float64 resolution here.
     log_tail = (math.lgamma((df + 1.0) / 2.0) - math.lgamma(df / 2.0)
-                - 0.5 * math.log(math.pi + 1e-8)
-                + (df / 2.0 - 1.0) * math.log(max(df, 1e-10))
-                - df * math.log(abs(t + 1e-8)))
+                - 0.5 * math.log(math.pi)
+                + (df / 2.0 - 1.0) * math.log(df)
+                - df * math.log(abs(t)))
     if not math.isfinite(log_tail):
         # For astronomically large df the two lgamma terms can overflow to
         # +inf and subtract to NaN even though the true tail is negligible.
