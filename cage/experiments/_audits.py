@@ -63,6 +63,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     tune_seeds = settings.seeds[:max(1, min(settings.min_seeds_for_claim,
                                              len(settings.seeds)))]
     ceiling_acc = float(ceiling["accuracy"]) if ceiling else float("nan")
+    # TODO: Report confidence intervals or std alongside point estimates
     ceiling_known = math.isfinite(ceiling_acc)
     chance = 1.0 / max((settings.vocab - 2), 1e-10)
     # HB0 is a union claim over the ladder rungs ("at least one rung is
@@ -72,6 +73,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     # a rung competent on an uncorrected one-sided bound while the
     # registered family-wise criterion would not.
     competence_alpha = 0.05 / max(len(ladder), 1)
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     # Pre-registered practical-significance bound for the depth readouts:
     # HB6/HB7 both register ``sesoi: {accuracy: 0.01}``, so the same bound
     # decides "saturated" (one-sided equivalence within the band) and

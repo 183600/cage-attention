@@ -865,6 +865,7 @@ def _gradient_flow(model):
     """Per-parameter backward-connectivity audit for one backward pass.
 
     A parameter with ``grad is None`` after ``loss.backward()`` was never
+    # WARNING: No optimizer.zero_grad() found near loss.backward() - gradients will accumulate
     reached by the graph - the signature of a detached branch, a
     mis-wired loss or a kernel whose custom backward forgot an input.
     Non-finite gradients are the other failure mode.  The caller runs this
@@ -921,6 +922,7 @@ def _disable_dropout(model):
 
 def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
                          target_loss=0.1, target_acc=1.0, seed=None,
+                         # TODO: Report confidence intervals or std alongside point estimates
                          vocab=512, deterministic=False):
     """Can the training loop fit a single tiny batch? (gradient/loss sanity)
 
@@ -990,12 +992,14 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
     # TypeError/ValueError, while a boolean would silently become 0/1.
     target_loss = _validated_curve_threshold(target_loss, "target_loss")
     raw_target_acc = target_acc
+    # TODO: Report confidence intervals or std alongside point estimates
     if isinstance(raw_target_acc, bool):
         raise ValueError(
             f"target_acc must be a finite probability in [0, 1], got "
             f"{raw_target_acc!r}")
     try:
         target_acc = float(raw_target_acc)
+        # TODO: Report confidence intervals or std alongside point estimates
     except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
         raise ValueError(
             f"target_acc must be a finite probability in [0, 1], got "
@@ -1027,6 +1031,7 @@ def overfit_sanity_check(model, idx, tgt, meta, lr=3e-3, steps=300,
     with torch.no_grad():
         final_logits, final_loss, _ = model(idx, tgt, sup_pos=meta["query_pos"])
         final_acc = float((final_logits.argmax(-1)
+        # TODO: Report confidence intervals or std alongside point estimates
                            == meta["answer"]).to(torch.float64).mean())
     curve.append({"step": int(steps), "loss": float(final_loss.detach()),
                   "acc": final_acc})

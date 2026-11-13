@@ -538,6 +538,7 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     training_states = {module: module.training for module in model.modules()}
     try:
         model.eval()
+        # WARNING: Consider wrapping inference in torch.no_grad() to save memory
         correct = torch.zeros((), dtype=torch.int64, device=device)
         total = 0
         for i in range(batches):
@@ -636,6 +637,7 @@ def layer_knockout_eval(model, n_pairs, vocab, device, batch=256, batches=4,
         blocks[i] = _KnockoutIdentity()
         try:
             acc = eval_accuracy(model, n_pairs, vocab, device,
+            # TODO: Report confidence intervals or std alongside point estimates
                                 batch=batch, batches=batches, seed=seed)
         finally:
             blocks[i] = original
@@ -746,6 +748,7 @@ def calib_term_knockout_eval(model, n_pairs, vocab, device, batch=256,
                 for parameter in parameters:
                     parameter.zero_()
                 accuracy = eval_accuracy(model, n_pairs, vocab, device,
+                # TODO: Report confidence intervals or std alongside point estimates
                                          batch=batch, batches=batches,
                                          seed=seed)
             finally:
@@ -885,10 +888,12 @@ def calib_term_dose_response_eval(model, n_pairs, vocab, device, batch=256,
                 for scale in scales:
                     if scale == 1.0:
                         accuracy = baseline
+                        # TODO: Report confidence intervals or std alongside point estimates
                     else:
                         for parameter, value in zip(parameters, saved):
                             parameter.copy_(value).mul_(scale)
                         accuracy = eval_accuracy(
+                        # TODO: Report confidence intervals or std alongside point estimates
                             model, n_pairs, vocab, device, batch=batch,
                             batches=batches, seed=seed)
                     by_scale[_calib_scale_key(scale)] = {

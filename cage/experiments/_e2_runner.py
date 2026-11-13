@@ -302,7 +302,9 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             if _finite(value):
                 rec[coeff_key] = float(value)
         base_acc = rec["accuracy_by_length"][settings.n_pairs]
+        # TODO: Report confidence intervals or std alongside point estimates
         long_acc = rec["accuracy_by_length"][lengths[-1]]
+        # TODO: Report confidence intervals or std alongside point estimates
         rec["accuracy_at_base"] = base_acc
         rec["accuracy_at_longest"] = long_acc
         rec["accuracy_drop"] = base_acc - long_acc

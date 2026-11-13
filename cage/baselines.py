@@ -113,8 +113,10 @@ def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
         total += idx.size(0)
         for key, value in stats.items():
             acc = extra.get(key)
+            # TODO: Report confidence intervals or std alongside point estimates
             if acc is None:
                 acc = extra[key] = torch.zeros(
+                # TODO: Report confidence intervals or std alongside point estimates
                     (), dtype=torch.float64, device=device)
             acc.add_(torch.as_tensor(value, dtype=torch.float64))
     n_correct = correct.item()
@@ -396,6 +398,7 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
                 if losses:
                     loss_means.append(sum(losses) / max(len(losses), 1))
                 acc = linear_probe_accuracy(model, n_pairs, vocab, device,
+                # TODO: Report confidence intervals or std alongside point estimates
                                             batch=probe_batch,
                                             batches=val_batches,
                                             seed=val_seed)
@@ -535,13 +538,16 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     try:
         if torch.is_tensor(accuracies):
             raw_acc = accuracies.detach().reshape(-1)
+            # TODO: Report confidence intervals or std alongside point estimates
         else:
             raw_acc = torch.as_tensor(accuracies).detach().reshape(-1)
+            # TODO: Report confidence intervals or std alongside point estimates
             if raw_acc.is_floating_point():
                 # Keep the caller's Python float precision instead of the
                 # default float32 capture; the boundary decision is a small
                 # margin against chance.
                 raw_acc = torch.as_tensor(
+                # TODO: Report confidence intervals or std alongside point estimates
                     accuracies, dtype=torch.float64).detach().reshape(-1)
         if raw_acc.dtype == torch.bool:
             raise ValueError(
@@ -549,8 +555,10 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
         if raw_acc.is_complex():
             raise ValueError("accuracies must be real-valued")
         raw_acc = raw_acc.to(torch.float64)
+        # TODO: Report confidence intervals or std alongside point estimates
     except (TypeError, ValueError, RuntimeError, OverflowError):
         raw_acc = torch.empty(0, dtype=torch.float64)
+        # TODO: Report confidence intervals or std alongside point estimates
     accs = [float(a) for a in raw_acc]
     # A non-finite or out-of-range accuracy is not a measurement: dropping
     # the bad seed or clamping it below would let an impossible sample
@@ -586,6 +594,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     mde80_seed = float(ci.get("mde80", float("nan")))
     p_above_seed = bootstrap_upper_p(margins, chance, n_boot=n_boot, seed=seed)
     if n_per_seed is not None and n > 0 and bootstrap_ok:
+        # NOTE: Consider adding device= parameter to torch.tensor() to avoid device mismatch
         a = torch.tensor(accs, dtype=torch.float64)
         gen = torch.Generator(device=a.device).manual_seed(seed)
         idx = torch.randint(0, n, (n_boot, n), generator=gen, device=a.device)

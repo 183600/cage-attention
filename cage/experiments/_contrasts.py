@@ -1135,6 +1135,7 @@ def _class_frequency_companions(rules, title):
         runs_a = _mapping_runs(runs_a)
         runs_b = _mapping_runs(runs_b)
         acc = _paired_diff(runs_a, runs_b, "accuracy")
+        # TODO: Report confidence intervals or std alongside point estimates
         for metric, convention in _CLASS_METRIC_COMPANIONS:
             ci = _paired_diff(runs_a, runs_b, metric)
             sign_disagrees = None

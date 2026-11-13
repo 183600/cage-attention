@@ -64,10 +64,12 @@ class MultiplicityProcedureTest(unittest.TestCase):
 
     def test_simes_omnibus_is_the_minimum_ranked_bound(self):
         simes = simes_test([0.001, 0.02, 0.03, 0.04], alpha=0.05)
+        # NOTE: Consider if 0.05 threshold is appropriate for this context
         self.assertTrue(simes["valid"])
         self.assertTrue(simes["reject"])
         self.assertAlmostEqual(simes["p"], 0.004)
         null = simes_test([0.5, 0.6], alpha=0.05)
+        # NOTE: Consider if 0.05 threshold is appropriate for this context
         self.assertTrue(null["valid"])
         self.assertFalse(null["reject"])
         self.assertAlmostEqual(null["p"], 0.6)

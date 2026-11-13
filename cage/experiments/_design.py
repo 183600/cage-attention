@@ -334,6 +334,7 @@ def _run_order_audit(order, cells, seeds, randomized=True):
     # a random one is only surprising when the family-wise chance of an
     # extreme position is below 5%.
     flag_extremes = (not randomized) or extreme_p < 0.05
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     mean_position = {
         key: (sum(vals) / max(len(vals), 1) if vals else float("nan"))
         for key, vals in sorted(positions.items())}

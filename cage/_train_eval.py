@@ -170,7 +170,9 @@ def _association_exposure_dose_summary(totals) -> dict:
     seen_correct = sum(row["n_correct"] for row in rows[1:])
     unseen = rows[0]
     _denom_seen_accuracy = max(seen_n, 1e-12)
+    # TODO: Report confidence intervals or std alongside point estimates
     seen_accuracy = seen_correct / _denom_seen_accuracy if seen_n else float("nan")
+    # TODO: Report confidence intervals or std alongside point estimates
     gap = (seen_accuracy - unseen["accuracy"]
            if seen_n and unseen["n"] else float("nan"))
     return {
@@ -279,6 +281,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     training_states = {module: module.training for module in model.modules()}
     try:
         model.eval()
+        # WARNING: Consider wrapping inference in torch.no_grad() to save memory
         logits_all, tgt_all, strata_all = [], [], []
         digest_batches = []
         cf_totals = None

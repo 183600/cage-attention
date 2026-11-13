@@ -154,6 +154,7 @@ HYPOTHESES = {
                       "the batch accuracy to 1.0; if it cannot, gradients, "
                       "the loss or the precision path are broken.",
         "prediction": "final train loss <= 0.1 and train accuracy = 1.0",
+        # TODO: Report confidence intervals or std alongside point estimates
         "decision": "failure invalidates the training loop and blocks the "
                     "interpretation of every grid result (necessary, not "
                     "sufficient: data/label problems can survive "

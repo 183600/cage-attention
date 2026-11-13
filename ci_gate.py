@@ -148,6 +148,7 @@ def check_smoke() -> None:
         if not torch.isfinite(loss):
             raise RuntimeError(f"non-finite loss for {cfg}")
         loss.backward()
+        # WARNING: No optimizer.zero_grad() found near loss.backward() - gradients will accumulate
         for p in m.parameters():
             if p.grad is not None and not torch.isfinite(p.grad).all():
                 raise RuntimeError(f"non-finite grad for {cfg}")
@@ -183,6 +184,7 @@ def check_smoke() -> None:
         if len(hist) != 3:
             raise RuntimeError("train_model did not run 3 steps")
         acc = eval_accuracy(m, 6, 64, "cpu", batch=4, batches=1)
+        # TODO: Report confidence intervals or std alongside point estimates
         if not 0.0 <= acc <= 1.0:
             raise RuntimeError(f"eval_accuracy out of range: {acc}")
         st = collect_stats(m, 6, 64, "cpu", batch=4, batches=1)

@@ -734,6 +734,7 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
         base_correct = cat[n_pairs]
         base_n = int(base_correct.numel())
         base_acc = (float(base_correct.to(torch.float64).mean())
+        # TODO: Report confidence intervals or std alongside point estimates
                     if base_n else float("nan"))
         n_base_correct = int(base_correct.sum())
         n_base_wrong = int(base_n - n_base_correct)
@@ -769,6 +770,7 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
         for length in parsed:
             rows = cat[length]
             acc = (float(rows.to(torch.float64).mean())
+            # TODO: Report confidence intervals or std alongside point estimates
                    if rows.numel() else float("nan"))
             retained = int((base_correct & rows).sum())
             rescued = int((~base_correct & rows).sum())
@@ -1384,9 +1386,11 @@ def _association_exposure_dose_accumulate(totals, idx, meta, vocab,
         raise ValueError(
             f"association exposure has {len(codes)} entries for "
             f"{int(pred.numel())} rows")
+    # NOTE: Consider adding device= parameter to torch.tensor() to avoid device mismatch
     counts = torch.tensor(
         [int(reference_counts.get(int(code), 0)) for code in codes],
         dtype=torch.long, device=pred.device)
+    # NOTE: Consider adding device= parameter to torch.tensor() to avoid device mismatch
     boundaries = torch.tensor(
         _EXPOSURE_DOSE_BOUNDARIES, dtype=torch.long, device=pred.device)
     bins = torch.bucketize(counts, boundaries, right=True)
@@ -1460,6 +1464,7 @@ def _association_exposure_accumulate(totals, idx, meta, vocab, reference,
     codes = association_codes(idx, meta, vocab)["code"].tolist()
     if not isinstance(reference, frozenset):
         reference = association_reference_codes(reference)
+    # NOTE: Consider adding device= parameter to torch.tensor() to avoid device mismatch
     seen = torch.tensor([int(code) in reference for code in codes],
                         dtype=torch.bool, device=pred.device)
     if seen.numel() != n:

@@ -189,6 +189,7 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
                 return dict(
                     r,
                     accuracy=_length_entry(r.get("accuracy_by_length"),
+                    # TODO: Report confidence intervals or std alongside point estimates
                                            length),
                     correct_bitmask=metrics.get("correct_bitmask"),
                     stream_digest=metrics.get("stream_digest"),

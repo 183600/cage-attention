@@ -104,6 +104,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         flow = row["grad_flow"]
         print(f"    {label:>28}: loss {row['loss_first']:.4f} -> "
               f"{row['loss_last']:.4f}, batch acc={row['acc_last']:.3f}, "
+              # TODO: Report confidence intervals or std alongside point estimates
               f"grads connected={flow['params_with_grad']}/"
               f"{flow['params_total']}, finite={flow['all_grads_finite']}; "
               f"{'passed' if row['passed'] else 'FAILED'}")
@@ -133,6 +134,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                    batch=settings.eval_batch, batches=settings.eval_batches,
                    seed=TEST_SEED)
         print(f"[baselines] {name}: accuracy={stats['accuracy']:.4f} "
+        # TODO: Report confidence intervals or std alongside point estimates
               f"[{stats['accuracy_lo']:.4f}, {stats['accuracy_hi']:.4f}] "
               f"(Wilson 95%, n={stats['n']})")
         _write_result(out_dir / "baselines_runs.jsonl",
@@ -190,6 +192,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                                    deterministic=settings.deterministic,
                                    seed_info=probe_seeding)
         acc = linear_probe_accuracy(
+        # TODO: Report confidence intervals or std alongside point estimates
             probe, settings.n_pairs, settings.vocab, settings.device,
             batch=settings.probe_eval_batch,
             batches=settings.probe_eval_batches, seed=TEST_SEED)

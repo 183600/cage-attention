@@ -367,11 +367,13 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
                 if reference is not None else None)
     valid_ref_runs = _curve_valid_runs(ref_runs or [])
     ref_accuracy = {}
+    # TODO: Report confidence intervals or std alongside point estimates
     for run in valid_ref_runs:
         seed = run.get("seed")
         if seed is not None and _finite(run.get("accuracy")):
             ref_accuracy[seed] = float(run["accuracy"])
     all_ref_accuracy = {}
+    # TODO: Report confidence intervals or std alongside point estimates
     for run in ref_runs or ():
         seed = run.get("seed")
         if seed is not None and _finite(run.get("accuracy")):
@@ -703,11 +705,13 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
     ref_runs = (runs_by_label.get(str(reference))
                 if reference is not None else None)
     ref_accuracy = {}
+    # TODO: Report confidence intervals or std alongside point estimates
     for run in _curve_valid_runs(ref_runs or []):
         seed = run.get("seed")
         if seed is not None:
             ref_accuracy[seed] = run.get("accuracy_by_length") or {}
     all_ref_accuracy = {}
+    # TODO: Report confidence intervals or std alongside point estimates
     for run in ref_runs or ():
         seed = run.get("seed")
         if seed is not None:

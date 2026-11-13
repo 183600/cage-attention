@@ -1108,6 +1108,7 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
         print(f"[{self.tag}] note: {len(low_resolution)}/{len(testable)} "
               f"testable contrast(s) rest on <=5 seeds; an exact "
               f"two-sided sign test cannot reach p<0.05 below n=6, so "
+              # NOTE: Consider if 0.05 threshold is appropriate for this context
               f"direction reads rest on the bootstrap's moment "
               f"assumptions - the exact sign-flip p/floor, jackknife and "
               f"BCa annotations above show the exposure")

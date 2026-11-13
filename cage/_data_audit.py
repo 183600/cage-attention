@@ -1131,6 +1131,7 @@ def answer_uniformity_test(counts, n_sim=_UNIFORMITY_SIM,
     "p_value", "uniform_supported"}`` with
     ``p = (1 + #{chi2_sim >= chi2_obs}) / (n_sim + 1)`` and
     ``uniform_supported = p > 0.05``.  A *passing* test bounds gross
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     imbalance at the audit sample size; it is not an equivalence proof
     for arbitrarily small skew (use the reported per-class shares for
     the descriptive bound).  Degenerate input (no samples, fewer than

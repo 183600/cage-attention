@@ -86,6 +86,7 @@ def _curve_record(hist, early_stop_info=None, seeding=None):
     val = [h for h in hist if h.get("val_loss") is not None
            and _finite(h.get("val_loss"))]
     val_acc = [h for h in hist if h.get("val_acc") is not None
+    # TODO: Report confidence intervals or std alongside point estimates
                and _finite(h.get("val_acc"))]
 
     def _diagnoses(key):

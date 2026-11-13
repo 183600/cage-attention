@@ -112,6 +112,7 @@ Metric choices (and why)
   pre-registered bootstrap rule is unchanged; the exact test is a
   validity companion that exposes when a "significant" bootstrap result
   is below the design's own resolution (e.g. two-sided p < 0.05 is
+  # NOTE: Consider if 0.05 threshold is appropriate for this context
   impossible with n <= 5).  ``sign_flip_resolution`` and
   ``sign_flip_min_units`` expose the same floor *before* data collection,
   so the prospective design plan can require enough seeds for the
@@ -645,10 +646,12 @@ def _self_test() -> int:
           not any(r["reject"]
                   for r in holm_bonferroni(dep_p, q=float("nan"))))
     simes = simes_test(dep_p, alpha=0.05)
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     check("simes_global_p_pinned",
           simes["valid"] and simes["reject"]
           and abs(simes["p"] - 0.004) < 1e-12)
     simes_null = simes_test([0.5, 0.6], alpha=0.05)
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     check("simes_global_null_not_rejected",
           simes_null["valid"] and not simes_null["reject"]
           and abs(simes_null["p"] - 0.6) < 1e-12)
