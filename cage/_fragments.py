@@ -37,7 +37,9 @@ def load_fragments(namespace: dict, names: tuple[str, ...]) -> None:
                 f"Failed to compile fragment {name!r} ({path}): {exc}"
             ) from exc
         try:
-            exec(code, namespace)
+            # nosec B102: exec() is used intentionally to compose module fragments
+            # from local project files only, never from user input.
+            exec(code, namespace)  # nosec B102
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to execute fragment {name!r} ({path}): {exc}"
