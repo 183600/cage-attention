@@ -780,8 +780,8 @@ def mcnemar_test(correct_a, correct_b) -> dict:
     # just report values; experiments can interpret
     try:
         from math import erfc, sqrt
-        # chi2_1 approx tail ~ erfc(sqrt(x/2))
-        p_chi2_cc = erfc(sqrt(chi2_cc / 2.0))
+        # chi2_1 approx tail ~ erfc(sqrt(max(x/2, 0.0)))
+        p_chi2_cc = erfc(sqrt(max(chi2_cc / 2.0, 0.0)))
     except Exception:
         p_chi2_cc = float("nan")
     return {"n": int(ca.numel()), "b": b, "c": c, "chi2_cc": chi2_cc,

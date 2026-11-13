@@ -307,7 +307,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         rec["accuracy_at_longest"] = long_acc
         rec["accuracy_drop"] = base_acc - long_acc
         # Degradation *shape*, not only the endpoint: fit accuracy on
-        # log(T) across the measured sweep.  A mid-sweep reversal can
+        # log(max(T, 1e-300)) across the measured sweep.  A mid-sweep reversal can
         # leave the base-to-longest drop unchanged while contradicting
         # "degrades more slowly"; this readout uses data already
         # collected, no extra grid point.
@@ -455,7 +455,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
           f"present in both is a length effect.")
 
     print(f"\n[e2] whole-sweep degradation slope (least-squares accuracy per "
-          f"unit log(T) over all {len(lengths)} measured lengths, "
+          f"unit log(max(T, 1e-300)) over all {len(lengths)} measured lengths, "
           f"mean±std over seeds; more negative = faster degradation).  This "
           f"is the shape readout behind H2a/H2d's 'degrades more slowly' "
           f"claim: the endpoint drop alone can hide a mid-sweep reversal:")
@@ -851,7 +851,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     clog.print("calib raw entropy drift vs 0", "H2b", "entropy_drift",
                _one_sample_contrast(calib_runs, "entropy_drift"),
                warn=calib_warn)
-    # The H/log(T) drift and the gate drift are *null predictions*: the
+    # The H/log(max(T, 1e-300)) drift and the gate drift are *null predictions*: the
     # decision rule is CI-within-bound (bootstrap TOST), not "CI excludes
     # 0" - support means "indistinguishable from length-stable within the
     # pre-registered bound", and a large drift must refute, not support,

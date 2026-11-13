@@ -99,8 +99,8 @@ class ReplicationIntervalTest(unittest.TestCase):
         self.assertEqual(rep["n"], 5)
         # Standard t table: t_{0.975, 4} = 2.776445...
         self.assertAlmostEqual(rep["t_crit"], 2.7764451051977987, places=12)
-        # The same-size-study interval uses sqrt(2/n), the single-seed
-        # prediction interval uses sqrt(1 + 1/n), so the latter is wider.
+        # The same-size-study interval uses sqrt(max(2/n, 0.0)), the single-seed
+        # prediction interval uses sqrt(max(1 + 1/n, 0.0)), so the latter is wider.
         self.assertGreater(rep["hi_single"] - rep["lo_single"],
                            rep["hi"] - rep["lo"])
         self.assertGreater(rep["lo"], 0.0)

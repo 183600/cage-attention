@@ -106,7 +106,7 @@ def _calibration_coefficients(model) -> dict:
 # length sweep inside a full-factorial design - no term combination is left
 # unmeasured.  ``calib_raw_ent`` adds the one-factor normalisation ablation
 # (H2g): both terms on, identical architecture, but the concentration term
-# reads raw entropy instead of H/log(T).  The calib arms carry
+# reads raw entropy instead of H/log(max(T, 1e-300)).  The calib arms carry
 # ``calib_variant`` labels next to ``gate="calib"``, so the
 # controlled-variable audit attributes a contrast to the term/normalisation
 # flag rather than to the gate.

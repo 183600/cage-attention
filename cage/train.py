@@ -690,7 +690,7 @@ def calib_term_knockout_eval(model, n_pairs, vocab, device, batch=256,
     training trajectory.  This probe is the complementary within-model
     intervention: hold the trained weights fixed, zero only the chosen
     additive coefficient(s), and re-score the same sealed evaluation
-    stream.  ``length`` zeroes ``calib_a`` (the ``-a*log(T)`` term),
+    stream.  ``length`` zeroes ``calib_a`` (the ``-a*log(max(T, 1e-300))`` term),
     ``concentration`` zeroes ``calib_c`` (the ``-c*scale*Hbar`` term), and
     ``both`` zeroes every calibration coefficient.  Parameters are restored
     exactly, including on error, and baseline/knockout rows are paired on

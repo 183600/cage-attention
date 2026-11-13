@@ -24,7 +24,7 @@ _E1_CALIB_PLACEBO = (
 # E1 position-conflation ablation arm (H1h): the identical calib
 # architecture, parameter count, computation and recipe, but the gate's
 # length term and concentration divisor are taken from each causal row's
-# own visible-token count log(max(t+1, 2)) instead of the global log(T).
+# own visible-token count log(max(t+1, 2)) instead of the global log(max(T, 1e-300)).
 # A causal row t can see at most t+1 keys, so its entropy ceiling is
 # log(t+1); the registered gate's global divisor therefore mixes a
 # position-dependent open-ness schedule into the concentration signal.  The

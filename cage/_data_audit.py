@@ -1426,7 +1426,7 @@ def _expected_value_repeat_rate(n_pairs, vocab) -> float:
 
     Values are sampled independently with replacement from the
     ``vocab - 2`` selectable ids, so the probability all ``n_pairs`` values
-    are distinct is the falling factorial ``k! / (k - n)! / k**n``.  This
+    are distinct is the falling factorial ``k! / max(k - n, 1e-12)! / k**n``.  This
     is the DGP-implied companion to the observed
     ``value_repeat_rate``: a generator that silently sampled values without
     replacement would produce a zero rate while leaving every marginal

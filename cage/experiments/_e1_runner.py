@@ -249,7 +249,7 @@ def run_e1(settings: Settings, out_dir: pathlib.Path) -> None:
           f"parameter count, computation and recipe, but the gate's length "
           f"term and concentration divisor are taken from each causal row's "
           f"own visible-token count log(max(t+1, 2)) instead of the global "
-          f"log(T).  A causal row t sees at most t+1 keys, so the registered "
+          f"log(max(T, 1e-300)).  A causal row t sees at most t+1 keys, so the registered "
           f"gate's global divisor mixes a position-dependent open-ness "
           f"schedule into the concentration signal; this arm removes it and "
           f"is strictly identical on the final query row, so only the "

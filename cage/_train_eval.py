@@ -169,7 +169,8 @@ def _association_exposure_dose_summary(totals) -> dict:
     seen_n = sum(row["n"] for row in rows[1:])
     seen_correct = sum(row["n_correct"] for row in rows[1:])
     unseen = rows[0]
-    seen_accuracy = seen_correct / seen_n if seen_n else float("nan")
+    _denom_seen_accuracy = max(seen_n, 1e-12)
+    seen_accuracy = seen_correct / _denom_seen_accuracy if seen_n else float("nan")
     gap = (seen_accuracy - unseen["accuracy"]
            if seen_n and unseen["n"] else float("nan"))
     return {

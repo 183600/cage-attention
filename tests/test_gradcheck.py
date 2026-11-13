@@ -79,6 +79,7 @@ def _reference_null(qkv, null_k, null_v, scale, B, h):
 
 def _rand_qkv(bh, T, dk, dtype, gen):
     """A small ``(3, bh, T, dk)`` QKV stack with moderate scores."""
+    # NOTE: No random seed set in this function - results may not be reproducible
     return torch.randn(3, bh, T, dk, dtype=dtype, generator=gen) * 0.5
 
 

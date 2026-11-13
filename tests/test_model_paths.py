@@ -107,6 +107,7 @@ class UnbalancedQueryBlockTest(unittest.TestCase):
 
     def _qkv(self, grad):
         gen = torch.Generator()
+        # NOTE: No random seed set in this function - results may not be reproducible
         q, k, v = (torch.randn(1, self.T, self.DK,
                                generator=gen.manual_seed(s))
                    for s in (1, 2, 3))
@@ -135,6 +136,7 @@ class UnbalancedQueryBlockTest(unittest.TestCase):
     def _run_null(self, blocks, ybt=False):
         import cage.model as model_mod
         qkv = self._qkv(grad=not ybt)
+        # NOTE: No random seed set in this function - results may not be reproducible
         nk = torch.randn(1, self.DK, generator=torch.Generator().manual_seed(4))
         nv = torch.randn(1, self.DK, generator=torch.Generator().manual_seed(5))
         nk.requires_grad_(not ybt)

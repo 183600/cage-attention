@@ -479,7 +479,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     ``sqrt(n_seeds)`` (pseudo-replication).  The primary
     ``lo``/``hi``/``p_value``/``p_above_chance`` then carry both seed noise
     and the common-stream scoring noise.  ``sd_effective`` is the total
-    per-seed SD (``sqrt(sd_seed^2 + mean(p(1-p))/n_per_seed)``) for
+    per-seed SD (``sqrt(max(sd_seed^2 + mean(p(1-p, 0.0)))/n_per_seed)``) for
     display, while planning uses the SD of the mean,
     ``se_effective = sqrt(sd_seed^2 / max(n, 1) + mean(p(1-p))/n_per_seed)``; the
     stream term does not shrink with more seeds, so
@@ -686,7 +686,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
             # The seed term of the mean's variance shrinks as sd_seed^2/n;
             # the common-stream scoring term enters once (all seeds share
             # the evaluation examples).  Solving the target SE
-            # (margin - z*sd_binomial)/z = sqrt(sd_seed^2/n) for n inflates
+            # (margin - z*sd_binomial)/z = sqrt(max(sd_seed^2/n, 0.0)) for n inflates
             # the plain seed-only estimate by sd_seed^2 / sd_seed^2/n,
             # i.e. by the current seed count.
             z = 2.8015852

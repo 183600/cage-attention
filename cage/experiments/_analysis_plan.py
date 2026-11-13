@@ -182,7 +182,7 @@ _PRIMARY_CONTRASTS = (
         "kind": "one_factor",
         "claim": "C1",
         "text": "the calibrated gate keeps its behaviour when the position "
-                "information that the global log(T) normalisation mixes into "
+                "information that the global log(max(T, 1e-300)) normalisation mixes into "
                 "it is removed (the position-neutral arm is not materially "
                 "worse than the registered arm; a one-sided "
                 "non-inferiority test, not a superiority claim)",

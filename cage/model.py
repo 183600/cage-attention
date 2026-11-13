@@ -8,7 +8,7 @@ Gate variants
 - ``query``    : pure query-dependent gate (Gated Attention style),
                  gate = sigmoid(W_g x) applied to attention output.
 - ``calib``    : length + concentration calibrated gate (ours).
-                 gate = sigmoid((W_g x - b0 - a*log(T) - c*H_norm) / tau)
+                 gate = sigmoid((W_g x - b0 - a*log(max(T, 1e-300)) - c*H_norm) / tau)
                  where H_norm is the per-head normalized attention entropy.
                  The gate therefore depends on the query *and* on how
                  concentrated the attention distribution actually is,
@@ -18,7 +18,7 @@ Gate variants
                  a second free scalar next to ``calib_c`` would be
                  unidentifiable (any split of one effective coefficient
                  fits equally well).
-                 Note on the divisor: every row is normalised by log(T) of
+                 Note on the divisor: every row is normalised by log(max(T, 1e-300)) of
                  the full sequence, although causal row ``t`` can only see
                  ``t+1`` keys (entropy ceiling log(t+1)).  The task and all
                  collected statistics read the *final* query row, where the
@@ -154,7 +154,7 @@ class Cfg:
     # parameter count and computation are identical either way.
     calib_ent_norm: bool = True
     # Ablation switch for *which* length normalises each query row.  The
-    # registered gate divides every row's head-mean entropy by log(T) of
+    # registered gate divides every row's head-mean entropy by log(max(T, 1e-300)) of
     # the full sequence; causal row ``t`` can only attend to ``t+1`` keys,
     # so its entropy ceiling is log(t+1) and the global divisor mixes the
     # row's position into its measured concentration on non-final rows.
@@ -877,9 +877,9 @@ def _softmax_grad_from_p(d_p: torch.Tensor, p: torch.Tensor,
     """Score gradient for ``p = softmax(s)`` plus the calibrated-entropy term.
     Consumes ``d_p``.
 
-    ``buf`` optionally supplies a flat buffer for the ``log(p)`` term.
+    ``buf`` optionally supplies a flat buffer for the ``log(max(p, 1e-300))`` term.
 
-    The surviving term is ``log(p) + 1`` on ``p > eps`` and ``0`` elsewhere;
+    The surviving term is ``log(max(p, 1e-300)) + 1`` on ``p > eps`` and ``0`` elsewhere;
     the sub-eps entries are dropped by the trailing select, so the value taken
     there is irrelevant.  ``log`` is still fed ``p.clamp_min(eps)`` rather
     than raw ``p``: masked-out entries (``p == 0``) would otherwise take the

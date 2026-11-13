@@ -1052,7 +1052,7 @@ def _linear_slope(xs, ys):
     """Least-squares slope of ``ys`` on ``xs`` (NaN when not identifiable).
 
     Used for the E2 degradation-shape readout: fitting accuracy on
-    ``log(T)`` across the whole sweep tests "degrades more slowly" with all
+    ``log(max(T, 1e-300))`` across the whole sweep tests "degrades more slowly" with all
     the measured lengths instead of only the endpoint, and is scale-free
     with respect to the absolute accuracy level.  Non-finite pairs are
     dropped; fewer than two points or a constant x returns NaN rather than
@@ -1693,7 +1693,7 @@ _CALIB_PLACEBO_CELL = "calib_shuf_ent"
 
 # E2 normalisation-ablation cell (H2g): the full calib architecture and both
 # additive terms, but the concentration term reads the raw row-mean entropy
-# instead of the registered H/log(T).  It is a one-factor ablation of the
+# instead of the registered H/log(max(T, 1e-300)).  It is a one-factor ablation of the
 # normalisation itself (same parameters, same length term, same kernel), kept
 # outside the 2x2 term factorisation because at a fixed length the two forms
 # differ only by a constant absorbed into ``calib_c`` - it is identifiable
@@ -1701,15 +1701,15 @@ _CALIB_PLACEBO_CELL = "calib_shuf_ent"
 _CALIB_RAW_ENT_CELL = "calib_raw_ent"
 
 # Declared single-factor position-normalisation cell: the full calib
-# architecture and both additive terms with the registered H/log(T)
+# architecture and both additive terms with the registered H/log(max(T, 1e-300))
 # normalisation, but each causal row divides by its own visible-token count
-# log(max(t+1, 2)) instead of the global log(T).  It is a distinct cell
+# log(max(t+1, 2)) instead of the global log(max(T, 1e-300)).  It is a distinct cell
 # because, unlike the term ablations, the resolved term flags are identical
 # to ``full``; only ``calib_pos_norm`` identifies it.  The cell is declared
 # and expanded into its factor vector like the other one-factor cells, and
 # E1 trains it as the position-conflation arm of H1h (E2 has no
 # position-normalisation arm): the registered gate divides every row by the
-# global log(T) although a causal row t can see at most t+1 keys, so the
+# global log(max(T, 1e-300)) although a causal row t can see at most t+1 keys, so the
 # global divisor mixes a position-dependent open-ness schedule into the
 # concentration signal.  The arm removes that schedule and is strictly
 # identical on the final query row, so it isolates the confound in a single

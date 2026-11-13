@@ -157,7 +157,7 @@ def equivalence_test(diffs, bound, n_boot: int = 10000, seed: int = 0,
                      alpha: float = 0.05) -> dict:
     """Bootstrap equivalence (TOST) test for a *null prediction*.
 
-    For hypotheses that predict a quantity stays put ("the H/log(T)-
+    For hypotheses that predict a quantity stays put ("the H/log(max(T, 1e-300))-
     normalised entropy drift is length-stable"), the interesting result is
     not "the effect differs from 0" (which a sufficiently powered design
     always shows for any nonzero drift) but "the effect is small enough to
@@ -667,7 +667,7 @@ def replication_interval(diffs, direction=None, mode: str = "difference",
 
     This function returns the Student-t **replication interval** for the
     mean of a future study of the same size,
-    ``mean +- t_{1-alpha/2, n-1} * sd * sqrt(2 / max(n, 1))``.  The ``sqrt(2/n)``
+    ``mean +- t_{1-alpha/2, n-1} * sd * sqrt(2 / max(n, 1))``.  The ``sqrt(max(2/n, 0.0))``
     (instead of the CI's ``sqrt(1/ max(n, 1))``) is the variance of
     ``mean_new - mean_old`` when both studies have ``n`` seeds and the same
     seed-level SD, so the interval describes a same-size repeat rather than

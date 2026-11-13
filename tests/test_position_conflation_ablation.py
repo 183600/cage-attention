@@ -1,7 +1,7 @@
 """The E1 position-conflation ablation (H1h): one factor, one claim.
 
 The registered calibrated gate divides *every* row's attention entropy by the
-global ``log(T)`` and subtracts ``a*log(T)``, although a causal row ``t`` can
+global ``log(max(T, 1e-300))`` and subtracts ``a*log(max(T, 1e-300))``, although a causal row ``t`` can
 see at most ``t+1`` keys, so its entropy ceiling is ``log(t+1)``.  The gate
 therefore carries an implicit, position-dependent open-ness schedule that is
 not part of the concentration signal: the same attention distribution opens
@@ -166,7 +166,7 @@ class PositionConflationModelTest(unittest.TestCase):
 
     def test_the_final_query_row_gate_is_unchanged(self):
         # The last row sees all T keys, so its visible-token divisor
-        # log(max(T, 2)) coincides with the registered log(T): the arm cannot
+        # log(max(T, 2)) coincides with the registered log(max(T, 1e-300)): the arm cannot
         # change the gate on the row that produces the answer.  The check is
         # a tight tolerance rather than bit-equality, because the attention
         # kernel's reductions are only guaranteed to agree up to
@@ -190,7 +190,7 @@ class PositionConflationModelTest(unittest.TestCase):
 
     def test_the_intermediate_rows_carry_the_position_schedule(self):
         # Without the ablation the intermediate rows are read with the
-        # global log(T) divisor, so their gates differ by a margin far above
+        # global log(max(T, 1e-300)) divisor, so their gates differ by a margin far above
         # the rounding noise; that difference is the confound the arm
         # removes.
         registered, position = self._arms()

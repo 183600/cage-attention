@@ -32,7 +32,7 @@ HYPO_IDS = ("HB0", "HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7",
 # every result record, so the SESOI is part of the pre-registration.
 #
 # A hypothesis whose prediction is a *null/equivalence* claim (a quantity is
-# expected to stay inside a bound, e.g. H2b's length-stable H/log(T)) lists
+# expected to stay inside a bound, e.g. H2b's length-stable H/log(max(T, 1e-300))) lists
 # the metric under ``"sesoi_test"`` with value ``"equivalence"``: the SESOI
 # then acts as the equivalence bound and the contrast is supported only when
 # the 95% CI of the effect lies inside +-bound (bootstrap TOST,
@@ -492,11 +492,11 @@ HYPOTHESES = {
     "H1h": {
         "experiment": "e1",
         "question": "Is the calibrated gate's behaviour an artefact of the "
-                    "position information that the global log(T) "
+                    "position information that the global log(max(T, 1e-300)) "
                     "normalisation mixes into it, or does the mechanism "
                     "survive without that confound?",
         "hypothesis": "The registered gate divides *every* row's attention "
-                      "entropy by the global log(T) and subtracts a*log(T), "
+                      "entropy by the global log(max(T, 1e-300)) and subtracts a*log(max(T, 1e-300)), "
                       "although a causal row t can see at most t+1 keys, so "
                       "its entropy ceiling is log(t+1).  The gate therefore "
                       "carries an implicit, position-dependent open-ness "
@@ -542,12 +542,12 @@ HYPOTHESES = {
         "experiment": "e2",
         "question": "Does length calibration slow the degradation beyond "
                     "the training length?",
-        "hypothesis": "Because the gate subtracts a*log(T) and the "
-                      "log(T)-normalised entropy, calib degrades less than "
+        "hypothesis": "Because the gate subtracts a*log(max(T, 1e-300)) and the "
+                      "log(max(T, 1e-300))-normalised entropy, calib degrades less than "
                       "none when evaluated at 2x-spaced lengths.",
         "prediction": "accuracy_drop(calib) < accuracy_drop(none) and "
                       "accuracy@longest(calib) > accuracy@longest(none); "
-                      "the fitted accuracy slope on log(T) across the whole "
+                      "the fitted accuracy slope on log(max(T, 1e-300)) across the whole "
                       "sweep is also less negative for calib (endpoint-only "
                       "reads can hide a mid-sweep reversal)",
         "decision": "paired bootstrap 95% CI of the differences excludes 0 "
@@ -562,15 +562,15 @@ HYPOTHESES = {
         "experiment": "e2",
         "question": "Do the attention statistics drift with length as the "
                     "calibration assumes?",
-        "hypothesis": "Raw entropy grows with log(T), while the quantity the "
-                      "gate normalises by, H/log(T), is length-stable.",
+        "hypothesis": "Raw entropy grows with log(max(T, 1e-300)), while the quantity the "
+                      "gate normalises by, H/log(max(T, 1e-300)), is length-stable.",
         "prediction": "raw entropy drift (longest - base) > 0 (directional) "
-                      "and the normalised entropy drift H/log(T) lies inside "
+                      "and the normalised entropy drift H/log(max(T, 1e-300)) lies inside "
                       "the pre-registered equivalence bound, with the "
                       "calibrated gate drift inside its bound too",
         "decision": "paired bootstrap 95% CIs, FDR-controlled across the E2 "
                     "contrasts (q=0.05): the raw entropy drift CI excludes 0 "
-                    "with a positive mean (difference test); the H/log(T) "
+                    "with a positive mean (difference test); the H/log(max(T, 1e-300)) "
                     "drift and the gate drift are *equivalence* (TOST) tests "
                     "- each is supported only when its CI lies inside "
                     "+-SESOI, so a CI that merely includes 0 while spanning "
@@ -591,7 +591,7 @@ HYPOTHESES = {
         "question": "Is the length term (not the concentration term) the "
                     "specific cause of calib's length robustness?",
         "hypothesis": "The advantage of calib over none beyond the training "
-                      "length comes from subtracting a*log(T): removing the "
+                      "length comes from subtracting a*log(max(T, 1e-300)): removing the "
                       "length term (concentration-only arm) must lose the "
                       "advantage, while removing the concentration term "
                       "(length-only arm) must keep it.",
@@ -637,7 +637,7 @@ HYPOTHESES = {
                       "accuracy_at_longest(query) and "
                       "accuracy_drop(calib) < accuracy_drop(query), with "
                       "the same sign on the whole-sweep accuracy slope on "
-                      "log(T)",
+                      "log(max(T, 1e-300))",
         "decision": "paired bootstrap 95% CI excludes 0 in the "
                     "pre-registered directions after Benjamini-Hochberg FDR "
                     "control across the E2 contrasts (q=0.05)",
@@ -951,7 +951,7 @@ class Settings:
     # The probe evaluation stream is deliberately wider than the grid
     # evaluation stream: HB2 certifies "the tuned probe stays below
     # 2x chance", and with a narrow stream the per-seed binomial noise
-    # (sd ~ sqrt(p(1-p)/n)) can exceed the chance-level margin, making the
+    # (sd ~ sqrt(max(p(1-p, 0.0))/n)) can exceed the chance-level margin, making the
     # certificate fail for power reasons on a clean pipeline.  512x16
     # samples shrink that noise well below the margin; the one-sided
     # p-value and the seeds_for_certification power plan are reported next
