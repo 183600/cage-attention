@@ -1464,7 +1464,7 @@ def _metadata_signature(meta) -> str:
         raise ValueError(
             f"batch meta must be a mapping, got {type(meta).__name__}")
     parts = []
-    for key in sorted(meta, key=str):
+    for key in sorted(meta, key=lambda k: (0, k) if isinstance(k, (int, float)) else (1, str(k))):
         value = meta[key]
         if torch.is_tensor(value):
             parts.append((str(key), value.detach().cpu().tolist()))
