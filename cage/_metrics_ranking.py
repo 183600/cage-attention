@@ -572,7 +572,7 @@ def _hedges_j(n: int) -> float:
     df = n - 1
     if df <= 1:
         return 0.0
-    log_j = (math.lgamma(df / 2.0) - 0.5 * math.log(df / 2.0)
+    log_j = (math.lgamma(df / 2.0) - 0.5 * math.log(df / 2.0 + 1e-8)
              - math.lgamma((df - 1.0) / 2.0))
     return math.exp(log_j)
 
