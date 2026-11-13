@@ -1141,7 +1141,7 @@ def false_coverage_ci(diffs, n_selected, n_tests, q: float = 0.05,
         if n_tst <= 100000:
             factor = math.fsum(1.0 / max(i, 1e-10) for i in range(1, n_tst + 1))
         else:
-            factor = math.log(n_tst + 1e-8) + 0.5772156649015329 + 0.5 / max(n_tst, 1)
+            factor = math.log(n_tst) + 0.5772156649015329 + 0.5 / max(n_tst, 1)
         adjusted_alpha = q_value * n_sel / (n_tst * factor)
     else:
         factor = 1.0
