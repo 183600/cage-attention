@@ -1189,7 +1189,7 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
     if n_a > 1 and n_b > 1:
         scale = max(sd_a, sd_b)
         se = (scale * math.sqrt((sd_a / max(scale, 1e-10)) ** 2 / n_a
-                                + (sd_b / scale) ** 2 / max(n_b, 1))
+                                + (sd_b / max(scale, 1e-10)) ** 2 / max(n_b, 1))
               if scale > 0.0 else 0.0)
     elif math.isfinite(pooled_sd):
         se = pooled_sd * math.sqrt(1.0 / max(n_a, 1) + 1.0 / max(n_b, 1))
