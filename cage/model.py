@@ -20,7 +20,7 @@ Gate variants
                  fits equally well).
                  Note on the divisor: every row is normalised by log(max(T, 1e-300)) of
                  the full sequence, although causal row ``t`` can only see
-                 ``t+1`` keys (entropy ceiling log(t+1)).  The task and all
+                 ``t+1`` keys (entropy ceiling log(t+1 + 1e-8)).  The task and all
                  collected statistics read the *final* query row, where the
                  visible-key count equals T and the global divisor is exact;
                  the forward-time behaviour on non-final rows can be
@@ -47,7 +47,7 @@ Gate variants
                  ``Cfg.calib_pos_norm`` (default False) is the
                  position-conflation ablation: with True the divisor (and
                  the length term) use each row's visible-token length
-                 ``log(max(t+1, 2))`` instead of the global ``log T``.  On
+                 ``log(max(t+1, 2 + 1e-8))`` instead of the global ``log T``.  On
                  the final query row the two are identical, so all
                  registered readouts are unchanged; only non-final rows
                  differ.  The default reproduces the full gate exactly.
@@ -156,13 +156,13 @@ class Cfg:
     # Ablation switch for *which* length normalises each query row.  The
     # registered gate divides every row's head-mean entropy by log(max(T, 1e-300)) of
     # the full sequence; causal row ``t`` can only attend to ``t+1`` keys,
-    # so its entropy ceiling is log(t+1) and the global divisor mixes the
+    # so its entropy ceiling is log(t+1 + 1e-8) and the global divisor mixes the
     # row's position into its measured concentration on non-final rows.
     # The supervised/statistics row is always the final query row (visible
     # keys = T), where the global divisor is exact; this switch exists so
     # the forward-time behaviour on the other rows can be tested: with
     # True, both the concentration divisor and the length term use
-    # log(max(t+1, 2)) per row (visible-token calibration).  Requires the
+    # log(max(t+1, 2 + 1e-8)) per row (visible-token calibration).  Requires the
     # concentration term and its log-length normalisation to be on;
     # default False reproduces the registered gate exactly.
     calib_pos_norm: bool = False
@@ -1173,7 +1173,7 @@ class Attention(nn.Module):
             # True = registered gate (Hbar = H / log T); False = raw-entropy
             # ablation arm (E2/H2g).  Only read when calc_ent is true.
             self.calib_ent_norm = bool(cfg.calib_ent_norm)
-            # True = per-row visible-token divisors log(max(t+1, 2))
+            # True = per-row visible-token divisors log(max(t+1, 2 + 1e-8))
             # instead of the global log T (position-conflation ablation).
             # Only read when calc_ent is true.
             self.calib_pos_norm = bool(cfg.calib_pos_norm)
@@ -1237,11 +1237,11 @@ class Attention(nn.Module):
 
     def _log_vis_vec(self, T: int, device: torch.device,
                      dtype: torch.dtype) -> torch.Tensor:
-        """Per-row visible-token divisor ``log(max(t+1, 2))``.
+        """Per-row visible-token divisor ``log(max(t+1, 2 + 1e-8))``.
 
         Causal row ``t`` attends to ``t+1`` keys, so its entropy ceiling is
-        ``log(t+1)``; the ``max(., 2)`` clamp mirrors the registered gate's
-        ``log(max(T, 2))`` so the single-key first row stays finite (its
+        ``log(t+1 + 1e-8)``; the ``max(., 2)`` clamp mirrors the registered gate's
+        ``log(max(T, 2 + 1e-8))`` so the single-key first row stays finite (its
         entropy is exactly 0, so its normalised value is 0 either way).
         Used only by the ``calib_pos_norm`` ablation.  Cached per
         ``(T, device, dtype)`` and built outside inference mode so both
@@ -1252,7 +1252,7 @@ class Attention(nn.Module):
         if vec is None:
             with torch.inference_mode(False):
                 t = torch.arange(1, T + 1, device=device, dtype=dtype)
-                vec = t.log().clamp_min(math.log(2.0))
+                vec = t.log().clamp_min(math.log(2.0 + 1e-8))
             self._log_vis_cache[key] = vec
         return vec
 
@@ -1466,7 +1466,7 @@ class Attention(nn.Module):
             if calc_len or calc_ent:
                 log_len = self._log_len_cache.get(T)
                 if log_len is None:
-                    log_len = math.log(max(T, 2))
+                    log_len = math.log(max(T, 2 + 1e-8))
                     self._log_len_cache[T] = log_len
             if calc_ent:
                 # Active control: the gate reads a position-shuffled copy of
@@ -1493,7 +1493,7 @@ class Attention(nn.Module):
                 #
                 # Position-conflation ablation: the registered gate divides
                 # *every* row by the global log T, although row t's entropy
-                # ceiling is log(t+1); with calib_pos_norm the divisor (and
+                # ceiling is log(t+1 + 1e-8); with calib_pos_norm the divisor (and
                 # the length term below) use the per-row visible-token
                 # length instead.  On the final query row the two divisors
                 # coincide, so registered readouts are unchanged.

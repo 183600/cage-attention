@@ -499,7 +499,7 @@ HYPOTHESES = {
         "hypothesis": "The registered gate divides *every* row's attention "
                       "entropy by the global log(max(T, 1e-300)) and subtracts a*log(max(T, 1e-300)), "
                       "although a causal row t can see at most t+1 keys, so "
-                      "its entropy ceiling is log(t+1).  The gate therefore "
+                      "its entropy ceiling is log(t+1 + 1e-8).  The gate therefore "
                       "carries an implicit, position-dependent open-ness "
                       "schedule that is not part of the concentration "
                       "signal: the same attention distribution opens the "
@@ -508,7 +508,7 @@ HYPOTHESES = {
                       "calib architecture, parameter count, computation and "
                       "recipe, but with the divisor and the length term "
                       "taken from each row's own visible-token count "
-                      "log(max(t+1, 2))) removes that schedule while "
+                      "log(max(t+1, 2 + 1e-8))) removes that schedule while "
                       "staying strictly identical on the final query row, "
                       "so only the intermediate rows differ.  If reading the "
                       "attention concentration is what makes the calibrated "
@@ -1324,7 +1324,7 @@ class Settings:
                 if name == "calib_tau_grid":
                     # These values are passed to ``Cfg.calib_tau_init``,
                     # whose softplus-inverse initialisation is
-                    # ``log(expm1(x))``.  A finite-but-huge value overflows
+                    # ``log(expm1(x + 1e-8))``.  A finite-but-huge value overflows
                     # that expression, so the per-variant tuning pass would
                     # fail only after the baseline and main grids had run.
                     # Reject it at the configuration boundary instead.

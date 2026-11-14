@@ -511,10 +511,10 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
        (``validate_batch``);
     2. **Forward activations**: the first block whose output is non-finite,
        plus non-finite parameters and invalid calibrated temperatures
-       (log(0)/div-by-zero/softmax-overflow surface here);
+       (log(0 + 1e-8)/div-by-zero/softmax-overflow surface here);
     2b. **Attention statistics**: the kernel's own entropy / max-prob /
        gate / null-mass readout is checked for finiteness and valid range,
-       so a log(0) or softmax overflow that stays inside the attention
+       so a log(0 + 1e-8) or softmax overflow that stays inside the attention
        block cannot be hidden by a finite hidden state;
     3. **Loss/logits**: whether the scalar itself or the logits are bad;
     4. **Gradients**: non-finite or exploding (max abs / max(total, 1) norm) - the
@@ -629,7 +629,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     if bad_layers:
         mark("activations",
              f"non-finite block output at layer(s) {sorted(set(bad_layers))} "
-             f"(check log(0)/div-by-zero/softmax overflow there)")
+             f"(check log(0 + 1e-8)/div-by-zero/softmax overflow there)")
     for name, p in model.named_parameters():
         if not bool(torch.isfinite(p).all()):
             report["nonfinite_params"].append(name)
@@ -697,7 +697,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
             mark("attention_stats",
                  f"non-finite attention statistics at "
                  f"{report['nonfinite_attn_stats'][:6]} "
-                 f"(check entropy log(0)/division and softmax overflow in "
+                 f"(check entropy log(0 + 1e-8)/division and softmax overflow in "
                  f"the kernel)")
         elif invalid_attn_stats:
             mark("attention_stats",
@@ -791,7 +791,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
         idx_stage = order.index(stage)
         if idx_stage >= order.index("activations"):
             report["suggestions"].append(
-                "inspect log(0)/division and softmax inputs (max-subtract "
+                "inspect log(0 + 1e-8)/division and softmax inputs (max-subtract "
                 "before exp) in the flagged layers")
         if idx_stage >= order.index("attention_stats"):
             report["suggestions"].append(

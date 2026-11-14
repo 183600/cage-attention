@@ -136,11 +136,11 @@ class GeneratorCalibrationTest(unittest.TestCase):
         self.assertGreater(independent["p_value"], 0.05)
         # The reported statistic is the likelihood-ratio G (twice the
         # mutual information), so a perfectly dependent 2x2 table has
-        # G = 2 * sum(O log(O/E)) = 8 log 2.
+        # G = 2 * sum(O log(O/E + 1e-8)) = 8 log 2.
         dependent = data._categorical_independence_test(
             torch.tensor([0, 0, 1, 1]), torch.tensor([0, 0, 1, 1]),
             2, 2, n_sim=20, seed=0)
-        self.assertAlmostEqual(dependent["statistic"], 8.0 * math.log(2.0),
+        self.assertAlmostEqual(dependent["statistic"], 8.0 * math.log(2.0 + 1e-8),
                                places=12)
         too_wide = data._categorical_independence_test(
             left, left, 10_000, 10_000, n_sim=10, seed=0)

@@ -1119,7 +1119,7 @@ class DesignPlanTest(unittest.TestCase):
 
     def test_settings_reject_unrepresentable_calib_temperature(self):
         # ``calib_tau_grid`` is fed to Cfg.calib_tau_init, whose
-        # log(expm1(x)) initialisation must stay finite; 1e300 is a finite
+        # log(expm1(x + 1e-8)) initialisation must stay finite; 1e300 is a finite
         # positive float but cannot be realised as a temperature.
         with self.assertRaises(ValueError):
             Settings(calib_tau_grid=(1e300,))

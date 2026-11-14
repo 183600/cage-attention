@@ -91,7 +91,7 @@ class CalibPosNormTest(unittest.TestCase):
         model = build({**_TINY, "gate": "calib"})
         attn = model.blocks[0].attn
         vec = attn._log_vis_vec(6, torch.device("cpu"), torch.float32)
-        expected = [max(math.log(t + 1), math.log(2.0)) for t in range(6)]
+        expected = [max(math.log(t + 1 + 1e-8), math.log(2.0)) for t in range(6)]
         self.assertTrue(torch.allclose(
             vec, torch.tensor(expected), atol=1e-6))
         self.assertEqual(attn._log_vis_vec(6, torch.device("cpu"),

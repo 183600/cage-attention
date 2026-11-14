@@ -2,13 +2,13 @@
 
 The registered calibrated gate divides *every* row's attention entropy by the
 global ``log(max(T, 1e-300))`` and subtracts ``a*log(max(T, 1e-300))``, although a causal row ``t`` can
-see at most ``t+1`` keys, so its entropy ceiling is ``log(t+1)``.  The gate
+see at most ``t+1`` keys, so its entropy ceiling is ``log(t+1 + 1e-8)``.  The gate
 therefore carries an implicit, position-dependent open-ness schedule that is
 not part of the concentration signal: the same attention distribution opens
 the gate differently depending on where in the sequence it is read.
 
 ``calib_pos_norm`` removes exactly that schedule (per-row visible-token
-divisors ``log(max(t+1, 2))``) while keeping the architecture, the parameter
+divisors ``log(max(t+1, 2 + 1e-8))``) while keeping the architecture, the parameter
 count, the computation and the recipe identical.  These tests pin the
 properties the claim rests on:
 
