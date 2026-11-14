@@ -83,20 +83,47 @@ load_fragments(globals(), _FRAGMENTS)
 del _FRAGMENTS
 
 
-def _make_adamw(params, lr):
-    """AdamW on the current device."""
-    params = list(params)
+def _make_adamw(model_or_params, lr):
+    """AdamW on the current device with proper weight-decay parameter groups.
+
+    When a ``nn.Module`` is given, parameters are split into decay (≥2-D
+    weights) and no-decay (bias, LayerNorm, Embedding, 1-D scalars) groups,
+    matching the convention in lega-attention, ada-squash and SMELT-ISR.
+    A pre-built parameter list is accepted for backward compatibility but
+    applies weight decay uniformly (callers should prefer passing the model).
+    """
+    import torch.nn as _nn
+
+    if isinstance(model_or_params, _nn.Module):
+        decay, no_decay = [], []
+        for name, p in model_or_params.named_parameters():
+            if not p.requires_grad:
+                continue
+            # ≥2-D weight matrices get decay; bias/norm/embedding/scalars do not.
+            if p.ndim >= 2 and "norm" not in name and "bias" not in name:
+                decay.append(p)
+            else:
+                no_decay.append(p)
+        param_groups = [
+            {"params": decay, "weight_decay": _ADAMW_WEIGHT_DECAY},
+            {"params": no_decay, "weight_decay": 0.0},
+        ]
+        all_params = decay + no_decay
+    else:
+        all_params = list(model_or_params)
+        param_groups = all_params  # flat list → uniform weight_decay
+
     kw = dict(lr=lr, weight_decay=_ADAMW_WEIGHT_DECAY, betas=_ADAMW_BETAS)
-    if any(p.is_cuda for p in params):
+    if any(p.is_cuda for p in all_params):
         try:
-            return torch.optim.AdamW(params, fused=True, **kw)
+            return torch.optim.AdamW(param_groups, fused=True, **kw)
         except (TypeError, RuntimeError, ValueError):
-            import logging as _logging; _logging.warning("Suppressed exception in train.py:93", exc_info=True)
+            import logging as _logging; _logging.warning("Suppressed exception in train.py: _make_adamw fused", exc_info=True)
     try:
-        return torch.optim.AdamW(params, foreach=True, **kw)
+        return torch.optim.AdamW(param_groups, foreach=True, **kw)
     except (TypeError, RuntimeError, ValueError):
-        import logging as _logging; _logging.warning("Suppressed exception in train.py:97", exc_info=True)
-    return torch.optim.AdamW(params, **kw)
+        import logging as _logging; _logging.warning("Suppressed exception in train.py: _make_adamw foreach", exc_info=True)
+    return torch.optim.AdamW(param_groups, **kw)
 
 def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
                 device="cpu", log_every=250, seed=0, dense_lm=False,
@@ -318,7 +345,7 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     perm_gen = stream_generator(stream_seed, device)
     val_gen = stream_generator(VAL_SEED, device)
     params = list(model.parameters())
-    opt = _make_adamw(params, lr)
+    opt = _make_adamw(model, lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=steps, eta_min=lr * _ETA_MIN_FACTOR)
     hist = []

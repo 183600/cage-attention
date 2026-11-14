@@ -243,7 +243,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     gen = stream_generator(seed, device)
     model = LinearBagProbe(vocab).to(device)
     params = list(model.parameters())
-    opt = _make_adamw(params, lr)
+    opt = _make_adamw(model, lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=steps, eta_min=lr * _ETA_MIN_FACTOR)
     sample_every = max(1, steps // 20)
