@@ -148,7 +148,6 @@ def check_smoke() -> None:
         if not torch.isfinite(loss):
             raise RuntimeError(f"non-finite loss for {cfg}")
         loss.backward()
-        # WARNING: No optimizer.zero_grad() found near loss.backward() - gradients will accumulate
         for p in m.parameters():
             if p.grad is not None and not torch.isfinite(p.grad).all():
                 raise RuntimeError(f"non-finite grad for {cfg}")

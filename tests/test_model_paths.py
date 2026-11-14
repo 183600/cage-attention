@@ -34,7 +34,6 @@ class DropoutStatsPathTest(unittest.TestCase):
                     idx, tgt, sup_pos=meta["query_pos"],
                     stat_pos=meta["query_pos"])
                 loss.backward()
-                # WARNING: No optimizer.zero_grad() found near loss.backward() - gradients will accumulate
                 self.assertTrue(torch.isfinite(loss))
                 for layer in stats:
                     for key, value in layer.items():

@@ -865,7 +865,6 @@ def _gradient_flow(model):
     """Per-parameter backward-connectivity audit for one backward pass.
 
     A parameter with ``grad is None`` after ``loss.backward()`` was never
-    # WARNING: No optimizer.zero_grad() found near loss.backward() - gradients will accumulate
     reached by the graph - the signature of a detached branch, a
     mis-wired loss or a kernel whose custom backward forgot an input.
     Non-finite gradients are the other failure mode.  The caller runs this
