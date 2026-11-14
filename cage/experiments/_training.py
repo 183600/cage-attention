@@ -505,7 +505,7 @@ def _eval_answer_balance(settings: Settings) -> dict:
             counts += torch.bincount(meta["answer"].cpu(),
                                      minlength=settings.vocab)
         present = counts > 0
-        shares = counts[present] / counts.sum() if counts.sum() > 0 else \
+        shares = counts[present] / counts.sum() if counts.sum().item() > 0 else \
             counts[present]
         uniformity = answer_uniformity_test(counts[2:])
         return {
