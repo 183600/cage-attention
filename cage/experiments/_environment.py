@@ -1,0 +1,1744 @@
+# cage/experiments/_environment.py - Source/environment fingerprints, context and manifest stamps.
+# Executed into the cage.experiments namespace by __init__.py;
+# split for readability, sharing the module globals.
+# ruff: noqa: F821, F541
+def _source_tree_sha256(root=None) -> str:
+    """Content hash of the training package (``cage/**/*.py``).
+
+    ``git_sha`` identifies the committed revision, but a run from a dirty
+    tree is not rebuildable from that revision alone and the dirty flag does
+    not say *what* code ran.  Hashing the actual source files gives every
+    record a content-addressed code version that survives uncommitted
+    edits, so two runs can be compared (and a stale baseline verdict can be
+    refused) even when both report the same ``git_sha``.
+
+    Each file contributes its **relative POSIX path** as well as its bytes.
+    The earlier implementation hashed only ``path.name``, so two checkouts
+    whose modules were moved between subpackages - but kept the same
+    basenames and contents - produced the same code id.  A source fingerprint
+    must identify the tree, not just the multiset of file contents.
+
+    ``root`` is an optional test hook; production callers use the package
+    directory.  Only the production result is cached, so a test tree cannot
+    poison the process-wide fingerprint.
+    """
+    global _SOURCE_TREE_SHA
+    base = (pathlib.Path(__file__).resolve().parent.parent
+            if root is None else pathlib.Path(root))
+    if root is None and _SOURCE_TREE_SHA is not None:
+        return _SOURCE_TREE_SHA
+    h = hashlib.sha256()
+    excluded = {"__pycache__", ".git", ".venv", "venv"}
+    for path in sorted(base.rglob("*.py")):
+        relative = path.relative_to(base)
+        if any(part in excluded for part in relative.parts):
+            continue
+        h.update(relative.as_posix().encode("utf-8") + b"\0")
+        h.update(path.read_bytes())
+        h.update(b"\0")
+    digest = h.hexdigest()[:16]
+    if root is None:
+        _SOURCE_TREE_SHA = digest
+    return digest
+
+
+def _run_identity() -> tuple[str, str]:
+    """Per-process run id and start timestamp (excluded from setup hash).
+
+    One invocation can write many JSONL records; the run id groups them and
+    links the compact provenance stamp on error-case rows back to the full
+    manifest, so stale rows from an earlier invocation are never mistaken
+    for part of the current one.
+    """
+    global _RUN_ID, _RUN_STARTED_UTC
+    if _RUN_ID is None:
+        _RUN_ID = (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+                   + "-" + uuid.uuid4().hex[:8])
+        _RUN_STARTED_UTC = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return _RUN_ID, _RUN_STARTED_UTC
+
+
+def _hypotheses_sha() -> str:
+    """Content hash of the pre-registered hypothesis registry.
+
+    Records carry the hash so a result can be matched to the exact
+    decision rules in force when it was produced: if the registry is
+    edited mid-analysis, old and new records can no longer be silently
+    pooled under "the same" hypotheses.
+    """
+    payload = json.dumps(HYPOTHESES, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+# Fields that describe *how this invocation was launched* rather than the
+# numerical environment a rerun has to match.  They are deliberately kept in
+# the record (they are useful provenance) but excluded from the environment
+# fingerprint and from drift comparison: a rerun from another directory or
+# with another argv is still the same environment.
+_ENV_IGNORED_FIELDS = frozenset({
+    "argv", "cwd", "repo_root", "git_dirty", "pythonhashseed",
+    "environment_sha256",
+})
+
+# Hardware/toolchain descriptors that are reported as advisories instead of
+# hard incompatibilities.  A different CPU model can change the last bits of
+# a float, but it does not by itself mean that a *protocol* was changed;
+# critical fields below identify the software/numerical recipe.
+_ENV_ADVISORY_FIELDS = frozenset({
+    "platform", "machine", "processor", "os_release", "cpu_model",
+    "cpu_count", "cuda_device_count", "cuda_devices", "python_executable",
+    "hash_randomization",
+})
+
+# Declared dependencies are content-addressed: the installed inventory alone
+# cannot tell whether the project's own requirement range changed.
+_DEPENDENCY_FILES = ("pyproject.toml", "requirements-ci.txt",
+                     "requirements.txt")
+
+
+def _package_inventory() -> dict:
+    """Installed distribution name -> version, deterministically sorted.
+
+    ``torch.__version__`` pins the framework but not the rest of the
+    process.  An optional dependency (NumPy, a BLAS wheel, a plugin) can
+    change numerics or import behaviour, so the environment record keeps the
+    full installed inventory.  Package metadata is untrusted input: a broken
+    distribution must not make the provenance probe fail a run.
+    """
+    packages: dict[str, str] = {}
+    try:
+        distributions = list(importlib_metadata.distributions())
+    except Exception:  # noqa: BLE001 - metadata is a best-effort probe
+        return {}
+    for dist in distributions:
+        try:
+            name = dist.metadata["Name"]
+            version = dist.version
+        except Exception:  # noqa: BLE001 - skip malformed distributions
+            continue
+        if not isinstance(name, str) or not isinstance(version, str):
+            continue
+        key = name.strip().lower().replace("_", "-").replace(".", "-")
+        if not key or not version:
+            continue
+        # Two spellings of the same distribution should not make the
+        # inventory order-dependent: keep the lexicographically largest
+        # version so the result is stable regardless of scan order.
+        previous = packages.get(key)
+        packages[key] = version if previous is None else max(previous, version)
+    return dict(sorted(packages.items()))
+
+
+def _dependency_manifest() -> dict:
+    """Content hashes of the project's declared dependency files.
+
+    The installed inventory answers "what ran"; these hashes answer "what
+    was requested".  A requirements/pyproject edit changes the latter even
+    when the current interpreter already has the new versions installed.
+    """
+    manifest = {}
+    for name in _DEPENDENCY_FILES:
+        path = _REPO_ROOT / name
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        manifest[name] = {
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    return manifest
+
+
+def _environment_fingerprint(record: Mapping) -> str:
+    """Stable content id for the reproducibility-relevant environment.
+
+    All non-volatile fields participate, so a field added to the record
+    automatically strengthens the fingerprint instead of being silently
+    ignored.  Volatile launch metadata (argv/cwd/git status) is excluded:
+    two runs from different directories still share an environment.
+    """
+    payload = {
+        key: value for key, value in record.items()
+        if key not in _ENV_IGNORED_FIELDS
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _mapping_delta(recorded: Mapping, current: Mapping) -> dict:
+    """Summarise a nested mapping difference without dumping both copies."""
+    recorded_keys = set(recorded)
+    current_keys = set(current)
+    return {
+        "missing_keys": sorted(recorded_keys - current_keys),
+        "extra_keys": sorted(current_keys - recorded_keys),
+        "changed_keys": sorted(
+            key for key in recorded_keys & current_keys
+            if recorded[key] != current[key]),
+    }
+
+
+def _environment_drift(recorded, current) -> dict:
+    """Compare a stored environment record with the current process.
+
+    Returns a structured diagnosis rather than a bare boolean:
+
+    * ``compatible`` - no *critical* field differs (the software/numerical
+      recipe is unchanged); advisory hardware fields may still differ;
+    * ``identical`` - no recorded field differs at all;
+    * ``critical_differences`` / ``advisory_differences`` - the evidence for
+      either verdict, with nested mappings summarised by missing/extra/
+      changed keys instead of two full copies.
+
+    Missing fields fail closed when they are critical: an old record that
+    predates the package inventory cannot certify the packages that ran.
+    A malformed record is itself an incompatibility, never an empty match.
+    """
+    result = {
+        "compatible": False,
+        "identical": False,
+        "recorded_environment_sha256": None,
+        "current_environment_sha256": None,
+        "differences": [],
+        "critical_differences": [],
+        "advisory_differences": [],
+    }
+    if not isinstance(recorded, Mapping) or not isinstance(current, Mapping) \
+            or not recorded:
+        result["reason"] = "recorded or current environment is missing/malformed"
+        return result
+    recorded_sha = recorded.get("environment_sha256")
+    current_sha = current.get("environment_sha256")
+    if not isinstance(current_sha, str) or not current_sha:
+        current_sha = _environment_fingerprint(current)
+    result["recorded_environment_sha256"] = recorded_sha
+    result["current_environment_sha256"] = current_sha
+    for field in sorted((set(recorded) | set(current)) - _ENV_IGNORED_FIELDS):
+        severity = "advisory" if field in _ENV_ADVISORY_FIELDS else "critical"
+        if field not in recorded:
+            difference = {
+                "field": field, "kind": "missing_recorded",
+                "severity": severity,
+                "current": (current.get(field)
+                            if not isinstance(current.get(field), Mapping)
+                            else _mapping_delta({}, current[field])),
+            }
+        elif field not in current:
+            difference = {
+                "field": field, "kind": "missing_current",
+                "severity": severity,
+                "recorded": (recorded.get(field)
+                             if not isinstance(recorded.get(field), Mapping)
+                             else _mapping_delta(recorded[field], {})),
+            }
+        elif recorded[field] != current[field]:
+            if isinstance(recorded[field], Mapping) \
+                    and isinstance(current[field], Mapping):
+                detail = _mapping_delta(recorded[field], current[field])
+            else:
+                detail = {"recorded": recorded[field],
+                          "current": current[field]}
+            difference = {
+                "field": field, "kind": "changed",
+                "severity": severity, **detail,
+            }
+        else:
+            continue
+        result["differences"].append(difference)
+        result[f"{severity}_differences"].append(difference)
+    # A hash mismatch with no field-level difference means the fingerprint
+    # algorithm or its field set changed.  Treat that as a critical schema
+    # mismatch instead of claiming the environments are identical.  A
+    # malformed hash is likewise not allowed to pass as "no hash".
+    valid_recorded_hash = (
+        isinstance(recorded_sha, str) and len(recorded_sha) == 16
+        and all(ch in "0123456789abcdef" for ch in recorded_sha))
+    if recorded_sha is not None and not valid_recorded_hash:
+        difference = {
+            "field": "environment_sha256", "kind": "malformed",
+            "severity": "critical",
+            "recorded": recorded_sha, "current": current_sha,
+        }
+        result["differences"].append(difference)
+        result["critical_differences"].append(difference)
+    elif (isinstance(recorded_sha, str) and recorded_sha
+          and recorded_sha != current_sha and not result["differences"]):
+        difference = {
+            "field": "environment_sha256", "kind": "fingerprint_schema",
+            "severity": "critical",
+            "recorded": recorded_sha, "current": current_sha,
+        }
+        result["differences"].append(difference)
+        result["critical_differences"].append(difference)
+    result["compatible"] = not result["critical_differences"]
+    result["identical"] = not result["differences"]
+    if result["identical"]:
+        result["reason"] = "environment matches the recorded one"
+    elif result["compatible"]:
+        result["reason"] = ("critical software/numerical fields match; "
+                            "advisory hardware fields differ")
+    else:
+        result["reason"] = ("critical software/numerical fields differ: "
+                            + ", ".join(
+                                d["field"] for d in
+                                result["critical_differences"]))
+    return result
+
+
+def _extract_environment_record(payload):
+    """Accept either a bare environment block or a run-context document."""
+    if not isinstance(payload, Mapping):
+        return None, None
+    nested = payload.get("environment")
+    if isinstance(nested, Mapping):
+        return nested, payload
+    if "torch" in payload and "python" in payload:
+        return payload, None
+    return None, payload
+
+
+def _environment_record(settings: Settings, git_dirty: bool | None = None) -> dict:
+    """Software/hardware provenance for reproducibility.
+
+    Beyond versions the record pins the numerical-behaviour switches a
+    rerun must match: CPU thread count and the BLAS/OpenMP environment
+    overrides that determine it (parallel reductions change the summation
+    order), the CPU model and OS release, cuDNN determinism/benchmark,
+    whether deterministic algorithms are on, the cuBLAS workspace config,
+    the torch build identity/backends and the NumPy version when installed.
+    The determinism switch is applied from ``Settings.deterministic``
+    *before* it is read, so the recorded state is the one this run will
+    train under even when the context is built before the first training
+    call (a previous run in the same process may have left the global flag
+    in the other position).
+
+    The record additionally carries the full installed package inventory,
+    content hashes of the declared dependency files, and a stable
+    ``environment_sha256`` over the non-volatile fields.  The hash makes
+    "same environment" a one-field comparison; :func:`_environment_drift`
+    explains a mismatch field by field.
+    """
+    determinism = configure_determinism(settings.deterministic)
+    numeric_env = {}
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                 "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                 "CUBLAS_WORKSPACE_CONFIG"):
+        numeric_env[name] = os.environ.get(name)
+    env = {
+        "python": platform.python_version(),
+        "python_executable": sys.executable,
+        "python_implementation": platform.python_implementation(),
+        "python_compiler": platform.python_compiler(),
+        "torch": torch.__version__,
+        "torch_git_version": getattr(torch.version, "git_version", None),
+        "torch_debug": bool(getattr(torch.version, "debug", False)),
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "processor": platform.processor(),
+        "os_release": platform.release(),
+        "device": settings.device,
+        "cpu_count": os.cpu_count(),
+        "cuda_available": bool(torch.cuda.is_available()),
+        "cuda_runtime": torch.version.cuda,
+        "torch_num_threads": determinism["torch_num_threads"],
+        "deterministic_requested": bool(settings.deterministic),
+        "deterministic_algorithms": determinism["deterministic_algorithms"],
+        "cublas_workspace_config": determinism["cublas_workspace_config"],
+        "tf32": determinism["tf32"],
+        # Thread-count overrides are read by the BLAS/OpenMP runtimes before
+        # torch is imported, so they are part of the numerical recipe even
+        # though ``torch_num_threads`` records the resulting value.
+        "numeric_env": numeric_env,
+        "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
+        "hash_randomization": bool(sys.flags.hash_randomization),
+        # How the run was launched is part of the recipe: the same config
+        # can mean different code paths through CLI flags, and a result is
+        # only rebuildable when its invocation is recorded.
+        "argv": [str(arg) for arg in sys.argv],
+        "cwd": os.getcwd(),
+        "repo_root": str(_REPO_ROOT),
+        "git_dirty": (_git_dirty() if git_dirty is None else bool(git_dirty)),
+    }
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.lower().startswith("model name"):
+                    env["cpu_model"] = line.split(":", 1)[1].strip()
+                    break
+    except OSError:
+        import logging as _logging; _logging.warning("Suppressed exception in _environment.py:370", exc_info=True)
+    # ``/proc/cpuinfo`` is absent on some platforms (and ARM kernels may not
+    # expose a ``model name`` line).  Keep the record schema stable: a
+    # missing probe is ``None``, not a missing key that breaks consumers
+    # expecting the documented field.
+    env.setdefault("cpu_model", None)
+    for name in ("mkldnn", "openmp"):
+        backend = getattr(torch.backends, name, None)
+        probe = getattr(backend, "is_available", None)
+        try:
+            env[f"torch_{name}"] = bool(probe()) if probe is not None else None
+        except Exception:  # noqa: BLE001 - probe must not fail a record
+            env[f"torch_{name}"] = None
+    try:
+        env["torch_num_interop_threads"] = int(torch.get_num_interop_threads())
+    except Exception:  # noqa: BLE001 - older/limited builds may not expose it
+        env["torch_num_interop_threads"] = None
+    cudnn = getattr(torch.backends, "cudnn", None)
+    if cudnn is not None:
+        env["cudnn_deterministic"] = bool(cudnn.deterministic)
+        env["cudnn_benchmark"] = bool(cudnn.benchmark)
+        try:
+            env["cudnn_version"] = cudnn.version()
+        except Exception:  # noqa: BLE001 - probe must not fail a record
+            env["cudnn_version"] = None
+    try:
+        import numpy as np
+        env["numpy"] = np.__version__
+    except ImportError:
+        env["numpy"] = None
+    if torch.cuda.is_available():
+        try:
+            count = int(torch.cuda.device_count())
+            devices = []
+            for i in range(count):
+                props = torch.cuda.get_device_properties(i)
+                devices.append({
+                    "index": i,
+                    "name": props.name,
+                    "capability": f"{props.major}.{props.minor}",
+                    "total_memory_bytes": int(props.total_memory),
+                })
+            env["cuda_device_count"] = count
+            env["cuda_devices"] = devices
+        except Exception as exc:  # noqa: BLE001 - probe must not fail a record
+            env["cuda_devices_error"] = f"{type(exc).__name__}: {exc}"
+    # Full interpreter string (the short ``python`` field omits the build),
+    # the complete package set, and content ids for the declared dependency
+    # files.  Computed last so the fingerprint below covers every probe that
+    # actually ran.
+    env["python_full_version"] = sys.version
+    env["package_inventory"] = _package_inventory()
+    env["dependency_manifest"] = _dependency_manifest()
+    env["environment_sha256"] = _environment_fingerprint(env)
+    return env
+
+
+def _read_environment_file(path) -> tuple[dict | None, dict | None, str | None]:
+    """Read an ``environment.json`` or run manifest.
+
+    Returns ``(environment_block, whole_payload, error)``.  A malformed or
+    schema-less file is an error rather than an empty record: treating a
+    corrupt provenance file as "no previous environment" would let a rerun
+    silently bless an unverifiable results directory.
+    """
+    try:
+        payload = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        return None, None, f"{type(exc).__name__}: {exc}"
+    environment, context = _extract_environment_record(payload)
+    if environment is None:
+        return None, payload if isinstance(payload, dict) else None, (
+            "file has no environment block")
+    return environment, context, None
+
+
+def _record_environment_history(out_dir, context: Mapping) -> dict:
+    """Compare this invocation to the previous environment in ``out_dir``.
+
+    A results directory is routinely appended to across days, package
+    upgrades and machines.  Silently mixing records from different
+    environments makes the artifact index certify a directory whose numbers
+    were not produced by one recipe.  Every invocation therefore appends a
+    compatibility row to ``environment_history.jsonl`` before the new
+    ``environment.json`` replaces the old one; a critical drift is printed
+    and (with ``--strict-environment``) aborts the run, while an advisory
+    hardware drift is recorded but allowed.
+
+    The previous file is the *only* source of the old record: it is read
+    before the caller writes the new one.  If it is missing or malformed the
+    history still records that fact (``compatible=False`` for malformed,
+    ``None`` for a first run) so the provenance chain has no silent gap.
+    """
+    out_dir = pathlib.Path(out_dir)
+    previous_path = out_dir / "environment.json"
+    previous, previous_payload, previous_error = (None, None, None)
+    if previous_path.exists():
+        previous, previous_payload, previous_error = _read_environment_file(
+            previous_path)
+    current = context.get("environment") if isinstance(context, Mapping) else None
+    if not isinstance(current, Mapping):
+        drift = {
+            "compatible": False,
+            "identical": False,
+            "reason": "current environment record is missing",
+            "differences": [], "critical_differences": [],
+            "advisory_differences": [],
+        }
+    elif previous_error is not None:
+        drift = {
+            "compatible": False,
+            "identical": False,
+            "reason": f"previous environment record is unreadable: "
+                      f"{previous_error}",
+            "differences": [], "critical_differences": [],
+            "advisory_differences": [],
+        }
+    elif previous is None:
+        drift = {
+            "compatible": None,
+            "identical": None,
+            "reason": "no previous environment record (first run in this "
+                      "results directory)",
+            "differences": [], "critical_differences": [],
+            "advisory_differences": [],
+        }
+    else:
+        drift = _environment_drift(previous, current)
+    record = {
+        "run_id": context.get("run_id"),
+        "schema_version": context.get("schema_version"),
+        "setup_sha256": context.get("setup_sha256"),
+        "git_sha": context.get("git_sha"),
+        "source_tree_sha256": context.get("source_tree_sha256"),
+        "event": "environment_checked",
+        "previous_environment_sha256": (
+            previous.get("environment_sha256")
+            if isinstance(previous, Mapping) else None),
+        "current_environment_sha256": (
+            current.get("environment_sha256")
+            if isinstance(current, Mapping) else None),
+        "previous_setup_sha256": (
+            previous_payload.get("setup_sha256")
+            if isinstance(previous_payload, Mapping) else None),
+        "previous_git_sha": (
+            previous_payload.get("git_sha")
+            if isinstance(previous_payload, Mapping) else None),
+        "compatible": drift.get("compatible"),
+        "identical": drift.get("identical"),
+        "reason": drift.get("reason"),
+        "differences": drift.get("differences", []),
+    }
+    try:
+        _write_result(out_dir / "environment_history.jsonl", record)
+    except TrackingError:
+        # A certificate mismatch is not a transient I/O problem: continuing
+        # would let the end-of-run index writer re-bless edited evidence.
+        raise
+    except Exception as exc:  # noqa: BLE001 - history must not kill a run
+        print(f"[runner] WARNING: could not record environment history: {exc}")
+    return drift
+
+
+def _describe_environment_difference(difference: Mapping) -> str:
+    """One readable line for an environment drift entry."""
+    field = difference.get("field", "<unknown>")
+    kind = difference.get("kind")
+    severity = difference.get("severity", "critical")
+    if kind == "missing_recorded":
+        detail = "missing from the recorded environment"
+    elif kind == "missing_current":
+        detail = "missing from the current environment"
+    elif "changed_keys" in difference:
+        detail = ("missing={missing_keys} extra={extra_keys} "
+                  "changed={changed_keys}").format(**difference)
+    elif kind == "fingerprint_schema":
+        detail = (f"fingerprint {difference.get('recorded')} != "
+                  f"{difference.get('current')}")
+    else:
+        detail = (f"recorded={difference.get('recorded')!r} "
+                  f"current={difference.get('current')!r}")
+    return f"[{severity}] {field}: {detail}"
+
+
+def _check_environment(out_dir) -> int:
+    """Compare the environment stored in ``out_dir`` with this process.
+
+    Exit 0 when the critical software/numerical fields match, 1 when they
+    drift, 2 when no usable environment record exists.  The check is
+    read-only: it writes nothing into the results directory.
+    """
+    root = pathlib.Path(out_dir)
+    candidates = []
+    primary = root / "environment.json"
+    if primary.is_file():
+        candidates.append(primary)
+    if not candidates and root.is_dir():
+        candidates.extend(sorted(root.glob("*_manifest.json")))
+    if not candidates:
+        print(f"[env-check] no environment.json or run manifest under {root}; "
+              f"nothing to check")
+        return 2
+    path = candidates[0]
+    recorded, payload, error = _read_environment_file(path)
+    if error is not None:
+        print(f"[env-check] cannot read {path}: {error}")
+        return 2
+    device = recorded.get("device") if isinstance(
+        recorded.get("device"), str) else "cpu"
+    deterministic = recorded.get("deterministic_requested")
+    if not isinstance(deterministic, bool):
+        deterministic = True
+    try:
+        current = _environment_record(
+            Settings(device=device, deterministic=deterministic),
+            git_dirty=None)
+    except Exception as exc:  # noqa: BLE001 - a bad record is a check error
+        print(f"[env-check] cannot build the current environment record: "
+              f"{type(exc).__name__}: {exc}")
+        return 2
+    drift = _environment_drift(recorded, current)
+    run_label = (payload.get("run_id") if isinstance(payload, Mapping)
+                 else None)
+    print(f"[env-check] recorded={path} run={run_label} "
+          f"recorded_env={drift.get('recorded_environment_sha256')} "
+          f"current_env={drift.get('current_environment_sha256')}")
+    for difference in drift["differences"]:
+        print("    " + _describe_environment_difference(difference))
+    print(f"[env-check] {drift.get('reason')}")
+    if drift["compatible"]:
+        print("[env-check] PASS: critical software/numerical fields match")
+        return 0
+    print("[env-check] FAIL: the stored result was produced under a "
+          "different software/numerical environment")
+    return 1
+
+
+def _print_conformance(prefix: str, report: Mapping) -> None:
+    """Print one conformance report (current process or archived record)."""
+    for entry in report.get("entries", []):
+        installed = entry.get("installed") or "<missing>"
+        print(f"    [{entry.get('status')}] {entry.get('name')}: "
+              f"required {entry.get('required')}, installed {installed} "
+              f"({entry.get('source', '?')})")
+
+
+def _check_dependencies(out_dir=None) -> int:
+    """Compare the installed distributions with the declared dependency set.
+
+    The seeds fix *which* numbers a run draws; this check fixes *which
+    library* produced them.  A run whose interpreter does not satisfy the
+    versions the project declares is not a reproduction of the declared
+    recipe, no matter how carefully it was seeded.
+
+    When ``out_dir`` holds an environment record, the archived run is
+    audited as well: its recorded package inventory is checked against the
+    same declarations, so an old result directory can be asked "was this
+    produced with the dependency set we declare?" without a rerun.
+
+    Exit codes: 0 = the installed set conforms (and the archived record, if
+    any, conforms too), 1 = a declaration is unsatisfied or its distribution
+    is missing, 2 = there is nothing to check (no declaration file, or an
+    unreadable archive).  Nothing is written.
+    """
+    current = check_dependency_conformance()
+    declared = current.get("declared", {})
+    total = sum(len(items) for items in declared.values())
+    if not total:
+        print("[dep-check] no dependency declaration found "
+              "(requirements-ci.txt / requirements.txt / pyproject.toml); "
+              "nothing to check")
+        return 2
+    print(f"[dep-check] declared dependency set: {total} requirement(s) in "
+          f"{len(declared)} file(s)")
+    for source in sorted(declared):
+        items = declared[source]
+        print(f"    {source}: {', '.join(items) if items else '<none>'}")
+    _print_conformance("current", current)
+    conforms = bool(current.get("conforms"))
+    unchecked = current.get("unchecked") or []
+    if unchecked:
+        print(f"[dep-check] WARNING: {len(unchecked)} declaration(s) cannot be "
+              "evaluated exactly and are reported, not certified: "
+              + ", ".join(unchecked))
+    print("[dep-check] current environment: "
+          + ("CONFORMS to the declaration" if conforms
+             else "DOES NOT CONFORM to the declaration"))
+    if out_dir is not None:
+        root = pathlib.Path(out_dir)
+        candidates = []
+        primary = root / "environment.json"
+        if primary.is_file():
+            candidates.append(primary)
+        if not candidates and root.is_dir():
+            candidates.extend(sorted(root.glob("*_manifest.json")))
+        if candidates:
+            recorded, _payload, error = _read_environment_file(candidates[0])
+            if error is not None:
+                print(f"[dep-check] cannot read {candidates[0]}: {error}")
+                return 2
+            archived = dependency_conformance_from_record(recorded)
+            print(f"[dep-check] archived record {candidates[0]} "
+                  "(checked against the current declaration):")
+            _print_conformance("archived", archived)
+            archived_ok = bool(archived.get("conforms"))
+            print("[dep-check] archived run: "
+                  + ("CONFORMS to the declaration" if archived_ok
+                     else "DOES NOT CONFORM to the declaration"))
+            conforms = conforms and archived_ok
+        else:
+            print(f"[dep-check] no archived environment record under {root}; "
+                  "only the current environment was checked")
+    if not conforms:
+        print("[dep-check] FAIL: the environment does not match the declared "
+              "dependency set; install requirements-ci.txt before running "
+              "the experiment")
+        return 1
+    print("[dep-check] PASS: the installed distributions satisfy the "
+          "declared dependency set")
+    return 0
+
+
+def _source_hash_of(record):
+    """Code-content hash carried by one archived record, if any.
+
+    Full run records and manifests carry ``source_tree_sha256`` at the top
+    level; analysis companions nest the same stamp under ``_provenance``.
+    Documents without either are ignored here; :func:`_check_source` still
+    fails closed when a record declares a ``run_id`` or ``setup_sha256``
+    without a source hash.
+    """
+    if not isinstance(record, Mapping):
+        return None
+    value = record.get("source_tree_sha256")
+    if value is None:
+        provenance = record.get("_provenance")
+        if isinstance(provenance, Mapping):
+            value = provenance.get("source_tree_sha256")
+    return value
+
+
+def _source_hash_values(record) -> list:
+    """Every code hash carried by one archived record.
+
+    A record can carry the stamp at the top level, under ``_provenance``,
+    or both.  Both copies are returned so a stale nested companion cannot
+    hide behind a current top-level stamp.
+    """
+    if not isinstance(record, Mapping):
+        return []
+    values = []
+    if "source_tree_sha256" in record:
+        values.append(record.get("source_tree_sha256"))
+    provenance = record.get("_provenance")
+    if isinstance(provenance, Mapping) \
+            and "source_tree_sha256" in provenance:
+        values.append(provenance.get("source_tree_sha256"))
+    return values
+
+
+def _declares_code_provenance(record) -> bool:
+    """Whether a record claims provenance that should carry a code hash.
+
+    Analysis companions put the stamp under ``_provenance``, so the
+    declaration may live one level below the record itself.
+    """
+    if not isinstance(record, Mapping):
+        return False
+    if "run_id" in record or "setup_sha256" in record:
+        return True
+    provenance = record.get("_provenance")
+    return (isinstance(provenance, Mapping)
+            and ("run_id" in provenance or "setup_sha256" in provenance))
+
+
+def _iter_archived_source_record_mappings(document):
+    """Yield every record mapping in a parsed JSON artifact.
+
+    Most artifacts are objects, but pooled manifests may be top-level
+    arrays (a JSONL line can likewise hold one), and tuning/analysis
+    companions may nest per-run records under a mapping key (for example
+    ``{"runs": [...]}``).  A hash stored on those records must still be
+    checked; descending only through arrays would silently skip every
+    record nested one level below an object.
+    """
+    pending = [document]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, Mapping):
+            yield item
+            pending.extend(reversed([
+                value for key, value in item.items()
+                if key != "_provenance"]))
+        elif isinstance(item, (list, tuple)):
+            pending.extend(reversed(item))
+
+
+def _iter_archived_source_records(root: pathlib.Path):
+    """Yield ``(relative, line, record, error)`` for archived JSON documents.
+
+    Every ``*.json`` / ``*.jsonl`` artifact under the results directory is
+    scanned, so a code hash is checked wherever an experiment chose to store
+    it.  A malformed document is yielded with ``record=None`` and an error
+    string instead of being skipped: an unreadable provenance file cannot
+    certify the code that produced it.
+    """
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix not in (".json", ".jsonl"):
+            continue
+        if path.name.startswith("."):
+            continue
+        relative = str(path.relative_to(root))
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            yield relative, None, None, f"{type(exc).__name__}: {exc}"
+            continue
+        if path.suffix == ".jsonl":
+            for line_number, line in enumerate(text.splitlines(), 1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except (TypeError, ValueError) as exc:
+                    yield (relative, line_number, None,
+                           f"invalid JSON: {exc}")
+                    continue
+                yield relative, line_number, record, None
+            continue
+        try:
+            record = json.loads(text)
+        except (TypeError, ValueError) as exc:
+            yield relative, None, None, f"invalid JSON: {exc}"
+            continue
+        yield relative, None, record, None
+
+
+def _check_source(out_dir) -> int:
+    """Compare archived code-content hashes with this checkout.
+
+    ``--verify-artifacts`` proves the bytes did not change and
+    ``--verify-provenance`` proves each row is internally consistent, but
+    neither says whether the *current* package source is the code that
+    produced the stored numbers.  A result directory is routinely reused
+    after a code edit; appending to it or pooling its rows without checking
+    the code version silently mixes protocols.  This read-only audit reads
+    every archived ``source_tree_sha256`` and compares it with the hash of
+    the current ``cage/*.py`` tree.
+
+    Exit codes: 0 = every archived code hash matches this checkout, 1 = a
+    mismatched or malformed hash (or an unreadable document), 2 = no
+    archived code-provenance records.  Nothing is written.
+    """
+    root = pathlib.Path(out_dir)
+    if not root.is_dir():
+        print(f"[source-check] no results directory at {root}")
+        return 2
+    current = _source_tree_sha256()
+    git_sha = _git_sha()
+    git_dirty = _git_dirty()
+    checked = 0
+    problems = []
+    versions: dict[str, list[str]] = {}
+    for relative, line_number, document, error in (
+            _iter_archived_source_records(root)):
+        where = relative if line_number is None else f"{relative}:{line_number}"
+        if error is not None:
+            problems.append(f"{where}: {error}")
+            continue
+        for record in _iter_archived_source_record_mappings(document):
+            values = _source_hash_values(record)
+            provenance = record.get("_provenance")
+            nested_declares = (
+                isinstance(provenance, Mapping)
+                and ("run_id" in provenance
+                     or "setup_sha256" in provenance))
+            if not values:
+                if _declares_code_provenance(record):
+                    checked += 1
+                    problems.append(
+                        f"{where}: code-provenance record has no "
+                        f"source_tree_sha256")
+                continue
+            checked += 1
+            if nested_declares and "source_tree_sha256" not in provenance:
+                problems.append(
+                    f"{where}: nested provenance has no "
+                    f"source_tree_sha256")
+            valid = []
+            for value in values:
+                if not _is_short_sha(value):
+                    problems.append(
+                        f"{where}: source_tree_sha256 is malformed "
+                        f"({value!r})")
+                    continue
+                if value not in valid:
+                    valid.append(value)
+                    versions.setdefault(value, []).append(where)
+                if value != current:
+                    run_id = record.get("run_id")
+                    if not run_id and isinstance(provenance, Mapping):
+                        run_id = provenance.get("run_id")
+                    problems.append(
+                        f"{where}: source_tree_sha256 {value} != "
+                        f"current {current}"
+                        + (f" (run {run_id})" if run_id else ""))
+            if len(valid) > 1:
+                problems.append(
+                    f"{where}: conflicting source_tree_sha256 values "
+                    f"{sorted(valid)}")
+    print(f"[source-check] current source_tree_sha256={current} "
+          f"git_sha={git_sha} dirty={git_dirty}")
+    if not checked and not problems:
+        print(f"[source-check] no archived code-provenance records under "
+              f"{root}")
+        return 2
+    print(f"[source-check] scanned {checked} code-provenance record(s) "
+          f"across {len(versions)} distinct source version(s)")
+    for value in sorted(versions):
+        label = "current" if value == current else "other"
+        print(f"    {value} ({label}): {len(versions[value])} record(s)")
+    if problems:
+        print(f"[source-check] FAIL: {len(problems)} issue(s):")
+        for problem in problems:
+            print(f"    {problem}")
+        return 1
+    print("[source-check] PASS: every archived result was produced by the "
+          "current package source")
+    return 0
+
+
+_SEEDING_POLICY = {
+    "every_training_run": (
+        "cage.repro.seed_everything(seed): python random + numpy (when "
+        "installed) + torch CPU and all CUDA devices; deterministic kernels "
+        "are requested by default (Settings.deterministic=True)"),
+    "seed_canonicalisation": (
+        "every RNG (Python, NumPy, torch, CUDA) and every data-stream "
+        "generator consumes the same low-32-bit seed key, so s and "
+        "s + 2**32 are the same run; bool/fractional seeds are rejected "
+        "instead of silently truncated"),
+    "determinism_switch": (
+        "Settings.deterministic is applied by every seeding call, including "
+        "train_model; it defaults to True and can be opted out via "
+        "--no-deterministic; False explicitly restores non-deterministic "
+        "kernels so a prior deterministic run cannot leak into a later one"),
+    "data_streams": (
+        "each split and training seed owns a dedicated torch.Generator "
+        "(DataLoader generator= equivalent; make_batch never reads the "
+        "global RNG), so data order cannot be perturbed by other seeding"),
+    "eval_stream_seeds": {"val": VAL_SEED, "test": TEST_SEED,
+                          "stats": STATS_SEED},
+    "reserved_eval_seeds": list(RESERVED_EVAL_SEEDS),
+    "scope": ("run-to-run stable on the same machine/build; bit-exact "
+              "reproduction across different hardware or kernel libraries "
+              "is not promised"),
+}
+
+
+def _config_cache_key(settings: Settings) -> str:
+    """Content key for per-``Settings`` caches.
+
+    The runners mutate ``Settings`` in place (``--seeds``, CLI overrides,
+    verdict marks), so object identity alone must never decide whether a
+    cached audit is still valid: a mutated config would otherwise reuse
+    results computed for a different recipe and silently certify the wrong
+    setup.  Every cache below stores this key beside its value.
+    """
+    return json.dumps(
+        {name: getattr(settings, name)
+         for name in Settings.__dataclass_fields__ if name != "out_dir"},
+        ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _run_context(settings: Settings) -> dict:
+    """Self-contained provenance block attached to every result record.
+
+    Code revision, hypothesis-registry hash, resolved configuration (every
+    hyperparameter and seed actually used), software environment, the
+    seeding policy and the data-stream fingerprints travel *with* each
+    record, so a result file is traceable without relying on defaults that
+    may have changed since.  The ``setup_sha256`` hash over exactly
+    {revision, source-tree hash, hypotheses, config, data fingerprints}
+    gives every record a compact id for "same code + same recipe + same
+    data": records carrying different ids were not produced by the same
+    setup and cannot be pooled silently.  ``run_id`` groups all records of
+    one invocation.  Cached on the Settings object and invalidated when the
+    resolved config changes, so a mutated Settings cannot reuse a stale
+    provenance block.
+
+    The configured training-seed set is re-validated on every call (cheap,
+    before the cache lookup): every official entry point builds the run
+    context before training, so a seed set mutated after construction -
+    the runner applies ``--seeds`` that way - is still refused when it is
+    not duplicate-free / disjoint from the reserved evaluation streams.
+    """
+    # Keep the validated/normalised tuple: a caller may have assigned a
+    # one-shot iterable after construction, and validating it would consume
+    # the iterator before the config/fingerprint loops below read it.
+    settings.seeds = _validate_training_seeds(settings.seeds)
+    config = {name: getattr(settings, name)
+              for name in Settings.__dataclass_fields__ if name != "out_dir"}
+    cache_key = _config_cache_key(settings)
+    ctx = getattr(settings, "_run_context_cache", None)
+    if ctx is not None and getattr(settings, "_run_context_cache_key", None) \
+            == cache_key:
+        return ctx
+    # Fingerprint each stream at the geometry its consumer actually uses:
+    # make_batch's draws are shape-dependent, so one seed at two batch
+    # sizes is two realizations.  Training reads settings.batch; validation
+    # monitoring reads settings.batch too (same fixed VAL stream), final
+    # val/test read eval_batch, mechanism statistics read stats_batch, the
+    # linear probe trains at probe_batch and selects/scores at
+    # probe_eval_batch, and the overfit sanity check reads overfit_batch.
+    fingerprints = {
+        "val": stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.eval_batch, seed=VAL_SEED),
+        "val_monitor": stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.batch, seed=VAL_SEED),
+        "test": stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.eval_batch, seed=TEST_SEED),
+        "stats": stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.stats_batch, seed=STATS_SEED),
+        "probe_val": stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.probe_eval_batch, seed=VAL_SEED),
+        "probe_test": stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.probe_eval_batch, seed=TEST_SEED),
+        "overfit_sanity": stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.overfit_batch, seed=SANITY_SEED),
+    }
+    fingerprints["train"] = {
+        str(seed): stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.batch, seed=seed)
+        for seed in settings.seeds
+    }
+    fingerprints["probe_train"] = {
+        str(seed): stream_fingerprint(
+            settings.n_pairs, settings.vocab, settings.device,
+            batch=settings.probe_batch, seed=seed)
+        for seed in settings.seeds
+    }
+    git_sha = _git_sha()
+    git_dirty = _git_dirty()
+    source_tree = _source_tree_sha256()
+    run_id, run_started_utc = _run_identity()
+    payload = json.dumps({
+        "git_sha": git_sha,
+        "source_tree_sha256": source_tree,
+        "hypotheses_sha256": _hypotheses_sha(),
+        "config": config,
+        "data_fingerprints": fingerprints,
+    }, ensure_ascii=False, sort_keys=True, default=str)
+    ctx = {
+        "run_id": run_id,
+        "schema_version": _RECORD_SCHEMA,
+        "run_started_utc": run_started_utc,
+        "git_sha": git_sha,
+        "git_dirty": bool(git_dirty),
+        "source_tree_sha256": source_tree,
+        "hypotheses_sha256": _hypotheses_sha(),
+        "setup_sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16],
+        "environment": _environment_record(settings, git_dirty),
+        "config": config,
+        "seeding": dict(_SEEDING_POLICY),
+        "data_fingerprints": fingerprints,
+        # Frozen prospective design-plan id (``None`` before the plan is
+        # published, e.g. while the baselines runner is producing its
+        # verdict).  Excluded from the setup hash: the plan is a design
+        # commitment, not a numerical recipe.
+        "design_sha256": getattr(settings, "_design_sha256", None),
+        # Validity-gate summary stamped by ``_enforce_baseline_verdict``
+        # (None for the baselines runner itself, which is the producer).
+        # Deliberately excluded from the setup hash above: the verdict
+        # describes whether this protocol passed its gates, not which
+        # protocol it is.
+        "baseline_validity": getattr(settings, "_baseline_validity", None),
+    }
+    settings._run_context_cache = ctx
+    settings._run_context_cache_key = cache_key
+    return ctx
+
+
+def _stamp(settings: Settings) -> dict:
+    """Compact provenance stamp for auxiliary/error-case records.
+
+    Full provenance lives in the run manifest; the stamp carries just the
+    ids needed to join a raw case row back to it without repeating the
+    environment and every hyperparameter on each row.
+    """
+    ctx = _run_context(settings)
+    return {key: ctx[key] for key in
+            ("run_id", "schema_version", "setup_sha256", "git_sha",
+             "source_tree_sha256")}
+
+
+def _protocol_sha256(ctx: dict) -> str:
+    """Hash over exactly the resolved config and data-stream fingerprints.
+
+    Excludes the code revision, hypothesis registry and environment on
+    purpose: those do not change *which data* a check was run on.  The
+    source-tree hash is checked separately by
+    :func:`_verdict_provenance_note`, because the gate *implementation*
+    must also match.  Any config or stream-fingerprint change invalidates
+    the stored HB marks.
+    """
+    payload = json.dumps({"config": ctx["config"],
+                          "data_fingerprints": ctx["data_fingerprints"]},
+                         ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _verdict_provenance_note(verdict: dict, settings: Settings) -> str | None:
+    """Explain why a stored baselines verdict may not apply to this run.
+
+    A verdict written under a different config/data protocol (or before
+    the stamp existed) cannot annotate the current grids: its HB1/HB2/HB4/
+    HB5/HB6/HB7 marks were measured on different streams or a different
+    recipe.  The source-tree hash is checked separately: the gates are
+    implemented in this package, so a verdict produced by older code is not
+    evidence about the current code even when config and data match (a
+    dirty tree with the same ``git_sha`` makes that distinction necessary).
+    """
+    stored = verdict.get("protocol_sha256")
+    if stored is None:
+        return ("baselines verdict predates protocol stamping; re-run "
+                "`--only baselines` so its HB marks describe the current "
+                "data/recipe")
+    current = _protocol_sha256(_run_context(settings))
+    if stored != current:
+        return (f"baselines verdict protocol {stored} != current {current}; "
+                f"it was produced under a different config/data protocol, so "
+                f"its HB marks do not describe this run - re-run "
+                f"`--only baselines`")
+    stored_source = verdict.get("source_tree_sha256")
+    current_source = _source_tree_sha256()
+    if stored_source is None:
+        return ("baselines verdict predates source-tree stamping; re-run "
+                "`--only baselines` so its HB marks were produced by the "
+                "current gate code")
+    if stored_source != current_source:
+        return (f"baselines verdict source {stored_source} != current "
+                f"{current_source}; it was produced by older gate code, so "
+                f"its HB marks do not certify this run - re-run "
+                f"`--only baselines`")
+    return None
+
+
+def _write_manifest(settings: Settings, out_dir: pathlib.Path, tag: str) -> dict:
+    """Per-experiment provenance manifest, written before any training.
+
+    One ``<tag>_manifest.json`` per experiment pins the invocation run id,
+    the code revision (plus dirty flag and content hash), the
+    pre-registered hypotheses and their hash, every hyperparameter and
+    seed, the data-stream fingerprints (including each training stream) and
+    the software environment.  Run records repeat this context inline; the
+    manifest is the single artifact that makes a results directory
+    traceable back to a reproducible setup without joining files by hand.
+    """
+    manifest = {
+        "experiment": tag,
+        "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        **_run_context(settings),
+    }
+    _write_json(out_dir / f"{tag}_manifest.json", manifest)
+    return manifest
+
+
+class ReplayManifestError(RuntimeError):
+    """A run manifest cannot be replayed faithfully under this checkout."""
+
+
+_REPLAY_EXPERIMENTS = ("baselines", "sanity", "e1", "e2", "e3")
+
+
+def _replay_settings(config) -> Settings:
+    """Rebuild the frozen ``Settings`` recipe stored in a manifest.
+
+    The config block is written by ``_run_context`` as every ``Settings``
+    field except ``out_dir``.  Requiring the exact field set (instead of
+    filling missing keys with defaults) is deliberate: a partial config
+    cannot define the recipe that produced the archived numbers, and an
+    unknown key means the manifest was written by a different schema.
+    """
+    if not isinstance(config, Mapping):
+        raise ReplayManifestError("manifest config must be a JSON object")
+    fields = {name for name in Settings.__dataclass_fields__
+              if name != "out_dir"}
+    unknown = sorted(set(config) - fields)
+    missing = sorted(fields - set(config))
+    if unknown:
+        raise ReplayManifestError(
+            f"manifest config has unknown field(s) {unknown}; this checkout's "
+            f"Settings schema is different")
+    if missing:
+        raise ReplayManifestError(
+            f"manifest config is missing field(s) {missing}; a partial "
+            f"manifest cannot define the frozen recipe")
+    try:
+        return Settings(**dict(config))
+    except (TypeError, ValueError) as exc:
+        raise ReplayManifestError(
+            f"manifest config is not a valid Settings recipe: {exc}") from exc
+
+
+def _load_replay_manifest(path, *, allow_environment_drift=False):
+    """Load and verify a run manifest as an executable reproduction plan.
+
+    A manifest is only descriptive unless something can consume it.  This
+    helper turns it into the exact ``Settings`` recipe and refuses the
+    replay when the code, pre-registered hypothesis registry or data
+    streams changed.  The git revision is intentionally not compared: a
+    later commit with byte-identical source is the same code for
+    reproduction.  A critical software/numerical environment drift is
+    refused by default; ``allow_environment_drift`` permits a non-identical
+    replay and the override is written to the replay provenance artifact
+    instead of being silently ignored.
+
+    Returns ``(settings, manifest, drift, manifest_sha256)``.
+    """
+    path = pathlib.Path(path)
+    try:
+        raw = path.read_bytes()
+        manifest = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        raise ReplayManifestError(
+            f"cannot read manifest {path}: {type(exc).__name__}: {exc}"
+        ) from exc
+    if not isinstance(manifest, Mapping):
+        raise ReplayManifestError(f"manifest {path} is not a JSON object")
+    experiment = manifest.get("experiment")
+    if experiment not in _REPLAY_EXPERIMENTS:
+        raise ReplayManifestError(
+            f"manifest {path} names experiment {experiment!r}; expected one "
+            f"of {list(_REPLAY_EXPERIMENTS)}")
+    settings = _replay_settings(manifest.get("config"))
+    # A manifest is evidence, not just a config file: its own setup id must
+    # match the fields it carries.  Without this check a corrupted `steps`
+    # or `lr` would replay a different recipe while the rest of the
+    # provenance still looked valid.
+    recorded_setup = manifest.get("setup_sha256")
+    if not _is_short_sha(recorded_setup):
+        raise ReplayManifestError("manifest has no valid setup_sha256")
+    if _setup_fingerprint(manifest) != recorded_setup:
+        raise ReplayManifestError(
+            "manifest setup_sha256 does not match its own code/config/data "
+            "fields; the manifest was edited or corrupted")
+    # Use the same builder that stamped the original run.  Comparing its
+    # components catches a changed config, data geometry, source tree or
+    # hypothesis registry in one place, and caches the context that the
+    # caller will reuse.
+    context = _run_context(settings)
+    recorded_config = json.dumps(
+        manifest["config"], ensure_ascii=False, sort_keys=True, default=str)
+    current_config = json.dumps(
+        context["config"], ensure_ascii=False, sort_keys=True, default=str)
+    if recorded_config != current_config:
+        raise ReplayManifestError(
+            "manifest config does not round-trip to this checkout's Settings; "
+            "the frozen recipe cannot be reconstructed exactly")
+    recorded_source = manifest.get("source_tree_sha256")
+    if not _is_short_sha(recorded_source):
+        raise ReplayManifestError("manifest has no valid source_tree_sha256")
+    if recorded_source != context["source_tree_sha256"]:
+        raise ReplayManifestError(
+            f"manifest was produced by source {recorded_source}, current "
+            f"source is {context['source_tree_sha256']}; replaying it would "
+            f"not reproduce the recorded code - check out the recorded "
+            f"revision or rebuild the manifest")
+    recorded_hypotheses = manifest.get("hypotheses_sha256")
+    if not _is_short_sha(recorded_hypotheses):
+        raise ReplayManifestError("manifest has no valid hypotheses_sha256")
+    if recorded_hypotheses != context["hypotheses_sha256"]:
+        raise ReplayManifestError(
+            f"manifest hypothesis registry {recorded_hypotheses} != current "
+            f"{context['hypotheses_sha256']}; the pre-registered decision "
+            f"rules changed")
+    recorded_fingerprints = manifest.get("data_fingerprints")
+    if not isinstance(recorded_fingerprints, Mapping):
+        raise ReplayManifestError(
+            "manifest has no data_fingerprints mapping")
+    if recorded_fingerprints != context["data_fingerprints"]:
+        raise ReplayManifestError(
+            "manifest data-stream fingerprints differ from this checkout's "
+            "streams; the replay would train on different data")
+    environment = manifest.get("environment")
+    if not isinstance(environment, Mapping):
+        raise ReplayManifestError(
+            "manifest has no environment block; cannot certify the replay "
+            "environment")
+    drift = _environment_drift(environment, context["environment"])
+    if not drift["compatible"] and not allow_environment_drift:
+        fields = ", ".join(
+            str(item.get("field")) for item in drift["critical_differences"])
+        raise ReplayManifestError(
+            f"manifest environment is not compatible with this process "
+            f"(critical: {fields or drift.get('reason')}); pass "
+            f"--allow-environment-drift to run a non-identical replay")
+    return settings, dict(manifest), drift, hashlib.sha256(raw).hexdigest()
+
+
+_REPLAY_BOOKKEEPING_ARTIFACTS = frozenset({
+    "artifact_index.json", "environment_history.jsonl", "replay.json",
+    "run_index.jsonl",
+})
+
+_REPLAY_GLOBAL_ARTIFACTS = frozenset({
+    "environment.json", "hypotheses.json",
+})
+
+_REPLAY_GATED_ARTIFACTS = frozenset({"e1", "e2", "e3"})
+
+# Everything that necessarily differs between two invocations of the same
+# frozen recipe: run identity, wall-clock stamps, revision/dirty status,
+# launch directory/argv and the ids that hash those launch details.  The
+# scientific payload (config, data fingerprints, metrics, decisions) is
+# compared after removing only these fields.
+_REPLAY_VOLATILE_FIELDS = frozenset({
+    "argv", "created_utc", "cwd", "elapsed_seconds", "environment_sha256",
+    "git_dirty", "git_sha", "hash_randomization", "pythonhashseed",
+    "repo_root", "run_id", "run_started_utc", "setup_sha256",
+})
+
+# Wall-clock *measurements* of the cost companion.  They are not part of
+# the scientific payload: the replay runs the same frozen recipe, but the
+# machine it runs on is not the machine that produced the source run, so
+# the measured latency and throughput differ by a few percent every time.
+# Comparing them would report every faithful replay as a defect and train
+# the reader to ignore the comparison.  The analytic cost (FLOPs, parameter
+# count) stays in the comparison: it is reproducible.
+_REPLAY_MEASUREMENT_FIELDS = frozenset({
+    "latency_ms_median", "latency_ms_min", "latency_ms_p90",
+    "throughput_sequences_per_s",
+})
+
+_REPLAY_EXCLUDED_FIELDS = _REPLAY_VOLATILE_FIELDS | _REPLAY_MEASUREMENT_FIELDS
+
+
+def _inherit_replay_baseline_verdict(source_dir, out_dir, settings,
+                                     experiment):
+    """Carry the source gate verdict into a gated replay directory.
+
+    E1/E2/E3 refuse to train without the protocol-specific
+    ``baselines_verdict.json`` that certified HB1/HB3/HB4/HB5.  A replay
+    directory is new and therefore has no verdict, so ``--replay-manifest``
+    for those experiments could not reach the grid it was supposed to
+    reproduce.  The verdict is evidence from the source invocation, not a
+    new result: copy its exact bytes only after checking that its protocol
+    and source-tree stamps still describe this replay, record its hash in
+    ``replay.json``, and let the normal gate re-validate its contents before
+    any grid trains.
+
+    Returns provenance metadata for the copied verdict, or ``None`` when
+    the experiment does not use the baseline gate.
+    """
+    if experiment not in _REPLAY_GATED_ARTIFACTS:
+        return None
+    source = pathlib.Path(source_dir) / "baselines_verdict.json"
+    try:
+        raw = source.read_bytes()
+        text = raw.decode("utf-8")
+        verdict = json.loads(text)
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        raise BaselineVerdictError(
+            f"replay of {experiment} needs the source "
+            f"baselines_verdict.json at {source}; cannot read it "
+            f"({type(exc).__name__}: {exc})") from exc
+    if not isinstance(verdict, Mapping):
+        raise BaselineVerdictError(
+            f"source baselines_verdict.json at {source} is not a JSON "
+            f"object")
+    stale = _verdict_provenance_note(dict(verdict), settings)
+    if stale:
+        raise BaselineVerdictError(
+            f"source baselines_verdict.json cannot certify this replay: "
+            f"{stale}")
+    target = pathlib.Path(out_dir) / "baselines_verdict.json"
+    if target.exists():
+        try:
+            existing = target.read_bytes()
+        except OSError as exc:
+            raise BaselineVerdictError(
+                f"cannot inspect {target} before inheriting the baseline "
+                f"verdict ({exc})") from exc
+        if existing != raw:
+            raise BaselineVerdictError(
+                f"replay output already contains a different "
+                f"baselines_verdict.json at {target}; choose a fresh --out "
+                f"directory")
+    _atomic_write_bytes(target, raw)
+    _register_artifact(target)
+    digest = hashlib.sha256(raw).hexdigest()
+    print(f"[runner] inherited source baseline verdict "
+          f"{source} (sha256={digest[:12]})")
+    return {
+        "source": str(source.resolve()),
+        "sha256": digest,
+        "source_run_id": verdict.get("run_id"),
+        "protocol_sha256": verdict.get("protocol_sha256"),
+    }
+
+
+def _replay_comparable(value):
+    """Canonical JSON payload with invocation-only metadata removed."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): _replay_comparable(item)
+            for key, item in value.items()
+            if key not in _REPLAY_EXCLUDED_FIELDS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_replay_comparable(item) for item in value]
+    if isinstance(value, float):
+        if math.isnan(value):
+            return {"__nonfinite_float__": "nan"}
+        if math.isinf(value):
+            return {"__nonfinite_float__": (
+                "inf" if value > 0.0 else "-inf")}
+    return value
+
+
+def _replay_payload_differences(left, right, path="", out=None, limit=8):
+    """Collect a few human-readable paths where two canonical payloads differ."""
+    differences = [] if out is None else out
+    if len(differences) >= limit:
+        return differences
+    if type(left) is not type(right):
+        differences.append(
+            f"{path or '<root>'}: type {type(left).__name__} != "
+            f"{type(right).__name__}")
+        return differences
+    if isinstance(left, Mapping):
+        for key in sorted(set(left) | set(right)):
+            child = f"{path}/{key}" if path else str(key)
+            if key not in left:
+                differences.append(f"{child}: missing from source")
+            elif key not in right:
+                differences.append(f"{child}: missing from replay")
+            else:
+                _replay_payload_differences(
+                    left[key], right[key], child, differences, limit)
+            if len(differences) >= limit:
+                break
+        return differences
+    if isinstance(left, list):
+        if len(left) != len(right):
+            differences.append(
+                f"{path or '<root>'}: length {len(left)} != {len(right)}")
+        for index, (source_item, replay_item) in enumerate(
+                zip(left, right)):
+            _replay_payload_differences(
+                source_item, replay_item, f"{path}/{index}", differences,
+                limit)
+            if len(differences) >= limit:
+                break
+        return differences
+    if left != right:
+        source_text = json.dumps(left, ensure_ascii=False, default=str)
+        replay_text = json.dumps(right, ensure_ascii=False, default=str)
+        differences.append(
+            f"{path or '<root>'}: {source_text[:120]} != "
+            f"{replay_text[:120]}")
+    return differences
+
+
+def _replay_evidence_paths(root, experiment):
+    """Sorted evidence files relevant to one experiment in ``root``."""
+    paths = []
+    for path in sorted(pathlib.Path(root).iterdir()):
+        if not path.is_file() or path.name in _REPLAY_BOOKKEEPING_ARTIFACTS:
+            continue
+        if path.suffix not in (".json", ".jsonl"):
+            continue
+        if experiment == "all" or path.name in _REPLAY_GLOBAL_ARTIFACTS \
+                or path.name.startswith(f"{experiment}_") \
+                or (experiment in _REPLAY_GATED_ARTIFACTS
+                    and path.name == "baselines_verdict.json"):
+            paths.append(path)
+    return paths
+
+
+def _compare_replay_artifact(source_path, replay_path):
+    """Compare one JSON/JSONL evidence artifact after metadata stripping."""
+    if source_path.suffix == ".jsonl":
+        try:
+            source_rows = _read_jsonl_objects(source_path)
+            replay_rows = _read_jsonl_objects(replay_path)
+        except (OSError, UnicodeError) as exc:
+            return [f"{source_path.name}: unreadable ({exc})"]
+        problems = []
+        for line_number, row, error in source_rows:
+            if error is not None:
+                problems.append(
+                    f"{source_path.name}:{line_number}: source row {error}")
+        for line_number, row, error in replay_rows:
+            if error is not None:
+                problems.append(
+                    f"{source_path.name}:{line_number}: replay row {error}")
+        if problems:
+            return problems
+        if len(source_rows) != len(replay_rows):
+            return [
+                f"{source_path.name}: source has {len(source_rows)} row(s), "
+                f"replay has {len(replay_rows)}"]
+        for index, ((_, source_row, _), (_, replay_row, _)) in enumerate(
+                zip(source_rows, replay_rows)):
+            differences = _replay_payload_differences(
+                _replay_comparable(source_row),
+                _replay_comparable(replay_row))
+            for difference in differences:
+                problems.append(
+                    f"{source_path.name}:row {index + 1}: {difference}")
+        return problems
+    try:
+        source_payload = json.loads(source_path.read_text(encoding="utf-8"))
+        replay_payload = json.loads(replay_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        return [f"{source_path.name}: unreadable ({type(exc).__name__}: {exc})"]
+    return [
+        f"{source_path.name}:{difference}"
+        for difference in _replay_payload_differences(
+            _replay_comparable(source_payload),
+            _replay_comparable(replay_payload))
+    ]
+
+
+def _verify_replay(source_dir, replay_dir) -> int:
+    """Compare a replay's evidence payload with its source run.
+
+    ``--replay-manifest`` proves that a frozen recipe can be re-executed
+    under the recorded code, hypotheses, data streams and environment.  It
+    does not prove that the re-execution produced the same numbers.  This
+    read-only audit joins a replay directory to its source through
+    ``replay.json`` and the source manifest's run id / digest, then compares
+    every experiment-scoped JSON/JSONL artifact present in the source with
+    its replay counterpart after stripping invocation-only metadata
+    (run id, timestamps, git status/revision, launch argv/cwd and the setup
+    hash that covers those launch details).
+
+    Exit codes: 0 = every compared artifact is payload-identical and no
+    source evidence is missing; 1 = a mismatch, missing artifact or
+    malformed record; 2 = missing directories, a replay directory without
+    usable ``replay.json``, or no evidence to compare.
+    """
+    source_root = pathlib.Path(source_dir)
+    replay_root = pathlib.Path(replay_dir)
+    if not source_root.is_dir():
+        print(f"[replay] no source results directory at {source_root}")
+        return 2
+    if not replay_root.is_dir():
+        print(f"[replay] no replay results directory at {replay_root}")
+        return 2
+    if source_root.resolve() == replay_root.resolve():
+        print("[replay] source and replay directories are the same; a replay "
+              "is a separate evidence directory")
+        return 2
+    replay_path = replay_root / "replay.json"
+    try:
+        replay = json.loads(replay_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        print(f"[replay] no usable replay provenance at {replay_path} "
+              f"({type(exc).__name__}: {exc})")
+        return 2
+    if not isinstance(replay, Mapping):
+        print(f"[replay] replay provenance at {replay_path} is not a JSON "
+              f"object")
+        return 2
+    source_run = replay.get("source_run_id")
+    manifest_sha = replay.get("manifest_sha256")
+    if not isinstance(source_run, str) or not source_run:
+        print("[replay] replay provenance has no non-empty source_run_id")
+        return 2
+    if not isinstance(manifest_sha, str) or len(manifest_sha) != 64 \
+            or any(char not in "0123456789abcdef" for char in manifest_sha):
+        print("[replay] replay provenance has no valid manifest_sha256")
+        return 2
+
+    problems = []
+    warnings = []
+    if replay.get("environment_override") \
+            or replay.get("environment_compatible") is False:
+        warnings.append(
+            "replay was run under an environment override; matching "
+            "payloads do not restore environment compatibility")
+    matches = []
+    for path in sorted(source_root.glob("*_manifest.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError, TypeError):
+            continue
+        if isinstance(payload, Mapping) and payload.get("run_id") == source_run:
+            matches.append((path, payload))
+    if not matches:
+        print(f"[replay] FAILED: source run {source_run} has no manifest in "
+              f"{source_root}")
+        return 1
+    digest_matches = [
+        (path, payload) for path, payload in matches
+        if hashlib.sha256(path.read_bytes()).hexdigest() == manifest_sha
+    ]
+    if not digest_matches:
+        problems.append(
+            f"source manifest digest does not match replay provenance "
+            f"(expected {manifest_sha[:12]})")
+    experiment = (digest_matches or matches)[0][1].get("experiment")
+    if experiment not in _REPLAY_EXPERIMENTS:
+        print(f"[replay] FAILED: source manifest names unknown experiment "
+              f"{experiment!r}")
+        return 1
+
+    index_path = replay_root / "artifact_index.json"
+    if index_path.is_file():
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError, TypeError) as exc:
+            problems.append(
+                f"replay artifact_index.json is unreadable "
+                f"({type(exc).__name__}: {exc})")
+        else:
+            if not isinstance(index, Mapping):
+                problems.append("replay artifact_index.json is not an object")
+            else:
+                if index.get("completed") is not True:
+                    problems.append(
+                        f"replay artifact index is marked "
+                        f"completed={index.get('completed')!r}")
+                if index.get("experiment") != experiment:
+                    problems.append(
+                        f"replay experiment {index.get('experiment')!r} != "
+                        f"source {experiment!r}")
+    else:
+        warnings.append(
+            "replay has no artifact_index.json; completion is not certified")
+
+    source_evidence = _replay_evidence_paths(source_root, experiment)
+    replay_evidence = _replay_evidence_paths(replay_root, experiment)
+    replay_names = {path.name for path in replay_evidence}
+    source_names = {path.name for path in source_evidence}
+    if not source_evidence:
+        print(f"[replay] no {experiment} evidence artifacts found in "
+              f"{source_root}; nothing to compare")
+        return 2
+    compared = 0
+    for path in source_evidence:
+        if path.name not in replay_names:
+            problems.append(f"{path.name}: missing from replay")
+            continue
+        problems.extend(_compare_replay_artifact(
+            path, replay_root / path.name))
+        compared += 1
+    for path in sorted(replay_names - source_names):
+        warnings.append(f"{path}: present only in replay")
+
+    print(f"[replay] source={source_root} replay={replay_root} "
+          f"run={source_run} experiment={experiment}")
+    if problems:
+        print(f"[replay] FAILED ({len(problems)} issue(s)); "
+              f"{compared} artifact(s) compared:")
+        for problem in problems:
+            print(f"    {problem}")
+        for warning in warnings:
+            print(f"    warning: {warning}")
+        return 1
+    print(f"[replay] ok: {compared} artifact(s) payload-identical after "
+          f"stripping invocation metadata")
+    for warning in warnings:
+        print(f"[replay] warning: {warning}")
+    return 0
+
+
+def _load_baseline_verdict(out_dir: pathlib.Path):
+    """The HB1-HB5 verdicts written by ``run_baselines``, if present.
+
+    E1/E2/E3 read the learned model against the simple baselines, so a
+    missing verdict file is surfaced as a note instead of silently
+    treating the baseline check as passed.  A verdict file written by an
+    older version lacks the HB4/HB5 keys or the protocol/source stamps; the
+    marks are reported as ``n/a`` (not ``FAILED``) and a provenance warning
+    asks for a re-run, so neither a missing check nor a stale one is
+    mistaken for a pass.
+    """
+    path = out_dir / "baselines_verdict.json"
+    if not path.exists():
+        return None
+    try:
+        verdict = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    # A syntactically valid JSON array/scalar is not a verdict record; treat
+    # it like a corrupt/missing file so the caller raises the documented
+    # BaselineVerdictError instead of failing on ``.get``.
+    return verdict if isinstance(verdict, dict) else None
+
+
+class BaselineVerdictError(RuntimeError):
+    """A baseline validity gate failed (or its verdict is missing/stale).
+
+    HB1 (task construction), HB3 (split disjointness), HB4 (label-leak
+    negative control) and HB5 (training loop) pre-register that their
+    failure invalidates every result above them.  The E1/E2/E3 runners
+    enforce that semantics by refusing to train on a protocol whose
+    verdict is absent, stale, or failed - the same hard-gate policy as
+    the reproducibility and overfit pre-flights.
+    """
+
+
+# Validity gates whose failure invalidates every grid result (the
+# pre-registered "invalidate everything above it" semantics of HB1/HB3,
+# plus the loop gate).  HB2 is deliberately not in this set: its
+# registered semantics invalidate the *simple-baseline comparison*, so its
+# state is stamped and displayed (certified/inconclusive/violated) instead
+# of blocking the grid.  HB4 is also special-cased below: only a
+# *violated* negative control blocks, while an inconclusive one is
+# stamped (with a finite stream, "not shown" is not "leakage shown").
+_BLOCKING_VERDICT_GATES = ("hb1_supported", "hb3_supported",
+                           "hb5_supported")
+
+
+def _verdict_seed_floor(verdict: dict, settings: Settings) -> dict:
+    """The pre-registered seed floor as applied to the verdict's marks.
+
+    ``min_seeds_for_claim`` (Settings, hashed) says a seed-level claim
+    needs at least that many independent training seeds.  The baselines
+    verdict applies the same floor to HB2/HB4/HB6/HB7: a supported mark
+    resting on fewer seeds is *provisional* (displayed and stamped as
+    such, never silently certified), matching the decision layer of the
+    contrast families where a 2-seed "win" is marked INELIGIBLE.
+    """
+    if not isinstance(verdict, dict):
+        verdict = {}
+    floor = int(settings.min_seeds_for_claim)
+    stored = verdict.get("seed_floor")
+    if not isinstance(stored, dict):
+        stored = {}
+    if "n_seeds" not in stored:
+        total = len(settings.seeds)
+    else:
+        total = _positive_integer(stored["n_seeds"])
+        # A corrupted count is not a licence to fall back to the configured
+        # seed set: mark the affected floor ineligible so a hand-edited
+        # verdict cannot silently certify a claim.
+        if total is None:
+            total = 0
+    out = {"min_seeds_for_claim": floor, "n_seeds": int(total)}
+    for key in ("hb2", "hb4", "hb6", "hb7"):
+        key_n = f"{key}_n_seeds"
+        if key_n not in stored:
+            n = total
+        else:
+            n = _positive_integer(stored[key_n])
+            if n is None:
+                n = 0
+        flag_key = f"{key}_claim_eligible"
+        if flag_key in stored:
+            flag = stored[flag_key]
+            # The stored mark cannot override the seed floor: if it says a
+            # claim is eligible while its own count is below the registered
+            # minimum, the verdict is internally inconsistent (or was
+            # hand-edited) and must fail closed.  A genuine ``False`` is
+            # still respected.
+            eligible = (isinstance(flag, bool) and flag
+                        and int(n) >= floor)
+        else:
+            eligible = bool(int(n) >= floor)
+        out[f"{key}_n_seeds"] = int(n)
+        out[f"{key}_claim_eligible"] = bool(eligible)
+    return out
