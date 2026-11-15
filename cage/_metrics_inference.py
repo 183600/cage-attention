@@ -482,7 +482,7 @@ def _beta_continued_fraction(a: float, b: float, x: float) -> float:
     maxit, eps, fpmin = 300, 3e-14, 1e-300
     qab, qap, qam = a + b, a + 1.0, a - 1.0
     c = 1.0
-    d = 1.0 - qab * x / qap
+    d = 1.0 - qab * x / qap if qap != 0 else 0.0
     if abs(d) < fpmin:
         d = fpmin
     d = 1.0 / max(d, 1e-10)
@@ -1247,7 +1247,7 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
         p = successes_f / max(total_f, 1)
     z2 = z * z
     if total_f is not None:
-        denom = 1.0 + z2 / total_f
+        denom = 1.0 + z2 / total_f if total_f != 0 else 0.0
         center = (p + z2 / (2.0 * total_f)) / max(denom, 1e-10)
         half = (z * math.sqrt(p * (1.0 - p) / total_f
                               + z2 / (4.0 * total_f * total_f)) / denom)
@@ -1263,7 +1263,7 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
         if sqrt_total == 0.0 or not math.isfinite(sqrt_total):
             denom, center, half = 1.0, p, 0.0
         else:
-            inv = 1.0 / sqrt_total
+            inv = 1.0 / sqrt_total if sqrt_total != 0 else 0.0
             inv2 = inv * inv
             denom = 1.0 + z2 * inv2
             center = (p + (z2 / 2.0) * inv2) / max(denom, 1e-10)

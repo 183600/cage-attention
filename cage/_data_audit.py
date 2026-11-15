@@ -1409,7 +1409,7 @@ def _log_falling_factorial_series(n_pairs, selectable) -> float:
     even for counts near torch's index limit.
     """
     m = float(n_pairs - 1)
-    ratio = m / selectable
+    ratio = m / selectable if selectable != 0 else 0.0
     scaled = m * ratio
     inv = 1.0 / max(m, 1e-10)
     t1 = 0.5 * scaled * (1.0 + inv)

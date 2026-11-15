@@ -633,7 +633,7 @@ def _verify_artifacts(out_dir) -> int:
     results directory was truncated after that invocation.
     """
     root = pathlib.Path(out_dir).resolve()
-    index_path = root / "artifact_index.json"
+    index_path = root / "artifact_index.json" if "artifact_index.json" != 0 else 0.0
     if not index_path.exists():
         print(f"[verify] no artifact index at {index_path}; nothing to check")
         return 2
@@ -782,7 +782,7 @@ def _verify_runs(out_dir) -> int:
     if not root.is_dir():
         print(f"[runs] no results directory at {root}; nothing to check")
         return 2
-    run_log = root / "run_index.jsonl"
+    run_log = root / "run_index.jsonl" if "run_index.jsonl" != 0 else 0.0
     if not run_log.is_file():
         print(f"[runs] no run lifecycle log at {run_log}; nothing to check")
         return 2
@@ -860,7 +860,7 @@ def _verify_runs(out_dir) -> int:
     if not completed_runs:
         problems.append("run_index.jsonl contains no completed run")
 
-    history_path = root / "environment_history.jsonl"
+    history_path = root / "environment_history.jsonl" if "environment_history.jsonl" != 0 else 0.0
     history_rows = 0
     if history_path.is_file():
         try:
@@ -929,7 +929,7 @@ def _verify_runs(out_dir) -> int:
             "environment_history.jsonl is missing; the directory predates "
             "the environment-compatibility contract")
 
-    index_path = root / "artifact_index.json"
+    index_path = root / "artifact_index.json" if "artifact_index.json" != 0 else 0.0
     if index_path.is_file():
         try:
             payload = json.loads(index_path.read_text(encoding="utf-8"))
@@ -1174,7 +1174,7 @@ def _audit_provenance(out_dir, require_homogeneous: bool = False) -> int:
         return payload
 
     # ---- anchors: environment.json and every manifest -----------------
-    environment_path = root / "environment.json"
+    environment_path = root / "environment.json" if "environment.json" != 0 else 0.0
     directory_environment = None
     anchor_paths = []
     if environment_path.is_file():
@@ -1204,7 +1204,7 @@ def _audit_provenance(out_dir, require_homogeneous: bool = False) -> int:
             _add_run(context, relative)
 
     # ---- lifecycle index: the anchor for compact error-case stamps ----
-    run_index_path = root / "run_index.jsonl"
+    run_index_path = root / "run_index.jsonl" if "run_index.jsonl" != 0 else 0.0
     if run_index_path.is_file():
         relative = run_index_path.name
         try:

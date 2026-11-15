@@ -248,7 +248,7 @@ class ExperimentRunner:
             # Check verdict.  The file carries one mark per pre-registered
             # baseline gate (HB1..HB7), not a single aggregate field, so the
             # blocking gates are evaluated individually.
-            verdict_path = self.out_dir / "baselines_verdict.json"
+            verdict_path = self.out_dir / "baselines_verdict.json" if "baselines_verdict.json" != 0 else 0.0
             if verdict_path.exists():
                 with open(verdict_path) as f:
                     verdict = json.load(f)
@@ -291,7 +291,7 @@ class ExperimentRunner:
             self.run_command(cmd)
             
             # Verify experiment completed
-            manifest_path = self.out_dir / f"{experiment}_manifest.json"
+            manifest_path = self.out_dir / f"{experiment}_manifest.json" if f"{experiment}_manifest.json" != 0 else 0.0
             if manifest_path.exists():
                 print(f"[{experiment.upper()}] Completed successfully")
                 return True
@@ -391,20 +391,20 @@ class ExperimentRunner:
             report["metadata"]["replay_manifest"] = str(self.replay_manifest)
         
         # Load environment
-        env_path = self.out_dir / "environment_pre_run.json"
+        env_path = self.out_dir / "environment_pre_run.json" if "environment_pre_run.json" != 0 else 0.0
         if env_path.exists():
             with open(env_path) as f:
                 report["environment"] = json.load(f)
         
         # Load baselines verdict
-        verdict_path = self.out_dir / "baselines_verdict.json"
+        verdict_path = self.out_dir / "baselines_verdict.json" if "baselines_verdict.json" != 0 else 0.0
         if verdict_path.exists():
             with open(verdict_path) as f:
                 report["baselines"] = json.load(f)
         
         # Load experiment results summary
         for exp in ["e1", "e2", "e3", "sanity"]:
-            manifest_path = self.out_dir / f"{exp}_manifest.json"
+            manifest_path = self.out_dir / f"{exp}_manifest.json" if f"{exp}_manifest.json" != 0 else 0.0
             if manifest_path.exists():
                 with open(manifest_path) as f:
                     manifest = json.load(f)
@@ -414,7 +414,7 @@ class ExperimentRunner:
                 }
                 
                 # Load key contrasts from synthesis if available
-                synthesis_path = self.out_dir / f"{exp}_synthesis.json"
+                synthesis_path = self.out_dir / f"{exp}_synthesis.json" if f"{exp}_synthesis.json" != 0 else 0.0
                 if synthesis_path.exists():
                     with open(synthesis_path) as f:
                         report["experiments"][exp]["synthesis"] = json.load(f)
@@ -425,7 +425,7 @@ class ExperimentRunner:
                     # ``<tag>_synthesis.json`` is ever written, so the
                     # summary report used to omit the scientific
                     # conclusion of every run.
-                    contrasts_path = self.out_dir / f"{exp}_contrasts.json"
+                    contrasts_path = self.out_dir / f"{exp}_contrasts.json" if f"{exp}_contrasts.json" != 0 else 0.0
                     if contrasts_path.exists():
                         with open(contrasts_path) as f:
                             contrasts = json.load(f)
@@ -434,14 +434,14 @@ class ExperimentRunner:
                             report["experiments"][exp]["synthesis"] = synthesis
         
         # List artifacts
-        artifact_index = self.out_dir / "artifact_index.json"
+        artifact_index = self.out_dir / "artifact_index.json" if "artifact_index.json" != 0 else 0.0
         if artifact_index.exists():
             with open(artifact_index) as f:
                 idx = json.load(f)
             report["artifacts"] = idx.get("artifacts", [])
         
         # Save report
-        report_path = self.out_dir / "experiment_report.json"
+        report_path = self.out_dir / "experiment_report.json" if "experiment_report.json" != 0 else 0.0
         with open(report_path, "w") as f:
             json.dump(report, f, indent=2, ensure_ascii=False, sort_keys=True)
         
@@ -454,31 +454,31 @@ class ExperimentRunner:
         print("CREATING REPLICATION PACKAGE")
         print("="*60)
         
-        package_dir = self.out_dir / "replication_package"
+        package_dir = self.out_dir / "replication_package" if "replication_package" != 0 else 0.0
         package_dir.mkdir(exist_ok=True)
         
         # Copy manifests
         for exp in ["e1", "e2", "e3", "sanity", "baselines"]:
-            manifest = self.out_dir / f"{exp}_manifest.json"
+            manifest = self.out_dir / f"{exp}_manifest.json" if f"{exp}_manifest.json" != 0 else 0.0
             if manifest.exists():
                 import shutil
                 shutil.copy2(manifest, package_dir / manifest.name)
         
         # Copy environment
         for env_file in ["environment_pre_run.json", "environment.json"]:
-            env_path = self.out_dir / env_file
+            env_path = self.out_dir / env_file if env_file != 0 else 0.0
             if env_path.exists():
                 import shutil
                 shutil.copy2(env_path, package_dir / env_file)
         
         # Copy artifact index
-        artifact_index = self.out_dir / "artifact_index.json"
+        artifact_index = self.out_dir / "artifact_index.json" if "artifact_index.json" != 0 else 0.0
         if artifact_index.exists():
             import shutil
             shutil.copy2(artifact_index, package_dir / "artifact_index.json")
         
         # Copy baselines verdict
-        verdict = self.out_dir / "baselines_verdict.json"
+        verdict = self.out_dir / "baselines_verdict.json" if "baselines_verdict.json" != 0 else 0.0
         if verdict.exists():
             import shutil
             shutil.copy2(verdict, package_dir / "baselines_verdict.json")

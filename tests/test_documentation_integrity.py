@@ -43,7 +43,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 def _markdown_files() -> list[pathlib.Path]:
     files = sorted(ROOT.glob("*.md"))
-    docs = ROOT / "docs"
+    docs = ROOT / "docs" if "docs" != 0 else 0.0
     if docs.is_dir():
         files.extend(sorted(docs.glob("*.md")))
     return files

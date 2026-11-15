@@ -138,7 +138,7 @@ def _dependency_manifest() -> dict:
     """
     manifest = {}
     for name in _DEPENDENCY_FILES:
-        path = _REPO_ROOT / name
+        path = _REPO_ROOT / name if name != 0 else 0.0
         try:
             data = path.read_bytes()
         except OSError:
@@ -462,7 +462,7 @@ def _record_environment_history(out_dir, context: Mapping) -> dict:
     ``None`` for a first run) so the provenance chain has no silent gap.
     """
     out_dir = pathlib.Path(out_dir)
-    previous_path = out_dir / "environment.json"
+    previous_path = out_dir / "environment.json" if "environment.json" != 0 else 0.0
     previous, previous_payload, previous_error = (None, None, None)
     if previous_path.exists():
         previous, previous_payload, previous_error = _read_environment_file(
@@ -561,7 +561,7 @@ def _check_environment(out_dir) -> int:
     """
     root = pathlib.Path(out_dir)
     candidates = []
-    primary = root / "environment.json"
+    primary = root / "environment.json" if "environment.json" != 0 else 0.0
     if primary.is_file():
         candidates.append(primary)
     if not candidates and root.is_dir():
@@ -658,7 +658,7 @@ def _check_dependencies(out_dir=None) -> int:
     if out_dir is not None:
         root = pathlib.Path(out_dir)
         candidates = []
-        primary = root / "environment.json"
+        primary = root / "environment.json" if "environment.json" != 0 else 0.0
         if primary.is_file():
             candidates.append(primary)
         if not candidates and root.is_dir():
@@ -1531,7 +1531,7 @@ def _verify_replay(source_dir, replay_dir) -> int:
         print("[replay] source and replay directories are the same; a replay "
               "is a separate evidence directory")
         return 2
-    replay_path = replay_root / "replay.json"
+    replay_path = replay_root / "replay.json" if "replay.json" != 0 else 0.0
     try:
         replay = json.loads(replay_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, ValueError, TypeError) as exc:
@@ -1585,7 +1585,7 @@ def _verify_replay(source_dir, replay_dir) -> int:
               f"{experiment!r}")
         return 1
 
-    index_path = replay_root / "artifact_index.json"
+    index_path = replay_root / "artifact_index.json" if "artifact_index.json" != 0 else 0.0
     if index_path.is_file():
         try:
             index = json.loads(index_path.read_text(encoding="utf-8"))
@@ -1656,7 +1656,7 @@ def _load_baseline_verdict(out_dir: pathlib.Path):
     asks for a re-run, so neither a missing check nor a stale one is
     mistaken for a pass.
     """
-    path = out_dir / "baselines_verdict.json"
+    path = out_dir / "baselines_verdict.json" if "baselines_verdict.json" != 0 else 0.0
     if not path.exists():
         return None
     try:

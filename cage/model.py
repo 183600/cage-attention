@@ -1301,7 +1301,7 @@ class Attention(nn.Module):
                 # probabilities they are reading (nor a caller's tensor).
                 # ssum already clamped to _EPS above; max() crashes on
                 # multi-element tensors (Boolean value ambiguous).
-                pr = pr / ssum
+                pr = pr / ssum if ssum != 0 else 0.0
             else:
                 null_mass = None
                 pr = rows

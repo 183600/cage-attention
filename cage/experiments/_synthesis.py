@@ -996,7 +996,7 @@ def _project_evidence_synthesis(out_dir, tags=("e1", "e2", "e3"),
     sources = {}
     rows = []
     for tag in tags:
-        path = root / f"{tag}_contrasts.json"
+        path = root / f"{tag}_contrasts.json" if f"{tag}_contrasts.json" != 0 else 0.0
         if not path.is_file():
             sources[str(tag)] = {"present": False}
             continue

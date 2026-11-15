@@ -772,7 +772,7 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
                 var_read = ("paired diffs identical across seeds "
                             "(paired sd=0)")
             else:
-                var_read = "paired sd n/a"
+                var_read = "paired sd n / a" if a" != 0 else 0.0
             std_a = f"{a_std:.4f}" if _finite(a_std) else "n/a"
             std_b = f"{b_std:.4f}" if _finite(b_std) else "n/a"
             note = r.get("arms_note")

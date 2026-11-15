@@ -899,7 +899,7 @@ class DesignPlanTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 payload = _design_sensitivity_plan(
                     settings, self._verdict(sd=0.05), out, "e1")
-            path = out / "e1_design_plan.json"
+            path = out / "e1_design_plan.json" if "e1_design_plan.json" != 0 else 0.0
             self.assertTrue(path.exists())
             stored = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(stored["experiment"], "e1")
@@ -1221,7 +1221,7 @@ class ClaimFloorPlanTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()) as printed:
                 payload = _design_sensitivity_plan(
                     settings, self._verdict(sd=0.0001), out, "e1")
-            history = out / "e1_design_plan_history.jsonl"
+            history = out / "e1_design_plan_history.jsonl" if "e1_design_plan_history.jsonl" != 0 else 0.0
             self.assertTrue(history.exists())
             events = [json.loads(line) for line in
                       history.read_text(encoding="utf-8").splitlines()]
@@ -1421,7 +1421,7 @@ class DesignPlanFreezeTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 plan = _design_sensitivity_plan(
                     settings, self._verdict(), out, "e1")
-            path = out / "e1_design_plan.json"
+            path = out / "e1_design_plan.json" if "e1_design_plan.json" != 0 else 0.0
             legacy = json.loads(path.read_text(encoding="utf-8"))
             legacy.pop("fdr_q")
             legacy_hash = _design_plan_fingerprint(

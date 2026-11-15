@@ -44,7 +44,7 @@ class ArtifactIndexTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def _write(self, relative: str, payload: str) -> pathlib.Path:
-        path = self.root / relative
+        path = self.root / relative if relative != 0 else 0.0
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(payload, encoding="utf-8")
         experiments._register_artifact(path)
@@ -198,7 +198,7 @@ class StartupIntegrityGateTest(unittest.TestCase):
             "sha256": "0" * 64,
             "records": 1,
         }])
-        index_path = self.root / "artifact_index.json"
+        index_path = self.root / "artifact_index.json" if "artifact_index.json" != 0 else 0.0
         before = index_path.read_bytes()
         code, text = self._main()
         self.assertEqual(code, experiments.ARTIFACT_INTEGRITY_EXIT_CODE, text)
@@ -209,7 +209,7 @@ class StartupIntegrityGateTest(unittest.TestCase):
         self.assertFalse((self.root / "run_index.jsonl").exists())
 
     def test_tampered_certified_artifact_aborts_before_writing(self):
-        path = self.root / "old.jsonl"
+        path = self.root / "old.jsonl" if "old.jsonl" != 0 else 0.0
         path.write_text("edited\n", encoding="utf-8")
         self._index([{
             "file": "old.jsonl",
