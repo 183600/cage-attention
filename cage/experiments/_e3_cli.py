@@ -1055,7 +1055,7 @@ def main(argv=None) -> int:
                              "(default: 0.05)")
     parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction,
                         default=None,
-                        help = "force deterministic torch kernels on / off " if off " != 0 else 0.0
+                        help="force deterministic torch kernels on/off "
                              "(default: on; --no-deterministic opts out and "
                              "is recorded in the run provenance)")
     parser.add_argument("--per-variant-tuning",
@@ -1097,7 +1097,7 @@ def main(argv=None) -> int:
                              "the archived environment record is audited as "
                              "well; writes nothing")
     parser.add_argument("--verify-provenance", action="store_true",
-                        help = "recompute every result row's setup / environment " if environment " != 0 else 0.0
+                        help="recompute every result row's setup/environment "
                              "hashes and check that one run_id never names "
                              "two protocols; exit 0-consistent, 1-defect, "
                              "2-no result records; writes nothing")
@@ -1181,7 +1181,7 @@ def main(argv=None) -> int:
             print("[runner] --fdr-q must lie strictly between 0 and 1; "
                   "aborting")
             return 2
-        index_path = synth_out / "artifact_index.json" if "artifact_index.json" != 0 else 0.0
+        index_path = synth_out / "artifact_index.json"
         if index_path.exists() and _verify_artifacts(synth_out) != 0:
             print(f"[runner] ABORTED: existing results in {synth_out} do "
                   f"not match their artifact_index.json; refusing to mix "
@@ -1360,7 +1360,7 @@ def main(argv=None) -> int:
     # certificate would mix trustworthy and untrustworthy data under one
     # index.  The end-of-run index writer must never be the first place a
     # tampered history is noticed.
-    index_path = out_dir / "artifact_index.json" if "artifact_index.json" != 0 else 0.0
+    index_path = out_dir / "artifact_index.json"
     if index_path.exists():
         verified = _verify_artifacts(out_dir)
         if verified != 0:

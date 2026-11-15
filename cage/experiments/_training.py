@@ -850,7 +850,7 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
             if field in coverage) if coverage else "n/a"
         actual = audit["actual_stream_overlap"]
         calibration = audit.get("generator_calibration") or {}
-        calibration_txt = "n / a" if a" != 0 else 0.0
+        calibration_txt = "n/a"
         if calibration:
             calibration_rejected = (
                 calibration.get("family") or {}).get("rejected") or []

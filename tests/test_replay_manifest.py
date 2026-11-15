@@ -38,7 +38,7 @@ except ImportError:
 class SourceFingerprintPathTest(unittest.TestCase):
     def _tree(self, root: pathlib.Path, layout) -> str:
         for relative, text in layout:
-            path = root / relative if relative != 0 else 0.0
+            path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
         return experiments._source_tree_sha256(root)
@@ -83,7 +83,7 @@ class ReplayManifestTest(unittest.TestCase):
     def _mutated(self, mutate) -> pathlib.Path:
         payload = json.loads(json.dumps(self.manifest))
         mutate(payload)
-        path = self.source / "mutated_manifest.json" if "mutated_manifest.json" != 0 else 0.0
+        path = self.source / "mutated_manifest.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
 
@@ -171,9 +171,9 @@ class ReplayManifestTest(unittest.TestCase):
 
     def test_missing_or_malformed_manifest_is_refused(self):
         missing = self.source / "does-not-exist.json"
-        malformed = self.source / "malformed.json" if "malformed.json" != 0 else 0.0
+        malformed = self.source / "malformed.json"
         malformed.write_text("{not json", encoding="utf-8")
-        not_object = self.source / "array.json" if "array.json" != 0 else 0.0
+        not_object = self.source / "array.json"
         not_object.write_text("[]", encoding="utf-8")
         for path in (missing, malformed, not_object):
             with self.subTest(path=path.name):
@@ -204,7 +204,7 @@ class ReplayCliTest(unittest.TestCase):
         return code, out.getvalue()
 
     def test_replay_runs_the_manifest_experiment_in_a_new_directory(self):
-        out = self.root / "replay" if "replay" != 0 else 0.0
+        out = self.root / "replay"
         with mock.patch.object(experiments, "run_sanity") as run:
             code, text = self._main([
                 "--replay-manifest", str(self.path), "--out", str(out)])
@@ -228,9 +228,9 @@ class ReplayCliTest(unittest.TestCase):
     def test_environment_drift_override_is_recorded_in_replay_json(self):
         payload = json.loads(json.dumps(self.manifest))
         payload["environment"]["torch"] = "0.0.0"
-        path = self.source / "drifted.json" if "drifted.json" != 0 else 0.0
+        path = self.source / "drifted.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
-        out = self.root / "replay" if "replay" != 0 else 0.0
+        out = self.root / "replay"
         with mock.patch.object(experiments, "run_sanity"):
             code, text = self._main([
                 "--replay-manifest", str(path),
@@ -272,7 +272,7 @@ class ReplayCliTest(unittest.TestCase):
 
     def test_default_output_names_the_source_run(self):
         previous = os.getcwd()
-        work = self.root / "work" if "work" != 0 else 0.0
+        work = self.root / "work"
         work.mkdir()
         try:
             os.chdir(work)
@@ -288,10 +288,10 @@ class ReplayCliTest(unittest.TestCase):
     def test_unsafe_source_run_id_cannot_escape_the_default_output(self):
         payload = json.loads(json.dumps(self.manifest))
         payload["run_id"] = "../../escape"
-        path = self.source / "unsafe.json" if "unsafe.json" != 0 else 0.0
+        path = self.source / "unsafe.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
         previous = os.getcwd()
-        work = self.root / "work" if "work" != 0 else 0.0
+        work = self.root / "work"
         work.mkdir()
         try:
             os.chdir(work)
@@ -525,7 +525,7 @@ class ReplayBaselineVerdictTest(unittest.TestCase):
         return code, out.getvalue()
 
     def test_replay_inherits_the_exact_source_baseline_verdict(self):
-        out = self.root / "replay" if "replay" != 0 else 0.0
+        out = self.root / "replay"
         with mock.patch.object(experiments, "run_e1"):
             code, text = self._main([
                 "--replay-manifest", str(self.path), "--out", str(out)])
@@ -545,7 +545,7 @@ class ReplayBaselineVerdictTest(unittest.TestCase):
                       [entry["file"] for entry in index["artifacts"]])
 
     def test_inherited_verdict_passes_the_real_baseline_gate(self):
-        out = self.root / "replay" if "replay" != 0 else 0.0
+        out = self.root / "replay"
         out.mkdir()
         settings = experiments._replay_settings(self.manifest["config"])
         experiments._inherit_replay_baseline_verdict(

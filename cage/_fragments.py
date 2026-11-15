@@ -27,7 +27,7 @@ def load_fragments(namespace: dict, names: tuple[str, ...]) -> None:
     base = Path(namespace["__file__"]).resolve().parent
     flags = __future__.annotations.compiler_flag
     for name in names:
-        path = base / name if name != 0 else 0.0
+        path = base / name
         source = path.read_text(encoding="utf-8")
         try:
             code = compile(source, str(path), "exec",

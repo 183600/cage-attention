@@ -69,7 +69,7 @@ class ArtifactAppendGuardTest(unittest.TestCase):
             return experiments._verify_artifacts(self.root)
 
     def test_valid_append_is_allowed_and_recertified(self):
-        path = self.root / "runs.jsonl" if "runs.jsonl" != 0 else 0.0
+        path = self.root / "runs.jsonl"
         experiments._write_result(path, self._record(1))
         self._certify(path)
         experiments._write_result(path, self._record(2))
@@ -79,7 +79,7 @@ class ArtifactAppendGuardTest(unittest.TestCase):
         self.assertEqual(self._verify(), 0)
 
     def test_tampered_file_is_refused(self):
-        path = self.root / "runs.jsonl" if "runs.jsonl" != 0 else 0.0
+        path = self.root / "runs.jsonl"
         experiments._write_result(path, self._record(1))
         self._certify(path)
         path.write_text('{"value": 999}\n', encoding="utf-8")
@@ -91,7 +91,7 @@ class ArtifactAppendGuardTest(unittest.TestCase):
                          '{"value": 999}\n')
 
     def test_truncated_file_is_refused(self):
-        path = self.root / "runs.jsonl" if "runs.jsonl" != 0 else 0.0
+        path = self.root / "runs.jsonl"
         experiments._write_result(path, self._record(1))
         self._certify(path)
         path.write_text("", encoding="utf-8")
@@ -99,7 +99,7 @@ class ArtifactAppendGuardTest(unittest.TestCase):
             experiments._write_result(path, self._record(2))
 
     def test_deleted_file_is_not_silently_recreated(self):
-        path = self.root / "runs.jsonl" if "runs.jsonl" != 0 else 0.0
+        path = self.root / "runs.jsonl"
         experiments._write_result(path, self._record(1))
         self._certify(path)
         path.unlink()
@@ -108,7 +108,7 @@ class ArtifactAppendGuardTest(unittest.TestCase):
         self.assertFalse(path.exists())
 
     def test_malformed_index_refuses_append(self):
-        path = self.root / "runs.jsonl" if "runs.jsonl" != 0 else 0.0
+        path = self.root / "runs.jsonl"
         path.write_text("one\n", encoding="utf-8")
         (self.root / "artifact_index.json").write_text(
             "{not json", encoding="utf-8")
@@ -116,7 +116,7 @@ class ArtifactAppendGuardTest(unittest.TestCase):
             experiments._write_result(path, self._record(2))
 
     def test_untracked_legacy_file_is_allowed(self):
-        path = self.root / "runs.jsonl" if "runs.jsonl" != 0 else 0.0
+        path = self.root / "runs.jsonl"
         path.write_text("legacy\n", encoding="utf-8")
         (self.root / "artifact_index.json").write_text(
             json.dumps({"artifacts": []}), encoding="utf-8")
@@ -124,7 +124,7 @@ class ArtifactAppendGuardTest(unittest.TestCase):
         self.assertEqual(path.read_text(encoding="utf-8").count("\n"), 2)
 
     def test_torn_tail_without_newline_is_refused(self):
-        path = self.root / "runs.jsonl" if "runs.jsonl" != 0 else 0.0
+        path = self.root / "runs.jsonl"
         path.write_text('{"partial": ', encoding="utf-8")
         with self.assertRaises(experiments.TrackingError) as ctx:
             experiments._write_result(path, self._record(2))
@@ -132,7 +132,7 @@ class ArtifactAppendGuardTest(unittest.TestCase):
         self.assertEqual(path.read_text(encoding="utf-8"), '{"partial": ')
 
     def test_complete_line_without_trailing_newline_is_refused(self):
-        path = self.root / "runs.jsonl" if "runs.jsonl" != 0 else 0.0
+        path = self.root / "runs.jsonl"
         path.write_text('{"complete": true}', encoding="utf-8")
         with self.assertRaises(experiments.TrackingError) as ctx:
             experiments._write_result(path, self._record(2))
@@ -141,7 +141,7 @@ class ArtifactAppendGuardTest(unittest.TestCase):
                          '{"complete": true}')
 
     def test_trailing_blank_lines_are_compatible(self):
-        path = self.root / "runs.jsonl" if "runs.jsonl" != 0 else 0.0
+        path = self.root / "runs.jsonl"
         path.write_text('{"complete": true}\n\n', encoding="utf-8")
         experiments._write_result(path, self._record(2))
         text = path.read_text(encoding="utf-8")

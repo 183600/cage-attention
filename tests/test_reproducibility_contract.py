@@ -152,7 +152,7 @@ class EnvironmentHistoryTest(unittest.TestCase):
         }
 
     def _rows(self):
-        path = self.root / "environment_history.jsonl" if "environment_history.jsonl" != 0 else 0.0
+        path = self.root / "environment_history.jsonl"
         return [json.loads(line) for line in
                 path.read_text(encoding="utf-8").splitlines()]
 
@@ -197,7 +197,7 @@ class EnvironmentHistoryTest(unittest.TestCase):
 
     def test_history_is_append_only_against_tampering(self):
         experiments._record_environment_history(self.root, self._context("r1"))
-        history = self.root / "environment_history.jsonl" if "environment_history.jsonl" != 0 else 0.0
+        history = self.root / "environment_history.jsonl"
         experiments._write_artifact_index(
             self.root, None, "history", completed=True, elapsed_seconds=0.0)
         experiments._RUN_ARTIFACTS = set()

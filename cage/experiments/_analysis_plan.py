@@ -540,7 +540,7 @@ def _analysis_plan_outcomes_exist(out_dir) -> bool:
     root = pathlib.Path(out_dir)
     for tag in _STUDY_EXPERIMENTS:
         for suffix in ("_runs.jsonl", "_contrasts.json"):
-            path = root / f"{tag}{suffix}" if f"{tag}{suffix}" != 0 else 0.0
+            path = root / f"{tag}{suffix}"
             try:
                 if not path.exists() and not path.is_symlink():
                     continue
@@ -849,7 +849,7 @@ def _study_level_adjudication(out_dir, q: float = 0.05) -> dict:
     missing_experiments = []
     invalid_sources = []
     for tag in _STUDY_EXPERIMENTS:
-        path = root / f"{tag}_contrasts.json" if f"{tag}_contrasts.json" != 0 else 0.0
+        path = root / f"{tag}_contrasts.json"
         if not path.is_file():
             sources[str(tag)] = {"present": False}
             missing_experiments.append(str(tag))
@@ -1042,7 +1042,7 @@ def _study_level_adjudication(out_dir, q: float = 0.05) -> dict:
             claim_report["status"] == "supported"
             and claim_report["status_pooled_family"] != "supported")
         claim_reports.append(claim_report)
-    plan_path = root / "analysis_plan.json" if "analysis_plan.json" != 0 else 0.0
+    plan_path = root / "analysis_plan.json"
     plan_state = {"present": False}
     if plan_path.is_file():
         try:
