@@ -218,9 +218,30 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
         rep = (row.get("replication_curve_valid")
                or row.get("replication") or {})
         row["replication_effective"] = rep
-        row["replication_uncertain"] = bool(
-            row["supports_hypothesis"] and rep.get("valid")
-            and not rep.get("replicates"))
+        # Replication uncertainty: a supported effect whose 95% same-size-
+        # repeat interval still crosses zero (or their null-prediction bound)
+        # is not expected to reproduce its sign at 95% in a fresh run of the
+        # same size.  Flag is systematic: it considers whether the interval
+        # crosses zero/bound while the effect is supported.  Width information
+        # is recorded separately for decision guidance.
+        rep_valid = rep.get("valid")
+        rep_replicates = rep.get("replicates")
+        obs_mean = row.get("mean") or 0.0
+        obs_half_width = (rep.get("hi") or 0.0) - abs(obs_mean) if rep_valid else float("nan")
+        half_width_to_effect = (abs(obs_half_width / obs_mean)
+                                if rep_valid and _finite(obs_mean) and obs_mean != 0
+                                else float("nan"))
+        # Base flag: only set when effect is supported but replication interval
+        # crosses zero/bound (original pre-registered behavior).
+        base_uncertain = row["supports_hypothesis"] and rep_valid and not rep_replicates
+        row["replication_uncertain"] = bool(base_uncertain)
+        # Width relative to observed effect: for decision guidance, report
+        # how wide the replication interval is relative to the observed mean.
+        # This does not change the pre-registered replication_uncertain flag
+        # but flags when the supported effect is fragile to sampling variability.
+        row["replication_half_width"] = rep.get("hi") - rep.get("lo") if rep_valid else None
+        row["replication_half_width_to_effect"] = (
+            None if not _finite(half_width_to_effect) else half_width_to_effect)
         row["replication_prob"] = rep.get("prob_replicates")
         # Small-sample robustness: does the *decision* survive when any
         # single seed is dropped (jackknife), and does BCa reach the
@@ -427,9 +448,29 @@ def _contrastlog_finalize(self, out_dir: pathlib.Path, q: float = 0.05) -> dict:
                 _finite(row.get("p_value"))
                 and _finite(row.get("sign_flip_min_p"))
                 and float(row["p_value"]) < float(row["sign_flip_min_p"]))
+            row["sign_flip_floor_overstated_decision_guidance"] = (
+                "bootstrap p below exact floor: resolution overstated, "
+                "report as provisional")
         else:
             row["sign_flip_exact_floor"] = None
             row["sign_flip_bootstrap_floor_overstated"] = False
+            row["sign_flip_floor_overstated_decision_guidance"] = ""
+        # Small-sample resolution floor: the minimum p the sign-flip
+        # exact test can attain at the current seed count, and the
+        # seed count needed to clear the FDR threshold q.
+        # These are companions, not decision rules: the bootstrap p
+        # remains the pre-registered decision, but the floor exposes
+        # when the bootstrap moment assumptions exceed the design's
+        # actual resolution.
+        alt = ("greater" if row.get("direction") == "+"
+               else "less" if row.get("direction") == "-"
+               else "two-sided")
+        row["sign_flip_resolution"] = sign_flip_resolution(
+            row.get("n"), alt,
+            n_random=10000, max_exact=16)
+        row["sign_flip_min_units"] = sign_flip_min_units(
+            alt, q,
+            n_random=10000, max_exact=16)
     # A contrast is unfalsifiable by the exact test when even its
     # smallest attainable p is above ``q``.  The per-row BH threshold is
     # at most ``q`` (a row with p <= q can reject when it is compared at

@@ -152,8 +152,7 @@ def check_smoke() -> None:
             if p.grad is not None and not torch.isfinite(p.grad).all():
                 raise RuntimeError(f"non-finite grad for {cfg}")
         m.eval()
-        with torch.no_grad():
-            _, _, layer_stats = m(idx, stat_pos=meta["query_pos"])
+        _, _, layer_stats = m(idx, stat_pos=meta["query_pos"])
         for s in layer_stats:
             for k, v in s.items():
                 if isinstance(v, torch.Tensor) and v.numel() and not torch.isfinite(v).all():
@@ -184,7 +183,6 @@ def check_smoke() -> None:
         if len(hist) != 3:
             raise RuntimeError("train_model did not run 3 steps")
         acc = eval_accuracy(m, 6, 64, "cpu", batch=4, batches=1)
-        # TODO: Report confidence intervals or std alongside point estimates
         if not 0.0 <= acc <= 1.0:
             raise RuntimeError(f"eval_accuracy out of range: {acc}")
         st = collect_stats(m, 6, 64, "cpu", batch=4, batches=1)
