@@ -26,7 +26,7 @@ def _flatten_float(x) -> torch.Tensor:
         probe = torch.as_tensor(x)
     except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
         raise ValueError(
-            f"metric inputs must be real numeric values, got "
+            "metric inputs must be real numeric values, got "
             f"{type(x).__name__}") from exc
     if probe.is_complex():
         return torch.empty(0, dtype=torch.float64)
@@ -34,7 +34,7 @@ def _flatten_float(x) -> torch.Tensor:
         return torch.as_tensor(x, dtype=torch.float64).detach().reshape(-1)
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            f"metric inputs must be real numeric values, got "
+            "metric inputs must be real numeric values, got "
             f"{type(x).__name__}") from exc
 
 
@@ -201,7 +201,7 @@ def _bootstrap_seed(seed) -> int:
             f"bootstrap seed must be an integer, got {seed!r}") from exc
     if not _TORCH_SEED_MIN <= seed_int <= _TORCH_SEED_MAX:
         raise ValueError(
-            f"bootstrap seed must fit in torch's 64-bit seed range "
+            "bootstrap seed must fit in torch's 64-bit seed range "
             f"[{_TORCH_SEED_MIN}, {_TORCH_SEED_MAX}], got {seed!r}")
     return seed_int
 
@@ -265,6 +265,7 @@ def roc_auc(scores, positives) -> float:
         return float("nan")
     r = average_ranks(s)
     auc = (r[y].sum() - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg)
+    # CI companion: roc_auc_ci() provides bootstrap CI for this estimate
     return float(auc)
 
 
@@ -298,6 +299,7 @@ def pr_auc(scores, positives) -> float:
     ))
     tp_end = tp[ends]
     precision = tp_end / (ends + 1).to(torch.float64)
+    # CI companion: pr_auc_ci() provides bootstrap CI for this estimate
     prev_tp = torch.cat((tp_end.new_zeros(1), tp_end[:-1]))
     return float(((tp_end - prev_tp) / max(n_pos, 1e-10) * precision).sum())
 
@@ -381,6 +383,7 @@ def selection_at_fraction(scores, positives, frac: float = 0.1) -> dict:
     tp = int((flagged & y).sum())
     prevalence = n_pos / max(n, 1)
     recall = tp / max(n_pos, 1) if n_pos else float("nan")
+    # CI companion: use paired_bootstrap_ci over seeds for this estimate
     precision = tp / max(k, 1e-10)
     lift = precision / prevalence if prevalence > 0.0 else float("nan")
     return {"frac": k / max(n, 1), "k": k, "recall": recall,
@@ -406,9 +409,11 @@ def roc_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
     n_neg = y.numel() - n_pos
     if n_pos == 0 or n_neg == 0:
         auc = roc_auc(s, y)
+        # CI unavailable: single-class bootstrap yields degenerate AUC
         return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
                 "n": int(y.numel())}
     auc = roc_auc(s, y)
+    # CI unavailable: invalid bootstrap parameters
     if not _bootstrap_args_ok(n_boot, alpha):
         return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
                 "n": int(y.numel())}
@@ -448,9 +453,11 @@ def pr_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
     n_pos = int(y.sum())
     if n_pos == 0:
         auc = pr_auc(s, y)
+        # CI unavailable: single-class bootstrap yields degenerate AP
         return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
                 "n": int(y.numel())}
     auc = pr_auc(s, y)
+    # CI unavailable: invalid bootstrap parameters
     if not _bootstrap_args_ok(n_boot, alpha):
         return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
                 "n": int(y.numel())}
@@ -470,6 +477,7 @@ def pr_auc_ci(scores, positives, n_boot: int = 10000, seed: int = 0,
     if not boots:
         return {"auc": auc, "lo": float("nan"), "hi": float("nan"),
                 "n": int(y.numel())}
+    # NOTE: Consider adding device= parameter to torch.tensor() to avoid device mismatch
     bt = torch.tensor(boots, dtype=torch.float64)
     lo = float(torch.quantile(bt, alpha / 2.0))
     hi = float(torch.quantile(bt, 1.0 - alpha / 2.0))
@@ -501,7 +509,7 @@ def auc_paired_bootstrap_ci(scores_a, scores_b, positives, n_boot: int = 10000,
     if metric not in ("roc", "pr"):
         raise ValueError(
             f"metric must be 'roc' or 'pr', got {metric!r}: an unknown "
-            f"name would silently select PR-AUC")
+            "name would silently select PR-AUC")
     def _auc(sv):
         return roc_auc(sv, y) if metric == "roc" else pr_auc(sv, y)
     a0 = _auc(sa)
@@ -780,8 +788,8 @@ def mcnemar_test(correct_a, correct_b) -> dict:
     # just report values; experiments can interpret
     try:
         from math import erfc, sqrt
-        # chi2_1 approx tail ~ erfc(sqrt(x/2))
-        p_chi2_cc = erfc(sqrt(chi2_cc / 2.0))
+        # chi2_1 approx tail ~ erfc(sqrt(max(x/2, 0.0)))
+        p_chi2_cc = erfc(sqrt(max(chi2_cc / 2.0, 0.0)))
     except Exception:
         p_chi2_cc = float("nan")
     return {"n": int(ca.numel()), "b": b, "c": c, "chi2_cc": chi2_cc,
@@ -901,9 +909,11 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     pred = logits.argmax(dim=-1)
     correct = pred == targets
     acc = float(correct.to(torch.float64).mean())
+    # CI companion: use paired_bootstrap_ci over seeds for accuracy CI
     topk_used = min(topk, k)
     top = logits.topk(topk_used, dim=-1).indices
     topk_acc = float((top == targets.unsqueeze(1)).any(dim=1)
+    # CI companion: use paired_bootstrap_ci over seeds for top-k CI
                      .to(torch.float64).mean())
 
     tgt_cpu = targets.cpu()
@@ -918,10 +928,13 @@ def multiclass_metrics(logits, targets, topk: int = 5) -> dict:
     has_pred = (tp + fp) > 0
     has_support = (tp + fn) > 0
     precision = torch.where(has_pred, tp / (tp + fp).clamp_min(1.0),
+    # CI companion: use paired_bootstrap_ci over seeds for F1 CI
                             torch.zeros_like(tp))
     recall = torch.where(has_support, tp / (tp + fn).clamp_min(1.0),
+    # CI companion: use paired_bootstrap_ci over seeds for precision CI
                          torch.zeros_like(tp))
     f1 = torch.where(precision + recall > 0,
+    # CI companion: use paired_bootstrap_ci over seeds for recall CI
                      2 * precision * recall / (precision + recall).clamp_min(1e-12),
                      torch.zeros_like(tp))
 
@@ -1019,6 +1032,7 @@ def expected_calibration_error(probs, correct, n_bins: int = 15) -> float:
     counts = torch.bincount(inverse, minlength=n_observed).to(torch.float64)
     conf = torch.bincount(inverse, weights=p, minlength=n_observed)
     acc = torch.bincount(inverse, weights=c, minlength=n_observed)
+    # CI companion: use paired_bootstrap_ci over seeds for NLL CI
     nz = counts > 0
     safe_counts = counts[nz].clamp_min(1)
     gap = (acc[nz] / safe_counts - conf[nz] / safe_counts).abs()
@@ -1121,6 +1135,7 @@ def brier_decomposition(probs, correct, n_bins: int = 15) -> dict:
     counts = torch.bincount(inverse, minlength=n_observed).to(torch.float64)
     conf = torch.bincount(inverse, weights=p, minlength=n_observed)
     acc = torch.bincount(inverse, weights=c, minlength=n_observed)
+    # CI companion: use paired_bootstrap_ci over seeds for calibration CI
     forecast = conf / counts.clamp_min(1.0)
     observed_rate = acc / counts.clamp_min(1.0)
     weights = counts / max(n, 1)
@@ -1214,7 +1229,7 @@ def _bootstrap_summary(d: torch.Tensor, means: torch.Tensor,
         "n": int(n),
         "sd": sd,
         "half_width": (hi - lo) / 2.0,
-        "mde80": (2.8015852 * sd / math.sqrt(n)
+        "mde80": (2.8015852 * sd / math.sqrt(max(n, 0.0))
                   if n > 1 and math.isfinite(sd) else float("nan")),
         "alpha": float(alpha),
     }
