@@ -31,9 +31,9 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
     if verdict is None:
         raise BaselineVerdictError(
             f"{tag}: no baselines_verdict.json in {out_dir}; the HB1/HB3/"
-            f"HB4/HB5 validity gates have not been certified for this "
-            f"protocol, so no mechanism claim may be produced - run "
-            f"`--only baselines` first")
+            "HB4/HB5 validity gates have not been certified for this "
+            "protocol, so no mechanism claim may be produced - run "
+            "`--only baselines` first")
     stale = _verdict_provenance_note(verdict, settings)
     if stale:
         raise BaselineVerdictError(
@@ -118,7 +118,7 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
                                 uniformity.get("uniform_supported"), bool):
                         failed.append(
                             f"eval_answer_balance.streams[{label!r}] "
-                            f"(malformed: missing boolean uniformity mark)")
+                            "(malformed: missing boolean uniformity mark)")
             e2 = balance.get("e2_length_sweep")
             if e2 is not None:
                 if not isinstance(e2, Mapping):
@@ -155,10 +155,10 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
     if failed:
         raise BaselineVerdictError(
             f"{tag}: baseline validity gate(s) {', '.join(failed)} failed "
-            f"in baselines_verdict.json; their pre-registered semantics "
-            f"invalidate every grid result above them, so the grid is not "
-            f"started (fix the task/data/loop and re-run `--only "
-            f"baselines`)")
+            "in baselines_verdict.json; their pre-registered semantics "
+            "invalidate every grid result above them, so the grid is not "
+            "started (fix the task/data/loop and re-run `--only "
+            "baselines`)")
     floor = _verdict_seed_floor(verdict, settings)
     marks = {
         "source": "baselines_verdict.json",
@@ -195,9 +195,9 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
               f"{', '.join(provisional)} are supported only provisionally: "
               f"they rest on {floor['n_seeds']} seed(s), below the "
               f"pre-registered claim floor {floor['min_seeds_for_claim']} "
-              f"(Settings.min_seeds_for_claim); they are stamped and "
-              f"displayed as provisional, and no seed-level claim may be "
-              f"based on them")
+              "(Settings.min_seeds_for_claim); they are stamped and "
+              "displayed as provisional, and no seed-level claim may be "
+              "based on them")
     if marks["eval_answer_balance_all_uniform"] is False:
         bad = [label for label, row in balance_streams.items()
                if isinstance(row, Mapping)
@@ -205,9 +205,9 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
                    "uniform_supported") is False]
         print(f"[{tag}] WARNING: held-out answer balance failed on stream(s) "
               f"{', '.join(bad) or 'unknown'}: accuracy-based readings on "
-              f"those streams are class-prior readings, so the F1/PR-AUC "
-              f"companions carry the headline and the balance premise is "
-              f"stamped as failed in the baseline validity marks")
+              "those streams are class-prior readings, so the F1/PR-AUC "
+              "companions carry the headline and the balance premise is "
+              "stamped as failed in the baseline validity marks")
     if e2_balance.get("endpoint_uniform") is False:
         raw_endpoints = e2_balance.get("endpoint_lengths")
         endpoints = (list(raw_endpoints)
@@ -222,9 +222,9 @@ def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
                 .get("uniform_supported")) is not True]
         print(f"[{tag}] WARNING: E2 length-sweep endpoint balance failed at "
               f"length(s) {', '.join(bad_lengths) or 'unknown'}: accuracy at "
-              f"the base/longest endpoints is a class-prior reading, so the "
-              f"length-generalisation accuracy contrasts cannot support a "
-              f"claim")
+              "the base/longest endpoints is a class-prior reading, so the "
+              "length-generalisation accuracy contrasts cannot support a "
+              "claim")
     return verdict
 
 
@@ -305,7 +305,7 @@ def _competence_check(named_runs, correct_and_n, chance, what="arm"):
             best = name
     return {
         "check": (f"at least one {what} has a seed-clustered one-sided "
-                  f"95% family-wise lower bound above chance "
+                  "95% family-wise lower bound above chance "
                   f"(Bonferroni over {n_arms} arms)"),
         "method": ("two-level bootstrap: resample training seeds, shared "
                    "binomial draw on the common evaluation stream; lower "
@@ -367,11 +367,13 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
                 if reference is not None else None)
     valid_ref_runs = _curve_valid_runs(ref_runs or [])
     ref_accuracy = {}
+    # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
     for run in valid_ref_runs:
         seed = run.get("seed")
         if seed is not None and _finite(run.get("accuracy")):
             ref_accuracy[seed] = float(run["accuracy"])
     all_ref_accuracy = {}
+    # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
     for run in ref_runs or ():
         seed = run.get("seed")
         if seed is not None and _finite(run.get("accuracy")):
@@ -441,10 +443,10 @@ def _efficiency_companion(settings: Settings, out_dir: pathlib.Path,
         entries[label] = rec
 
     print(f"\n[{experiment}] inference cost (batch=1, seq_len={seq_len}; "
-          f"FLOPs are analytic forward matmuls; latency is the eval-mode "
+          "FLOPs are analytic forward matmuls; latency is the eval-mode "
           f"median of {_EFFICIENCY_REPEATS} passes on {settings.device}; "
-          f"d_acc uses curve-valid paired seeds (acc is all runs); ratios "
-          f"and cost are companions, not decision rules):")
+          "d_acc uses curve-valid paired seeds (acc is all runs); ratios "
+          "and cost are companions, not decision rules):")
     print(f"{'cell':>23} {'params':>9} {'param_x':>8} {'GFLOP':>8} "
           f"{'gflop_x':>8} {'lat_ms':>8} {'lat_x':>7} {'d_acc':>8} "
           f"{'acc':>7}")
@@ -629,11 +631,11 @@ def _complexity_cost_companion(settings: Settings, out_dir: pathlib.Path,
             sum(deltas) / max(len(deltas), 1) if deltas else float("nan"))
         rec["accuracy_delta_n"] = len(deltas)
 
-    print(f"\n[e1] complexity cost (batch=1, seq_len="
+    print("\n[e1] complexity cost (batch=1, seq_len="
           f"{_efficiency_seq_len(settings)}; cost ratios are deep none / "
-          f"reference; d_acc is deep minus reference, and both acc and "
-          f"d_acc use curve-valid seeds (all-run deep mean stored as "
-          f"accuracy_mean_all); companions only):")
+          "reference; d_acc is deep minus reference, and both acc and "
+          "d_acc use curve-valid seeds (all-run deep mean stored as "
+          "accuracy_mean_all); companions only):")
     print(f"{'arm':>28} {'params':>9} {'GFLOP':>8} {'lat_ms':>8} "
           f"{'acc':>7} {'d_acc':>8} {'param_x':>8} {'gflop_x':>8} "
           f"{'lat_x':>8}")
@@ -692,7 +694,7 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
         }
         _write_json(out_dir / f"{experiment}_efficiency.json", payload)
         print(f"[{experiment}] inference cost scaling: empty sweep; no "
-              f"base/longest point to measure")
+              "base/longest point to measure")
         return payload
     clean_cells = []
     for item in _materialize_runs(cells):
@@ -703,11 +705,13 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
     ref_runs = (runs_by_label.get(str(reference))
                 if reference is not None else None)
     ref_accuracy = {}
+    # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
     for run in _curve_valid_runs(ref_runs or []):
         seed = run.get("seed")
         if seed is not None:
             ref_accuracy[seed] = run.get("accuracy_by_length") or {}
     all_ref_accuracy = {}
+    # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
     for run in ref_runs or ():
         seed = run.get("seed")
         if seed is not None:
@@ -790,10 +794,10 @@ def _length_efficiency_companion(settings: Settings, out_dir: pathlib.Path,
 
     base, longest = lengths[0], lengths[-1]
     print(f"\n[{experiment}] inference cost scaling (batch=1; FLOPs are "
-          f"analytic forward matmuls; latency is the eval-mode median of "
+          "analytic forward matmuls; latency is the eval-mode median of "
           f"{_EFFICIENCY_REPEATS} passes on {settings.device}; d_acc uses "
-          f"curve-valid paired seeds (acc is all runs); cost is a "
-          f"companion, not a decision rule):")
+          "curve-valid paired seeds (acc is all runs); cost is a "
+          "companion, not a decision rule):")
     print(f"{'arm':>16} {'GFLOP@' + str(base):>11} "
           f"{'GFLOP@' + str(longest):>11} {'gflop_x':>8} "
           f"{'lat@' + str(base):>10} {'lat@' + str(longest):>10} "
@@ -1364,6 +1368,6 @@ def _enforce_reproducibility(settings: Settings, out_dir: pathlib.Path,
                      **_run_context(settings)})
         raise ReproducibilityError(
             f"{tag}: seed-determinism audit failed for {failed}; same-seed "
-            f"reruns are not stable on this machine, so every seed-level "
-            f"statistic produced by the grid would be unrepeatable")
+            "reruns are not stable on this machine, so every seed-level "
+            "statistic produced by the grid would be unrepeatable")
     return audit
