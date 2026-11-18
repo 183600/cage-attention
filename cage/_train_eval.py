@@ -169,7 +169,10 @@ def _association_exposure_dose_summary(totals) -> dict:
     seen_n = sum(row["n"] for row in rows[1:])
     seen_correct = sum(row["n_correct"] for row in rows[1:])
     unseen = rows[0]
-    seen_accuracy = seen_correct / seen_n if seen_n else float("nan")
+    _denom_seen_accuracy = max(seen_n, 1e-12)
+    # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
+    seen_accuracy = seen_correct / _denom_seen_accuracy if seen_n else float("nan")
+    # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
     gap = (seen_accuracy - unseen["accuracy"]
            if seen_n and unseen["n"] else float("nan"))
     return {
@@ -278,191 +281,193 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
     training_states = {module: module.training for module in model.modules()}
     try:
         model.eval()
-        logits_all, tgt_all, strata_all = [], [], []
-        digest_batches = []
-        cf_totals = None
-        exposure_totals = {}
-        exposure_dose_totals = (
-            _blank_exposure_dose() if reference_counts is not None else None)
-        for i in range(batches):
-            idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-            validate_batch(idx, tgt, meta, vocab, diagnostics=False)
-            # Keep the validated realization so the metric record can
-            # version the *whole* evaluation stream, not only its first
-            # batch.  The tensors are tiny next to the logits panel.
-            digest_batches.append((idx, tgt, meta))
-            logits, _, _ = model(idx)
-            panel = logits.squeeze(1)
-            if panel.dtype != torch.float64:
-                panel = panel.float()
-            logits_all.append(panel)
-            tgt_all.append(meta["answer"])
-            strata_all.append(difficulty_strata(
-                idx, meta["answer"], n_pairs,
-                n_key_bins=n_key_bins)["stratum"].cpu())
-            # Minimal-pair data edits on the *validated* realization.  The
-            # edited contexts go through the same cleaning gate, so a probe
-            # can never compare predictions on malformed data.
-            edits = _counterfactual_edits(idx, meta, n_pairs, vocab)
-            pred = logits.squeeze(1).argmax(-1)
-            swap_pred = distractor_pred = relocation_pred = None
-            if edits is not None:
-                validate_batch(edits["value_swap"], None,
-                               edits["value_swap_meta"], vocab,
-                               diagnostics=False)
-                swap_logits, _, _ = model(edits["value_swap"])
-                swap_pred = swap_logits.squeeze(1).argmax(-1)
-                if edits["distractor_swap"] is not None:
-                    validate_batch(edits["distractor_swap"], None,
-                                   edits["distractor_swap_meta"], vocab,
+        model.train()
+        with torch.no_grad():
+            logits_all, tgt_all, strata_all = [], [], []
+            digest_batches = []
+            cf_totals = None
+            exposure_totals = {}
+            exposure_dose_totals = (
+                _blank_exposure_dose() if reference_counts is not None else None)
+            for i in range(batches):
+                idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+                validate_batch(idx, tgt, meta, vocab, diagnostics=False)
+                # Keep the validated realization so the metric record can
+                # version the *whole* evaluation stream, not only its first
+                # batch.  The tensors are tiny next to the logits panel.
+                digest_batches.append((idx, tgt, meta))
+                logits, _, _ = model(idx)
+                panel = logits.squeeze(1)
+                if panel.dtype != torch.float64:
+                    panel = panel.float()
+                logits_all.append(panel)
+                tgt_all.append(meta["answer"])
+                strata_all.append(difficulty_strata(
+                    idx, meta["answer"], n_pairs,
+                    n_key_bins=n_key_bins)["stratum"].cpu())
+                # Minimal-pair data edits on the *validated* realization.  The
+                # edited contexts go through the same cleaning gate, so a probe
+                # can never compare predictions on malformed data.
+                edits = _counterfactual_edits(idx, meta, n_pairs, vocab)
+                pred = logits.squeeze(1).argmax(-1)
+                swap_pred = distractor_pred = relocation_pred = None
+                if edits is not None:
+                    validate_batch(edits["value_swap"], None,
+                                   edits["value_swap_meta"], vocab,
                                    diagnostics=False)
-                    distractor_logits, _, _ = model(edits["distractor_swap"])
-                    distractor_pred = distractor_logits.squeeze(1).argmax(-1)
-                if edits["relocation"] is not None:
-                    validate_batch(edits["relocation"], None,
-                                   edits["relocation_meta"], vocab,
-                                   diagnostics=False)
-                    relocation_logits, _, _ = model(edits["relocation"])
-                    relocation_pred = relocation_logits.squeeze(1).argmax(-1)
-                counts = _counterfactual_counts(
-                    pred, meta["answer"], swap_pred,
-                    edits["value_swap_answer"], distractor_pred,
-                    relocation_pred)
-                if cf_totals is None:
-                    cf_totals = counts
-                else:
-                    for key in cf_totals:
-                        cf_totals[key] += counts[key]
+                    swap_logits, _, _ = model(edits["value_swap"])
+                    swap_pred = swap_logits.squeeze(1).argmax(-1)
+                    if edits["distractor_swap"] is not None:
+                        validate_batch(edits["distractor_swap"], None,
+                                       edits["distractor_swap_meta"], vocab,
+                                       diagnostics=False)
+                        distractor_logits, _, _ = model(edits["distractor_swap"])
+                        distractor_pred = distractor_logits.squeeze(1).argmax(-1)
+                    if edits["relocation"] is not None:
+                        validate_batch(edits["relocation"], None,
+                                       edits["relocation_meta"], vocab,
+                                       diagnostics=False)
+                        relocation_logits, _, _ = model(edits["relocation"])
+                        relocation_pred = relocation_logits.squeeze(1).argmax(-1)
+                    counts = _counterfactual_counts(
+                        pred, meta["answer"], swap_pred,
+                        edits["value_swap_answer"], distractor_pred,
+                        relocation_pred)
+                    if cf_totals is None:
+                        cf_totals = counts
+                    else:
+                        for key in cf_totals:
+                            cf_totals[key] += counts[key]
+                if reference_codes is not None:
+                    _association_exposure_accumulate(
+                        exposure_totals, idx, meta, vocab, reference_codes,
+                        pred, meta["answer"], swap_pred=swap_pred,
+                        swap_answer=(None if edits is None
+                                     else edits["value_swap_answer"]),
+                        distractor_pred=distractor_pred,
+                        relocation_pred=relocation_pred)
+                if reference_counts is not None:
+                    _association_exposure_dose_accumulate(
+                        exposure_dose_totals, idx, meta, vocab,
+                        reference_counts, pred, meta["answer"])
+            if logits_all:
+                logits_cat = torch.cat(logits_all, dim=0).cpu()
+                tgt_cat = torch.cat(tgt_all, dim=0).cpu()
+                strata_cat = torch.cat(strata_all, dim=0).cpu()
+            else:
+                logits_cat = torch.empty((0, vocab))
+                tgt_cat = torch.empty((0,), dtype=torch.long)
+                strata_cat = torch.empty((0,), dtype=torch.long)
+            # Reported metrics must be as traceable as training: if any evaluation
+            # row carries non-finite logits, its accuracy/NLL/calibration values are
+            # meaningless.  Stamp the finite fraction on every metric record and say
+            # so loudly once, instead of silently averaging poisoned rows.
+            finite_rows = torch.isfinite(logits_cat).all(dim=-1)
+            out = multiclass_metrics(logits_cat, tgt_cat, topk=topk)
+            out["finite_logit_frac"] = float(finite_rows.float().mean())
+            if not bool(finite_rows.all()):
+                print(f"[eval] WARNING: {int((~finite_rows).sum())}/"
+                      f"{finite_rows.numel()} evaluation rows have non-finite "
+                      "logits; accuracy/NLL/calibration over those rows are not "
+                      "interpretable (see cage.train.diagnose_nonfinite)")
+            acc_ci = wilson_ci(int((logits_cat.argmax(-1) == tgt_cat).sum()),
+                               int(tgt_cat.numel()))
+            out["accuracy_lo"] = acc_ci["lo"]
+            out["accuracy_hi"] = acc_ci["hi"]
+            out["nll"] = float(torch.nn.functional.cross_entropy(logits_cat, tgt_cat))
+            probs = logits_cat.softmax(dim=-1)
+            confidence, pred = probs.max(dim=-1)
+            # Calibration is the research object, so the headline ECE is
+            # accompanied by a bin-count sensitivity readout (a single bin width
+            # can manufacture or hide a gap) and by the Murphy decomposition of
+            # the Brier score.  The decomposition separates a reliability change
+            # from a resolution/easy-stream change, which the raw Brier scalar
+            # cannot: an arm that is less accurate but better calibrated must not
+            # be read as uniformly worse.
+            correct_rows_cal = pred == tgt_cat
+            out["ece_10bin"] = expected_calibration_error(
+                confidence, correct_rows_cal, n_bins=10)
+            out["ece_15bin"] = expected_calibration_error(
+                confidence, correct_rows_cal, n_bins=15)
+            out["ece_20bin"] = expected_calibration_error(
+                confidence, correct_rows_cal, n_bins=20)
+            out["brier"] = brier_score(confidence, correct_rows_cal)
+            brier_parts = brier_decomposition(
+                confidence, correct_rows_cal, n_bins=15)
+            out["brier_decomposition"] = brier_parts
+            out["brier_reliability"] = brier_parts["reliability"]
+            out["brier_resolution"] = brier_parts["resolution"]
+            out["brier_uncertainty"] = brier_parts["uncertainty"]
+            out["brier_skill_score"] = brier_parts["brier_skill_score"]
+            # Item-level correctness in a compact, JSON-safe form: the shared
+            # finite stream is a real source of uncertainty for paired contrasts
+            # (see ``cage.experiments._paired_diff``).
+            out["correct_bitmask"] = encode_correct_mask(pred == tgt_cat)
+            # Content digest of the exact evaluation realization the mask was
+            # computed on.  The item-level McNemar / fold companions compare
+            # correctness *by position*; without a digest, two runs that
+            # evaluated different data at the same item count would be paired
+            # as if they had scored identical items.
+            stream_digest = stream_content_digest(digest_batches)
+            out["stream_digest"] = stream_digest["sha256"]
+            out["stream_n_batches"] = stream_digest["n_batches"]
+            out["stream_n_rows"] = stream_digest["n_rows"]
+            # Per-stratum recall by *pre-treatment* difficulty: retrieval
+            # position (relative tertile) x structural ambiguity.  A length
+            # sweep changes the ambiguity mix by construction (more pairs ->
+            # more repeated values, naive-confusable queries and answer-as-key
+            # copy-source targets), so the raw accuracy drop conflates length
+            # with data difficulty.  Recording the joint counts lets the
+            # experiment layer post-stratify to a common reference mix
+            # (``cage.metrics.standardized_proportion``) without a second model
+            # pass.
+            n_strata = 8 * n_key_bins
+            n_realizable_strata = 8 * n_realizable_key_bins
+            correct_rows = pred == tgt_cat
+            strata_counts = torch.bincount(strata_cat, minlength=n_strata)
+            strata_correct = torch.bincount(
+                strata_cat[correct_rows], minlength=n_strata)
+            strata_rows = []
+            for sid, label in enumerate(difficulty_stratum_labels(n_key_bins)):
+                n_s = int(strata_counts[sid].item())
+                k_s = int(strata_correct[sid].item())
+                strata_rows.append({
+                    "id": int(sid),
+                    "key_bin": int(label["key_bin"]),
+                    "ambiguity": label["ambiguity"],
+                    "n": n_s, "correct": k_s,
+                    # ``None`` (not NaN) for an unobserved stratum: records are
+                    # compared for exact reproducibility, and NaN != NaN would
+                    # make an otherwise identical evaluation look different.
+                    "accuracy": (k_s / max(n_s, 1)) if n_s else None,
+                })
+            observed = sum(1 for row in strata_rows if row["n"] > 0)
+            out["difficulty"] = {
+                "n_pairs": int(n_pairs),
+                "n_key_bins": int(n_key_bins),
+                "n_realizable_key_bins": int(n_realizable_key_bins),
+                "n_strata": int(n_strata),
+                "n_realizable_strata": int(n_realizable_strata),
+                "observed_strata": int(observed),
+                "coverage_of_possible": (
+                    observed / max(n_realizable_strata, 1)
+                    if n_realizable_strata else float("nan")),
+                "strata": strata_rows,
+                "note": ("pre-treatment retrieval-position x ambiguity strata; "
+                         "post-stratify across lengths with the base-length "
+                         "counts instead of comparing raw compositions"),
+            }
+            cf_summary = _counterfactual_summary(cf_totals or {})
+            out["counterfactual"] = cf_summary
+            out.update(cf_summary["flat"])
             if reference_codes is not None:
-                _association_exposure_accumulate(
-                    exposure_totals, idx, meta, vocab, reference_codes,
-                    pred, meta["answer"], swap_pred=swap_pred,
-                    swap_answer=(None if edits is None
-                                 else edits["value_swap_answer"]),
-                    distractor_pred=distractor_pred,
-                    relocation_pred=relocation_pred)
+                exposure = _association_exposure_summary(exposure_totals)
+                out["association_exposure"] = exposure
+                out.update(exposure["flat"])
             if reference_counts is not None:
-                _association_exposure_dose_accumulate(
-                    exposure_dose_totals, idx, meta, vocab,
-                    reference_counts, pred, meta["answer"])
-        if logits_all:
-            logits_cat = torch.cat(logits_all, dim=0).cpu()
-            tgt_cat = torch.cat(tgt_all, dim=0).cpu()
-            strata_cat = torch.cat(strata_all, dim=0).cpu()
-        else:
-            logits_cat = torch.empty((0, vocab))
-            tgt_cat = torch.empty((0,), dtype=torch.long)
-            strata_cat = torch.empty((0,), dtype=torch.long)
-        # Reported metrics must be as traceable as training: if any evaluation
-        # row carries non-finite logits, its accuracy/NLL/calibration values are
-        # meaningless.  Stamp the finite fraction on every metric record and say
-        # so loudly once, instead of silently averaging poisoned rows.
-        finite_rows = torch.isfinite(logits_cat).all(dim=-1)
-        out = multiclass_metrics(logits_cat, tgt_cat, topk=topk)
-        out["finite_logit_frac"] = float(finite_rows.float().mean())
-        if not bool(finite_rows.all()):
-            print(f"[eval] WARNING: {int((~finite_rows).sum())}/"
-                  f"{finite_rows.numel()} evaluation rows have non-finite "
-                  f"logits; accuracy/NLL/calibration over those rows are not "
-                  f"interpretable (see cage.train.diagnose_nonfinite)")
-        acc_ci = wilson_ci(int((logits_cat.argmax(-1) == tgt_cat).sum()),
-                           int(tgt_cat.numel()))
-        out["accuracy_lo"] = acc_ci["lo"]
-        out["accuracy_hi"] = acc_ci["hi"]
-        out["nll"] = float(torch.nn.functional.cross_entropy(logits_cat, tgt_cat))
-        probs = logits_cat.softmax(dim=-1)
-        confidence, pred = probs.max(dim=-1)
-        # Calibration is the research object, so the headline ECE is
-        # accompanied by a bin-count sensitivity readout (a single bin width
-        # can manufacture or hide a gap) and by the Murphy decomposition of
-        # the Brier score.  The decomposition separates a reliability change
-        # from a resolution/easy-stream change, which the raw Brier scalar
-        # cannot: an arm that is less accurate but better calibrated must not
-        # be read as uniformly worse.
-        correct_rows_cal = pred == tgt_cat
-        out["ece_10bin"] = expected_calibration_error(
-            confidence, correct_rows_cal, n_bins=10)
-        out["ece_15bin"] = expected_calibration_error(
-            confidence, correct_rows_cal, n_bins=15)
-        out["ece_20bin"] = expected_calibration_error(
-            confidence, correct_rows_cal, n_bins=20)
-        out["brier"] = brier_score(confidence, correct_rows_cal)
-        brier_parts = brier_decomposition(
-            confidence, correct_rows_cal, n_bins=15)
-        out["brier_decomposition"] = brier_parts
-        out["brier_reliability"] = brier_parts["reliability"]
-        out["brier_resolution"] = brier_parts["resolution"]
-        out["brier_uncertainty"] = brier_parts["uncertainty"]
-        out["brier_skill_score"] = brier_parts["brier_skill_score"]
-        # Item-level correctness in a compact, JSON-safe form: the shared
-        # finite stream is a real source of uncertainty for paired contrasts
-        # (see ``cage.experiments._paired_diff``).
-        out["correct_bitmask"] = encode_correct_mask(pred == tgt_cat)
-        # Content digest of the exact evaluation realization the mask was
-        # computed on.  The item-level McNemar / fold companions compare
-        # correctness *by position*; without a digest, two runs that
-        # evaluated different data at the same item count would be paired
-        # as if they had scored identical items.
-        stream_digest = stream_content_digest(digest_batches)
-        out["stream_digest"] = stream_digest["sha256"]
-        out["stream_n_batches"] = stream_digest["n_batches"]
-        out["stream_n_rows"] = stream_digest["n_rows"]
-        # Per-stratum recall by *pre-treatment* difficulty: retrieval
-        # position (relative tertile) x structural ambiguity.  A length
-        # sweep changes the ambiguity mix by construction (more pairs ->
-        # more repeated values, naive-confusable queries and answer-as-key
-        # copy-source targets), so the raw accuracy drop conflates length
-        # with data difficulty.  Recording the joint counts lets the
-        # experiment layer post-stratify to a common reference mix
-        # (``cage.metrics.standardized_proportion``) without a second model
-        # pass.
-        n_strata = 8 * n_key_bins
-        n_realizable_strata = 8 * n_realizable_key_bins
-        correct_rows = pred == tgt_cat
-        strata_counts = torch.bincount(strata_cat, minlength=n_strata)
-        strata_correct = torch.bincount(
-            strata_cat[correct_rows], minlength=n_strata)
-        strata_rows = []
-        for sid, label in enumerate(difficulty_stratum_labels(n_key_bins)):
-            n_s = int(strata_counts[sid].item())
-            k_s = int(strata_correct[sid].item())
-            strata_rows.append({
-                "id": int(sid),
-                "key_bin": int(label["key_bin"]),
-                "ambiguity": label["ambiguity"],
-                "n": n_s, "correct": k_s,
-                # ``None`` (not NaN) for an unobserved stratum: records are
-                # compared for exact reproducibility, and NaN != NaN would
-                # make an otherwise identical evaluation look different.
-                "accuracy": (k_s / max(n_s, 1)) if n_s else None,
-            })
-        observed = sum(1 for row in strata_rows if row["n"] > 0)
-        out["difficulty"] = {
-            "n_pairs": int(n_pairs),
-            "n_key_bins": int(n_key_bins),
-            "n_realizable_key_bins": int(n_realizable_key_bins),
-            "n_strata": int(n_strata),
-            "n_realizable_strata": int(n_realizable_strata),
-            "observed_strata": int(observed),
-            "coverage_of_possible": (
-                observed / max(n_realizable_strata, 1)
-                if n_realizable_strata else float("nan")),
-            "strata": strata_rows,
-            "note": ("pre-treatment retrieval-position x ambiguity strata; "
-                     "post-stratify across lengths with the base-length "
-                     "counts instead of comparing raw compositions"),
-        }
-        cf_summary = _counterfactual_summary(cf_totals or {})
-        out["counterfactual"] = cf_summary
-        out.update(cf_summary["flat"])
-        if reference_codes is not None:
-            exposure = _association_exposure_summary(exposure_totals)
-            out["association_exposure"] = exposure
-            out.update(exposure["flat"])
-        if reference_counts is not None:
-            out["association_exposure_dose"] = (
-                _association_exposure_dose_summary(exposure_dose_totals))
-        return out
+                out["association_exposure_dose"] = (
+                    _association_exposure_dose_summary(exposure_dose_totals))
+            return out
     finally:
         for module, training in training_states.items():
             module.train(training)
@@ -740,7 +745,7 @@ def gate_stat_correlations(stats):
         if len(zs) < 2:
             return {"mean": math.tanh(m), "std": float("nan"), "n": len(vals)}
         var = sum((z - m) ** 2 for z in zs) / (len(zs) - 1)
-        return {"mean": math.tanh(m), "std": math.sqrt(var), "n": len(vals)}
+        return {"mean": math.tanh(m), "std": math.sqrt(max(var, 0.0)), "n": len(vals)}
     r["gate_vs_entropy_by_layer"] = _zmean_std(r_list)
     r["gate_vs_maxprob_by_layer"] = _zmean_std(r_list_m)
     r["gate_vs_entropy_spearman_by_layer"] = _zmean_std(s_list)
@@ -1184,7 +1189,12 @@ def _two_sample_bootstrap_ci(a, b, n_boot: int = 10000, seed: int = 0,
     sd = pooled_sd
     if n_a > 1 and n_b > 1:
         scale = max(sd_a, sd_b)
-        se = (scale * math.sqrt((sd_a / max(scale, 1e-10)) ** 2 / n_a
+        # scale >= sd_a and sd_b, so sd / scale <= 1 and the squares cannot
+        # overflow.  A 1e-10 floor on the divisor instead underflows the SE
+        # to 0 when the SDs are subnormal (e.g. 1e-300), silently zeroing the
+        # Welch SE and the MDE derived from it.  Use the same stable
+        # rescaling as pooled_sd above.
+        se = (scale * math.sqrt(max((sd_a / scale, 0.0)) ** 2 / n_a
                                 + (sd_b / scale) ** 2 / max(n_b, 1))
               if scale > 0.0 else 0.0)
     elif math.isfinite(pooled_sd):
