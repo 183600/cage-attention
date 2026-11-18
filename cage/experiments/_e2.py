@@ -106,7 +106,7 @@ def _calibration_coefficients(model) -> dict:
 # length sweep inside a full-factorial design - no term combination is left
 # unmeasured.  ``calib_raw_ent`` adds the one-factor normalisation ablation
 # (H2g): both terms on, identical architecture, but the concentration term
-# reads raw entropy instead of H/log(T).  The calib arms carry
+# reads raw entropy instead of H/log(max(T, 1e-300)).  The calib arms carry
 # ``calib_variant`` labels next to ``gate="calib"``, so the
 # controlled-variable audit attributes a contrast to the term/normalisation
 # flag rather than to the gate.
@@ -156,11 +156,11 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
         print("[e2] per-length paired contrasts: empty sweep; no endpoint "
               "to read")
         return payload
-    print(f"\n[e2] per-length paired contrasts (exploratory, outside the "
+    print("\n[e2] per-length paired contrasts (exploratory, outside the "
           f"FDR family): the endpoint decision above uses L={lengths[-1]} "
-          f"only; these rows ask whether an earlier sweep length reverses "
-          f"or exaggerates that effect on the same seeds/streams.  An "
-          f"interior reversal is diagnostic, not a new decision rule.")
+          "only; these rows ask whether an earlier sweep length reverses "
+          "or exaggerates that effect on the same seeds/streams.  An "
+          "interior reversal is diagnostic, not a new decision rule.")
     print(f"{'contrast':>18} {'length':>7} {'arm_a':>9} {'control':>9} "
           f"{'paired_diff':>28} {'seeds':>6} {'control':>9}")
     payload = {"lengths": list(lengths), "contrasts": {},
@@ -189,6 +189,7 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
                 return dict(
                     r,
                     accuracy=_length_entry(r.get("accuracy_by_length"),
+                    # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
                                            length),
                     correct_bitmask=metrics.get("correct_bitmask"),
                     stream_digest=metrics.get("stream_digest"),
@@ -267,10 +268,10 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
             and endpoint["seeds_used"] == recompute["seeds_used"])
         if not endpoint_matches:
             print(f"      -> {rule}: WARNING the per-length longest-row does "
-                  f"not reproduce the pre-registered accuracy_at_longest "
+                  "not reproduce the pre-registered accuracy_at_longest "
                   f"contrast (per-length {_fmt_ci(endpoint)} vs direct "
                   f"{_fmt_ci(direct)}); treat the per-length alignment as "
-                  f"broken")
+                  "broken")
         endpoint_sign = endpoint["signed_direction"]
         interior = rule_rows[1:-1]
         reversals = [row["length"] for row in interior
@@ -308,8 +309,8 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
         if reversals:
             print(f"      -> {rule}: INTERIOR REVERSAL at L={reversals} "
                   f"(endpoint sign {endpoint_sign:+d}); the endpoint "
-                  f"decision is unchanged, but length robustness is not "
-                  f"monotone")
+                  "decision is unchanged, but length robustness is not "
+                  "monotone")
         elif endpoint_sign and worst is not None and worst["length"] != lengths[-1]:
             direction = ("benefit" if endpoint_sign > 0 else "loss")
             relation = ("overstates" if endpoint_sign > 0 else "understates")
@@ -317,13 +318,13 @@ def _e2_per_length_contrasts(settings: Settings, out_dir: pathlib.Path,
                   f"{relation} the {direction} (most extreme L="
                   f"{worst['length']}, {worst['mean']:+.4f} vs endpoint "
                   f"{endpoint['mean']:+.4f}); the endpoint decision is "
-                  f"unchanged but is not the conservative summary")
+                  "unchanged but is not the conservative summary")
         elif endpoint_sign:
             print(f"      -> {rule}: no interior reversal and the endpoint "
-                  f"is the worst point")
+                  "is the worst point")
         else:
             print(f"      -> {rule}: endpoint effect is not confidently "
-                  f"signed, so no reversal conclusion is drawn")
+                  "signed, so no reversal conclusion is drawn")
         payload["contrasts"][rule] = {"rows": rule_rows,
                                       "summary": verdict}
     _write_json(out_dir / "e2_length_contrasts.json", payload)
@@ -441,7 +442,7 @@ def _e2_term_knockout_companion(by_variant: dict, lengths: list) -> dict:
             if _finite(agg.get("mean")):
                 print(f"  retrained {reference} @L={selected[-1]}: "
                       f"{agg['mean']:.3f}±{agg['std']:.3f} (reference point, "
-                      f"not subtraction target)")
+                      "not subtraction target)")
     return payload
 
 
@@ -723,11 +724,11 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
         1, min(int(settings.per_variant_tune_seeds), len(settings.seeds)))])
     claim_floor = min(int(settings.min_seeds_for_claim), len(settings.seeds))
     if len(tune_seeds) < claim_floor:
-        print(f"[e2] WARNING: per-variant tuning selects on "
+        print("[e2] WARNING: per-variant tuning selects on "
               f"{len(tune_seeds)} seed(s), below the pre-registered claim "
               f"floor {claim_floor}; the tuned recipes are noisier than the "
-              f"controlled ones and the two accounts must still be read "
-              f"separately")
+              "controlled ones and the two accounts must still be read "
+              "separately")
     candidate_lrs = sorted({reference_lr,
                             *(float(v) for v in settings.lr_grid)})
     default_tau = float(Cfg().calib_tau_init)
@@ -795,7 +796,7 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
             lr_rows.append({
                 "lr": float(lr), "calib_tau_init": default_tau,
                 "val_accuracy_mean": mean,
-                "val_accuracy_std": math.sqrt(var) if math.isfinite(var)
+                "val_accuracy_std": math.sqrt(max(var, 0.0)) if math.isfinite(var)
                 else float("nan"),
                 "n_seeds": len(accs), "curve_verdicts": verdicts,
                 "curve_invalid_runs": sum(
@@ -831,7 +832,7 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                 tau_rows.append({
                     "lr": final_lr, "calib_tau_init": float(tau),
                     "val_accuracy_mean": mean,
-                    "val_accuracy_std": math.sqrt(var) if math.isfinite(var)
+                    "val_accuracy_std": math.sqrt(max(var, 0.0)) if math.isfinite(var)
                     else float("nan"),
                     "n_seeds": len(accs), "curve_verdicts": verdicts,
                     "curve_invalid_runs": sum(
@@ -994,14 +995,14 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
                    "baseline by the pre-registered SESOI on both endpoint "
                    "metrics")
 
-    print(f"\n[e2] per-variant tuning (separate fairness accounting, "
-          f"exploratory and outside the FDR family): each primary arm's own "
+    print("\n[e2] per-variant tuning (separate fairness accounting, "
+          "exploratory and outside the FDR family): each primary arm's own "
           f"recipe is selected on validation seed {VAL_SEED} at the training "
           f"length over lr={candidate_lrs} (calib also over "
           f"calib_tau_init={candidate_taus}); selection seeds={tune_seeds}.  "
-          f"The controlled rows above freeze one recipe for all arms - this "
-          f"table asks whether calib still degrades less when none/query/null "
-          f"also get their own best shot:")
+          "The controlled rows above freeze one recipe for all arms - this "
+          "table asks whether calib still degrades less when none/query/null "
+          "also get their own best shot:")
     print(f"{'arm':>6} {'lr':>10} {'tau':>7} {'val_acc':>17} {'val_n':>6} "
           f"{'curve_invalid':>13} {'test_at_long':>17} {'test_drop':>17} "
           f"{'reused':>7}")
@@ -1029,11 +1030,11 @@ def _e2_per_variant_tuning(settings: Settings, out_dir: pathlib.Path,
               f"{'yes' if row['reused_reference_runs'] else 'no':>7}")
         if row.get("fallback"):
             print(f"       fallback: {row['fallback']}")
-    print(f"\n[e2] two accounting conventions side by side (endpoint "
-          f"accuracy metrics; controlled = same frozen recipe, tuned = each "
-          f"arm's own validation-selected recipe).  The pre-registered FDR "
-          f"family is the controlled column; the tuned column is the "
-          f"fairness robustness check and must not be averaged with it:")
+    print("\n[e2] two accounting conventions side by side (endpoint "
+          "accuracy metrics; controlled = same frozen recipe, tuned = each "
+          "arm's own validation-selected recipe).  The pre-registered FDR "
+          "family is the controlled column; the tuned column is the "
+          "fairness robustness check and must not be averaged with it:")
     print(f"{'contrast':>18} {'metric':>22} {'controlled':>28} "
           f"{'tuned':>28} {'tuned state':>38}")
     controlled_columns = {}
