@@ -86,6 +86,7 @@ def _curve_record(hist, early_stop_info=None, seeding=None):
     val = [h for h in hist if h.get("val_loss") is not None
            and _finite(h.get("val_loss"))]
     val_acc = [h for h in hist if h.get("val_acc") is not None
+    # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
                and _finite(h.get("val_acc"))]
 
     def _diagnoses(key):
@@ -191,8 +192,8 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
             stream_seed_key(s) for s in settings.seeds}:
         raise ValueError(
             f"eval_seed={eval_seed} is also a configured training seed; "
-            f"evaluation data must come from a stream that never trained "
-            f"the model"
+            "evaluation data must come from a stream that never trained "
+            "the model"
         )
     raw_train_steps = settings.steps if steps is None else steps
     train_steps = _positive_integer(raw_train_steps)
@@ -202,18 +203,18 @@ def _train_and_eval(settings: Settings, seed: int, lr: float, eval_seed: int,
     raw_curve_points = settings.curve_points
     if isinstance(raw_curve_points, bool):
         raise ValueError(
-            f"curve_points must be a non-negative integer, got "
+            "curve_points must be a non-negative integer, got "
             f"{raw_curve_points!r}")
     try:
         curve_points_num = float(raw_curve_points)
     except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
         raise ValueError(
-            f"curve_points must be a non-negative integer, got "
+            "curve_points must be a non-negative integer, got "
             f"{raw_curve_points!r}") from exc
     if not (math.isfinite(curve_points_num) and curve_points_num >= 0.0
             and curve_points_num == int(curve_points_num)):
         raise ValueError(
-            f"curve_points must be a non-negative integer, got "
+            "curve_points must be a non-negative integer, got "
             f"{raw_curve_points!r}")
     curve_points = int(curve_points_num)
     seed_everything(seed, deterministic=settings.deterministic)
@@ -314,21 +315,21 @@ def tune_shared_recipe(settings: Settings):
                    if _finite(row["val_accuracy_mean"])]
     if not finite_rows:
         raise RuntimeError(
-            f"shared recipe tuning produced no finite validation accuracy "
+            "shared recipe tuning produced no finite validation accuracy "
             f"across lr grid {tuple(settings.lr_grid)}: every tuning run "
-            f"diverged or returned NaN, so no learning rate can be frozen "
-            f"for the controlled grids (inspect the run records; no "
-            f"downstream contrast from this run is interpretable)")
+            "diverged or returned NaN, so no learning rate can be frozen "
+            "for the controlled grids (inspect the run records; no "
+            "downstream contrast from this run is interpretable)")
     pick = _curve_valid_selection_rows(table)
     if pick["n_excluded"]:
-        print(f"[baselines] shared recipe selection excluded "
+        print("[baselines] shared recipe selection excluded "
               f"{pick['n_excluded']} of {pick['n_finite']} finite lr row(s) "
-              f"with curve-invalid runs; selecting among curve-valid rows "
-              f"only")
+              "with curve-invalid runs; selecting among curve-valid rows "
+              "only")
     elif pick["n_invalid"]:
-        print(f"[baselines] WARNING: every finite lr row has curve-invalid "
+        print("[baselines] WARNING: every finite lr row has curve-invalid "
               f"runs; falling back to all {pick['n_finite']} finite row(s) - "
-              f"the frozen recipe is not validated by a healthy curve")
+              "the frozen recipe is not validated by a healthy curve")
     eligible = pick["rows"]
     best = max(eligible, key=lambda row: row["val_accuracy_mean"])
     selection = _selection_reliability(
@@ -364,7 +365,7 @@ def _resolve_lr(settings: Settings, out_dir: pathlib.Path, tag: str):
     warn = _selection_warn(f"shared recipe selection lr={lr:g}", selection)
     if warn:
         print(f"[{tag}] {warn}: the frozen recipe may make every variant "
-              f"look equally flat")
+              "look equally flat")
     _write_json(out_dir / f"{tag}_lr_tuning.json",
                 {"val_seed": VAL_SEED, "table": table, "chosen_lr": lr,
                  "selection": selection})
@@ -504,7 +505,7 @@ def _eval_answer_balance(settings: Settings) -> dict:
             counts += torch.bincount(meta["answer"].cpu(),
                                      minlength=settings.vocab)
         present = counts > 0
-        shares = counts[present] / counts.sum() if counts.sum() > 0 else \
+        shares = counts[present] / counts.sum() if counts.sum().item() > 0 else \
             counts[present]
         uniformity = answer_uniformity_test(counts[2:])
         return {
@@ -862,23 +863,23 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
               f"{len(audit['pairwise_duplicate_overlap'])} stream pairs; "
               f"actual stream replay={actual['n_rows_total']} rows, "
               f"cross-split overlap max={actual['max_overlap']}, "
-              f"cross-group seed collisions="
+              "cross-group seed collisions="
               f"{actual['cross_group_seed_collisions'] or 'none'}; "
               f"TV noise floor [{floor_txt}]; calibrated shift test "
               f"(BH q={settings.fdr_q:g}) adjusted p: [{adj_txt}]; "
-              f"atypical-sample rate train="
+              "atypical-sample rate train="
               f"{outlier.get('rate_train', float('nan')):.4f} "
               f"(bound={outlier.get('rate_bound', float('nan')):.4f}) "
               f"[{outlier_txt}]; train stationarity min p="
               f"{audit.get('train_stationarity_min_p', 1.0):.3f}; "
               f"unseen-value rates [{cov_txt}]; "
-              f"stream duplicates train="
+              "stream duplicates train="
               f"{audit['n_duplicate_rows_train']} ({dup_txt}); "
               f"unique_key_rate={audit['unique_key_rate']:.4f}; "
               f"generator calibration={calibration_txt}")
     else:
         print(f"[{tag}] split audit (HB3, train seeds {list(train_seeds)}): "
-              f"deterministic result reused; hb3_supported="
+              "deterministic result reused; hb3_supported="
               f"{audit['hb3_supported']}")
     exposure = audit.get("association_exposure") or {}
     if exposure:
@@ -892,23 +893,23 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
               f"coverage={train_assoc.get('pair_space_coverage', float('nan')):.4f} "
               f"({train_assoc.get('n_unique_pairs', 0)}/"
               f"{train_assoc.get('n_possible_pairs', 0)} possible pairs). "
-              f"This is a memorisation-opportunity disclosure, not a "
-              f"leakage verdict; exposure-stratified accuracy is stamped "
-              f"on every metric record.")
+              "This is a memorisation-opportunity disclosure, not a "
+              "leakage verdict; exposure-stratified accuracy is stamped "
+              "on every metric record.")
     if rejected:
         print(f"[{tag}] WARNING: calibrated shift test rejects "
               f"{', '.join(rejected)}: held-out counts differ from the "
-              f"pooled training distribution beyond same-stream sampling "
-              f"noise")
+              "pooled training distribution beyond same-stream sampling "
+              "noise")
     if audit.get("outlier_shift_detected"):
         flagged = [f"{name}={audit['outlier_audit']['rate_by_split'][name]:.4f}"
                    for name, bad in
                    audit["outlier_audit"]["shift_by_split"].items() if bad]
         print(f"[{tag}] WARNING: atypical-sample tail rate exceeds the "
-              f"train-fitted bound (bound="
+              "train-fitted bound (bound="
               f"{audit['outlier_audit']['rate_bound']:.4f}): "
               f"{', '.join(flagged)}; the held-out difficulty tail differs "
-              f"from training")
+              "from training")
     if audit.get("train_drift_suspected"):
         drift = [key for key, item in
                  audit.get("train_stationarity_bh", {}).items()
@@ -917,18 +918,18 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
                      key.rsplit(":", 1)[-1], 0.0)]
         print(f"[{tag}] WARNING: training-stream non-stationarity suspected "
               f"({', '.join(drift)}): first and second halves of the "
-              f"training stream differ beyond sampling noise, so a single "
-              f"held-out split may not represent the future")
+              "training stream differ beyond sampling noise, so a single "
+              "held-out split may not represent the future")
     calibration = audit.get("generator_calibration") or {}
     if calibration.get("calibration_supported") is False:
         family = calibration.get("family") or {}
         print(f"[{tag}] WARNING: generator calibration rejects "
               f"{', '.join(family.get('rejected') or [])}: the realized "
-              f"stream differs from the declared data-generating process, "
-              f"so a defect shared by every split cannot be ruled out")
+              "stream differs from the declared data-generating process, "
+              "so a defect shared by every split cannot be ruled out")
     if not audit["hb3_supported"]:
         print(f"[{tag}] WARNING: HB3 split/disjointness audit failed; "
-              f"all reported numbers are suspect")
+              "all reported numbers are suspect")
     _write_json(out_dir / f"{tag}_split_audit.json", audit)
     if enforce and not audit["hb3_supported"]:
         _write_json(out_dir / f"{tag}_aborted.json", {
@@ -950,9 +951,9 @@ def _audit_data_splits(settings: Settings, out_dir: pathlib.Path,
             f"{tag}: HB3 failed (max pairwise duplicate overlap="
             f"{audit['max_pairwise_duplicate_overlap']}, max actual-stream "
             f"overlap={audit.get('max_actual_stream_overlap')}, cross-group "
-            f"seed collisions="
+            "seed collisions="
             f"{audit.get('actual_stream_seed_collisions') or 'none'}, "
             f"rejected shift tests={rejected or 'none'}); a data protocol "
-            f"with leakage or a held-out distribution shift cannot support "
-            f"any grid result")
+            "with leakage or a held-out distribution shift cannot support "
+            "any grid result")
     return audit
