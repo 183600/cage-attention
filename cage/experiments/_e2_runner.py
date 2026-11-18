@@ -97,11 +97,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             f"L={row['length']} needs {row['required_positions']} positions "
             f"> max_len={sweep_plan['max_len']}"
             for row in sweep_plan["dropped"])
-        print(f"[e2] length sweep truncated: requested "
+        print("[e2] length sweep truncated: requested "
               f"{sweep_plan['requested_count']} length(s) (grid "
               f"{sweep_plan['requested_lengths']}), realized {lengths} "
               f"({dropped_txt}); every length beyond the first dropped one "
-              f"is dropped with it")
+              "is dropped with it")
     print(f"[e2] length-sweep coverage: {coverage['base_pairs']} -> "
           f"{coverage['longest_pairs']} pairs "
           f"({coverage['base_positions']} -> {coverage['longest_positions']} "
@@ -128,8 +128,8 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     })
     print(f"[e2] training at n_pairs={settings.n_pairs}, sweep over {lengths} "
           f"(test seed {TEST_SEED}, stats seed {STATS_SEED})")
-    print(f"[e2] per-length rule ceiling (parameter-free structural rule; "
-          f"exact only where keys are unique): "
+    print("[e2] per-length rule ceiling (parameter-free structural rule; "
+          "exact only where keys are unique): "
           + ", ".join(f"L={L}: acc={rule_ceiling_by_length[L]['accuracy']:.4f} "
                       f"unique={rule_ceiling_by_length[L]['unique_key_rate']:.3f}"
                       for L in lengths))
@@ -302,12 +302,14 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
             if _finite(value):
                 rec[coeff_key] = float(value)
         base_acc = rec["accuracy_by_length"][settings.n_pairs]
+        # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
         long_acc = rec["accuracy_by_length"][lengths[-1]]
+        # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
         rec["accuracy_at_base"] = base_acc
         rec["accuracy_at_longest"] = long_acc
         rec["accuracy_drop"] = base_acc - long_acc
         # Degradation *shape*, not only the endpoint: fit accuracy on
-        # log(T) across the measured sweep.  A mid-sweep reversal can
+        # log(max(T, 1e-300)) across the measured sweep.  A mid-sweep reversal can
         # leave the base-to-longest drop unchanged while contradicting
         # "degrades more slowly"; this readout uses data already
         # collected, no extra grid point.
@@ -371,15 +373,15 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         lambda r: r.get("variant"),
         tuple(label for label, *_ in _E2_VARIANTS),
         planned_seeds=settings.seeds)
-    print(f"\n[e2] accuracy by n_pairs (mean +- std over seeds; the "
-          f"calib_len_only / calib_ent_only / calib_no_terms arms complete "
-          f"the H2c calibration-term 2x2 with calib - H2c's directional rows "
-          f"use only the single-term ablations, while calib_no_terms (both "
-          f"terms off) enters the factorial main effects/interaction; "
-          f"calib_raw_ent is the H2g normalisation ablation - identical "
-          f"architecture/parameters, raw entropy instead of H/log T; "
-          f"gap@long = mean gap to the per-length rule ceiling at the "
-          f"longest length, the absolute reference for H2a's drop):")
+    print("\n[e2] accuracy by n_pairs (mean +- std over seeds; the "
+          "calib_len_only / calib_ent_only / calib_no_terms arms complete "
+          "the H2c calibration-term 2x2 with calib - H2c's directional rows "
+          "use only the single-term ablations, while calib_no_terms (both "
+          "terms off) enters the factorial main effects/interaction; "
+          "calib_raw_ent is the H2g normalisation ablation - identical "
+          "architecture/parameters, raw entropy instead of H/log T; "
+          "gap@long = mean gap to the per-length rule ceiling at the "
+          "longest length, the absolute reference for H2a's drop):")
     # ``drop`` / ``gap@long`` / ``entropy_drift`` are the pre-registered H2a
     # readouts, so they carry the same mean +- std treatment as the per-length
     # cells: an effect size printed without its seed-to-seed spread invites a
@@ -411,11 +413,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     print(f"{'rule ceiling':>16}" + "".join(f"{c:>12}" for c in ceil_cells)
           + f"{'-':>17} {'(gap@long)':>17} {'-':>17}")
 
-    print(f"\n[e2] within-item linked length extension (nested: each base "
-          f"item keeps its query/answer/pair index and only gains "
-          f"distractors; retention=P(correct@L|correct@base), rescue="
-          f"P(correct@L|wrong@base); exploratory companion, the H2 decision "
-          f"still reads the raw sweep):")
+    print("\n[e2] within-item linked length extension (nested: each base "
+          "item keeps its query/answer/pair index and only gains "
+          "distractors; retention=P(correct@L|correct@base), rescue="
+          "P(correct@L|wrong@base); exploratory companion, the H2 decision "
+          "still reads the raw sweep):")
     print(f"{'arm':>16} {'raw_drop':>17} {'linked_drop':>17} "
           f"{'retain@long':>14} {'rescue@long':>14} {'net@long':>17} "
           f"{'raw-linked':>15} {'p<.05':>7}")
@@ -447,18 +449,18 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     linked_reproduced = sum(
         1 for rs in by_variant.values() for r in rs
         if r.get("linked_base_matches_raw"))
-    print(f"  linked base reproduces the raw base accuracy in "
+    print("  linked base reproduces the raw base accuracy in "
           f"{linked_reproduced}/{sum(len(rs) for rs in by_variant.values())} "
-          f"runs; a linked drop smaller than raw means composition inflated "
-          f"the raw length loss, a linked drop larger than raw means an "
-          f"easier composition masked a within-item length loss, and a drop "
-          f"present in both is a length effect.")
+          "runs; a linked drop smaller than raw means composition inflated "
+          "the raw length loss, a linked drop larger than raw means an "
+          "easier composition masked a within-item length loss, and a drop "
+          "present in both is a length effect.")
 
-    print(f"\n[e2] whole-sweep degradation slope (least-squares accuracy per "
-          f"unit log(T) over all {len(lengths)} measured lengths, "
-          f"mean±std over seeds; more negative = faster degradation).  This "
-          f"is the shape readout behind H2a/H2d's 'degrades more slowly' "
-          f"claim: the endpoint drop alone can hide a mid-sweep reversal:")
+    print("\n[e2] whole-sweep degradation slope (least-squares accuracy per "
+          f"unit log(max(T, 1e-300)) over all {len(lengths)} measured lengths, "
+          "mean±std over seeds; more negative = faster degradation).  This "
+          "is the shape readout behind H2a/H2d's 'degrades more slowly' "
+          "claim: the endpoint drop alone can hide a mid-sweep reversal:")
     print(f"{'arm':>16} {'slope/logT':>17} {'seeds_slope<0':>14}")
     for label, *_ in _E2_VARIANTS:
         agg = _mean_std([
@@ -474,11 +476,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     # to the headline accuracy at every sweep length.  The values agree
     # under a uniform stream; a divergence means the length reading depends
     # on class frequency and must be reported as such.
-    print(f"\n[e2] balanced accuracy (macro recall) and macro-F1 by n_pairs "
-          f"(mean +- std over seeds; companions to the accuracy table - "
-          f"divergence at a length means that length's reading depends on "
-          f"answer-class frequency; macro-F1 averages F1 over the classes "
-          f"present in the target, f1_micro would equal accuracy):")
+    print("\n[e2] balanced accuracy (macro recall) and macro-F1 by n_pairs "
+          "(mean +- std over seeds; companions to the accuracy table - "
+          "divergence at a length means that length's reading depends on "
+          "answer-class frequency; macro-F1 averages F1 over the classes "
+          "present in the target, f1_micro would equal accuracy):")
     print(f"{'arm':>16} {'metric':>8}" + "".join(f"{L:>12}" for L in lengths)
           + f"{'drop':>17}")
     for label, *_ in _E2_VARIANTS:
@@ -498,13 +500,13 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                   + "".join(f"{c:>12}" for c in cells)
                   + f"{drop_s:>17}")
 
-    print(f"\n[e2] learned calibration coefficients (mechanism manipulation "
-          f"check for H2b; read from the trained gates, no extra grid point). "
-          f"The gate computes sigmoid((W_g x - a*log T - c*scale*Hbar)/tau): "
-          f"a>0 is the explicit length correction, c*scale>0 is the "
-          f"concentration correction.  'a+'/'c+' count layers with a positive "
-          f"coefficient; an ablated arm that should not have a term must "
-          f"report n/a there.  Mean over seeds and layers, ± seed std:")
+    print("\n[e2] learned calibration coefficients (mechanism manipulation "
+          "check for H2b; read from the trained gates, no extra grid point). "
+          "The gate computes sigmoid((W_g x - a*log T - c*scale*Hbar)/tau): "
+          "a>0 is the explicit length correction, c*scale>0 is the "
+          "concentration correction.  'a+'/'c+' count layers with a positive "
+          "coefficient; an ablated arm that should not have a term must "
+          "report n/a there.  Mean over seeds and layers, ± seed std:")
     print(f"{'arm':>16} {'signal':>10} {'a':>16} {'c_eff':>16} "
           f"{'tau_eff':>16} {'a+':>8} {'c+':>8} {'layers':>8}")
     for label, *_ in _E2_VARIANTS:
@@ -545,14 +547,14 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
           "raw-entropy ablation - the two c_eff values are therefore not in "
           "the same units and must not be compared directly.)")
 
-    print(f"\n[e2] gate/attention-distribution association across the length "
-          f"sweep (within-layer Pearson, Fisher-z mean over layers, mean±std "
-          f"over seeds; computed from the same per-length statistics, no new "
-          f"runs).  The length-calibration claim predicts that the calib "
-          f"gate keeps reading entropy / max-prob at longer lengths; a "
-          f"query-only gate has no such pathway, so its association should "
-          f"stay weaker and flatter.  'drift' = longest - training length "
-          f"(positive = association strengthens with length):")
+    print("\n[e2] gate/attention-distribution association across the length "
+          "sweep (within-layer Pearson, Fisher-z mean over layers, mean±std "
+          "over seeds; computed from the same per-length statistics, no new "
+          "runs).  The length-calibration claim predicts that the calib "
+          "gate keeps reading entropy / max-prob at longer lengths; a "
+          "query-only gate has no such pathway, so its association should "
+          "stay weaker and flatter.  'drift' = longest - training length "
+          "(positive = association strengthens with length):")
     print(f"{'arm':>16} {'metric':>12}" + "".join(f"{L:>17}" for L in lengths)
           + f"{'drift':>17}")
     gate_corr_by_length = {}
@@ -595,10 +597,10 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     # systematically wrong.  Read the calibration fields eval_metrics
     # already computes at every sweep length (no new runs).  Exploratory
     # companion; H2a/H2b remain the decisions.
-    print(f"\n[e2] calibration drift across the length sweep (ECE15 and "
-          f"Brier; lower is better, BSS>0 beats the base-rate forecast; "
-          f"mean±std over seeds).  'ECE drift' = longest - training length "
-          f"(positive = more miscalibrated at the extrapolated length):")
+    print("\n[e2] calibration drift across the length sweep (ECE15 and "
+          "Brier; lower is better, BSS>0 beats the base-rate forecast; "
+          "mean±std over seeds).  'ECE drift' = longest - training length "
+          "(positive = more miscalibrated at the extrapolated length):")
     print(f"{'arm':>16} {'ECE@base':>15} {'ECE@long':>15} "
           f"{'ECE drift':>15} {'Brier@base':>15} {'Brier@long':>15} "
           f"{'BSS@long':>15}")
@@ -651,13 +653,13 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     # recorded (learned a / c_eff and the per-length normalised entropy), so
     # it adds no runs or grid points: it asks *which* term moves with length,
     # the explicit mechanism H2b/H2c is about.
-    print(f"\n[e2] implied calibration-term contributions at the base and "
-          f"longest sweep lengths (a*log T and c_eff*S, using the trained "
-          f"coefficients; mean±std over seeds).  S is the concentration "
-          f"signal the arm actually reads: H/log T for the registered gate, "
-          f"raw H for the H2g raw-entropy arm.  A length term that is on "
-          f"should show a non-zero drift a*(log T_long - log T_base); a "
-          f"stable concentration term drifts only with its own signal:")
+    print("\n[e2] implied calibration-term contributions at the base and "
+          "longest sweep lengths (a*log T and c_eff*S, using the trained "
+          "coefficients; mean±std over seeds).  S is the concentration "
+          "signal the arm actually reads: H/log T for the registered gate, "
+          "raw H for the H2g raw-entropy arm.  A length term that is on "
+          "should show a non-zero drift a*(log T_long - log T_base); a "
+          "stable concentration term drifts only with its own signal:")
     print(f"{'arm':>16} {'length@base':>17} {'length@long':>17} "
           f"{'length_drift':>17} {'conc@base':>17} {'conc@long':>17} "
           f"{'conc_drift':>17}")
@@ -715,11 +717,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
               f"{tcell('conc_base'):>17} {tcell('conc_long'):>17} "
               f"{tcell('conc_drift'):>17}")
 
-    print(f"\n[e2] training-curve health (curve_ok = curve-valid runs / "
-          f"all runs; late = U-shaped val curves; tail_train = relative "
-          f"change over the last third - falling under a plateau verdict "
-          f"means the step count is the limit; vse = last validation "
-          f"point's batch-sampling SE):")
+    print("\n[e2] training-curve health (curve_ok = curve-valid runs / "
+          "all runs; late = U-shaped val curves; tail_train = relative "
+          "change over the last third - falling under a plateau verdict "
+          "means the step count is the limit; vse = last validation "
+          "point's batch-sampling SE):")
     print(f"{'arm':>16} {'curve_ok':>8} {'late':>5} {'tail_train':>11} "
           f"{'vse':>8} {'curve':>10}")
     for label, *_ in _E2_VARIANTS:
@@ -740,11 +742,11 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     print(f"\n[e2] bad cases at the longest length (n_pairs={lengths[-1]}; "
           f"stats seed {STATS_SEED}, batch {settings.stats_batch}x"
           f"{settings.stats_batches}; raw cases in e2_error_cases.jsonl).  "
-          f"retrieval = attention mass < 0.5 on the correct key in every "
-          f"block (the model never found it); lost = found mid-stack but "
-          f"not in the last block; readout = key found in the last block "
-          f"but the wrong value read out - the split that tells apart "
-          f"'cannot find' from 'found then lost' from 'cannot use':")
+          "retrieval = attention mass < 0.5 on the correct key in every "
+          "block (the model never found it); lost = found mid-stack but "
+          "not in the last block; readout = key found in the last block "
+          "but the wrong value read out - the split that tells apart "
+          "'cannot find' from 'found then lost' from 'cannot use':")
     print(f"{'arm':>16} {'err_rate':>9} {'label':>7} {'struct':>7} "
           f"{'retrieval':>10} {'lost':>7} {'readout':>8} {'key_miss':>9} "
           f"{'mass_key_err':>13}")
@@ -787,21 +789,21 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                 {**competence, **_run_context(settings)})
     if competence["passed"]:
         print(f"[e2] HB0 competence: ok (best arm {competence['best_arm']} "
-              f"has seed-clustered 95% lower bound above chance "
+              "has seed-clustered 95% lower bound above chance "
               f"{competence['chance']:.4f} at the training length)")
     else:
-        print(f"[e2] HB0 competence: FAILED - no arm's seed-clustered 95% "
+        print("[e2] HB0 competence: FAILED - no arm's seed-clustered 95% "
               f"lower bound is above chance {competence['chance']:.4f} at "
-              f"the training length; the grid did not demonstrably learn the "
-              f"task at this step count, so no contrast below may be read as a "
-              f"mechanism statement")
+              "the training length; the grid did not demonstrably learn the "
+              "task at this step count, so no contrast below may be read as a "
+              "mechanism statement")
     eval_balance = verdict.get("eval_answer_balance") or {}
     e2_balance = eval_balance.get("e2_length_sweep") or {}
     balance_ok = e2_balance.get("endpoint_uniform")
     if balance_ok is None:
         balance_ok = eval_balance.get("all_uniform")
     print("\n[e2] pre-registered contrasts:")
-    print(f"[e2] length-generalisation rows below are read over the realized "
+    print("[e2] length-generalisation rows below are read over the realized "
           f"sweep {lengths} ({coverage['base_positions']} -> "
           f"{coverage['longest_positions']} sequence positions, "
           f"{coverage['position_ratio']:.2f}x); the requested grid "
@@ -851,7 +853,7 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     clog.print("calib raw entropy drift vs 0", "H2b", "entropy_drift",
                _one_sample_contrast(calib_runs, "entropy_drift"),
                warn=calib_warn)
-    # The H/log(T) drift and the gate drift are *null predictions*: the
+    # The H/log(max(T, 1e-300)) drift and the gate drift are *null predictions*: the
     # decision rule is CI-within-bound (bootstrap TOST), not "CI excludes
     # 0" - support means "indistinguishable from length-stable within the
     # pre-registered bound", and a large drift must refute, not support,
@@ -894,13 +896,13 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     # one-sample test across seeds (no new grid point): a full-calib arm
     # with a<=0 or c*scale<=0 cannot be said to implement the length /
     # concentration correction, whatever the endpoint accuracy says.
-    print(f"\n[e2] H2f explicit-correction manipulation check (one-sample "
-          f"across training seeds): the gate is "
-          f"sigmoid((W_g x - a*log T - c*scale*Hbar)/tau), so a>0 and "
-          f"c*scale>0 are the learned coefficients that implement the named "
-          f"correction.  A full calib arm with a non-positive coefficient is "
-          f"a capacity/accuracy effect, not the claimed explicit "
-          f"calibration:")
+    print("\n[e2] H2f explicit-correction manipulation check (one-sample "
+          "across training seeds): the gate is "
+          "sigmoid((W_g x - a*log T - c*scale*Hbar)/tau), so a>0 and "
+          "c*scale>0 are the learned coefficients that implement the named "
+          "correction.  A full calib arm with a non-positive coefficient is "
+          "a capacity/accuracy effect, not the claimed explicit "
+          "calibration:")
     for metric, label in (
         ("a_mean", "calib length coefficient a"),
         ("c_effective_mean", "calib concentration coefficient c*scale"),
@@ -920,19 +922,19 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                  for r in calib_runs}
     raw_norm = {(r.get("model_cfg") or {}).get("calib_ent_norm")
                 for r in raw_runs}
-    print(f"\n[e2] H2g log-T normalisation ablation (single factor: both "
-          f"additive terms on, identical architecture/parameter count/"
-          f"computation, but the concentration term reads raw entropy "
-          f"instead of Hbar=H/log T).  Resolved flags: full calib "
+    print("\n[e2] H2g log-T normalisation ablation (single factor: both "
+          "additive terms on, identical architecture/parameter count/"
+          "computation, but the concentration term reads raw entropy "
+          "instead of Hbar=H/log T).  Resolved flags: full calib "
           f"calib_ent_norm={sorted(full_norm, key=str)}, "
           f"{_CALIB_RAW_ENT_CELL} calib_ent_norm={sorted(raw_norm, key=str)}. "
-          f"A gain for the normalised arm at the longest length / a smaller "
-          f"drop is evidence that the normalisation - not merely the "
-          f"presence of a concentration term - carries length robustness:")
+          "A gain for the normalised arm at the longest length / a smaller "
+          "drop is evidence that the normalisation - not merely the "
+          "presence of a concentration term - carries length robustness:")
     if full_norm != {True} or raw_norm != {False}:
-        print(f"      WARNING: the resolved normalisation flags do not match "
+        print("      WARNING: the resolved normalisation flags do not match "
               f"the declared arms (full={full_norm}, raw={raw_norm}); the "
-              f"H2g contrasts are mis-wired and must not be read")
+              "H2g contrasts are mis-wired and must not be read")
     # Descriptive manipulation check: H2g compares two *implemented*
     # corrections, so the raw arm must still use its concentration term
     # (otherwise the contrast would silently become full-vs-no-term).  This
@@ -943,21 +945,21 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
                if _finite(raw_c["mean"]) else "n/a")
     print(f"      descriptive manipulation check: {_CALIB_RAW_ENT_CELL} "
           f"c*scale={raw_c_s} (coefficient on raw H; a non-positive value "
-          f"would mean this arm did not use its concentration term, in which "
-          f"case the contrast is not a normalisation-only comparison)")
+          "would mean this arm did not use its concentration term, in which "
+          "case the contrast is not a normalisation-only comparison)")
     raw_pair = _design_pair("e2", "calib", _CALIB_RAW_ENT_CELL,
                             calib_runs, raw_runs)
     for metric in ("accuracy_at_longest", "accuracy_drop"):
         clog.print("calib - calib_raw_ent", "H2g", metric,
                    _paired_diff(*raw_pair, metric),
                    warn=raw_warn)
-    print(f"\n[e2] H2c length-term ablation contrast (the single-factor "
-          f"arm removes only the length term from the full gate at "
-          f"identical recipe, leaving the concentration term on; the "
-          f"calib_no_terms cell disables both terms at once, so it is a "
-          f"two-factor manipulation and is read only through the registered "
-          f"2x2 main effects/interaction below, not as a length-term "
-          f"decision row):")
+    print("\n[e2] H2c length-term ablation contrast (the single-factor "
+          "arm removes only the length term from the full gate at "
+          "identical recipe, leaving the concentration term on; the "
+          "calib_no_terms cell disables both terms at once, so it is a "
+          "two-factor manipulation and is read only through the registered "
+          "2x2 main effects/interaction below, not as a length-term "
+          "decision row):")
     for arm in ("calib_ent_only",):
         rs = by_variant[arm]
         warn = _curve_warn(("calib", calib_runs), (arm, rs))
@@ -999,21 +1001,21 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
     factorial_warn = _curve_warn(
         *[(cell, e2_factorial_cells[cell])
           for cell in _CALIB_FACTORIAL_CELLS])
-    print(f"\n[e2] H2c factorial main effect (length term): the average of "
-          f"full-vs-ent_only and len_only-vs-no_terms, i.e. the length "
-          f"term's contribution averaged over both concentration-term "
-          f"levels:")
+    print("\n[e2] H2c factorial main effect (length term): the average of "
+          "full-vs-ent_only and len_only-vs-no_terms, i.e. the length "
+          "term's contribution averaged over both concentration-term "
+          "levels:")
     for metric in ("accuracy_at_longest", "accuracy_drop"):
         ci = _factorial_main_effect(e2_factorial_cells, metric, "length")
         clog.print("length main effect (2x2)", "H2c", metric, ci,
                    warn=factorial_warn)
-    print(f"\n[e2] H2e factorial companions: the concentration term's main "
-          f"effect (average of full-vs-len_only and ent_only-vs-no_terms, "
-          f"i.e. averaged over both length-term levels) and the two-term "
-          f"interaction (length effect under concentration on minus under "
-          f"concentration off).  Together with the length main effect these "
-          f"read the complete 2x2, so neither term nor their additivity is "
-          f"left unmeasured:")
+    print("\n[e2] H2e factorial companions: the concentration term's main "
+          "effect (average of full-vs-len_only and ent_only-vs-no_terms, "
+          "i.e. averaged over both length-term levels) and the two-term "
+          "interaction (length effect under concentration on minus under "
+          "concentration off).  Together with the length main effect these "
+          "read the complete 2x2, so neither term nor their additivity is "
+          "left unmeasured:")
     for metric in ("accuracy_at_longest", "accuracy_drop"):
         ci = _factorial_main_effect(e2_factorial_cells, metric,
                                     "concentration")
@@ -1042,18 +1044,18 @@ def run_e2(settings: Settings, out_dir: pathlib.Path) -> None:
         row.get("supports_hypothesis") for row in h2f_rows)
     if not h2f_supported:
         if not h2f_evaluable:
-            print(f"[e2] NOTE: H2f is not evaluable on this run (the "
-                  f"coefficient contrasts are claim-ineligible: HB0 "
-                  f"competence, seed floor, coverage or curve filtering), "
-                  f"so neither a positive nor a non-positive coefficient "
-                  f"read is a mechanism conclusion here.")
+            print("[e2] NOTE: H2f is not evaluable on this run (the "
+                  "coefficient contrasts are claim-ineligible: HB0 "
+                  "competence, seed floor, coverage or curve filtering), "
+                  "so neither a positive nor a non-positive coefficient "
+                  "read is a mechanism conclusion here.")
         else:
-            print(f"[e2] WARNING: H2f not supported - the full calib arm did "
-                  f"not show both learned corrections (a>0 and c*scale>0) "
-                  f"with FDR-significant, practically-sized coefficients.  "
-                  f"The H2a/H2b endpoint and entropy-drift rows remain their "
-                  f"own tests, but the 'explicit correction' mechanism "
-                  f"reading is not established by the trained coefficients.")
+            print("[e2] WARNING: H2f not supported - the full calib arm did "
+                  "not show both learned corrections (a>0 and c*scale>0) "
+                  "with FDR-significant, practically-sized coefficients.  "
+                  "The H2a/H2b endpoint and entropy-drift rows remain their "
+                  "own tests, but the 'explicit correction' mechanism "
+                  "reading is not established by the trained coefficients.")
     learned_correction_check = {
         "hypothesis": "H2f",
         "supported": h2f_supported,
