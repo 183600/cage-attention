@@ -32,7 +32,7 @@ HYPO_IDS = ("HB0", "HB1", "HB2", "HB3", "HB4", "HB5", "HB6", "HB7",
 # every result record, so the SESOI is part of the pre-registration.
 #
 # A hypothesis whose prediction is a *null/equivalence* claim (a quantity is
-# expected to stay inside a bound, e.g. H2b's length-stable H/log(T)) lists
+# expected to stay inside a bound, e.g. H2b's length-stable H/log(max(T, 1e-300))) lists
 # the metric under ``"sesoi_test"`` with value ``"equivalence"``: the SESOI
 # then acts as the equivalence bound and the contrast is supported only when
 # the 95% CI of the effect lies inside +-bound (bootstrap TOST,
@@ -154,6 +154,7 @@ HYPOTHESES = {
                       "the batch accuracy to 1.0; if it cannot, gradients, "
                       "the loss or the precision path are broken.",
         "prediction": "final train loss <= 0.1 and train accuracy = 1.0",
+        # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
         "decision": "failure invalidates the training loop and blocks the "
                     "interpretation of every grid result (necessary, not "
                     "sufficient: data/label problems can survive "
@@ -492,11 +493,11 @@ HYPOTHESES = {
     "H1h": {
         "experiment": "e1",
         "question": "Is the calibrated gate's behaviour an artefact of the "
-                    "position information that the global log(T) "
+                    "position information that the global log(max(T, 1e-300)) "
                     "normalisation mixes into it, or does the mechanism "
                     "survive without that confound?",
         "hypothesis": "The registered gate divides *every* row's attention "
-                      "entropy by the global log(T) and subtracts a*log(T), "
+                      "entropy by the global log(max(T, 1e-300)) and subtracts a*log(max(T, 1e-300)), "
                       "although a causal row t can see at most t+1 keys, so "
                       "its entropy ceiling is log(t+1).  The gate therefore "
                       "carries an implicit, position-dependent open-ness "
@@ -542,12 +543,12 @@ HYPOTHESES = {
         "experiment": "e2",
         "question": "Does length calibration slow the degradation beyond "
                     "the training length?",
-        "hypothesis": "Because the gate subtracts a*log(T) and the "
-                      "log(T)-normalised entropy, calib degrades less than "
+        "hypothesis": "Because the gate subtracts a*log(max(T, 1e-300)) and the "
+                      "log(max(T, 1e-300))-normalised entropy, calib degrades less than "
                       "none when evaluated at 2x-spaced lengths.",
         "prediction": "accuracy_drop(calib) < accuracy_drop(none) and "
                       "accuracy@longest(calib) > accuracy@longest(none); "
-                      "the fitted accuracy slope on log(T) across the whole "
+                      "the fitted accuracy slope on log(max(T, 1e-300)) across the whole "
                       "sweep is also less negative for calib (endpoint-only "
                       "reads can hide a mid-sweep reversal)",
         "decision": "paired bootstrap 95% CI of the differences excludes 0 "
@@ -562,15 +563,15 @@ HYPOTHESES = {
         "experiment": "e2",
         "question": "Do the attention statistics drift with length as the "
                     "calibration assumes?",
-        "hypothesis": "Raw entropy grows with log(T), while the quantity the "
-                      "gate normalises by, H/log(T), is length-stable.",
+        "hypothesis": "Raw entropy grows with log(max(T, 1e-300)), while the quantity the "
+                      "gate normalises by, H/log(max(T, 1e-300)), is length-stable.",
         "prediction": "raw entropy drift (longest - base) > 0 (directional) "
-                      "and the normalised entropy drift H/log(T) lies inside "
+                      "and the normalised entropy drift H/log(max(T, 1e-300)) lies inside "
                       "the pre-registered equivalence bound, with the "
                       "calibrated gate drift inside its bound too",
         "decision": "paired bootstrap 95% CIs, FDR-controlled across the E2 "
                     "contrasts (q=0.05): the raw entropy drift CI excludes 0 "
-                    "with a positive mean (difference test); the H/log(T) "
+                    "with a positive mean (difference test); the H/log(max(T, 1e-300)) "
                     "drift and the gate drift are *equivalence* (TOST) tests "
                     "- each is supported only when its CI lies inside "
                     "+-SESOI, so a CI that merely includes 0 while spanning "
@@ -591,7 +592,7 @@ HYPOTHESES = {
         "question": "Is the length term (not the concentration term) the "
                     "specific cause of calib's length robustness?",
         "hypothesis": "The advantage of calib over none beyond the training "
-                      "length comes from subtracting a*log(T): removing the "
+                      "length comes from subtracting a*log(max(T, 1e-300)): removing the "
                       "length term (concentration-only arm) must lose the "
                       "advantage, while removing the concentration term "
                       "(length-only arm) must keep it.",
@@ -637,7 +638,7 @@ HYPOTHESES = {
                       "accuracy_at_longest(query) and "
                       "accuracy_drop(calib) < accuracy_drop(query), with "
                       "the same sign on the whole-sweep accuracy slope on "
-                      "log(T)",
+                      "log(max(T, 1e-300))",
         "decision": "paired bootstrap 95% CI excludes 0 in the "
                     "pre-registered directions after Benjamini-Hochberg FDR "
                     "control across the E2 contrasts (q=0.05)",
@@ -888,8 +889,8 @@ def _validate_training_seeds(seeds):
         raise ValueError(
             f"duplicate training seeds/streams {sorted(set(duplicates))} in "
             f"{list(seeds)}: a repeated seed is the same run twice, so paired "
-            f"contrasts would double-count it (inflated n, too-narrow CI) and "
-            f"the seed-level Mean +- Std would not average independent runs")
+            "contrasts would double-count it (inflated n, too-narrow CI) and "
+            "the seed-level Mean +- Std would not average independent runs")
     reserved = sorted(
         s for s in seeds
         if any(stream_seed_key(s) == stream_seed_key(r)
@@ -898,7 +899,7 @@ def _validate_training_seeds(seeds):
         raise ValueError(
             f"training seeds {reserved} are reserved held-out evaluation "
             f"streams {RESERVED_EVAL_SEEDS}: training on them would fit the "
-            f"model on validation/test data")
+            "model on validation/test data")
     return seeds
 
 
@@ -951,7 +952,7 @@ class Settings:
     # The probe evaluation stream is deliberately wider than the grid
     # evaluation stream: HB2 certifies "the tuned probe stays below
     # 2x chance", and with a narrow stream the per-seed binomial noise
-    # (sd ~ sqrt(p(1-p)/n)) can exceed the chance-level margin, making the
+    # (sd ~ sqrt(max(p(1-p, 0.0))/n)) can exceed the chance-level margin, making the
     # certificate fail for power reasons on a clean pipeline.  512x16
     # samples shrink that noise well below the margin; the one-sided
     # p-value and the seeds_for_certification power plan are reported next
@@ -1061,13 +1062,13 @@ class Settings:
             _positive_int_field(name)
         if self.e2_sweep_factor <= 1:
             raise ValueError(
-                f"e2_sweep_factor must be > 1 so the sweep contains distinct "
+                "e2_sweep_factor must be > 1 so the sweep contains distinct "
                 f"lengths, got {self.e2_sweep_factor!r}")
         if self.e2_sweep_min_lengths > self.e2_sweep_lengths:
             raise ValueError(
                 f"e2_sweep_min_lengths={self.e2_sweep_min_lengths} exceeds "
                 f"e2_sweep_lengths={self.e2_sweep_lengths}: the sweep can "
-                f"never realize the minimum number of lengths it asks for")
+                "never realize the minimum number of lengths it asks for")
         if self.d_model % self.n_heads:
             raise ValueError(
                 f"d_model={self.d_model} is not a positive multiple of "
@@ -1075,17 +1076,17 @@ class Settings:
         raw_curve_points = self.curve_points
         if isinstance(raw_curve_points, bool):
             raise ValueError(
-                f"curve_points must be a non-negative integer, got "
+                "curve_points must be a non-negative integer, got "
                 f"{raw_curve_points!r}")
         try:
             curve_points = operator.index(raw_curve_points)
         except TypeError as exc:
             raise ValueError(
-                f"curve_points must be a non-negative integer, got "
+                "curve_points must be a non-negative integer, got "
                 f"{raw_curve_points!r}") from exc
         if curve_points < 0:
             raise ValueError(
-                f"curve_points must be a non-negative integer, got "
+                "curve_points must be a non-negative integer, got "
                 f"{raw_curve_points!r}")
         self.curve_points = int(curve_points)
         # The per-run error-case cap is zero-or-positive and is passed
@@ -1095,17 +1096,17 @@ class Settings:
         raw_max_cases = self.max_error_cases
         if isinstance(raw_max_cases, bool):
             raise ValueError(
-                f"max_error_cases must be a non-negative integer, got "
+                "max_error_cases must be a non-negative integer, got "
                 f"{raw_max_cases!r}")
         try:
             max_cases = operator.index(raw_max_cases)
         except TypeError as exc:
             raise ValueError(
-                f"max_error_cases must be a non-negative integer, got "
+                "max_error_cases must be a non-negative integer, got "
                 f"{raw_max_cases!r}") from exc
         if max_cases < 0:
             raise ValueError(
-                f"max_error_cases must be a non-negative integer, got "
+                "max_error_cases must be a non-negative integer, got "
                 f"{raw_max_cases!r}")
         self.max_error_cases = int(max_cases)
 
@@ -1232,11 +1233,11 @@ class Settings:
             q = float(raw_q)
         except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
             raise ValueError(
-                f"fdr_q must be a finite number strictly between 0 and 1, "
+                "fdr_q must be a finite number strictly between 0 and 1, "
                 f"got {raw_q!r}") from exc
         if not (math.isfinite(q) and 0.0 < q < 1.0):
             raise ValueError(
-                f"fdr_q must be a finite number strictly between 0 and 1, "
+                "fdr_q must be a finite number strictly between 0 and 1, "
                 f"got {raw_q!r}")
         self.fdr_q = q
         for name in ("design_alpha", "power_target"):
@@ -1254,7 +1255,7 @@ class Settings:
             setattr(self, name, value)
         if not isinstance(self.randomize_run_order, bool):
             raise ValueError(
-                f"randomize_run_order must be a bool, got "
+                "randomize_run_order must be a bool, got "
                 f"{self.randomize_run_order!r}")
         # ``configure_determinism`` coerces its argument with ``bool``, so a
         # string such as ``"False"`` would silently *enable* deterministic
@@ -1267,21 +1268,21 @@ class Settings:
         if isinstance(self.run_order_seed, bool) or not isinstance(
                 self.run_order_seed, int):
             raise ValueError(
-                f"run_order_seed must be a plain integer, got "
+                "run_order_seed must be a plain integer, got "
                 f"{self.run_order_seed!r}")
         floor = _positive_integer(self.min_seeds_for_claim)
         if floor is None:
             raise ValueError(
-                f"min_seeds_for_claim must be a positive integer, got "
+                "min_seeds_for_claim must be a positive integer, got "
                 f"{self.min_seeds_for_claim!r}")
         self.min_seeds_for_claim = int(floor)
         if not isinstance(self.per_variant_tuning, bool):
             raise ValueError(
-                f"per_variant_tuning must be a bool, got "
+                "per_variant_tuning must be a bool, got "
                 f"{self.per_variant_tuning!r}")
         if _positive_integer(self.per_variant_tune_seeds) is None:
             raise ValueError(
-                f"per_variant_tune_seeds must be a positive integer, got "
+                "per_variant_tune_seeds must be a positive integer, got "
                 f"{self.per_variant_tune_seeds!r}")
         for name in ("lr_grid", "probe_lr_grid", "calib_tau_grid"):
             raw = getattr(self, name)
@@ -1332,7 +1333,7 @@ class Settings:
                     except (OverflowError, ValueError) as exc:
                         raise ValueError(
                             f"{name} entries must keep "
-                            f"log(expm1(calib_tau_init)) finite, got "
+                            "log(expm1(calib_tau_init)) finite, got "
                             f"{value!r}") from exc
                 checked.append(value)
             # Canonicalise so a caller's list cannot be mutated after
