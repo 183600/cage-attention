@@ -140,18 +140,18 @@ def _controlled_audit(runs_a, runs_b):
         if count:
             audit["mismatches"].append(
                 f"side {side} has {count} non-mapping run record(s): the "
-                f"controlled-variable contract cannot be verified")
+                "controlled-variable contract cannot be verified")
     audit["seeds_paired"] = audit["seeds_a"] == audit["seeds_b"]
     if not audit["seeds_paired"]:
         audit["mismatches"].append(
             f"seed sets differ: a={audit['seeds_a']} b={audit['seeds_b']} "
-            f"(contrast must be paired over identical seeds)")
+            "(contrast must be paired over identical seeds)")
     for side, seeds in (("a", audit["seeds_a"]), ("b", audit["seeds_b"])):
         missing = sum(1 for s in seeds if s is None)
         if missing:
             audit["mismatches"].append(
                 f"side {side} has {missing} run(s) without a training seed: "
-                f"the contrast cannot be paired")
+                "the contrast cannot be paired")
         malformed_seeds = [
             s for s in seeds
             if s is not None and (
@@ -162,7 +162,7 @@ def _controlled_audit(runs_a, runs_b):
             audit["mismatches"].append(
                 f"side {side} has malformed training seed(s) "
                 f"{[repr(s) for s in malformed_seeds]}: the contrast cannot "
-                f"pair runs by an independent seed")
+                "pair runs by an independent seed")
         stream_counts = {}
         for s in seeds:
             if s is None:
@@ -186,9 +186,9 @@ def _controlled_audit(runs_a, runs_b):
         if repeats:
             audit["mismatches"].append(
                 f"side {side} repeats training seed/stream(s) {repeats}: a "
-                f"repeated seed (including a 32-bit stream alias such as "
-                f"0 vs 2**32) is one run counted twice, so the paired n "
-                f"would be inflated and the difference is not independent")
+                "repeated seed (including a 32-bit stream alias such as "
+                "0 vs 2**32) is one run counted twice, so the paired n "
+                "would be inflated and the difference is not independent")
     # A controlled side must be one fixed condition, not a pooled mix of
     # cells.  The resolved ``model_cfg`` gets this check below; legacy
     # records that carry only declared labels need it too, otherwise a side
@@ -218,8 +218,8 @@ def _controlled_audit(runs_a, runs_b):
                 side_pooled = True
                 audit["mismatches"].append(
                     f"side {side} carries multiple {key} labels {values}: "
-                    f"the side pools different conditions, so it is not one "
-                    f"fixed contrast arm")
+                    "the side pools different conditions, so it is not one "
+                    "fixed contrast arm")
     # Capacity: the parameter count each side actually trained (recorded for
     # every contrast; the placebo-specific enforcement happens below, where
     # the resolved model configs have been compared).
@@ -229,7 +229,7 @@ def _controlled_audit(runs_a, runs_b):
     if malformed_params:
         audit["mismatches"].append(
             f"{len(malformed_params)} run(s) carry a malformed parameter "
-            f"count; capacity cannot be verified")
+            "count; capacity cannot be verified")
     params_a = sorted({value for value in
                        (_positive_integer(r.get("params")) for r in runs_a)
                        if value is not None})
@@ -256,8 +256,8 @@ def _controlled_audit(runs_a, runs_b):
         if malformed_configs:
             audit["mismatches"].append(
                 f"side {side} has {len(malformed_configs)} run(s) with a "
-                f"malformed config object (expected a mapping): the training "
-                f"recipe cannot be verified")
+                "malformed config object (expected a mapping): the training "
+                "recipe cannot be verified")
         malformed_recipes = [
             r for r in runs
             if r.get("training_recipe") is not None
@@ -265,8 +265,8 @@ def _controlled_audit(runs_a, runs_b):
         if malformed_recipes:
             audit["mismatches"].append(
                 f"side {side} has {len(malformed_recipes)} run(s) with a "
-                f"malformed training_recipe object (expected a mapping): "
-                f"the optimisation recipe cannot be verified")
+                "malformed training_recipe object (expected a mapping): "
+                "the optimisation recipe cannot be verified")
         views = [_recipe_view(r) for r in runs]
         if not views:
             audit["mismatches"].append(f"side {side} has no runs")
@@ -304,9 +304,9 @@ def _controlled_audit(runs_a, runs_b):
             if c is not None and not isinstance(c, Mapping)]
         if malformed_cfgs:
             audit["mismatches"].append(
-                f"malformed model_cfg object(s) (expected mappings): "
+                "malformed model_cfg object(s) (expected mappings): "
                 f"{len(malformed_cfgs)} run(s) cannot be checked against the "
-                f"trained configuration")
+                "trained configuration")
         # The top-level design labels are what a reader sees in the table;
         # they must name the model that actually trained.  Check this for
         # *every* run that carries a resolved config, not only when both
@@ -329,7 +329,7 @@ def _controlled_audit(runs_a, runs_b):
                     if label != trained:
                         audit["mismatches"].append(
                             f"side {side}: {key} label {label!r} does "
-                            f"not match the trained model_cfg "
+                            "not match the trained model_cfg "
                             f"({trained!r})")
                 label = r.get("calib_variant")
                 if not label:
@@ -343,7 +343,7 @@ def _controlled_audit(runs_a, runs_b):
                 if label != cell:
                     audit["mismatches"].append(
                         f"side {side}: calib_variant label {label!r} "
-                        f"does not match the trained flags "
+                        "does not match the trained flags "
                         f"(cell {cell!r})")
         if all(isinstance(c, Mapping) for c in cfgs_a + cfgs_b):
             for side, cfgs in (("a", cfgs_a), ("b", cfgs_b)):
@@ -360,7 +360,7 @@ def _controlled_audit(runs_a, runs_b):
                     audit["model_factor_diffs"][key] = {"a": va, "b": vb}
                 else:
                     audit["mismatches"].append(
-                        f"undeclared model-config difference across sides: "
+                        "undeclared model-config difference across sides: "
                         f"{key}={va!r} vs {vb!r}")
             audit["model_cfg"] = {"a": cfgs_a[0], "b": cfgs_b[0]}
             labels_a = {r.get("calib_variant") for r in runs_a
@@ -374,11 +374,11 @@ def _controlled_audit(runs_a, runs_b):
             if (labels_a or labels_b) and labels_a != labels_b \
                     and cells_a == cells_b:
                 audit["mismatches"].append(
-                    f"declared ablation labels differ "
+                    "declared ablation labels differ "
                     f"({sorted(labels_a)} vs {sorted(labels_b)}) but the "
-                    f"trained calibration-term cells are identical "
+                    "trained calibration-term cells are identical "
                     f"({sorted(cells_a)}): the contrast does not actually "
-                    f"vary the mechanism")
+                    "vary the mechanism")
             if audit["model_factor_diffs"]:
                 # The resolved config is ground truth for *which* factor
                 # varies.  The declared label differences (including the
@@ -399,13 +399,13 @@ def _controlled_audit(runs_a, runs_b):
                     and set(audit["model_factor_diffs"]) == \
                     {"calib_shuffle_ent"}:
                 audit["mismatches"].append(
-                    f"placebo capacity mismatch: the only resolved "
-                    f"model-config difference is calib_shuffle_ent, whose "
-                    f"defining claim is the identical calib architecture "
-                    f"and parameter count, but the sides trained "
+                    "placebo capacity mismatch: the only resolved "
+                    "model-config difference is calib_shuffle_ent, whose "
+                    "defining claim is the identical calib architecture "
+                    "and parameter count, but the sides trained "
                     f"{capacity['a']} vs {capacity['b']} parameters - the "
-                    f"capacity would be confounded with the shuffled "
-                    f"entropy signal")
+                    "capacity would be confounded with the shuffled "
+                    "entropy signal")
         # Single-factor contract (see point 4 above).  The resolved config
         # is ground truth when both sides carry it; otherwise the declared
         # labels are the only evidence available.  ``calib_variant`` is a
@@ -506,12 +506,12 @@ def _controlled_audit(runs_a, runs_b):
                     "mislabeled contrast")
         elif len(factor_keys) > 1:
             audit["mismatches"].append(
-                f"single-factor contract: the contrast varies "
+                "single-factor contract: the contrast varies "
                 f"{len(factor_keys)} model factor(s) "
                 f"{sorted(factor_keys)}; a controlled contrast must vary "
-                f"exactly one factor, so a multi-factor manipulation has to "
-                f"be read through a registered factorial main effect or "
-                f"interaction instead")
+                "exactly one factor, so a multi-factor manipulation has to "
+                "be read through a registered factorial main effect or "
+                "interaction instead")
     audit["controlled"] = not audit["mismatches"]
     return audit
 
@@ -604,7 +604,7 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
             if not isinstance(value, str):
                 out["reason"] = (
                     f"evaluation-stream digest on side {side} is not a "
-                    f"string")
+                    "string")
                 return out
             # ``stream_content_digest`` only ever emits hexadecimal
             # SHA-256 prefixes.  A blank or arbitrary string is a
@@ -614,7 +614,7 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
             if not value or any(ch not in _STREAM_DIGEST_HEX for ch in value):
                 out["reason"] = (
                     f"evaluation-stream digest on side {side} is not a "
-                    f"hexadecimal content digest")
+                    "hexadecimal content digest")
                 return out
         if da is not None and db is not None:
             # Both sides stamped the digest: only this pair can verify that
@@ -649,7 +649,7 @@ def _paired_stream_test(by_a, by_b, used, metric, seed_mean):
         # the masks would still concatenate, but the per-seed and pooled
         # discordant tables would describe different samples.
         out["reason"] = (
-            f"evaluation item counts differ across paired seeds: "
+            "evaluation item counts differ across paired seeds: "
             f"{sorted(set(ns))}")
         return out
     # A content digest identifies the actual realization behind each mask;
@@ -913,7 +913,7 @@ def _paired_diff(runs_a, runs_b, metric):
     if missing_a or missing_b:
         audit["mismatches"].append(
             f"{len(missing_a) + len(missing_b)} run(s) lack a usable "
-            f"(hashable, non-boolean) training seed and cannot be paired")
+            "(hashable, non-boolean) training seed and cannot be paired")
         audit["controlled"] = False
     ci["controlled"] = audit
     return ci
@@ -1056,7 +1056,7 @@ def _one_sample_contrast(runs, metric, bound=None):
         ci["controlled"] = {
             "controlled": False,
             "mismatches": [
-                f"one-sample contrast repeats training stream(s) "
+                "one-sample contrast repeats training stream(s) "
                 f"{aliases}: aliased seeds are not independent units"],
             "varying_factors": {},
             "single_factor": None,
@@ -1119,7 +1119,7 @@ def _class_frequency_companions(rules, title):
     """
     rows = []
     print(f"\n[{title}] class-frequency robustness companions "
-          f"(exploratory, outside the FDR family; seed-paired a - b):")
+          "(exploratory, outside the FDR family; seed-paired a - b):")
     print(f"  {'contrast':<34} {'metric':<15} {'effect [95% CI]':>29} "
           f"{'n':>3}  {'vs accuracy':>18}")
     for item in _materialize_runs(rules):
@@ -1135,6 +1135,7 @@ def _class_frequency_companions(rules, title):
         runs_a = _mapping_runs(runs_a)
         runs_b = _mapping_runs(runs_b)
         acc = _paired_diff(runs_a, runs_b, "accuracy")
+        # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
         for metric, convention in _CLASS_METRIC_COMPANIONS:
             ci = _paired_diff(runs_a, runs_b, metric)
             sign_disagrees = None
@@ -1339,9 +1340,9 @@ def _paired_did(runs_a1, runs_b1, runs_a2, runs_b2, metric):
     overlap = sorted(set(marginal_factors[0]) & set(context_factors[0]))
     if overlap:
         mismatches.append(
-            f"interaction marginal and context edges vary the same "
+            "interaction marginal and context edges vary the same "
             f"factor(s) {overlap}: a factorial interaction needs two "
-            f"different factors")
+            "different factors")
     factors = {}
     for audit in audits:
         factors.update(audit.get("varying_factors", {}))
