@@ -113,8 +113,10 @@ def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
         total += idx.size(0)
         for key, value in stats.items():
             acc = extra.get(key)
+            # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
             if acc is None:
                 acc = extra[key] = torch.zeros(
+                # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
                     (), dtype=torch.float64, device=device)
             acc.add_(torch.as_tensor(value, dtype=torch.float64))
     n_correct = correct.item()
@@ -241,7 +243,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
     gen = stream_generator(seed, device)
     model = LinearBagProbe(vocab).to(device)
     params = list(model.parameters())
-    opt = _make_adamw(params, lr)
+    opt = _make_adamw(model, lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=steps, eta_min=lr * _ETA_MIN_FACTOR)
     sample_every = max(1, steps // 20)
@@ -257,7 +259,8 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
                                 "loss": float(loss.detach()),
                                 "nonfinite": True})
             break
-        loss.backward()
+        with torch.enable_grad():
+            loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(
             params, _GRAD_CLIP_MAX_NORM)
         if not bool(torch.isfinite(grad_norm)):
@@ -274,6 +277,7 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
             history.append({"step": int(step),
                             "loss": float(loss.detach())})
     model.eval()
+    model.train()
     return model
 
 
@@ -348,7 +352,7 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
     if stream_seed_key(val_seed) in {stream_seed_key(s) for s in seeds}:
         raise ValueError(
             f"validation seed {val_seed} is also a probe training seed; "
-            f"selection data must be disjoint from fitting data"
+            "selection data must be disjoint from fitting data"
         )
     lr_grid = _sequence(lr_grid, "lr_grid")
     if not lr_grid:
@@ -367,7 +371,7 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
             raw_steps = (steps,)
     step_values = tuple(_positive_integer(s) for s in raw_steps)
     if not step_values or any(s is None for s in step_values):
-        raise ValueError(f"steps_grid must contain positive ints, got "
+        raise ValueError("steps_grid must contain positive ints, got "
                          f"{raw_steps!r}")
     step_values = tuple(int(s) for s in step_values)
     table = []
@@ -396,6 +400,7 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
                 if losses:
                     loss_means.append(sum(losses) / max(len(losses), 1))
                 acc = linear_probe_accuracy(model, n_pairs, vocab, device,
+                # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
                                             batch=probe_batch,
                                             batches=val_batches,
                                             seed=val_seed)
@@ -441,12 +446,12 @@ def tune_linear_probe(n_pairs, vocab, device="cpu", lr_grid=(3e-3, 1e-3, 3e-4),
                    if math.isfinite(row["val_accuracy_mean"])]
     if not finite_rows:
         raise RuntimeError(
-            f"linear probe tuning produced no completed finite validation "
+            "linear probe tuning produced no completed finite validation "
             f"accuracy across grid lr={tuple(lr_grid)} x steps={step_values}: "
-            f"every grid point either diverged on at least one training seed "
-            f"or returned NaN, so no fully measured recipe can be selected "
-            f"(inspect the training histories; no HB2 near-chance read from "
-            f"this run is interpretable)")
+            "every grid point either diverged on at least one training seed "
+            "or returned NaN, so no fully measured recipe can be selected "
+            "(inspect the training histories; no HB2 near-chance read from "
+            "this run is interpretable)")
     best = max(finite_rows, key=lambda row: row["val_accuracy_mean"])
     return best["lr"], int(best["steps"]), table
 
@@ -479,7 +484,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     ``sqrt(n_seeds)`` (pseudo-replication).  The primary
     ``lo``/``hi``/``p_value``/``p_above_chance`` then carry both seed noise
     and the common-stream scoring noise.  ``sd_effective`` is the total
-    per-seed SD (``sqrt(sd_seed^2 + mean(p(1-p))/n_per_seed)``) for
+    per-seed SD (``sqrt(max(sd_seed^2 + mean(p(1-p, 0.0)))/n_per_seed)``) for
     display, while planning uses the SD of the mean,
     ``se_effective = sqrt(sd_seed^2 / max(n, 1) + mean(p(1-p))/n_per_seed)``; the
     stream term does not shrink with more seeds, so
@@ -514,7 +519,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     """
     if isinstance(chance, bool):
         raise ValueError(
-            f"chance must be a finite probability in [0, 0.5), got "
+            "chance must be a finite probability in [0, 0.5), got "
             f"{chance!r}; a boolean is a flag, not a chance level")
     chance = _float_or_nan(chance)
     # The pre-registered HB2 bound is "below 2x chance".  For chance >= 0.5
@@ -523,7 +528,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     # closed instead of returning a vacuous pass.
     if not (math.isfinite(chance) and 0.0 <= chance < 0.5):
         raise ValueError(
-            f"chance must be a finite probability in [0, 0.5), got "
+            "chance must be a finite probability in [0, 0.5), got "
             f"{chance!r}; the 2x-chance certificate is vacuous otherwise")
     # The resampling seed is part of the reproducibility contract: reject a
     # bool/fractional value instead of letting ``int()``/torch alias it to a
@@ -535,13 +540,16 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     try:
         if torch.is_tensor(accuracies):
             raw_acc = accuracies.detach().reshape(-1)
+            # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
         else:
             raw_acc = torch.as_tensor(accuracies).detach().reshape(-1)
+            # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
             if raw_acc.is_floating_point():
                 # Keep the caller's Python float precision instead of the
                 # default float32 capture; the boundary decision is a small
                 # margin against chance.
                 raw_acc = torch.as_tensor(
+                # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
                     accuracies, dtype=torch.float64).detach().reshape(-1)
         if raw_acc.dtype == torch.bool:
             raise ValueError(
@@ -549,8 +557,10 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
         if raw_acc.is_complex():
             raise ValueError("accuracies must be real-valued")
         raw_acc = raw_acc.to(torch.float64)
+        # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
     except (TypeError, ValueError, RuntimeError, OverflowError):
         raw_acc = torch.empty(0, dtype=torch.float64)
+        # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
     accs = [float(a) for a in raw_acc]
     # A non-finite or out-of-range accuracy is not a measurement: dropping
     # the bad seed or clamping it below would let an impossible sample
@@ -575,7 +585,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
         n_per_seed = _positive_integer(raw_n_per_seed)
         if n_per_seed is None:
             raise ValueError(
-                f"n_per_seed must be a positive example count, "
+                "n_per_seed must be a positive example count, "
                 f"got {raw_n_per_seed!r}")
     n = len(accs)
     sd_seed = float(ci.get("sd", float("nan")))
@@ -586,6 +596,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
     mde80_seed = float(ci.get("mde80", float("nan")))
     p_above_seed = bootstrap_upper_p(margins, chance, n_boot=n_boot, seed=seed)
     if n_per_seed is not None and n > 0 and bootstrap_ok:
+        # NOTE: Consider adding device= parameter to torch.tensor() to avoid device mismatch
         a = torch.tensor(accs, dtype=torch.float64)
         gen = torch.Generator(device=a.device).manual_seed(seed)
         idx = torch.randint(0, n, (n_boot, n), generator=gen, device=a.device)
@@ -662,7 +673,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
             "sd_seed": sd_seed,
             "sd_binomial": float("nan"),
             "sd_effective": sd_seed,
-            "se_effective": (sd_seed / math.sqrt(n) if n else float("nan")),
+            "se_effective": (sd_seed / math.sqrt(max(n, 0.0)) if n else float("nan")),
             "n_per_seed": n_per_seed,
             "measurement_noise_accounted": False,
         })
@@ -686,7 +697,7 @@ def probe_vs_chance_test(accuracies, chance, n_boot: int = 10000,
             # The seed term of the mean's variance shrinks as sd_seed^2/n;
             # the common-stream scoring term enters once (all seeds share
             # the evaluation examples).  Solving the target SE
-            # (margin - z*sd_binomial)/z = sqrt(sd_seed^2/n) for n inflates
+            # (margin - z*sd_binomial)/z = sqrt(max(sd_seed^2/n, 0.0)) for n inflates
             # the plain seed-only estimate by sd_seed^2 / sd_seed^2/n,
             # i.e. by the current seed count.
             z = 2.8015852
