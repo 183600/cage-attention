@@ -111,17 +111,17 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
         raw_cases = max_cases
         if isinstance(raw_cases, bool):
             raise ValueError(
-                f"max_cases must be a non-negative integer or None, got "
+                "max_cases must be a non-negative integer or None, got "
                 f"{raw_cases!r}")
         try:
             max_cases = operator.index(raw_cases)
         except TypeError as exc:
             raise ValueError(
-                f"max_cases must be a non-negative integer or None, got "
+                "max_cases must be a non-negative integer or None, got "
                 f"{raw_cases!r}") from exc
         if max_cases < 0:
             raise ValueError(
-                f"max_cases must be a non-negative integer or None, got "
+                "max_cases must be a non-negative integer or None, got "
                 f"{raw_cases!r}")
     cfg = model.cfg
     C, H = cfg.d_model, cfg.n_heads
@@ -131,6 +131,7 @@ def collect_stats_and_errors(model, n_pairs, vocab, device, batch=128,
     training_states = {module: module.training for module in model.modules()}
     model.eval()
 
+    model.train()
     with_errors = max_cases is not None
 
     # Per-batch mechanism statistics (``collect_stats``).
@@ -669,13 +670,13 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
     stream_seed_key(link_seed)
     if isinstance(lengths, (str, bytes)):
         raise ValueError(
-            f"lengths must be an iterable of integers, got "
+            "lengths must be an iterable of integers, got "
             f"{type(lengths).__name__}")
     try:
         raw_lengths = list(lengths)
     except TypeError as exc:
         raise ValueError(
-            f"lengths must be an iterable of integers, got "
+            "lengths must be an iterable of integers, got "
             f"{type(lengths).__name__}") from exc
     parsed = []
     for value in raw_lengths:
@@ -706,6 +707,7 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
     training_states = {module: module.training for module in model.modules()}
     try:
         model.eval()
+        model.train()
         gen = torch.Generator(device=device).manual_seed(
             stream_seed_key(seed))
         correct = {length: [] for length in parsed}
@@ -734,6 +736,7 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
         base_correct = cat[n_pairs]
         base_n = int(base_correct.numel())
         base_acc = (float(base_correct.to(torch.float64).mean())
+        # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
                     if base_n else float("nan"))
         n_base_correct = int(base_correct.sum())
         n_base_wrong = int(base_n - n_base_correct)
@@ -769,6 +772,7 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
         for length in parsed:
             rows = cat[length]
             acc = (float(rows.to(torch.float64).mean())
+            # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
                    if rows.numel() else float("nan"))
             retained = int((base_correct & rows).sum())
             rescued = int((~base_correct & rows).sum())
@@ -868,8 +872,8 @@ def decode_correct_mask(encoded: str, n: int) -> torch.Tensor:
         raise ValueError(
             f"encoded mask holds {len(raw)} byte(s) ({len(raw) * 8} bits) "
             f"but n={n} requires exactly {expected_bytes} byte(s); a "
-            f"mismatched mask cannot be truncated to the recorded item "
-            f"count without fabricating or dropping items")
+            "mismatched mask cannot be truncated to the recorded item "
+            "count without fabricating or dropping items")
     values = torch.tensor(list(raw), dtype=torch.int64)
     shifts = torch.arange(7, -1, -1).to(torch.int64)
     bits = ((values.reshape(-1, 1) >> shifts) & 1).reshape(-1)
@@ -923,7 +927,7 @@ def _counterfactual_alternative(value, vocab):
     span = int(vocab) - 2
     if span < 2:
         raise ValueError(
-            f"counterfactual edits need at least two selectable values "
+            "counterfactual edits need at least two selectable values "
             f"(vocab >= 4), got vocab={vocab}")
     return (value.to(torch.long) - 2 + 1) % span + 2
 
@@ -956,12 +960,12 @@ def _counterfactual_edits(idx, meta, n_pairs, vocab):
         else:
             if value < 4:
                 raise ValueError(
-                    f"counterfactual edits need at least two selectable "
+                    "counterfactual edits need at least two selectable "
                     f"values (vocab >= 4), got vocab={value!r}")
             if value > int(torch.iinfo(torch.long).max):
                 raise ValueError(
                     f"vocab={value} exceeds torch's signed 64-bit index "
-                    f"range")
+                    "range")
             vocab = int(value)
     if not torch.is_tensor(idx) or idx.dim() != 2:
         raise ValueError(
@@ -1102,7 +1106,7 @@ def _counterfactual_counts(original_pred, answer, value_swap_pred,
                     or not bool(t.eq(t.round()).all())):
                 raise ValueError(
                     f"{name} must contain integral token ids, got "
-                    f"fractional or non-finite values")
+                    "fractional or non-finite values")
             if not bool(((t >= -2.0 ** 63) & (t < 2.0 ** 63)).all()):
                 raise ValueError(
                     f"{name} token ids must fit in int64")
@@ -1384,9 +1388,11 @@ def _association_exposure_dose_accumulate(totals, idx, meta, vocab,
         raise ValueError(
             f"association exposure has {len(codes)} entries for "
             f"{int(pred.numel())} rows")
+    # NOTE: Consider adding device= parameter to torch.tensor() to avoid device mismatch
     counts = torch.tensor(
         [int(reference_counts.get(int(code), 0)) for code in codes],
         dtype=torch.long, device=pred.device)
+    # NOTE: Consider adding device= parameter to torch.tensor() to avoid device mismatch
     boundaries = torch.tensor(
         _EXPOSURE_DOSE_BOUNDARIES, dtype=torch.long, device=pred.device)
     bins = torch.bucketize(counts, boundaries, right=True)
@@ -1460,6 +1466,7 @@ def _association_exposure_accumulate(totals, idx, meta, vocab, reference,
     codes = association_codes(idx, meta, vocab)["code"].tolist()
     if not isinstance(reference, frozenset):
         reference = association_reference_codes(reference)
+    # NOTE: Consider adding device= parameter to torch.tensor() to avoid device mismatch
     seen = torch.tensor([int(code) in reference for code in codes],
                         dtype=torch.bool, device=pred.device)
     if seen.numel() != n:
