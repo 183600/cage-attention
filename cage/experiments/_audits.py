@@ -57,12 +57,13 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     depths = tuple(_positive_integer(d) for d in raw_ladder)
     if not depths or any(d is None for d in depths):
         raise ValueError(
-            f"depth_ladder must be non-empty positive ints, got "
+            "depth_ladder must be non-empty positive ints, got "
             f"{raw_ladder!r}")
     ladder = tuple(sorted(set(depths)))
     tune_seeds = settings.seeds[:max(1, min(settings.min_seeds_for_claim,
                                              len(settings.seeds)))]
     ceiling_acc = float(ceiling["accuracy"]) if ceiling else float("nan")
+    # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
     ceiling_known = math.isfinite(ceiling_acc)
     chance = 1.0 / max((settings.vocab - 2), 1e-10)
     # HB0 is a union claim over the ladder rungs ("at least one rung is
@@ -72,6 +73,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     # a rung competent on an uncorrected one-sided bound while the
     # registered family-wise criterion would not.
     competence_alpha = 0.05 / max(len(ladder), 1)
+    # NOTE: Consider if 0.05 threshold is appropriate for this context
     # Pre-registered practical-significance bound for the depth readouts:
     # HB6/HB7 both register ``sesoi: {accuracy: 0.01}``, so the same bound
     # decides "saturated" (one-sided equivalence within the band) and
@@ -127,9 +129,9 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         if not finite_rows:
             print(f"[baselines] WARNING: depth={depth} tuning table has no "
                   f"finite validation accuracy (all {len(table)} "
-                  f"lr x steps candidates non-finite); the rung is recorded "
-                  f"as unmeasured and cannot support HB6/HB7 or the "
-                  f"saturation depth")
+                  "lr x steps candidates non-finite); the rung is recorded "
+                  "as unmeasured and cannot support HB6/HB7 or the "
+                  "saturation depth")
             depths[depth] = {
                 "name": f"shallow_none_d{depth}", "n_layers": depth,
                 "val_seed": VAL_SEED, "test_seed": TEST_SEED,
@@ -157,13 +159,13 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         if pick["n_excluded"]:
             print(f"[baselines] depth={depth} selection excluded "
                   f"{pick['n_excluded']} of {pick['n_finite']} finite "
-                  f"lr x steps row(s) with curve-invalid runs; selecting "
-                  f"among curve-valid rows only")
+                  "lr x steps row(s) with curve-invalid runs; selecting "
+                  "among curve-valid rows only")
         elif pick["n_invalid"]:
             print(f"[baselines] WARNING: depth={depth} has no curve-valid "
-                  f"finite lr x steps row; falling back to all "
+                  "finite lr x steps row; falling back to all "
                   f"{pick['n_finite']} finite row(s) - the rung's recipe is "
-                  f"not validated by a healthy curve")
+                  "not validated by a healthy curve")
         eligible = pick["rows"]
         selection = _selection_reliability(
             eligible, grid_keys=("lr", "steps"), full_rows=table)
@@ -175,7 +177,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             f"depth={depth} lr x steps selection", selection)
         if warn:
             print(f"[baselines] {warn}: this rung's tuned accuracy may "
-                  f"understate the depth it is credited with")
+                  "understate the depth it is credited with")
         runs = []
         for seed in settings.seeds:
             model, params, metrics, curve, _ = _train_and_eval(
@@ -216,7 +218,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         if curve_invalid_seeds:
             print(f"[baselines] WARNING: depth={depth} final runs "
                   f"{curve_invalid_seeds} are curve-invalid and are excluded "
-                  f"from the rung's competence/saturation statistics")
+                  "from the rung's competence/saturation statistics")
         if valid_runs:
             pooled = wilson_ci(sum(r["correct"] for r in valid_runs),
                                sum(r["n"] for r in valid_runs))
@@ -311,21 +313,21 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
         if unmeasured:
             status = (f"unmeasured (all {len(runs)} final runs are "
                       f"curve-invalid: {curve_invalid_seeds}); this rung "
-                      f"cannot support HB6/HB7 or the saturation depth")
+                      "cannot support HB6/HB7 or the saturation depth")
         elif within_sesoi:
             status = (f"within SESOI {sesoi:g} of the ceiling (saturated: "
-                      f"even the seed-clustered lower bound is inside the "
+                      "even the seed-clustered lower bound is inside the "
                       f"practical band, reach={ceiling_gap:+.4f})")
         elif not above_chance:
-            status = (f"at chance (seed-clustered lower bound "
+            status = ("at chance (seed-clustered lower bound "
                       f"{cluster['lo']:.4f} <= chance {chance:.4f}): this "
-                      f"rung did not learn the task at this step count, so it "
-                      f"is not depth evidence")
+                      "rung did not learn the task at this step count, so it "
+                      "is not depth evidence")
         elif reaches_ceiling_ci:
-            status = (f"CI touches the ceiling but the seed-clustered lower "
+            status = ("CI touches the ceiling but the seed-clustered lower "
                       f"bound is more than SESOI={sesoi:g} below it "
                       f"(reach={ceiling_gap:+.4f}): saturation not "
-                      f"established")
+                      "established")
         else:
             status = "below the ceiling"
         print(f"[baselines] HB6/HB7 depth={depth} tuned standard "
@@ -335,7 +337,7 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
               f"{summary['std']:.4f} (seed-clustered "
               f"[{cluster['lo']:.4f}, {cluster['hi']:.4f}], "
               f"n={cluster['n']} seeds/{cluster['n_examples']} examples; "
-              f"pooled Wilson companion "
+              "pooled Wilson companion "
               f"[{pooled['lo']:.4f}, {pooled['hi']:.4f}]); "
               f"chance={chance:.4f}; rule ceiling={ceiling_acc:.4f}, gap="
               f"{ceiling_gap:.4f} (lower-bound gap="
@@ -415,8 +417,8 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
             "tost_n": eq["n"],
         }
         print(f"[baselines] HB7 adjacent-depth contrast {a}->{b} layers "
-              f"(paired over seeds; each rung independently val-tuned over "
-              f"lr x steps, so this is a performance-envelope contrast, not "
+              "(paired over seeds; each rung independently val-tuned over "
+              "lr x steps, so this is a performance-envelope contrast, not "
               f"a controlled single-recipe depth effect): {_fmt_ci(ci)}; "
               f"companion TOST vs SESOI={sesoi:g}: "
               f"{eq['mean']:+.4f} [{eq['lo']:+.4f}, {eq['hi']:+.4f}] "
@@ -461,12 +463,12 @@ def _run_depth_ladder(settings: Settings, out_dir: pathlib.Path,
     if saturation_depth is None and saturation_depth_ci is not None:
         sat_txt = (f"none within SESOI {sesoi:g} (depth "
                    f"{saturation_depth_ci} only touches the ceiling - "
-                   f"absence of evidence, not saturation)")
+                   "absence of evidence, not saturation)")
     if hb7_depth_required is None:
         if unmeasured_rungs:
             depth_txt = (f"not determinable - depth(s) {unmeasured_rungs} "
-                         f"are unmeasured, so the ladder cannot establish "
-                         f"whether depth is required")
+                         "are unmeasured, so the ladder cannot establish "
+                         "whether depth is required")
         elif not ladder_competent:
             depth_txt = ("not determinable - no rung is above chance, so "
                          "the ladder did not solve the task at this step "
@@ -584,10 +586,10 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
                  "params_delta_frac": ((wide_params - target_params)
                                        / max(target_params, 1))})
     if not matched:
-        print(f"[baselines] WARNING: matched-shallow control width d_model="
+        print("[baselines] WARNING: matched-shallow control width d_model="
               f"{wide_d} gives {wide_params} params vs target "
               f"{target_params} (>5% mismatch); the control is recorded "
-              f"but capacity_matched=False")
+              "but capacity_matched=False")
 
     tune_seeds = settings.seeds[:max(1, min(settings.min_seeds_for_claim,
                                              len(settings.seeds)))]
@@ -636,7 +638,7 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
         "matched-shallow lr x steps selection", selection)
     if warn:
         print(f"[baselines] {warn}: the matched-capacity control may "
-              f"understate one-layer capacity")
+              "understate one-layer capacity")
     runs = []
     for seed in settings.seeds:
         _, params, metrics, curve, _ = _train_and_eval(
@@ -691,7 +693,7 @@ def _matched_shallow_control(settings: Settings, out_dir: pathlib.Path,
                         if math.isfinite(ceiling) else float("nan")),
         "runs": runs,
     })
-    print(f"[baselines] matched-capacity shallow control (1 layer, "
+    print("[baselines] matched-capacity shallow control (1 layer, "
           f"d_model={wide_d}, {wide_params} params vs target "
           f"{target_params} for depth {target_depth}, "
           f"capacity_matched={matched}; lr={best['lr']:g}, "
@@ -866,7 +868,7 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
           f"{summary['batch']} samples, {summary['steps']} steps, lr="
           f"{summary['lr']:g}, seed {summary['seed']}, data "
           f"{sanity['data_sha256']}; dropout off, weight decay zeroed, no "
-          f"augmentation):")
+          "augmentation):")
     for label, row in summary["by_config"].items():
         loss_s = (f"{row['loss_first']:.4f} -> {row['loss_last']:.4f}"
                   if _finite(row["loss_first"]) and _finite(row["loss_last"])
@@ -888,7 +890,7 @@ def _enforce_overfit_gate(settings: Settings, out_dir: pathlib.Path,
                      **_run_context(settings)})
         raise OverfitSanityError(
             f"{tag}: tiny-batch overfit sanity failed for {failed}; "
-            f"address the training loop before running the grid (this "
-            f"check is necessary, not sufficient: data/label problems can "
-            f"still survive memorisation)")
+            "address the training loop before running the grid (this "
+            "check is necessary, not sufficient: data/label problems can "
+            "still survive memorisation)")
     return summary
