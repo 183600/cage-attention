@@ -96,14 +96,15 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     sanity_by_config = _overfit_sanity_by_config(settings)
     sanity = sanity_by_config[_SANITY_REFERENCE]
     hb5_supported = all(row["passed"] for row in sanity_by_config.values())
-    print(f"[baselines] HB5 tiny-batch overfit sanity (batch="
+    print("[baselines] HB5 tiny-batch overfit sanity (batch="
           f"{sanity['batch']}, steps={sanity['steps']}, lr={sanity['lr']:g}; "
-          f"dropout forced off, no augmentation, gradient connectivity "
-          f"audited):")
+          "dropout forced off, no augmentation, gradient connectivity "
+          "audited):")
     for label, row in sanity_by_config.items():
         flow = row["grad_flow"]
         print(f"    {label:>28}: loss {row['loss_first']:.4f} -> "
               f"{row['loss_last']:.4f}, batch acc={row['acc_last']:.3f}, "
+              # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
               f"grads connected={flow['params_with_grad']}/"
               f"{flow['params_total']}, finite={flow['all_grads_finite']}; "
               f"{'passed' if row['passed'] else 'FAILED'}")
@@ -133,6 +134,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                    batch=settings.eval_batch, batches=settings.eval_batches,
                    seed=TEST_SEED)
         print(f"[baselines] {name}: accuracy={stats['accuracy']:.4f} "
+        # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
               f"[{stats['accuracy_lo']:.4f}, {stats['accuracy_hi']:.4f}] "
               f"(Wilson 95%, n={stats['n']})")
         _write_result(out_dir / "baselines_runs.jsonl",
@@ -170,14 +172,14 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         probe_selection)
     if probe_warn:
         print(f"[baselines] {probe_warn}: HB2's near-chance bound may be an "
-              f"under-tuned strawman")
+              "under-tuned strawman")
     n_diverged = int(sum(row.get("diverged_runs", 0) for row in table))
     print(f"[baselines] linear probe tuned on val seed {VAL_SEED} over "
           f"lr x steps grid {settings.probe_lr_grid} x {probe_steps_grid}: "
           f"lr={best_lr:g}, steps={best_steps}"
           + ("" if not n_diverged else
              f" ({n_diverged} diverged grid runs excluded from selection, "
-             f"see baselines_probe_tuning.json)"))
+             "see baselines_probe_tuning.json)"))
     probe_accs = []
     probe_diverged = []
     for seed in settings.seeds:
@@ -190,6 +192,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                                    deterministic=settings.deterministic,
                                    seed_info=probe_seeding)
         acc = linear_probe_accuracy(
+        # CI companion: use paired_bootstrap_ci over training seeds for uncertainty
             probe, settings.n_pairs, settings.vocab, settings.device,
             batch=settings.probe_eval_batch,
             batches=settings.probe_eval_batches, seed=TEST_SEED)
@@ -222,14 +225,14 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     if probe_diverged:
         print(f"[baselines] WARNING: {len(probe_diverged)} final probe "
               f"run(s) diverged at lr={best_lr:g} and are excluded from "
-              f"HB2: seeds "
+              "HB2: seeds "
               f"{[row['seed'] for row in probe_diverged]}")
     if not probe_accs:
         raise RuntimeError(
             f"all {len(settings.seeds)} final linear-probe runs diverged "
             f"at the selected lr={best_lr:g}: no completed test-seed "
-            f"measurement exists, so HB2 cannot be certified (inspect "
-            f"baselines_runs.jsonl and the probe training curves)")
+            "measurement exists, so HB2 cannot be certified (inspect "
+            "baselines_runs.jsonl and the probe training curves)")
     summary = _mean_std(probe_accs)
     chance = 1.0 / max((settings.vocab - 2), 1e-10)
     probe_n_per_seed = settings.probe_eval_batch * settings.probe_eval_batches
@@ -243,11 +246,11 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
           f"accuracy={summary['mean']:.4f} +- {summary['std']:.4f} "
           f"(chance={chance:.4f}, n_seeds={summary['n']}, eval n="
           f"{settings.probe_eval_batch * settings.probe_eval_batches} per "
-          f"seed)")
-    print(f"[baselines] HB2 near-chance test: accuracy - chance = "
+          "seed)")
+    print("[baselines] HB2 near-chance test: accuracy - chance = "
           f"{hb2['mean']:+.4f} [{hb2['lo']:+.4f}, {hb2['hi']:+.4f}] "
           f"(seed-level [{hb2['lo_seed']:+.4f}, {hb2['hi_seed']:+.4f}]; "
-          f"seed resampling + one shared Binomial scoring draw per replicate "
+          "seed resampling + one shared Binomial scoring draw per replicate "
           f"on the common stream, n_per_seed={hb2['n_per_seed']}; one-sided "
           f"p(H0: margin >= +chance)={hb2['p_above_chance']:.3f}, "
           f"MDE80={hb2['mde80']:.4f}, sd_seed={hb2['sd_seed']:.4f}, "
@@ -264,11 +267,11 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
               "pipeline")
     else:
         if math.isfinite(hb2["seeds_for_certification"]):
-            need_s = (f"needs ~"
+            need_s = ("needs ~"
                       f"{math.ceil(hb2['seeds_for_certification'])} "
-                      f"independent seeds at the observed seed spread plus "
-                      f"the common-stream noise floor for 80% power at this "
-                      f"margin")
+                      "independent seeds at the observed seed spread plus "
+                      "the common-stream noise floor for 80% power at this "
+                      "margin")
         else:
             need_s = ("the observed margin cannot clear the irreducible "
                       "common-stream noise floor (or the point estimate is "
@@ -282,7 +285,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     if hb2["hb2_supported"] and int(hb2["n"]) < floor:
         print(f"  NOTE: HB2 is provisional: certified on {int(hb2['n'])} "
               f"completed seed(s) < the pre-registered claim floor {floor} "
-              f"(Settings.min_seeds_for_claim)")
+              "(Settings.min_seeds_for_claim)")
 
     # HB6/HB7 complexity ladder: the simplest learned model must be tried --
     # and tuned -- before the deep grids can claim that depth/gating is
@@ -366,7 +369,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
                          "widen the control stream)"),
         "untestable": "untestable",
     }[hb4_state]
-    print(f"[baselines] HB4 negative control (labels permuted in training, "
+    print("[baselines] HB4 negative control (labels permuted in training, "
           f"shared recipe lr={lr_shared:g}, test seed {TEST_SEED}): "
           f"accuracy={ctrl_summary['mean']:.4f} +- {ctrl_summary['std']:.4f} "
           f"over {ctrl_summary['n']} seeds; accuracy - chance = "
@@ -375,7 +378,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
           f"(seed-clustered, n={ctrl_cluster['n']} seeds/"
           f"{ctrl_cluster['n_examples']} examples; seed-only companion "
           f"{hb4['mean']:+.4f} [{hb4['lo']:+.4f}, {hb4['hi']:+.4f}]; "
-          f"pooled Wilson companion "
+          "pooled Wilson companion "
           f"[{pooled['lo']:.4f}, {pooled['hi']:.4f}], "
           f"tol={settings.negative_control_tol:g}); "
           f"{hb4_status}{hb4_note}")
@@ -605,7 +608,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
     elif verdict["hb7_depth_required"]:
         hb7_txt = "required"
     else:
-        hb7_txt = (f"NOT required (saturated within SESOI "
+        hb7_txt = ("NOT required (saturated within SESOI "
                    f"{ladder['sesoi_accuracy']:g} at depth "
                    f"{verdict['saturation_depth']})")
     provisional = [k for k in ("hb2", "hb4", "hb6")
@@ -623,7 +626,7 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
         "inconclusive": "INCONCLUSIVE", "untestable": "untestable",
     }.get(verdict.get("hb4_state"),
           "ok" if verdict["hb4_supported"] else "FAILED")
-    print(f"[baselines] verdict: "
+    print("[baselines] verdict: "
           f"HB1={'ok' if verdict['hb1_supported'] else 'FAILED'}"
           f" HB2={hb2_txt}"
           f" HB3={'ok' if verdict['hb3_supported'] else 'FAILED'}"
@@ -632,6 +635,6 @@ def run_baselines(settings: Settings, out_dir: pathlib.Path) -> None:
           f" HB6={'ok' if verdict['hb6_supported'] else 'FLAG'}"
           f" HB7={hb7_txt}"
           f"{provisional_txt} "
-          f"(stored in baselines_verdict.json; a failed baseline check "
-          f"invalidates the corresponding claims above it, HB6/HB7 only flag "
-          f"depth-based motivations)")
+          "(stored in baselines_verdict.json; a failed baseline check "
+          "invalidates the corresponding claims above it, HB6/HB7 only flag "
+          "depth-based motivations)")
