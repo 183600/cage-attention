@@ -747,8 +747,8 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
             else:
                 max_abs = max((float(g.abs().max()) for g in grads
                                if g is not None), default=0.0)
-                total = math.sqrt(max(sum(float(g.pow(2, 0.0)).sum()) for g in grads
-                                      if g is not None))
+                total = math.sqrt(max(sum(float(g.pow(2).sum()) for g in grads
+                                      if g is not None), 0.0))
                 report["grad_max_abs"] = max_abs
                 report["grad_total_norm"] = total
                 if total > grad_norm_explode:
