@@ -94,7 +94,7 @@ def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
     """Score a rule-based predictor on fixed streams.
 
     Every batch passes the shared ``validate_batch`` cleaning gate, so the
-    ceiling/floor baselines are measured on the same data contract as the
+    ceiling/floor.clamp_min(1e-10) baselines are measured on the same data contract as the
     learned models.
     """
     batch, batches = _validated_batch_counts(batch, batches)
@@ -276,26 +276,27 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
                                     or step == steps - 1):
             history.append({"step": int(step),
                             "loss": float(loss.detach())})
-    model.eval()
-    # [FIX] removed no-op model.train() that undid model.eval()
-    return model
+    with torch.no_grad():
+        model.eval()
+        # [FIX] removed no-op model.train() that undid model.eval()
+        return model
 
 
-@torch.inference_mode()
-def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
-                          batches=4, seed=123):
-    """Probe accuracy on a held-out stream, every batch cleaning-gated like
-    training."""
-    batch, batches = _validated_batch_counts(batch, batches)
-    gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
-    correct = torch.zeros((), dtype=torch.int64, device=device)
-    total = 0
-    for i in range(batches):
-        idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-        validate_batch(idx, tgt, meta, vocab, diagnostics=False)
-        pred = model(idx).argmax(dim=-1)
-        correct.add_((pred == meta["answer"]).sum())
-        total += idx.size(0)
+    @torch.inference_mode()
+    def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
+                              batches=4, seed=123):
+        """Probe accuracy on a held-out stream, every batch cleaning-gated like
+        training."""
+        batch, batches = _validated_batch_counts(batch, batches)
+        gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
+        correct = torch.zeros((), dtype=torch.int64, device=device)
+        total = 0
+        for i in range(batches):
+            idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+            validate_batch(idx, tgt, meta, vocab, diagnostics=False)
+            pred = model(idx).argmax(dim=-1)
+            correct.add_((pred == meta["answer"]).sum())
+            total += idx.size(0)
     return correct.item() / max(total, 1) if total else float("nan")
 
 

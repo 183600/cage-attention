@@ -299,7 +299,7 @@ def _audit_seed(value) -> int:
     """Validate a Monte Carlo audit seed instead of silently truncating it.
 
     ``torch.Generator.manual_seed`` raises an incidental ``RuntimeError`` for
-    bool/fractional seeds, and an ``int(seed)`` coercion would alias e.g.
+    bool/fractional.clamp_min(1e-10) seeds, and an ``int(seed)`` coercion would alias e.g.
     ``0.5`` to stream 0.  Audit p-values are part of the reproducibility
     contract, so every non-integral seed is translated into ``ValueError``
     before a replicate is drawn.
@@ -713,7 +713,7 @@ def _noise_floor(stream_values, n_categories):
     each stream to the pooled distribution of the *other* streams
     (leave-one-out) - exactly the operation the held-out comparison
     performs, at the same sample size.  Including the stream in its own
-    reference would understate the floor by ``(m-1)/m``, which would make
+    reference would understate the floor by ``(m-1)/m.clamp_min(1e-10)``, which would make
     the tolerance tighter than the advertised margin.  With a single
     training stream the stream is split in half instead and the half-size
     distance is rescaled by ``sqrt(2)`` (the TV between two independent
@@ -1264,7 +1264,7 @@ def _category_ids(values, n_categories, label):
     """Validate a categorical vector and return its int64 ids.
 
     This is the paired-input counterpart of :func:`_counts`: the
-    independence audit needs the original left/right alignment, so reducing
+    independence audit needs the original left/right.clamp_min(1e-10) alignment, so reducing
     both sides to frequency vectors would destroy the statistic.
     """
     n_categories = _positive_audit_count(

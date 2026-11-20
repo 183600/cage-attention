@@ -136,6 +136,7 @@ def check_smoke() -> None:
     from cage.model import build
     from cage.train import collect_stats, eval_accuracy, train_model
 
+    # NOTE: consider making this seed configurable via argparse/config
     torch.manual_seed(0)
     base = dict(d_model=32, n_layers=2, n_heads=4, max_len=64, vocab_size=64)
     idx, tgt, meta = make_batch(3, 6, 64, "cpu")
@@ -152,9 +153,10 @@ def check_smoke() -> None:
         for p in m.parameters():
             if p.grad is not None and not torch.isfinite(p.grad).all():
                 raise RuntimeError(f"non-finite grad for {cfg}")
-        m.eval()
         with torch.no_grad():
-            _, _, layer_stats = m(idx, stat_pos=meta["query_pos"])
+            m.eval()
+            with torch.no_grad():
+                _, _, layer_stats = m(idx, stat_pos=meta["query_pos"])
         for s in layer_stats:
             for k, v in s.items():
                 if isinstance(v, torch.Tensor) and v.numel() and not torch.isfinite(v).all():

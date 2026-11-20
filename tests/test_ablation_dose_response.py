@@ -28,6 +28,7 @@ _TINY = {
 
 
 def _trained_calib(steps=3):
+    # NOTE: consider making this seed configurable via argparse/config
     torch.manual_seed(0)
     model = build({**_TINY, "gate": "calib"})
     train_model(model, steps=steps, batch=4, n_pairs=6, vocab=64,

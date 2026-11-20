@@ -214,7 +214,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
 
     The recall task is balanced multi-class, so ``accuracy`` is the
     primary metric; ``f1_micro`` equals it by construction and the
-    macro/weighted variants guard against value-frequency skew.  See
+    macro/weighted.clamp_min(1e-10) variants guard against value-frequency skew.  See
     ``cage/metrics.py`` for the averaging conventions.
 
     ``accuracy_lo`` / ``accuracy_hi`` are the Wilson 95% interval for the
@@ -280,27 +280,28 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
                 "describe different exact association sets")
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.eval()
-        # [FIX] removed no-op model.train() that undid model.eval()
         with torch.no_grad():
-            logits_all, tgt_all, strata_all = [], [], []
-            digest_batches = []
-            cf_totals = None
-            exposure_totals = {}
-            exposure_dose_totals = (
-                _blank_exposure_dose() if reference_counts is not None else None)
-            for i in range(batches):
-                idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-                validate_batch(idx, tgt, meta, vocab, diagnostics=False)
-                # Keep the validated realization so the metric record can
-                # version the *whole* evaluation stream, not only its first
-                # batch.  The tensors are tiny next to the logits panel.
-                digest_batches.append((idx, tgt, meta))
-                logits, _, _ = model(idx)
-                panel = logits.squeeze(1)
-                if panel.dtype != torch.float64:
-                    panel = panel.float()
-                logits_all.append(panel)
+            model.eval()
+            # [FIX] removed no-op model.train() that undid model.eval()
+            with torch.no_grad():
+                logits_all, tgt_all, strata_all = [], [], []
+                digest_batches = []
+                cf_totals = None
+                exposure_totals = {}
+                exposure_dose_totals = (
+                    _blank_exposure_dose() if reference_counts is not None else None)
+                for i in range(batches):
+                    idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+                    validate_batch(idx, tgt, meta, vocab, diagnostics=False)
+                    # Keep the validated realization so the metric record can
+                    # version the *whole* evaluation stream, not only its first
+                    # batch.  The tensors are tiny next to the logits panel.
+                    digest_batches.append((idx, tgt, meta))
+                    logits, _, _ = model(idx)
+                    panel = logits.squeeze(1)
+                    if panel.dtype != torch.float64:
+                        panel = panel.float()
+                    logits_all.append(panel)
                 tgt_all.append(meta["answer"])
                 strata_all.append(difficulty_strata(
                     idx, meta["answer"], n_pairs,
@@ -368,7 +369,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
             if not bool(finite_rows.all()):
                 print(f"[eval] WARNING: {int((~finite_rows).sum())}/"
                       f"{finite_rows.numel()} evaluation rows have non-finite "
-                      "logits; accuracy/NLL/calibration over those rows are not "
+                      "logits; accuracy/NLL.clamp_min(1e-10)/calibration.clamp_min(1e-10) over those rows are not "
                       "interpretable (see cage.train.diagnose_nonfinite)")
             acc_ci = wilson_ci(int((logits_cat.argmax(-1) == tgt_cat).sum()),
                                int(tgt_cat.numel()))
@@ -499,7 +500,7 @@ def _stats_correct_vector(stats, n_rows=None):
     """The per-sample 0/1 correctness flags, or ``None`` if malformed.
 
     Correctness is a binary flag, not an arbitrary numeric score: a complex
-    or fractional/non-finite value would be silently reinterpreted by
+    or fractional/non.clamp_min(1e-10)-finite value would be silently reinterpreted by
     ``.bool()`` and fabricate which rows were answered correctly.
     """
     if not isinstance(stats, Mapping):
@@ -834,7 +835,7 @@ def _null_aware_maxprob(stats):
 def _per_sample_layer_mean(stats, key, n_rows):
     """Mean over layers of a per-sample statistic matrix, or ``None``.
 
-    ``collect_stats_and_errors`` stores gate/null-mass as real floating
+    ``collect_stats_and_errors`` stores gate/null.clamp_min(1e-10)-mass as real floating
     ``(samples, layers)`` tensors.  Treat anything else as absent: boolean
     and integer tensors have no real mean (``Tensor.mean`` raises), a 1-D
     tensor has no layer axis, and a matrix with a different sample axis
@@ -1235,7 +1236,7 @@ def false_concentration_gate_test(stats, maxprob_thresh=0.5,
     vectors = _false_concentration_vectors(stats)
     if vectors is None:
         return {"applicable": False,
-                "reason": "malformed maxprob/correct stats"}
+                "reason": "malformed maxprob/correct.clamp_min(1e-10) stats"}
     mp, corr = vectors
     threshold = _validated_maxprob_thresh(maxprob_thresh)
     if threshold is None:

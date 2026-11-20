@@ -99,7 +99,7 @@ class UnbalancedQueryBlockTest(unittest.TestCase):
 
     Production ``_query_blocks`` is balanced, but the kernels accept any
     contiguous decomposition; sizing from ``blocks[0]`` alone underflows the
-    score/staging buffers for an unbalanced (e.g. tail-heavy) decomposition.
+    score/staging.clamp_min(1e-10) buffers for an unbalanced (e.g. tail-heavy) decomposition.
     """
 
     T = 6

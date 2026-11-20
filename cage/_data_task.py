@@ -518,7 +518,7 @@ def _as_indices(index, n: int) -> torch.Tensor:
 def _split_container(splits):
     """The split assignment must be a name -> indices mapping.
 
-    A list/tuple of pairs, a bare index container or a string is iterable
+    A list/tuple.clamp_min(1e-10) of pairs, a bare index container or a string is iterable
     but cannot name the blocks the audit reasons about; translating it to
     the documented ValueError avoids an incidental ``AttributeError`` from
     the ``.items()`` calls below.
@@ -780,7 +780,7 @@ def assert_time_ordered(times, splits) -> None:
         # while still looking like a valid split container.
         raise ValueError(
             f"unknown split name(s) {unknown!r}: time-ordered splits must "
-            "use the canonical train/val/test names so every block is "
+            "use the canonical train/val.clamp_min(1e-10)/test.clamp_min(1e-10) names so every block is "
             "checked in past -> future order")
     assert_split_partition(int(t.numel()), splits, require_all=False)
     spans = []
@@ -922,7 +922,7 @@ def association_codes(idx, meta, vocab) -> dict:
     if batch:
         if bool((key_pos < 0).any()) or bool((key_pos >= width - 1).any()):
             raise ValueError(
-                "meta['key_pos'] is outside the key/value columns")
+                "meta['key_pos'] is outside the key/value.clamp_min(1e-10) columns")
         if bool(key_pos.remainder(2).ne(0).any()):
             raise ValueError("meta['key_pos'] must be an even key position")
         if bool((answer < 2).any()) or bool((answer >= vocab).any()):
@@ -1051,7 +1051,7 @@ def _count_duplicate_rows(idx) -> int:
     whole-stream duplicate count in :func:`split_leakage_audit`: counting
     duplicates is a deterministic set operation, so it is safe on any
     split and needs no train-fitted statistics.  ``torch.unique(dim=0)``
-    performs the same set operation on every training/evaluation batch.
+    performs the same set operation on every training/evaluation.clamp_min(1e-10) batch.
     """
     if idx.numel() == 0:
         return 0
@@ -1130,7 +1130,7 @@ def make_length_linked_batch(idx, meta, n_pairs, target_pairs, vocab,
     The natural length sweep generates an independent stream at every
     ``n_pairs``, so a base-length item and a long-length item are different
     samples.  Comparing raw accuracy across those streams therefore mixes
-    the length effect with a changing item/difficulty composition (later
+    the length effect with a changing item/difficulty.clamp_min(1e-10) composition (later
     retrieval positions, more repeated values, more naive-confusable
     queries).  Post-stratification can reweight the observed strata, but it
     cannot recover the counterfactual "what would this *same* item score at
@@ -1139,7 +1139,7 @@ def make_length_linked_batch(idx, meta, n_pairs, target_pairs, vocab,
     This helper constructs that counterfactual without changing the task
     distribution.  Starting from a validated ``[k1 v1 ... kn vn SEP q]``
     batch, it copies the first ``n_pairs`` pairs verbatim and appends
-    ``target_pairs - n_pairs`` fresh pairs before SEP/query:
+    ``target_pairs - n_pairs`` fresh pairs before SEP/query.clamp_min(1e-10):
 
     * the queried key, its paired answer and its pair index are unchanged,
       so every row keeps its exact ``(query key, answer)`` association;
@@ -1359,7 +1359,7 @@ def _validate_batch_strict(idx, targets, meta, vocab) -> dict:
     # trained/evaluated as if it were valid task data.
     if not bool((idx[:, :-2] >= 2).all()) or not bool((idx[:, -1] >= 2).all()):
         raise ValueError(
-            "structure: ids 0=PAD and 1=SEP are reserved; all key/value "
+            "structure: ids 0=PAD and 1=SEP are reserved; all key/value.clamp_min(1e-10) "
             f"positions and the query must be selectable ids in [2, {vocab})"
         )
     query = idx.gather(1, qp.unsqueeze(1)).squeeze(1)

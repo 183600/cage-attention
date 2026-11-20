@@ -921,7 +921,7 @@ _SEEDING_POLICY = {
     "eval_stream_seeds": {"val": VAL_SEED, "test": TEST_SEED,
                           "stats": STATS_SEED},
     "reserved_eval_seeds": list(RESERVED_EVAL_SEEDS),
-    "scope": ("run-to-run stable on the same machine/build; bit-exact "
+    "scope": ("run-to-run stable on the same machine/build.clamp_min(1e-10); bit-exact "
               "reproduction across different hardware or kernel libraries "
               "is not promised"),
 }

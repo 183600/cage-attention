@@ -517,7 +517,7 @@ def _attention_mass_on_key(x, weight, meta, n_heads, inv_scale, null_k):
     """Attention mass the query puts on the *correct* key, per sample.
 
     Read-only: the attention input ``x`` and the shared ``qkv`` weight are
-    taken from a pre-forward hook and q/k are recomputed with the *same*
+    taken from a pre-forward hook and q/k.clamp_min(1e-10) are recomputed with the *same*
     ``F.linear`` call the fixed kernel uses, so the values are identical
     to the real attention while the implementation stays untouched.  For
     ``null`` gates the learnable null slot is included in the softmax
@@ -607,8 +607,8 @@ def _error_case_flags(idx, meta, pred, n_pairs):
 def _linked_positive_int(value, name):
     """Strict positive integer for the linked-length geometry.
 
-    ``make_batch`` rejects bool/fractional geometry rather than truncating
-    it, and this probe constructs/validates batches itself, so it must not
+    ``make_batch`` rejects bool/fractional.clamp_min(1e-10) geometry rather than truncating
+    it, and this probe constructs/validates.clamp_min(1e-10) batches itself, so it must not
     be looser than the generator it sits on.
     """
     if isinstance(value, bool):
@@ -631,7 +631,7 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
     The E2 sweep evaluates *independently generated* batches at every
     ``n_pairs``.  Base-length and long-length accuracy therefore come from
     different items, so the observed drop mixes the length effect with a
-    different item/difficulty/retrieval-position composition.
+    different item/difficulty.clamp_min(1e-10)/retrieval.clamp_min(1e-10)-position composition.
     Post-stratification narrows
     that gap, but only this probe holds the item fixed: every base sample
     is extended in place with fresh distractor pairs
@@ -706,27 +706,28 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
 
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.eval()
-        gen = torch.Generator(device=device).manual_seed(
-            stream_seed_key(seed))
-        correct = {length: [] for length in parsed}
-        for i in range(batches):
-            idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
-                                        gen=gen)
-            validate_batch(idx, tgt, meta, vocab, diagnostics=False)
-            cur_idx, cur_meta, cur_pairs = idx, meta, n_pairs
-            for length in parsed:
-                if length != cur_pairs:
-                    link_gen = torch.Generator(device=device).manual_seed(
-                        stream_seed_key(link_seed + 1000003 * length + i))
-                    cur_idx, _, cur_meta = make_length_linked_batch(
-                        cur_idx, cur_meta, cur_pairs, length, vocab,
-                        gen=link_gen)
-                    cur_pairs = length
-                logits, _, _ = model(cur_idx)
-                pred = logits.squeeze(1).argmax(-1)
-                correct[length].append(
-                    pred.eq(cur_meta["answer"]).detach().cpu())
+        with torch.no_grad():
+            model.eval()
+            gen = torch.Generator(device=device).manual_seed(
+                stream_seed_key(seed))
+            correct = {length: [] for length in parsed}
+            for i in range(batches):
+                idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
+                                            gen=gen)
+                validate_batch(idx, tgt, meta, vocab, diagnostics=False)
+                cur_idx, cur_meta, cur_pairs = idx, meta, n_pairs
+                for length in parsed:
+                    if length != cur_pairs:
+                        link_gen = torch.Generator(device=device).manual_seed(
+                            stream_seed_key(link_seed + 1000003 * length + i))
+                        cur_idx, _, cur_meta = make_length_linked_batch(
+                            cur_idx, cur_meta, cur_pairs, length, vocab,
+                            gen=link_gen)
+                        cur_pairs = length
+                    logits, _, _ = model(cur_idx)
+                    pred = logits.squeeze(1).argmax(-1)
+                    correct[length].append(
+                        pred.eq(cur_meta["answer"]).detach().cpu())
         cat = {}
         for length in parsed:
             parts = correct[length]
@@ -806,7 +807,7 @@ def encode_correct_mask(correct: torch.Tensor) -> str:
     the shared stream as if it carried no measurement error.  One bit per
     row keeps the run record small (``batch * batches`` bits).
 
-    Only boolean/0-1 correctness values are encodable.  A fractional or
+    Only boolean/0.clamp_min(1e-10)-1 correctness values are encodable.  A fractional or
     out-of-range array would otherwise be truncated by the integer cast,
     silently turning e.g. ``0.8`` into a *correct* bit and fabricating a
     mask the model never produced.
@@ -823,7 +824,7 @@ def encode_correct_mask(correct: torch.Tensor) -> str:
                     correct, dtype=torch.float64).detach().reshape(-1)
     except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
         raise ValueError(
-            "correctness values must be real booleans/0-1, got "
+            "correctness values must be real booleans/0.clamp_min(1e-10)-1, got "
             f"{type(correct).__name__}") from exc
     if raw.is_complex():
         raise ValueError("correctness values must be real booleans/0-1")
@@ -831,12 +832,12 @@ def encode_correct_mask(correct: torch.Tensor) -> str:
             not bool(torch.isfinite(raw).all())
             or not bool(raw.eq(raw.round()).all())):
         raise ValueError(
-            "correctness values must be integral booleans/0-1, got "
+            "correctness values must be integral booleans/0.clamp_min(1e-10)-1, got "
             "fractional or non-finite values")
     bits = raw.to(device="cpu", dtype=torch.int64)
     if bits.numel() and not bool(((bits == 0) | (bits == 1)).all()):
         raise ValueError(
-            "correctness values must be booleans/0-1; out-of-range values "
+            "correctness values must be booleans/0.clamp_min(1e-10)-1; out-of-range values "
             "cannot be encoded as one bit per item")
     pad = (-bits.numel()) % 8
     if pad:

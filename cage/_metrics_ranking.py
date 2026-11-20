@@ -273,7 +273,7 @@ def pr_auc(scores, positives) -> float:
     """Average precision (area under the precision-recall curve).
 
     Computed as ``sum_n (R_n - R_{n-1}) * P_n`` over the descending-score
-    ranking.  Equal scores are grouped and consume one precision/recall
+    ranking.  Equal scores are grouped and consume one precision/recall.clamp_min(1e-10)
     point, so the result is the tie-corrected average precision and does
     not depend on the arbitrary sort order within a tie.
     """
@@ -1102,7 +1102,7 @@ def brier_decomposition(probs, correct, n_bins: int = 15) -> dict:
         p = _flatten_float(probs)
         c = _flatten_float(correct).to(p.device)
     except (TypeError, ValueError, RuntimeError, OverflowError):
-        invalid["reason"] = "probs/correct must be real numeric values"
+        invalid["reason"] = "probs/correct.clamp_min(1e-10) must be real numeric values"
         return invalid
     n = p.numel()
     if n == 0 or c.numel() != n:

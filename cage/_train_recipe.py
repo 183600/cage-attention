@@ -29,7 +29,7 @@ def _validated_curve_threshold(value, name):
     """Coerce a curve threshold to a finite non-negative number.
 
     ``rel_tol`` and ``grad_norm_explode`` are compared against curve
-    measurements, so a string/complex/NaN threshold would otherwise escape
+    measurements, so a string/complex.clamp_min(1e-10)/NaN.clamp_min(1e-10) threshold would otherwise escape
     as an incidental ``TypeError``/``NotImplementedError`` from the
     comparison (or silently disable the check).  A boolean is a flag, not
     a threshold.
@@ -584,10 +584,10 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
         mark("data", f"invalid batch: {e}")
     if torch.is_tensor(idx) and idx.is_floating_point() \
             and not bool(torch.isfinite(idx).all()):
-        mark("data", "idx contains NaN/Inf")
+        mark("data", "idx contains NaN/Inf.clamp_min(1e-10)")
     if torch.is_tensor(tgt) and tgt.is_floating_point() \
             and not bool(torch.isfinite(tgt).all()):
-        mark("data", "targets contain NaN/Inf")
+        mark("data", "targets contain NaN/Inf.clamp_min(1e-10)")
 
     # ---- 2. forward activations -----------------------------------------
     bad_layers = []
@@ -608,14 +608,15 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     if train_mode:
         model.train()
     else:
-        model.eval()
-    logits = loss = None
-    sup_pos = None
-    if not dense_lm and isinstance(meta, dict):
-        sup_pos = meta.get("query_pos")
-    try:
-        with torch.inference_mode(False), torch.enable_grad():
-            logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
+        with torch.no_grad():
+            model.eval()
+        logits = loss = None
+        sup_pos = None
+        if not dense_lm and isinstance(meta, dict):
+            sup_pos = meta.get("query_pos")
+        try:
+            with torch.inference_mode(False), torch.enable_grad():
+                logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
     except Exception as e:  # noqa: BLE001
         mark("activations", f"forward raised: {e}")
     finally:
@@ -629,7 +630,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     if bad_layers:
         mark("activations",
              f"non-finite block output at layer(s) {sorted(set(bad_layers))} "
-             "(check log(0)/div-by-zero/softmax overflow there)")
+             "(check log(0)/div.clamp_min(1e-10)-by-zero/softmax.clamp_min(1e-10) overflow there)")
     for name, p in model.named_parameters():
         if not bool(torch.isfinite(p).all()):
             report["nonfinite_params"].append(name)
@@ -654,9 +655,10 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
         stat_pos = meta["query_pos"]
         invalid_attn_stats = []
         try:
-            model.eval()
-            with torch.inference_mode():
-                _, _, layer_stats = model(idx, stat_pos=stat_pos)
+            with torch.no_grad():
+                model.eval()
+                with torch.inference_mode():
+                    _, _, layer_stats = model(idx, stat_pos=stat_pos)
             for layer_idx, stat in enumerate(layer_stats or ()):
                 for key, value in stat.items():
                     if not torch.is_tensor(value) or not value.numel():
@@ -676,7 +678,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
                     elif key == "entropy" and float(value.min()) < 0.0:
                         report["notes"].append(
                             f"{label} is negative "
-                            f"({float(value.min()):.3g}): log/div-by-zero "
+                            f"({float(value.min()):.3g}): log/div.clamp_min(1e-10)-by-zero "
                             "inside the attention kernel")
                         invalid_attn_stats.append(label)
                     elif key in ("gate", "null_mass") and (
@@ -720,7 +722,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
         if logit_max > 80.0:
             report["notes"].append(
                 f"max |logit| {logit_max:.1f} exceeds the fp16 range: under "
-                "autocast this saturates/overflows the softmax without a "
+                "autocast this saturates/overflows.clamp_min(1e-10) the softmax without a "
                 "max-subtracted stable pass")
     if not loss_ok:
         val = "None" if loss is None else f"{float(loss)}"
@@ -868,7 +870,7 @@ def _gradient_flow(model):
     reached by the graph - the signature of a detached branch, a
     mis-wired loss or a kernel whose custom backward forgot an input.
     Non-finite gradients are the other failure mode.  The caller runs this
-    straight after backward, before clipping/zeroing, on the standard
+    straight after backward, before clipping/zeroing.clamp_min(1e-10), on the standard
     (non-ablated) configuration; parameters deliberately switched off in
     an ablation arm may legitimately have no gradient there.
     """
@@ -1093,38 +1095,39 @@ def _validation_metrics(model, val_gen, n_pairs, vocab, device, batch, batches,
     """
     training_states = {module: module.training for module in model.modules()}
     try:
-        model.eval()
-        correct = torch.zeros((), dtype=torch.int64, device=device)
-        total = 0
-        last_batch = None
-        first_bad_batch = None
-        batch_losses = []
-        val_gen.manual_seed(stream_seed_key(VAL_SEED))
-        for i in range(max(1, batches)):
-            # Batch construction stays outside inference_mode so the returned
-            # triage batch remains usable by a grad-enabled triage/backward.
-            idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
-                                        dense_lm=dense_lm, gen=val_gen)
-            validate_batch(idx, tgt, meta, vocab, diagnostics=False)
-            last_batch = (idx, tgt, meta)
-            sup_pos = None if dense_lm else meta["query_pos"]
-            with torch.inference_mode():
-                logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
-                batch_losses.append(loss.detach())
-                if (first_bad_batch is None
-                        and not bool(torch.isfinite(loss))):
-                    first_bad_batch = last_batch
-                if dense_lm:
-                    # Dense training supervises every position, so the forward
-                    # returns the full-sequence logits flattened row-major; the
-                    # recall accuracy still lives at the query position only.
-                    rows = torch.arange(idx.size(0), device=logits.device)
-                    qlogits = logits.reshape(
-                        idx.size(0), idx.size(1), -1)[rows, meta["query_pos"]]
-                    correct.add_((qlogits.argmax(-1) == meta["answer"]).sum())
-                else:
-                    correct.add_((logits.argmax(-1) == meta["answer"]).sum())
-                total += idx.size(0)
+        with torch.no_grad():
+            model.eval()
+            correct = torch.zeros((), dtype=torch.int64, device=device)
+            total = 0
+            last_batch = None
+            first_bad_batch = None
+            batch_losses = []
+            val_gen.manual_seed(stream_seed_key(VAL_SEED))
+            for i in range(max(1, batches)):
+                # Batch construction stays outside inference_mode so the returned
+                # triage batch remains usable by a grad-enabled triage/backward.
+                idx, tgt, meta = make_batch(batch, n_pairs, vocab, device,
+                                            dense_lm=dense_lm, gen=val_gen)
+                validate_batch(idx, tgt, meta, vocab, diagnostics=False)
+                last_batch = (idx, tgt, meta)
+                sup_pos = None if dense_lm else meta["query_pos"]
+                with torch.inference_mode():
+                    logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
+                    batch_losses.append(loss.detach())
+                    if (first_bad_batch is None
+                            and not bool(torch.isfinite(loss))):
+                        first_bad_batch = last_batch
+                    if dense_lm:
+                        # Dense training supervises every position, so the forward
+                        # returns the full-sequence logits flattened row-major; the
+                        # recall accuracy still lives at the query position only.
+                        rows = torch.arange(idx.size(0), device=logits.device)
+                        qlogits = logits.reshape(
+                            idx.size(0), idx.size(1), -1)[rows, meta["query_pos"]]
+                        correct.add_((qlogits.argmax(-1) == meta["answer"]).sum())
+                    else:
+                        correct.add_((logits.argmax(-1) == meta["answer"]).sum())
+                    total += idx.size(0)
         n_batches = max(1, batches)
         losses = [float(x) for x in batch_losses]
         if len(losses) > 1:

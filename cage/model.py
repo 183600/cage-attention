@@ -1676,7 +1676,7 @@ class Block(nn.Module):
         """Record ``||scale * branch|| / ||stream||`` into ``stats``.
 
         E3's ``resid_norm`` is read *after* the block's final LayerNorm in
-        post-norm blocks but on the raw residual stream in pre/seednorm
+        post-norm blocks but on the raw residual stream in pre/seednorm.clamp_min(1e-10)
         blocks, so its level is not comparable across normalisation
         schemes.  The relative branch write is: each branch is measured
         against the stream it is actually added to, before any

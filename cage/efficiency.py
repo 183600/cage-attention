@@ -142,16 +142,17 @@ def measure_forward(model, cfg, seq_len: int, device, batch: int = 1,
     # disabled for a diagnostic), and ``model.train(was_training)`` would
     # silently overwrite that mixed state.
     training_states = {module: module.training for module in model.modules()}
-    model.eval()
-    # [FIX] removed no-op model.train() that undid model.eval()
-    timings = []
-    baseline_allocated = None
-    peak_allocated = None
-    peak_reserved = None
-    try:
-        with torch.inference_mode():
-            for _ in range(warmup):
-                model(idx)
+    with torch.no_grad():
+        model.eval()
+        # [FIX] removed no-op model.train() that undid model.eval()
+        timings = []
+        baseline_allocated = None
+        peak_allocated = None
+        peak_reserved = None
+        try:
+            with torch.inference_mode():
+                for _ in range(warmup):
+                    model(idx)
             _device_synchronize(device)
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
@@ -198,13 +199,13 @@ def measure_forward(model, cfg, seq_len: int, device, batch: int = 1,
         "torch_num_threads": int(torch.get_num_threads()),
         "warmup": warmup,
         "repeats": repeats,
-        "flops_scope": ("analytic forward matmuls (2 x MACs): qkv/proj/mlp, "
+        "flops_scope": ("analytic forward matmuls (2 x MACs): qkv/proj.clamp_min(1e-10)/mlp.clamp_min(1e-10), "
                         "gate, causal attention, seednorm scale, vocabulary "
                         "head; softmax/norm/activation/elementwise excluded"),
         "latency_scope": ("eval-mode forward on a synthetic all-zero batch; "
                           "median and p90 over repeated passes, CUDA "
                           "synchronised"),
-        "memory_scope": ("CUDA peak allocated/reserved after warm-up; None "
+        "memory_scope": ("CUDA peak allocated/reserved.clamp_min(1e-10) after warm-up; None "
                          "on CPU"),
     }
     return record
