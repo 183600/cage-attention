@@ -2,6 +2,7 @@
 # Executed into the cage.experiments namespace by __init__.py;
 # split for readability, sharing the module globals.
 # ruff: noqa: F821, F541
+import logging
 def _enforce_baseline_verdict(settings: Settings, out_dir: pathlib.Path,
                               tag: str) -> dict:
     """Read and enforce ``baselines_verdict.json`` before a grid trains.
@@ -1120,8 +1121,9 @@ def _reproducibility_audit(settings: Settings) -> dict:
                     with torch.cuda.device(index):
                         draws[f"torch_cuda_{index}"] = float(
                             torch.rand((), device=f"cuda:{index}"))
-                except Exception:  # noqa: BLE001 - a broken device probe must
-                    pass          # not hide the checks that still ran
+                except Exception as exc:  # noqa: BLE001 - a broken device probe must
+                    logging.getLogger(__name__).warning(  # not hide the checks that still ran
+                        "CUDA device %d probe failed: %s", index, exc)
         return draws
 
     def _draw(s):
