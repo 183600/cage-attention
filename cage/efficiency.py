@@ -149,22 +149,22 @@ def measure_forward(model, cfg, seq_len: int, device, batch: int = 1,
         baseline_allocated = None
         peak_allocated = None
         peak_reserved = None
-        try:
-            with torch.inference_mode():
-                for _ in range(warmup):
-                    model(idx)
-            _device_synchronize(device)
-            if device.type == "cuda":
-                torch.cuda.reset_peak_memory_stats(device)
-                baseline_allocated = torch.cuda.memory_allocated(device)
-            for _ in range(repeats):
-                start = time.perf_counter_ns()
+    try:
+        with torch.inference_mode():
+            for _ in range(warmup):
                 model(idx)
-                _device_synchronize(device)
-                timings.append((time.perf_counter_ns() - start) / 1e6)
-            if device.type == "cuda":
-                peak_allocated = torch.cuda.max_memory_allocated(device)
-                peak_reserved = torch.cuda.max_memory_reserved(device)
+        _device_synchronize(device)
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+            baseline_allocated = torch.cuda.memory_allocated(device)
+        for _ in range(repeats):
+            start = time.perf_counter_ns()
+            model(idx)
+            _device_synchronize(device)
+            timings.append((time.perf_counter_ns() - start) / 1e6)
+        if device.type == "cuda":
+            peak_allocated = torch.cuda.max_memory_allocated(device)
+            peak_reserved = torch.cuda.max_memory_reserved(device)
     finally:
         for module, training in training_states.items():
             module.train(training)

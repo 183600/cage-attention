@@ -614,9 +614,9 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
         sup_pos = None
         if not dense_lm and isinstance(meta, dict):
             sup_pos = meta.get("query_pos")
-        try:
-            with torch.inference_mode(False), torch.enable_grad():
-                logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
+    try:
+        with torch.inference_mode(False), torch.enable_grad():
+            logits, loss, _ = model(idx, tgt, sup_pos=sup_pos)
     except Exception as e:  # noqa: BLE001
         mark("activations", f"forward raised: {e}")
     finally:
