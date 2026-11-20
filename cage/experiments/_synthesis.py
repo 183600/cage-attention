@@ -1401,7 +1401,7 @@ def _selection_reliability(rows, metric="val_accuracy_mean",
         n = _positive_integer(row.get(n_key))
         if (_finite(std) and float(std) >= 0.0
                 and n is not None and n >= 2):
-            return float(std) / math.sqrt(max(float(n, 0.0)))
+            return float(std) / math.sqrt(max(float(n), 0.0))
         return float("nan")
 
     se_best, se_second = _se(r_best), _se(r_second)
