@@ -655,7 +655,6 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
         invalid_attn_stats = []
         try:
             model.eval()
-            with torch.no_grad():
             with torch.inference_mode():
                 _, _, layer_stats = model(idx, stat_pos=stat_pos)
             for layer_idx, stat in enumerate(layer_stats or ()):
