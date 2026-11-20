@@ -282,21 +282,21 @@ def train_linear_probe(n_pairs, vocab, device="cpu", steps=400, batch=64,
         return model
 
 
-    @torch.inference_mode()
-    def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
-                              batches=4, seed=123):
-        """Probe accuracy on a held-out stream, every batch cleaning-gated like
-        training."""
-        batch, batches = _validated_batch_counts(batch, batches)
-        gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
-        correct = torch.zeros((), dtype=torch.int64, device=device)
-        total = 0
-        for i in range(batches):
-            idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
-            validate_batch(idx, tgt, meta, vocab, diagnostics=False)
-            pred = model(idx).argmax(dim=-1)
-            correct.add_((pred == meta["answer"]).sum())
-            total += idx.size(0)
+@torch.inference_mode()
+def linear_probe_accuracy(model, n_pairs, vocab, device="cpu", batch=256,
+                          batches=4, seed=123):
+    """Probe accuracy on a held-out stream, every batch cleaning-gated like
+    training."""
+    batch, batches = _validated_batch_counts(batch, batches)
+    gen = torch.Generator(device=device).manual_seed(stream_seed_key(seed))
+    correct = torch.zeros((), dtype=torch.int64, device=device)
+    total = 0
+    for i in range(batches):
+        idx, tgt, meta = make_batch(batch, n_pairs, vocab, device, gen=gen)
+        validate_batch(idx, tgt, meta, vocab, diagnostics=False)
+        pred = model(idx).argmax(dim=-1)
+        correct.add_((pred == meta["answer"]).sum())
+        total += idx.size(0)
     return correct.item() / max(total, 1) if total else float("nan")
 
 

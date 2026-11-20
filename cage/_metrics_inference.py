@@ -1254,7 +1254,7 @@ def wilson_ci(successes: int, total: int, z: float = 1.959964) -> dict:
         _tf = max(total_f, 1.0)
         denom = 1.0 + z2 / _tf
         center = (p + z2 / (2.0 * _tf)) / max(denom, 1e-10)
-        half = (z * math.sqrt(max(p * (1.0 - p, 0.0)) / _tf
+        half = (z * math.sqrt(max(p * (1.0 - p), 0.0) / _tf
                               + z2 / (4.0 * _tf * _tf)) / denom)
     else:
         # ``total_f`` overflowed, so evaluate the interval in a scaled form.
