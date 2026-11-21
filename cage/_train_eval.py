@@ -302,55 +302,55 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
                     if panel.dtype != torch.float64:
                         panel = panel.float()
                     logits_all.append(panel)
-                tgt_all.append(meta["answer"])
-                strata_all.append(difficulty_strata(
-                    idx, meta["answer"], n_pairs,
-                    n_key_bins=n_key_bins)["stratum"].cpu())
-                # Minimal-pair data edits on the *validated* realization.  The
-                # edited contexts go through the same cleaning gate, so a probe
-                # can never compare predictions on malformed data.
-                edits = _counterfactual_edits(idx, meta, n_pairs, vocab)
-                pred = logits.squeeze(1).argmax(-1)
-                swap_pred = distractor_pred = relocation_pred = None
-                if edits is not None:
-                    validate_batch(edits["value_swap"], None,
-                                   edits["value_swap_meta"], vocab,
-                                   diagnostics=False)
-                    swap_logits, _, _ = model(edits["value_swap"])
-                    swap_pred = swap_logits.squeeze(1).argmax(-1)
-                    if edits["distractor_swap"] is not None:
-                        validate_batch(edits["distractor_swap"], None,
-                                       edits["distractor_swap_meta"], vocab,
+                    tgt_all.append(meta["answer"])
+                    strata_all.append(difficulty_strata(
+                        idx, meta["answer"], n_pairs,
+                        n_key_bins=n_key_bins)["stratum"].cpu())
+                    # Minimal-pair data edits on the *validated* realization.  The
+                    # edited contexts go through the same cleaning gate, so a probe
+                    # can never compare predictions on malformed data.
+                    edits = _counterfactual_edits(idx, meta, n_pairs, vocab)
+                    pred = logits.squeeze(1).argmax(-1)
+                    swap_pred = distractor_pred = relocation_pred = None
+                    if edits is not None:
+                        validate_batch(edits["value_swap"], None,
+                                       edits["value_swap_meta"], vocab,
                                        diagnostics=False)
-                        distractor_logits, _, _ = model(edits["distractor_swap"])
-                        distractor_pred = distractor_logits.squeeze(1).argmax(-1)
-                    if edits["relocation"] is not None:
-                        validate_batch(edits["relocation"], None,
-                                       edits["relocation_meta"], vocab,
-                                       diagnostics=False)
-                        relocation_logits, _, _ = model(edits["relocation"])
-                        relocation_pred = relocation_logits.squeeze(1).argmax(-1)
-                    counts = _counterfactual_counts(
-                        pred, meta["answer"], swap_pred,
-                        edits["value_swap_answer"], distractor_pred,
-                        relocation_pred)
-                    if cf_totals is None:
-                        cf_totals = counts
-                    else:
-                        for key in cf_totals:
-                            cf_totals[key] += counts[key]
-                if reference_codes is not None:
-                    _association_exposure_accumulate(
-                        exposure_totals, idx, meta, vocab, reference_codes,
-                        pred, meta["answer"], swap_pred=swap_pred,
-                        swap_answer=(None if edits is None
-                                     else edits["value_swap_answer"]),
-                        distractor_pred=distractor_pred,
-                        relocation_pred=relocation_pred)
-                if reference_counts is not None:
-                    _association_exposure_dose_accumulate(
-                        exposure_dose_totals, idx, meta, vocab,
-                        reference_counts, pred, meta["answer"])
+                        swap_logits, _, _ = model(edits["value_swap"])
+                        swap_pred = swap_logits.squeeze(1).argmax(-1)
+                        if edits["distractor_swap"] is not None:
+                            validate_batch(edits["distractor_swap"], None,
+                                           edits["distractor_swap_meta"], vocab,
+                                           diagnostics=False)
+                            distractor_logits, _, _ = model(edits["distractor_swap"])
+                            distractor_pred = distractor_logits.squeeze(1).argmax(-1)
+                        if edits["relocation"] is not None:
+                            validate_batch(edits["relocation"], None,
+                                           edits["relocation_meta"], vocab,
+                                           diagnostics=False)
+                            relocation_logits, _, _ = model(edits["relocation"])
+                            relocation_pred = relocation_logits.squeeze(1).argmax(-1)
+                        counts = _counterfactual_counts(
+                            pred, meta["answer"], swap_pred,
+                            edits["value_swap_answer"], distractor_pred,
+                            relocation_pred)
+                        if cf_totals is None:
+                            cf_totals = counts
+                        else:
+                            for key in cf_totals:
+                                cf_totals[key] += counts[key]
+                    if reference_codes is not None:
+                        _association_exposure_accumulate(
+                            exposure_totals, idx, meta, vocab, reference_codes,
+                            pred, meta["answer"], swap_pred=swap_pred,
+                            swap_answer=(None if edits is None
+                                         else edits["value_swap_answer"]),
+                            distractor_pred=distractor_pred,
+                            relocation_pred=relocation_pred)
+                    if reference_counts is not None:
+                        _association_exposure_dose_accumulate(
+                            exposure_dose_totals, idx, meta, vocab,
+                            reference_counts, pred, meta["answer"])
             if logits_all:
                 logits_cat = torch.cat(logits_all, dim=0).cpu()
                 tgt_cat = torch.cat(tgt_all, dim=0).cpu()
