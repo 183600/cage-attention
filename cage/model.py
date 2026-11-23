@@ -274,7 +274,7 @@ class Cfg:
                 "log(expm1(calib_tau_init)) is defined, got "
                 f"{raw_tau_init!r}")
         try:
-            math.log(max(math.expm1(tau_init, 1e-10)))
+            math.log(max(math.expm1(tau_init), 1e-10))
         except (OverflowError, ValueError) as exc:
             raise ValueError(
                 "calib_tau_init is too large for "
@@ -1155,7 +1155,7 @@ class Attention(nn.Module):
                             if cfg.calib_use_len else None)
             self.calib_c = (nn.Parameter(torch.tensor(float(cfg.calib_c)))
                             if cfg.calib_use_ent else None)
-            tau_init = math.log(max(math.expm1(cfg.calib_tau_init, 1e-10)))
+            tau_init = math.log(max(math.expm1(cfg.calib_tau_init), 1e-10))
             self.calib_tau = nn.Parameter(torch.tensor(tau_init))
             # Only the product ``calib_c * calib_scale`` enters the gate, so
             # a second *learnable* scalar would be unidentifiable next to

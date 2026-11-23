@@ -1329,7 +1329,7 @@ class Settings:
                     # fail only after the baseline and main grids had run.
                     # Reject it at the configuration boundary instead.
                     try:
-                        math.log(max(math.expm1(number, 1e-10)))
+                        math.log(max(math.expm1(number), 1e-10))
                     except (OverflowError, ValueError) as exc:
                         raise ValueError(
                             f"{name} entries must keep "

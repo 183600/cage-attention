@@ -93,8 +93,8 @@ def check_pins() -> None:
         fail("D3: unparenthesised '<< N //' precedence bug present")
 
     # D4: calib_tau softplus-inverse initialisation.
-    if "math.log(max(math.expm1(cfg.calib_tau_init, 1e-10)))" not in model:
-        fail("D4: calib_tau must be initialised via math.log(max(math.expm1(cfg.calib_tau_init, 1e-10)))")
+    if "math.log(max(math.expm1(cfg.calib_tau_init), 1e-10))" not in model:
+        fail("D4: calib_tau must be initialised via math.log(max(math.expm1(cfg.calib_tau_init), 1e-10))")
 
     # D5: optimizer factory with fallback chain.
     if "def _make_adamw" not in train:
