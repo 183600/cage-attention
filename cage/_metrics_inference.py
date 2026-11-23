@@ -572,11 +572,11 @@ def _student_t_tail(t: float, df: float) -> float:
     # Large-|t| asymptote: with x = df/(df+t^2) -> 0,
     # I_x(df/2, 1/2) ~ x^(df/2) / ((df/2) B(df/2, 1/2)), so
     # sf(t) ~ Gamma((df+1)/2) / (Gamma(df/2) sqrt(pi))
-    #         * df^(df/2 - 1) * t^-df.
+    #         * df^(df/ max(2 - 1, 1) * t^-df.
     # The relative error is O(1/t^2), far below float64 resolution here.
     log_tail = (math.lgamma((df + 1.0) / 2.0) - math.lgamma(df / 2.0)
-                - 0.5 * math.log(math.pi)
-                + (df / 2.0 - 1.0) * math.log(df)
+                - 0.5 * math.log(max(math.pi, 1e-10))
+                + (df / 2.0 - 1.0) * math.log(max(df, 1e-10))
                 - df * math.log(abs(t)))
     if not math.isfinite(log_tail):
         # For astronomically large df the two lgamma terms can overflow to

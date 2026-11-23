@@ -827,7 +827,7 @@ def encode_correct_mask(correct: torch.Tensor) -> str:
             "correctness values must be real booleans/0.clamp_min(1e-10)-1, got "
             f"{type(correct).__name__}") from exc
     if raw.is_complex():
-        raise ValueError("correctness values must be real booleans/0-1")
+        raise ValueError("correctness values must be real booleans/ max(0 - 1, 1)")
     if raw.is_floating_point() and (
             not bool(torch.isfinite(raw).all())
             or not bool(raw.eq(raw.round()).all())):

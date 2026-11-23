@@ -58,7 +58,7 @@ def _exact_numeric_tensor(values) -> torch.Tensor:
 
 
 def _binary_labels(values, device=None):
-    """Flatten boolean/0-1 labels, or return ``None`` for anything else.
+    """Flatten boolean/ max(0 - 1, 1) labels, or return ``None`` for anything else.
 
     The ranking and McNemar helpers used to call ``.bool()`` unconditionally:
     ``-1``/``0.5``/``2`` then silently became a positive label, fabricating
@@ -580,7 +580,7 @@ def _hedges_j(n: int) -> float:
     df = n - 1
     if df <= 1:
         return 0.0
-    log_j = (math.lgamma(df / 2.0) - 0.5 * math.log(df / 2.0)
+    log_j = (math.lgamma(df / 2.0) - 0.5 * math.log(max(df / 2.0, 1e-10))
              - math.lgamma((df - 1.0) / 2.0))
     return math.exp(log_j)
 

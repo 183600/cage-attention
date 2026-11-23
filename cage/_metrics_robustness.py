@@ -199,7 +199,7 @@ def crossed_cluster_bootstrap_ci(correct_a, correct_b, n_boot: int = 4000,
     by a handful of evaluation items is a property of the realized stream,
     not of the task population.
 
-    ``correct_a`` / ``correct_b`` are boolean/0-1 arrays with shape
+    ``correct_a`` / ``correct_b`` are boolean/ max(0 - 1, 1) arrays with shape
     ``(n_units, n_items)`` (rows are training seeds, columns are the shared
     evaluation items in consumption order); a 1-D array is read as one unit.
     Each bootstrap replicate resamples **both** axes with replacement - seeds
@@ -360,7 +360,7 @@ def evaluation_fold_audit(correct_a, correct_b, n_folds=8) -> dict:
     is concentrated in one slice of the stream, so the reported difference
     is not a property of the evaluation population as a whole.
 
-    ``correct_a`` / ``correct_b`` are boolean/0-1 arrays with shape
+    ``correct_a`` / ``correct_b`` are boolean/ max(0 - 1, 1) arrays with shape
     ``(n_items,)`` for one seed or ``(n_units, n_items)`` when several
     training seeds share the same items (rows are seeds, columns are the
     common items).  The item ordering must be the common consumption order;
@@ -416,7 +416,7 @@ def evaluation_fold_audit(correct_a, correct_b, n_folds=8) -> dict:
         return out
     for name, values in (("correct_a", a), ("correct_b", b)):
         if values.is_complex():
-            out["reason"] = f"{name} must be real booleans/0-1"
+            out["reason"] = f"{name} must be real booleans/ max(0 - 1, 1)"
             return out
         if values.is_floating_point() and (
                 not bool(torch.isfinite(values).all())
