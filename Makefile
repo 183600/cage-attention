@@ -1,0 +1,81 @@
+PYTHON ?= python3
+OUT ?= results
+MANIFEST ?=
+REPLAY_OUT ?=
+SOURCE ?=
+
+.PHONY: help gate test check lint preflight sanity replay verify verify-env verify-artifacts verify-provenance verify-runs verify-replay verify-source verify-deps
+
+help:
+	@echo "make gate             - design pins + smoke gate (python3 ci_gate.py)"
+	@echo "make test             - standard-library test suite (no extra dependencies)"
+	@echo "make check            - gate + tests"
+	@echo "make lint             - ruff check (skipped when ruff is not installed)"
+	@echo "make verify-deps      - installed distributions vs declared dependency set"
+	@echo "make preflight        - verify-deps + check (run before a formal grid)"
+	@echo "make sanity           - quick reproducibility/split/overfit pre-flight"
+	@echo "make replay MANIFEST=results/e1_manifest.json [REPLAY_OUT=results_replay]"
+	@echo "                      - re-run a frozen manifest as a new evidence directory"
+	@echo "make verify           - env + artifact + provenance + run + source checks on $(OUT)"
+	@echo "make verify-env       - compare $(OUT)/environment.json with this process"
+	@echo "make verify-artifacts - verify $(OUT) against artifact_index.json"
+	@echo "make verify-provenance - recompute each record's setup/environment ids"
+	@echo "make verify-runs      - reject incomplete runs and critical environment drift"
+	@echo "make verify-replay SOURCE=results [REPLAY_OUT=results_replay]"
+	@echo "                      - compare a replay payload with its source evidence"
+	@echo "make verify-source    - compare archived code hashes with this checkout"
+
+gate:
+	$(PYTHON) ci_gate.py
+
+test:
+	$(PYTHON) -m unittest discover -s tests -v
+
+check: gate test
+
+lint:
+	@if $(PYTHON) -c "import ruff" >/dev/null 2>&1 || command -v ruff >/dev/null 2>&1; then \
+		ruff check . || $(PYTHON) -m ruff check .; \
+	else \
+		echo "[lint] ruff is not installed; skipping (pip install '.[dev]' to enable)"; \
+	fi
+
+verify-deps:
+	$(PYTHON) -m cage.experiments --check-dependencies
+
+preflight: verify-deps check
+
+sanity:
+	$(PYTHON) -m cage.experiments --only sanity --quick --out results_quick
+
+replay:
+	@if [ -z "$(MANIFEST)" ]; then \
+		echo "usage: make replay MANIFEST=results/e1_manifest.json [REPLAY_OUT=results_replay]"; \
+		exit 2; \
+	fi
+	$(PYTHON) -m cage.experiments --replay-manifest "$(MANIFEST)" $(if $(REPLAY_OUT),--out "$(REPLAY_OUT)",)
+
+verify: verify-env verify-artifacts verify-provenance verify-runs verify-source
+
+verify-env:
+	$(PYTHON) -m cage.experiments --check-environment --out $(OUT)
+
+verify-artifacts:
+	$(PYTHON) -m cage.experiments --verify-artifacts --out $(OUT)
+
+verify-provenance:
+	$(PYTHON) -m cage.experiments --verify-provenance --out $(OUT)
+
+verify-runs:
+	$(PYTHON) -m cage.experiments --verify-runs --out $(OUT)
+
+verify-replay:
+	@if [ -z "$(SOURCE)" ]; then \
+		echo "usage: make verify-replay SOURCE=results [REPLAY_OUT=results_replay]"; \
+		exit 2; \
+	fi
+	$(PYTHON) -m cage.experiments --verify-replay "$(SOURCE)" \
+		--out $(if $(REPLAY_OUT),$(REPLAY_OUT),results_replay)
+
+verify-source:
+	$(PYTHON) -m cage.experiments --check-source --out $(OUT)
