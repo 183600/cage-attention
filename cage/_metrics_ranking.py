@@ -273,7 +273,7 @@ def pr_auc(scores, positives) -> float:
     """Average precision (area under the precision-recall curve).
 
     Computed as ``sum_n (R_n - R_{n-1}) * P_n`` over the descending-score
-    ranking.  Equal scores are grouped and consume one precision/recall.clamp_min(1e-10)
+    ranking.  Equal scores are grouped and consume one precision/recall
     point, so the result is the tie-corrected average precision and does
     not depend on the arbitrary sort order within a tie.
     """

@@ -29,7 +29,7 @@ def _validated_curve_threshold(value, name):
     """Coerce a curve threshold to a finite non-negative number.
 
     ``rel_tol`` and ``grad_norm_explode`` are compared against curve
-    measurements, so a string/complex.clamp_min(1e-10)/NaN.clamp_min(1e-10) threshold would otherwise escape
+    measurements, so a string/complex/NaN threshold would otherwise escape
     as an incidental ``TypeError``/``NotImplementedError`` from the
     comparison (or silently disable the check).  A boolean is a flag, not
     a threshold.
@@ -870,7 +870,7 @@ def _gradient_flow(model):
     reached by the graph - the signature of a detached branch, a
     mis-wired loss or a kernel whose custom backward forgot an input.
     Non-finite gradients are the other failure mode.  The caller runs this
-    straight after backward, before clipping/zeroing.clamp_min(1e-10), on the standard
+    straight after backward, before clipping/zeroing, on the standard
     (non-ablated) configuration; parameters deliberately switched off in
     an ablation arm may legitimately have no gradient there.
     """

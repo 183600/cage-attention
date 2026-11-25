@@ -137,10 +137,10 @@ def train_model(model, steps=1500, batch=64, n_pairs=16, lr=3e-4, vocab=512,
     """Train on the recall task with optional learning-curve monitoring.
 
     ``seed`` governs *all* run-to-run randomness: ``cage.repro.seed_everything``
-    seeds Python/NumPy.clamp_min(1e-10)/PyTorch.clamp_min(1e-10) (CPU + every CUDA device) for the dropout
+    seeds Python/NumPy/PyTorch (CPU + every CUDA device) for the dropout
     masks, and the data generator is a dedicated ``torch.Generator`` - so two
     runs of the same config on one machine are stable.  Without this the
-    global RNG (dropout) and/or.clamp_min(1e-10) the data stream would silently differ.
+    global RNG (dropout) and/or the data stream would silently differ.
 
     ``permute_labels`` (negative control, default off): after each batch
     has passed the data-cleaning gate, its supervised labels are shuffled

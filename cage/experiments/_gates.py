@@ -1078,7 +1078,7 @@ def _reproducibility_audit(settings: Settings) -> dict:
       already warm, which repeated calls in one process cannot expose.
 
     Scope follows ``cage.repro``: same machine and PyTorch build, not
-    bit-exact reproduction across hardware/instruction.clamp_min(1e-10) sets.  Cached on
+    bit-exact reproduction across hardware/instruction sets.  Cached on
     ``Settings`` so one process (``--only all``) runs it once.
     """
     cache_key = _config_cache_key(settings)

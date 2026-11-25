@@ -214,7 +214,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
 
     The recall task is balanced multi-class, so ``accuracy`` is the
     primary metric; ``f1_micro`` equals it by construction and the
-    macro/weighted.clamp_min(1e-10) variants guard against value-frequency skew.  See
+    macro/weighted variants guard against value-frequency skew.  See
     ``cage/metrics.py`` for the averaging conventions.
 
     ``accuracy_lo`` / ``accuracy_hi`` are the Wilson 95% interval for the
@@ -500,7 +500,7 @@ def _stats_correct_vector(stats, n_rows=None):
     """The per-sample 0/1 correctness flags, or ``None`` if malformed.
 
     Correctness is a binary flag, not an arbitrary numeric score: a complex
-    or fractional/non.clamp_min(1e-10)-finite value would be silently reinterpreted by
+    or fractional/non-finite value would be silently reinterpreted by
     ``.bool()`` and fabricate which rows were answered correctly.
     """
     if not isinstance(stats, Mapping):
@@ -835,7 +835,7 @@ def _null_aware_maxprob(stats):
 def _per_sample_layer_mean(stats, key, n_rows):
     """Mean over layers of a per-sample statistic matrix, or ``None``.
 
-    ``collect_stats_and_errors`` stores gate/null.clamp_min(1e-10)-mass as real floating
+    ``collect_stats_and_errors`` stores gate/null-mass as real floating
     ``(samples, layers)`` tensors.  Treat anything else as absent: boolean
     and integer tensors have no real mean (``Tensor.mean`` raises), a 1-D
     tensor has no layer axis, and a matrix with a different sample axis

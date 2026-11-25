@@ -48,7 +48,7 @@ def _curve_record(hist, early_stop_info=None, seeding=None):
 
     Stores both the reduced verdict and the raw series (steps, train loss,
     validation loss, validation accuracy, pre-clip gradient norm), so a run
-    that is later read as overfitting/plateauing.clamp_min(1e-10) can be re-examined without
+    that is later read as overfitting/plateauing can be re-examined without
     retraining.
     ``steps_run`` records the number of optimizer steps actually executed
     (from ``train_model``'s ``early_stop_info``, or the logged history as a

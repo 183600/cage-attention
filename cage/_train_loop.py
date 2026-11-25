@@ -517,7 +517,7 @@ def _attention_mass_on_key(x, weight, meta, n_heads, inv_scale, null_k):
     """Attention mass the query puts on the *correct* key, per sample.
 
     Read-only: the attention input ``x`` and the shared ``qkv`` weight are
-    taken from a pre-forward hook and q/k.clamp_min(1e-10) are recomputed with the *same*
+    taken from a pre-forward hook and q/k are recomputed with the *same*
     ``F.linear`` call the fixed kernel uses, so the values are identical
     to the real attention while the implementation stays untouched.  For
     ``null`` gates the learnable null slot is included in the softmax
@@ -607,8 +607,8 @@ def _error_case_flags(idx, meta, pred, n_pairs):
 def _linked_positive_int(value, name):
     """Strict positive integer for the linked-length geometry.
 
-    ``make_batch`` rejects bool/fractional.clamp_min(1e-10) geometry rather than truncating
-    it, and this probe constructs/validates.clamp_min(1e-10) batches itself, so it must not
+    ``make_batch`` rejects bool/fractional geometry rather than truncating
+    it, and this probe constructs/validates batches itself, so it must not
     be looser than the generator it sits on.
     """
     if isinstance(value, bool):
@@ -631,7 +631,7 @@ def eval_linked_lengths(model, n_pairs, vocab, device, lengths, batch=256,
     The E2 sweep evaluates *independently generated* batches at every
     ``n_pairs``.  Base-length and long-length accuracy therefore come from
     different items, so the observed drop mixes the length effect with a
-    different item/difficulty.clamp_min(1e-10)/retrieval.clamp_min(1e-10)-position composition.
+    different item/difficulty/retrieval-position composition.
     Post-stratification narrows
     that gap, but only this probe holds the item fixed: every base sample
     is extended in place with fresh distractor pairs
@@ -807,7 +807,7 @@ def encode_correct_mask(correct: torch.Tensor) -> str:
     the shared stream as if it carried no measurement error.  One bit per
     row keeps the run record small (``batch * batches`` bits).
 
-    Only boolean/0.clamp_min(1e-10)-1 correctness values are encodable.  A fractional or
+    Only boolean/0-1 correctness values are encodable.  A fractional or
     out-of-range array would otherwise be truncated by the integer cast,
     silently turning e.g. ``0.8`` into a *correct* bit and fabricating a
     mask the model never produced.

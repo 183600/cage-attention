@@ -9,7 +9,7 @@ What is seeded
   and ``torch.cuda.manual_seed_all`` makes the all-device coverage explicit.
 
 Data order is *not* part of the global RNG: ``cage.data.make_batch`` never
-reads global state - every split/stream.clamp_min(1e-10) passes its own ``torch.Generator``
+reads global state - every split/stream passes its own ``torch.Generator``
 (created here via :func:`stream_generator`).  That generator is the direct
 equivalent of a ``DataLoader(generator=...)``: the stream owns its seed, so
 re-seeding the global RNG elsewhere cannot shuffle the data underneath a
@@ -25,8 +25,8 @@ Scope of the guarantee
 ----------------------
 Running the same configuration twice on the same machine with the same
 PyTorch build is run-to-run stable.  Exact bit-for-bit reproduction across
-different hardware/instruction.clamp_min(1e-10) sets is *not* promised (reduction order in
-matmuls/atomics.clamp_min(1e-10) differs); ``deterministic=True`` additionally asks PyTorch
+different hardware/instruction sets is *not* promised (reduction order in
+matmuls/atomics differs); ``deterministic=True`` additionally asks PyTorch
 for deterministic kernels where they exist.
 
 What is declared
@@ -187,7 +187,7 @@ def seed_everything(seed: int, deterministic: bool = False) -> dict:
 
     ``PYTHONHASHSEED`` is exported for child processes and recorded.  The
     hash seed of the *running* interpreter is fixed at launch, so a run
-    that depends on set/dict.clamp_min(1e-10) iteration order must start with it exported.
+    that depends on set/dict iteration order must start with it exported.
     A value already present in the environment is left untouched; a value
     this helper pinned itself is refreshed on every call, so the recorded
     and exported value always describes the seed of the current call
@@ -236,7 +236,7 @@ def seed_everything(seed: int, deterministic: bool = False) -> dict:
 def stream_generator(seed: int, device="cpu") -> torch.Generator:
     """Deterministic per-stream data generator (DataLoader equivalent).
 
-    Every synthetic split/training.clamp_min(1e-10) seed owns one of these; ``make_batch``
+    Every synthetic split/training seed owns one of these; ``make_batch``
     draws exclusively through it, so data order is fixed independently of
     the global RNG state.  The seed is canonicalised with
     :func:`cage.data.stream_seed_key` (the low 32 bits torch's CPU

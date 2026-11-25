@@ -94,7 +94,7 @@ def _eval_predictor(predict, n_pairs, vocab, device, batch, batches, seed):
     """Score a rule-based predictor on fixed streams.
 
     Every batch passes the shared ``validate_batch`` cleaning gate, so the
-    ceiling/floor.clamp_min(1e-10) baselines are measured on the same data contract as the
+    ceiling/floor baselines are measured on the same data contract as the
     learned models.
     """
     batch, batches = _validated_batch_counts(batch, batches)

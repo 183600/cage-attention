@@ -518,7 +518,7 @@ def _as_indices(index, n: int) -> torch.Tensor:
 def _split_container(splits):
     """The split assignment must be a name -> indices mapping.
 
-    A list/tuple.clamp_min(1e-10) of pairs, a bare index container or a string is iterable
+    A list/tuple of pairs, a bare index container or a string is iterable
     but cannot name the blocks the audit reasons about; translating it to
     the documented ValueError avoids an incidental ``AttributeError`` from
     the ``.items()`` calls below.
@@ -1051,7 +1051,7 @@ def _count_duplicate_rows(idx) -> int:
     whole-stream duplicate count in :func:`split_leakage_audit`: counting
     duplicates is a deterministic set operation, so it is safe on any
     split and needs no train-fitted statistics.  ``torch.unique(dim=0)``
-    performs the same set operation on every training/evaluation.clamp_min(1e-10) batch.
+    performs the same set operation on every training/evaluation batch.
     """
     if idx.numel() == 0:
         return 0
@@ -1130,7 +1130,7 @@ def make_length_linked_batch(idx, meta, n_pairs, target_pairs, vocab,
     The natural length sweep generates an independent stream at every
     ``n_pairs``, so a base-length item and a long-length item are different
     samples.  Comparing raw accuracy across those streams therefore mixes
-    the length effect with a changing item/difficulty.clamp_min(1e-10) composition (later
+    the length effect with a changing item/difficulty composition (later
     retrieval positions, more repeated values, more naive-confusable
     queries).  Post-stratification can reweight the observed strata, but it
     cannot recover the counterfactual "what would this *same* item score at
@@ -1139,7 +1139,7 @@ def make_length_linked_batch(idx, meta, n_pairs, target_pairs, vocab,
     This helper constructs that counterfactual without changing the task
     distribution.  Starting from a validated ``[k1 v1 ... kn vn SEP q]``
     batch, it copies the first ``n_pairs`` pairs verbatim and appends
-    ``target_pairs - n_pairs`` fresh pairs before SEP/query.clamp_min(1e-10):
+    ``target_pairs - n_pairs`` fresh pairs before SEP/query:
 
     * the queried key, its paired answer and its pair index are unchanged,
       so every row keeps its exact ``(query key, answer)`` association;
