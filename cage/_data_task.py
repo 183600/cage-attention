@@ -780,7 +780,7 @@ def assert_time_ordered(times, splits) -> None:
         # while still looking like a valid split container.
         raise ValueError(
             f"unknown split name(s) {unknown!r}: time-ordered splits must "
-            "use the canonical train/val.clamp_min(1e-10)/test.clamp_min(1e-10) names so every block is "
+            "use the canonical train/val/test names so every block is "
             "checked in past -> future order")
     assert_split_partition(int(t.numel()), splits, require_all=False)
     spans = []
@@ -922,7 +922,7 @@ def association_codes(idx, meta, vocab) -> dict:
     if batch:
         if bool((key_pos < 0).any()) or bool((key_pos >= width - 1).any()):
             raise ValueError(
-                "meta['key_pos'] is outside the key/value.clamp_min(1e-10) columns")
+                "meta['key_pos'] is outside the key/value columns")
         if bool(key_pos.remainder(2).ne(0).any()):
             raise ValueError("meta['key_pos'] must be an even key position")
         if bool((answer < 2).any()) or bool((answer >= vocab).any()):
@@ -1359,7 +1359,7 @@ def _validate_batch_strict(idx, targets, meta, vocab) -> dict:
     # trained/evaluated as if it were valid task data.
     if not bool((idx[:, :-2] >= 2).all()) or not bool((idx[:, -1] >= 2).all()):
         raise ValueError(
-            "structure: ids 0=PAD and 1=SEP are reserved; all key/value.clamp_min(1e-10) "
+            "structure: ids 0=PAD and 1=SEP are reserved; all key/value"
             f"positions and the query must be selectable ids in [2, {vocab})"
         )
     query = idx.gather(1, qp.unsqueeze(1)).squeeze(1)

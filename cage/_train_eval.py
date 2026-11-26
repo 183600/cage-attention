@@ -369,7 +369,7 @@ def eval_metrics(model, n_pairs, vocab, device, batch=256, batches=4,
             if not bool(finite_rows.all()):
                 print(f"[eval] WARNING: {int((~finite_rows).sum())}/"
                       f"{finite_rows.numel()} evaluation rows have non-finite "
-                      "logits; accuracy/NLL.clamp_min(1e-10)/calibration.clamp_min(1e-10) over those rows are not "
+                      "logits; accuracy/NLL/calibration over those rows are not "
                       "interpretable (see cage.train.diagnose_nonfinite)")
             acc_ci = wilson_ci(int((logits_cat.argmax(-1) == tgt_cat).sum()),
                                int(tgt_cat.numel()))
@@ -1236,7 +1236,7 @@ def false_concentration_gate_test(stats, maxprob_thresh=0.5,
     vectors = _false_concentration_vectors(stats)
     if vectors is None:
         return {"applicable": False,
-                "reason": "malformed maxprob/correct.clamp_min(1e-10) stats"}
+                "reason": "malformed maxprob/correct stats"}
     mp, corr = vectors
     threshold = _validated_maxprob_thresh(maxprob_thresh)
     if threshold is None:

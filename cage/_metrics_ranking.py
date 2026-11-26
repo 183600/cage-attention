@@ -1102,7 +1102,7 @@ def brier_decomposition(probs, correct, n_bins: int = 15) -> dict:
         p = _flatten_float(probs)
         c = _flatten_float(correct).to(p.device)
     except (TypeError, ValueError, RuntimeError, OverflowError):
-        invalid["reason"] = "probs/correct.clamp_min(1e-10) must be real numeric values"
+        invalid["reason"] = "probs/correct must be real numeric values"
         return invalid
     n = p.numel()
     if n == 0 or c.numel() != n:

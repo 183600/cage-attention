@@ -199,13 +199,13 @@ def measure_forward(model, cfg, seq_len: int, device, batch: int = 1,
         "torch_num_threads": int(torch.get_num_threads()),
         "warmup": warmup,
         "repeats": repeats,
-        "flops_scope": ("analytic forward matmuls (2 x MACs): qkv/proj.clamp_min(1e-10)/mlp.clamp_min(1e-10), "
+        "flops_scope": ("analytic forward matmuls (2 x MACs): qkv/proj/mlp, "
                         "gate, causal attention, seednorm scale, vocabulary "
                         "head; softmax/norm/activation/elementwise excluded"),
         "latency_scope": ("eval-mode forward on a synthetic all-zero batch; "
                           "median and p90 over repeated passes, CUDA "
                           "synchronised"),
-        "memory_scope": ("CUDA peak allocated/reserved.clamp_min(1e-10) after warm-up; None "
+        "memory_scope": ("CUDA peak allocated/reserved after warm-up; None "
                          "on CPU"),
     }
     return record

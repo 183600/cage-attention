@@ -584,10 +584,10 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
         mark("data", f"invalid batch: {e}")
     if torch.is_tensor(idx) and idx.is_floating_point() \
             and not bool(torch.isfinite(idx).all()):
-        mark("data", "idx contains NaN/Inf.clamp_min(1e-10)")
+        mark("data", "idx contains NaN/Inf")
     if torch.is_tensor(tgt) and tgt.is_floating_point() \
             and not bool(torch.isfinite(tgt).all()):
-        mark("data", "targets contain NaN/Inf.clamp_min(1e-10)")
+        mark("data", "targets contain NaN/Inf")
 
     # ---- 2. forward activations -----------------------------------------
     bad_layers = []
@@ -630,7 +630,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     if bad_layers:
         mark("activations",
              f"non-finite block output at layer(s) {sorted(set(bad_layers))} "
-             "(check log(0)/div.clamp_min(1e-10)-by-zero/softmax.clamp_min(1e-10) overflow there)")
+             "(check log(0)/div.clamp_min(1e-10)-by-zero/softmax overflow there)")
     for name, p in model.named_parameters():
         if not bool(torch.isfinite(p).all()):
             report["nonfinite_params"].append(name)
@@ -722,7 +722,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
         if logit_max > 80.0:
             report["notes"].append(
                 f"max |logit| {logit_max:.1f} exceeds the fp16 range: under "
-                "autocast this saturates/overflows.clamp_min(1e-10) the softmax without a "
+                "autocast this saturates/overflows the softmax without a "
                 "max-subtracted stable pass")
     if not loss_ok:
         val = "None" if loss is None else f"{float(loss)}"
