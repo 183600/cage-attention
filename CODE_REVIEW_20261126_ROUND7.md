@@ -1,36 +1,46 @@
-# Code Review Round 7 — 2026-11-26
+# Code Review Report - cage-attention
+**审查日期**: 2026-11-26
+**审查者**: AI Sub-Agent #2 (Automated Static Analysis)
 
-## Scope
-- **Files scanned:** 91 Python files (excluding .git, __pycache__, .github, CI scripts)
-- **Review method:** Automated static analysis (AST-based + regex pattern matching) followed by manual verification of all findings
-- **Categories checked:** numerical stability, data leakage, statistical methodology, resource management, gradient correctness, shape safety
 
-## Findings Summary
+## 1. 静态分析发现的Bug
 
-| Severity | Count |
-|----------|-------|
-| Error    | 0     |
-| Warning  | 2 (all false positives) |
-| Info     | 409 (all false positives or style) |
+未发现明显的静态分析bug
 
-## Detailed Analysis
+## 2. 科研方法论检查
 
-### Warning-level findings (all verified as false positives)
+- ✅ 包含随机种子控制
+- ✅ 包含对照实验设计
+- ✅ 包含可复现性机制
 
-1. **cage/_data_audit.py:1385** — G-test implementation: `table[nonzero] * torch.log(table[nonzero] / expected[nonzero])`. The `nonzero` mask ensures only non-zero cells are processed, and `expected` is computed from positive row/column sums. **Safe by design**.
+## 3. 深度代码审查
 
-2. **cage/_train_recipe.py:175** — Flagged as "division by zero". Actual code: docstring describing the formula `delta = (fitted_last - fitted_first) / mean(loss)`. **False positive** (matched docstring text).
+- **_data_audit.py:5**: 函数 `actual_stream_overlap_audit` 缺少返回类型注解
+- **_data_audit.py:388**: 函数 `difficulty_features` 缺少返回类型注解
+- **_data_audit.py:753**: 函数 `_distribution_shift_p` 缺少返回类型注解
+- **_data_audit.py:1749**: 函数 `split_leakage_audit` 缺少返回类型注解
+- **_data_selfcheck.py:7**: 函数 `_self_test` 过长 (261 条语句)
+- **_data_task.py:1126**: 函数 `make_length_linked_batch` 缺少返回类型注解
+- **_metrics_inference.py:1373**: 函数 `_exact_fallback` 缺少返回类型注解
+- **_metrics_ranking.py:1268**: 函数 `_bca_bounds` 缺少返回类型注解
+- **_train_eval.py:591**: 函数 `partial_pearson` 缺少返回类型注解
+- **_train_eval.py:691**: 函数 `gate_stat_correlations` 缺少返回类型注解
+- **_train_eval.py:1224**: 函数 `false_concentration_gate_test` 缺少返回类型注解
+- **_train_eval.py:1334**: 函数 `error_detection_aucs` 缺少返回类型注解
+- **_train_loop.py:36**: 函数 `collect_stats_and_errors` 过长 (72 条语句)
+- **_train_loop.py:36**: 函数 `collect_stats_and_errors` 缺少返回类型注解
+- **_train_loop.py:516**: 函数 `_attention_mass_on_key` 缺少返回类型注解
+- **_train_loop.py:935**: 函数 `_counterfactual_edits` 缺少返回类型注解
+- **_train_recipe.py:163**: 函数 `training_curve_verdict` 缺少返回类型注解
+- **_train_recipe.py:504**: 函数 `diagnose_nonfinite` 缺少返回类型注解
+- **_train_recipe.py:924**: 函数 `overfit_sanity_check` 缺少返回类型注解
+- **_train_recipe.py:342**: 函数 `rel_delta` 缺少返回类型注解
 
-### Info-level bulk analysis
-- **132 `.view()` findings:** Explicit shape specifications with known dimensions. Intentional design.
-- **275 methodology findings:** "Statistical test without multiple comparison correction" — All matched in docstrings, comments, or test utility functions (e.g., `run_unit_tests` matching "unittest"). No actual statistical tests performed without correction.
-- **2 resource findings:**
-  - `cage/runlock.py:83` — File opened as instance variable `self._handle` for lock management with proper lifecycle. Intentional.
-  - `cage/experiments/_artifacts.py:270` — `os.open()` with `try/finally/os.close()` pattern for fsync. Properly managed.
+*... 及其他 40 个发现*
 
-## Conclusion
+## 4. 总结
 
-**No bugs or research methodology issues found.** The codebase demonstrates robust engineering practices including proper G-test implementation with nonzero masking, comprehensive statistical methodology, and correct resource lifecycle management.
+共发现 0 个潜在代码问题，60 个代码结构建议。
 
-## Changes Made
-- None (no issues requiring fixes)
+---
+*审查完成于 2026-11-26 22:47:14.488383*
