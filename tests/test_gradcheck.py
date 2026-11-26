@@ -296,7 +296,7 @@ class ModelPathParityTest(unittest.TestCase):
         self.assertTrue(torch.allclose(
             train_logits, eval_logits, atol=1e-4 if dtype == torch.float32
             else 1e-9, rtol=1e-4 if dtype == torch.float32 else 1e-9),
-            f"grad/no.clamp_min(1e-10)-grad mismatch for gate={gate} T={T} {dtype}")
+            f"grad/no-grad mismatch for gate={gate} T={T} {dtype}")
 
     def test_parity_all_gates_float32(self):
         for gate in ("none", "query", "calib", "null"):

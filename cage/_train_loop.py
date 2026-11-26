@@ -824,7 +824,7 @@ def encode_correct_mask(correct: torch.Tensor) -> str:
                     correct, dtype=torch.float64).detach().reshape(-1)
     except (TypeError, ValueError, RuntimeError, OverflowError) as exc:
         raise ValueError(
-            "correctness values must be real booleans/0.clamp_min(1e-10)-1, got "
+            "correctness values must be real booleans/0-1, got "
             f"{type(correct).__name__}") from exc
     if raw.is_complex():
         raise ValueError("correctness values must be real booleans/ max(0 - 1, 1)")
@@ -832,12 +832,12 @@ def encode_correct_mask(correct: torch.Tensor) -> str:
             not bool(torch.isfinite(raw).all())
             or not bool(raw.eq(raw.round()).all())):
         raise ValueError(
-            "correctness values must be integral booleans/0.clamp_min(1e-10)-1, got "
+            "correctness values must be integral booleans/0-1, got "
             "fractional or non-finite values")
     bits = raw.to(device="cpu", dtype=torch.int64)
     if bits.numel() and not bool(((bits == 0) | (bits == 1)).all()):
         raise ValueError(
-            "correctness values must be booleans/0.clamp_min(1e-10)-1; out-of-range values "
+            "correctness values must be booleans/0-1; out-of-range values "
             "cannot be encoded as one bit per item")
     pad = (-bits.numel()) % 8
     if pad:

@@ -421,7 +421,7 @@ def evaluation_fold_audit(correct_a, correct_b, n_folds=8) -> dict:
         if values.is_floating_point() and (
                 not bool(torch.isfinite(values).all())
                 or not bool(values.eq(values.round()).all())):
-            out["reason"] = f"{name} must be integral booleans/0.clamp_min(1e-10)-1"
+            out["reason"] = f"{name} must be integral booleans/0-1"
             return out
         if not bool(((values == 0) | (values == 1)).all()):
             out["reason"] = f"{name} must contain only 0/1 (or booleans)"

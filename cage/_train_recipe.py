@@ -630,7 +630,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
     if bad_layers:
         mark("activations",
              f"non-finite block output at layer(s) {sorted(set(bad_layers))} "
-             "(check log(0)/div.clamp_min(1e-10)-by-zero/softmax overflow there)")
+             "(check log(0)/div-by-zero/softmax overflow there)")
     for name, p in model.named_parameters():
         if not bool(torch.isfinite(p).all()):
             report["nonfinite_params"].append(name)
@@ -678,7 +678,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
                     elif key == "entropy" and float(value.min()) < 0.0:
                         report["notes"].append(
                             f"{label} is negative "
-                            f"({float(value.min()):.3g}): log/div.clamp_min(1e-10)-by-zero "
+                            f"({float(value.min()):.3g}): log/div-by-zero "
                             "inside the attention kernel")
                         invalid_attn_stats.append(label)
                     elif key in ("gate", "null_mass") and (
@@ -798,7 +798,7 @@ def diagnose_nonfinite(model, idx, tgt, meta, vocab, device="cpu",
         if idx_stage >= order.index("attention_stats"):
             report["suggestions"].append(
                 "the attention statistics are bad while the block output "
-                "may still be finite: inspect p.clamp_min(_EPS) before the "
+                "may still be finite: inspect p_eps before the "
                 "entropy log, row sums after masking, and the softmax "
                 "max-subtraction inside the fixed kernel")
         if idx_stage >= order.index("gradients"):
