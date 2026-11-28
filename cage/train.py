@@ -565,7 +565,6 @@ def eval_accuracy(model, n_pairs, vocab, device, batch=256, batches=4,
     training_states = {module: module.training for module in model.modules()}
     try:
         model.eval()
-        model.train()
         with torch.no_grad():
             correct = torch.zeros((), dtype=torch.int64, device=device)
             total = 0
